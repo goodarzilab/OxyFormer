@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Local editor / OS noise
+.DS_Store
+Thumbs.db
+
+# LaTeX and report intermediates
+report/generated/
+outputs/report/*.aux
+outputs/report/*.log
+outputs/report/*.out
+outputs/report/*.toc
+
+# Large local source files
+/BYAREA_COUNTY.TXT
+/BYAREA_COUNTY.csv
+/ACSST5Y2021.S1901-Data.csv
+/2026.02.09.704975v1.full.pdf
+
+# Downloaded public raw data
+/data/public/raw/
+
+# Large generated artifacts
+/outputs/phase1/cancer_endpoints_long.csv
+/outputs/phase2/county_master_table_phase2.csv
+/outputs/phase25/curated_county_features.csv
+/outputs/phase25/curated_model_matrix.csv
+/outputs/phase25/incidence_modeling_table.csv
+/outputs/phase25/mortality_modeling_table.csv
+/outputs/phase26/county_foundation_embeddings.csv
+/outputs/phase26/foundation_model_weights.pt
+/outputs/phase26/foundation_model_weights.npz

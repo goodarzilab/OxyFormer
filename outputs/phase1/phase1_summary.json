@@ -1,0 +1,16 @@
+{
+  "county_covariate_rows": 3233,
+  "cancer_endpoint_rows": 25391,
+  "county_master_rows": 3233,
+  "all_cancer_incidence_complete_cases": 1022,
+  "all_cancer_mortality_complete_cases": 1210,
+  "oxygen_proxy_mmhg_at_sea_level": 149.37350006279763,
+  "outputs": {
+    "county_covariates": "outputs/phase1/county_covariates.csv",
+    "cancer_endpoints_long": "outputs/phase1/cancer_endpoints_long.csv",
+    "county_master_table": "outputs/phase1/county_master_table.csv",
+    "site_support": "outputs/phase1/site_support.csv",
+    "baseline_model_metrics": "outputs/phase1/baseline_model_metrics.csv",
+    "baseline_model_coefficients": "outputs/phase1/baseline_model_coefficients.csv"
+  }
+}

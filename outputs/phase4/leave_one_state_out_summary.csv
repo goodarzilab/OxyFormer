@@ -1,0 +1,5 @@
+model_name,outcome,analysis_group,event_type,site,effect_type,support_count,states_tested,median_abs_slope_shift_pct,mean_abs_slope_shift_pct,max_abs_slope_shift_pct,most_influential_state_fips,worst_case_slope,worst_case_p_value,sign_consistent
+incidence_direct_effect,all_cancer_incidence_rate,all_cancer,Incidence,All Cancer Sites Combined,direct_effect,,1,0.0,0.0,0.0,48,-296.82165735843296,3.271268235887044e-08,True
+incidence_total_effect,all_cancer_incidence_rate,all_cancer,Incidence,All Cancer Sites Combined,total_effect,,1,0.0,0.0,0.0,48,-285.9230251334221,3.470526136209905e-08,True
+mortality_direct_effect,all_cancer_mortality_rate,all_cancer,Mortality,All Cancer Sites Combined,direct_effect,,1,0.0,0.0,0.0,48,-96.56735564516028,0.003864853211737115,True
+mortality_total_effect,all_cancer_mortality_rate,all_cancer,Mortality,All Cancer Sites Combined,total_effect,,1,0.0,0.0,0.0,48,-97.01157748359255,0.003330654960475997,True

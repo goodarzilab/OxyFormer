@@ -1,0 +1,17 @@
+{
+  "places": "data/public/raw/places_county_2025.csv",
+  "svi": "data/public/raw/svi_2022_county.csv",
+  "rucc": "data/public/raw/rucc_2023.csv",
+  "acs_groups": {
+    "DP02": "data/public/raw/acs5_profile_2024_dp02.csv",
+    "DP03": "data/public/raw/acs5_profile_2024_dp03.csv",
+    "DP04": "data/public/raw/acs5_profile_2024_dp04.csv",
+    "DP05": "data/public/raw/acs5_profile_2024_dp05.csv"
+  },
+  "acs_metadata": {
+    "DP02": "data/public/metadata/acs5_profile_2024_dp02_variables.csv",
+    "DP03": "data/public/metadata/acs5_profile_2024_dp03_variables.csv",
+    "DP04": "data/public/metadata/acs5_profile_2024_dp04_variables.csv",
+    "DP05": "data/public/metadata/acs5_profile_2024_dp05_variables.csv"
+  }
+}

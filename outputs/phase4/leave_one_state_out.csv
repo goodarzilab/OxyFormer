@@ -1,0 +1,5 @@
+model_name,outcome,analysis_group,event_type,site,effect_type,support_count,held_out_state_fips,held_out_rows,n_rows,full_slope,slope,slope_shift,slope_shift_pct,slope_se,p_value
+incidence_total_effect,all_cancer_incidence_rate,all_cancer,Incidence,All Cancer Sites Combined,total_effect,,48,254,1023,-285.9230251334221,-285.9230251334221,0.0,0.0,51.83640371857781,3.470526136209905e-08
+incidence_direct_effect,all_cancer_incidence_rate,all_cancer,Incidence,All Cancer Sites Combined,direct_effect,,48,254,1023,-296.82165735843296,-296.82165735843296,0.0,0.0,53.71111526272959,3.271268235887044e-08
+mortality_total_effect,all_cancer_mortality_rate,all_cancer,Mortality,All Cancer Sites Combined,total_effect,,48,254,1211,-97.01157748359255,-97.01157748359255,0.0,0.0,33.04829406391519,0.003330654960475997
+mortality_direct_effect,all_cancer_mortality_rate,all_cancer,Mortality,All Cancer Sites Combined,direct_effect,,48,254,1211,-96.56735564516028,-96.56735564516028,0.0,0.0,33.426028906858726,0.003864853211737115

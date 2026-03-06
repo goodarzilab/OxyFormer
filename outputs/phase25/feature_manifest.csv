@@ -1,0 +1,59 @@
+feature,group,raw_column,derived_from,description,include_in_model
+elevation_m,exposure,elevation_m,,County mean elevation in meters.,True
+oxygen_proxy_mmhg,exposure,oxygen_proxy_mmhg,,Inspired oxygen proxy derived from county elevation.,True
+oxygen_fraction_of_sea_level,exposure,oxygen_fraction_of_sea_level,,Inspired oxygen proxy as a fraction of sea-level oxygen.,True
+hypoxia_burden,exposure,hypoxia_burden,,1 - oxygen fraction of sea level.,True
+median_income_2021,baseline,median_income_2021,,ACS S1901 county median household income used in Phase 1.,True
+local_diabetes_pct,baseline,diabetes_pct,,Local diabetes prevalence from the original Brandon folder.,True
+local_obesity_pct,baseline,obesity_pct,,Local obesity prevalence from the original Brandon folder.,True
+places_current_smoking_pct,places,places_current_smoking_pct,,CDC PLACES crude prevalence of current smoking.,True
+places_lpa_pct,places,places_lpa_pct,,CDC PLACES crude prevalence of no leisure-time physical activity.,True
+places_no_health_insurance_pct,places,places_no_health_insurance_pct,,CDC PLACES crude prevalence of no health insurance.,True
+places_copd_pct,places,places_copd_pct,,CDC PLACES COPD crude prevalence.,True
+places_high_blood_pressure_pct,places,places_high_blood_pressure_pct,,CDC PLACES high blood pressure crude prevalence.,True
+places_diabetes_pct,places,places_diabetes_pct,,CDC PLACES diabetes crude prevalence.,True
+places_obesity_pct,places,places_obesity_pct,,CDC PLACES obesity crude prevalence.,True
+places_poor_physical_health_pct,places,places_poor_physical_health_pct,,CDC PLACES poor physical health crude prevalence.,True
+places_poor_mental_health_pct,places,places_poor_mental_health_pct,,CDC PLACES poor mental health crude prevalence.,True
+places_stroke_pct,places,places_stroke_pct,,CDC PLACES stroke crude prevalence.,True
+svi_ep_pov150,svi,svi_ep_pov150,,SVI estimated percentage below 150% poverty.,True
+svi_ep_unemp,svi,svi_ep_unemp,,SVI estimated unemployment percentage.,True
+svi_ep_nohsdp,svi,svi_ep_nohsdp,,SVI estimated percentage without high school diploma.,True
+svi_ep_noinsur,svi,svi_ep_uninsur,,SVI estimated percentage without health insurance.,True
+svi_ep_age65,svi,svi_ep_age65,,SVI estimated percentage age 65 and older.,True
+svi_ep_age17,svi,svi_ep_age17,,SVI estimated percentage age 17 and younger.,True
+svi_ep_disabl,svi,svi_ep_disabl,,SVI estimated disability percentage.,True
+svi_ep_sngpnt,svi,svi_ep_sngpnt,,SVI estimated single-parent household percentage.,True
+svi_ep_limeng,svi,svi_ep_limeng,,SVI estimated limited-English percentage.,True
+svi_ep_minrty,svi,svi_ep_minrty,,SVI estimated racial/ethnic minority percentage.,True
+svi_ep_noveh,svi,svi_ep_noveh,,SVI estimated households without a vehicle.,True
+svi_rpl_theme1,svi,svi_rpl_theme1,,SVI socioeconomic percentile rank.,True
+svi_rpl_theme2,svi,svi_rpl_theme2,,SVI household characteristics percentile rank.,True
+svi_rpl_theme3,svi,svi_rpl_theme3,,SVI minority/language percentile rank.,True
+svi_rpl_theme4,svi,svi_rpl_theme4,,SVI housing/transport percentile rank.,True
+svi_rpl_themes,svi,svi_rpl_themes,,SVI overall percentile rank.,True
+rucc_code_2023,rucc,rucc_code_2023,,USDA 2023 Rural-Urban Continuum Code.,True
+acs_per_capita_income_2024,acs,acs_dp03_dp03_0088e,,ACS DP03 per-capita income estimate.,True
+acs_poverty_pct,acs,acs_dp03_dp03_0119pe,,ACS DP03 poverty percentage.,True
+acs_no_health_insurance_pct,acs,acs_dp03_dp03_0099pe,,ACS DP03 uninsured percentage.,True
+acs_unemployment_rate,acs,acs_dp03_dp03_0009e,,ACS DP03 unemployment rate estimate.,True
+acs_mean_travel_time_min,acs,acs_dp03_dp03_0025e,,ACS DP03 mean travel time to work in minutes.,True
+acs_bachelors_plus_pct,acs,acs_dp02_dp02_0068pe,,ACS DP02 bachelor's degree or higher percentage.,True
+acs_less_than_9th_pct,acs,acs_dp02_dp02_0060pe,,ACS DP02 less than 9th grade percentage.,True
+acs_no_diploma_pct,acs,acs_dp02_dp02_0061pe,,ACS DP02 9th-12th no diploma percentage.,True
+acs_broadband_pct,acs,acs_dp02_dp02_0154pe,,ACS DP02 broadband subscription percentage.,True
+acs_owner_occupied_pct,acs,acs_dp04_dp04_0046pe,,ACS DP04 owner-occupied housing percentage.,True
+acs_rent_burden_35plus_pct,acs,acs_dp04_dp04_0142pe,,ACS DP04 renter households spending 35%+ income on rent.,True
+acs_median_age_years,acs,acs_dp05_dp05_0018e,,ACS DP05 median age in years.,True
+acs_under_18_pct,acs,acs_dp05_dp05_0019pe,,ACS DP05 percentage under age 18.,True
+acs_age_65_plus_pct,acs,acs_dp05_dp05_0024pe,,ACS DP05 percentage age 65 and older.,True
+acs_nonhisp_white_pct,acs,acs_dp05_dp05_0096pe,,ACS DP05 non-Hispanic White percentage.,True
+acs_black_pct,acs,acs_dp05_dp05_0045pe,,ACS DP05 Black population percentage.,True
+acs_hispanic_pct,acs,acs_dp05_dp05_0090pe,,ACS DP05 Hispanic/Latino percentage.,True
+acs_asian_pct,acs,acs_dp05_dp05_0099pe,,ACS DP05 non-Hispanic Asian percentage.,True
+median_income_log1p,derived,,engineered,log1p of Phase 1 median income.,True
+acs_per_capita_income_log1p,derived,,engineered,log1p of ACS per-capita income.,True
+acs_less_than_high_school_pct,derived,,engineered,ACS less than high school percentage = less than 9th + no diploma.,True
+rucc_nonmetro_flag,derived,,engineered,Indicator for RUCC code >= 4.,True
+obesity_places_minus_local,derived_qc,,engineered,PLACES obesity minus local obesity percentage.,False
+diabetes_places_minus_local,derived_qc,,engineered,PLACES diabetes minus local diabetes percentage.,False

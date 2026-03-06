@@ -1,0 +1,1147 @@
+group,variable,label,concept,predicate_type
+DP04,DP04_0001E,Estimate!!HOUSING OCCUPANCY!!Total housing units,Selected Housing Characteristics,int
+DP04,DP04_0001EA,Annotation of Estimate!!HOUSING OCCUPANCY!!Total housing units,Selected Housing Characteristics,string
+DP04,DP04_0001M,Margin of Error!!HOUSING OCCUPANCY!!Total housing units,Selected Housing Characteristics,int
+DP04,DP04_0001MA,Annotation of Margin of Error!!HOUSING OCCUPANCY!!Total housing units,Selected Housing Characteristics,string
+DP04,DP04_0001PE,Percent!!HOUSING OCCUPANCY!!Total housing units,Selected Housing Characteristics,int
+DP04,DP04_0001PEA,Annotation of Percent!!HOUSING OCCUPANCY!!Total housing units,Selected Housing Characteristics,string
+DP04,DP04_0001PM,Percent Margin of Error!!HOUSING OCCUPANCY!!Total housing units,Selected Housing Characteristics,int
+DP04,DP04_0001PMA,Annotation of Percent Margin of Error!!HOUSING OCCUPANCY!!Total housing units,Selected Housing Characteristics,string
+DP04,DP04_0002E,Estimate!!HOUSING OCCUPANCY!!Total housing units!!Occupied housing units,Selected Housing Characteristics,int
+DP04,DP04_0002EA,Annotation of Estimate!!HOUSING OCCUPANCY!!Total housing units!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0002M,Margin of Error!!HOUSING OCCUPANCY!!Total housing units!!Occupied housing units,Selected Housing Characteristics,int
+DP04,DP04_0002MA,Annotation of Margin of Error!!HOUSING OCCUPANCY!!Total housing units!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0002PE,Percent!!HOUSING OCCUPANCY!!Total housing units!!Occupied housing units,Selected Housing Characteristics,float
+DP04,DP04_0002PEA,Annotation of Percent!!HOUSING OCCUPANCY!!Total housing units!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0002PM,Percent Margin of Error!!HOUSING OCCUPANCY!!Total housing units!!Occupied housing units,Selected Housing Characteristics,float
+DP04,DP04_0002PMA,Annotation of Percent Margin of Error!!HOUSING OCCUPANCY!!Total housing units!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0003E,Estimate!!HOUSING OCCUPANCY!!Total housing units!!Vacant housing units,Selected Housing Characteristics,int
+DP04,DP04_0003EA,Annotation of Estimate!!HOUSING OCCUPANCY!!Total housing units!!Vacant housing units,Selected Housing Characteristics,string
+DP04,DP04_0003M,Margin of Error!!HOUSING OCCUPANCY!!Total housing units!!Vacant housing units,Selected Housing Characteristics,int
+DP04,DP04_0003MA,Annotation of Margin of Error!!HOUSING OCCUPANCY!!Total housing units!!Vacant housing units,Selected Housing Characteristics,string
+DP04,DP04_0003PE,Percent!!HOUSING OCCUPANCY!!Total housing units!!Vacant housing units,Selected Housing Characteristics,float
+DP04,DP04_0003PEA,Annotation of Percent!!HOUSING OCCUPANCY!!Total housing units!!Vacant housing units,Selected Housing Characteristics,string
+DP04,DP04_0003PM,Percent Margin of Error!!HOUSING OCCUPANCY!!Total housing units!!Vacant housing units,Selected Housing Characteristics,float
+DP04,DP04_0003PMA,Annotation of Percent Margin of Error!!HOUSING OCCUPANCY!!Total housing units!!Vacant housing units,Selected Housing Characteristics,string
+DP04,DP04_0004E,Estimate!!HOUSING OCCUPANCY!!Total housing units!!Homeowner vacancy rate,Selected Housing Characteristics,float
+DP04,DP04_0004EA,Annotation of Estimate!!HOUSING OCCUPANCY!!Total housing units!!Homeowner vacancy rate,Selected Housing Characteristics,string
+DP04,DP04_0004M,Margin of Error!!HOUSING OCCUPANCY!!Total housing units!!Homeowner vacancy rate,Selected Housing Characteristics,float
+DP04,DP04_0004MA,Annotation of Margin of Error!!HOUSING OCCUPANCY!!Total housing units!!Homeowner vacancy rate,Selected Housing Characteristics,string
+DP04,DP04_0004PE,Percent!!HOUSING OCCUPANCY!!Total housing units!!Homeowner vacancy rate,Selected Housing Characteristics,int
+DP04,DP04_0004PEA,Annotation of Percent!!HOUSING OCCUPANCY!!Total housing units!!Homeowner vacancy rate,Selected Housing Characteristics,string
+DP04,DP04_0004PM,Percent Margin of Error!!HOUSING OCCUPANCY!!Total housing units!!Homeowner vacancy rate,Selected Housing Characteristics,int
+DP04,DP04_0004PMA,Annotation of Percent Margin of Error!!HOUSING OCCUPANCY!!Total housing units!!Homeowner vacancy rate,Selected Housing Characteristics,string
+DP04,DP04_0005E,Estimate!!HOUSING OCCUPANCY!!Total housing units!!Rental vacancy rate,Selected Housing Characteristics,float
+DP04,DP04_0005EA,Annotation of Estimate!!HOUSING OCCUPANCY!!Total housing units!!Rental vacancy rate,Selected Housing Characteristics,string
+DP04,DP04_0005M,Margin of Error!!HOUSING OCCUPANCY!!Total housing units!!Rental vacancy rate,Selected Housing Characteristics,float
+DP04,DP04_0005MA,Annotation of Margin of Error!!HOUSING OCCUPANCY!!Total housing units!!Rental vacancy rate,Selected Housing Characteristics,string
+DP04,DP04_0005PE,Percent!!HOUSING OCCUPANCY!!Total housing units!!Rental vacancy rate,Selected Housing Characteristics,int
+DP04,DP04_0005PEA,Annotation of Percent!!HOUSING OCCUPANCY!!Total housing units!!Rental vacancy rate,Selected Housing Characteristics,string
+DP04,DP04_0005PM,Percent Margin of Error!!HOUSING OCCUPANCY!!Total housing units!!Rental vacancy rate,Selected Housing Characteristics,int
+DP04,DP04_0005PMA,Annotation of Percent Margin of Error!!HOUSING OCCUPANCY!!Total housing units!!Rental vacancy rate,Selected Housing Characteristics,string
+DP04,DP04_0006E,Estimate!!UNITS IN STRUCTURE!!Total housing units,Selected Housing Characteristics,int
+DP04,DP04_0006EA,Annotation of Estimate!!UNITS IN STRUCTURE!!Total housing units,Selected Housing Characteristics,string
+DP04,DP04_0006M,Margin of Error!!UNITS IN STRUCTURE!!Total housing units,Selected Housing Characteristics,int
+DP04,DP04_0006MA,Annotation of Margin of Error!!UNITS IN STRUCTURE!!Total housing units,Selected Housing Characteristics,string
+DP04,DP04_0006PE,Percent!!UNITS IN STRUCTURE!!Total housing units,Selected Housing Characteristics,int
+DP04,DP04_0006PEA,Annotation of Percent!!UNITS IN STRUCTURE!!Total housing units,Selected Housing Characteristics,string
+DP04,DP04_0006PM,Percent Margin of Error!!UNITS IN STRUCTURE!!Total housing units,Selected Housing Characteristics,int
+DP04,DP04_0006PMA,Annotation of Percent Margin of Error!!UNITS IN STRUCTURE!!Total housing units,Selected Housing Characteristics,string
+DP04,DP04_0007E,"Estimate!!UNITS IN STRUCTURE!!Total housing units!!1-unit, detached",Selected Housing Characteristics,int
+DP04,DP04_0007EA,"Annotation of Estimate!!UNITS IN STRUCTURE!!Total housing units!!1-unit, detached",Selected Housing Characteristics,string
+DP04,DP04_0007M,"Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!1-unit, detached",Selected Housing Characteristics,int
+DP04,DP04_0007MA,"Annotation of Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!1-unit, detached",Selected Housing Characteristics,string
+DP04,DP04_0007PE,"Percent!!UNITS IN STRUCTURE!!Total housing units!!1-unit, detached",Selected Housing Characteristics,float
+DP04,DP04_0007PEA,"Annotation of Percent!!UNITS IN STRUCTURE!!Total housing units!!1-unit, detached",Selected Housing Characteristics,string
+DP04,DP04_0007PM,"Percent Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!1-unit, detached",Selected Housing Characteristics,float
+DP04,DP04_0007PMA,"Annotation of Percent Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!1-unit, detached",Selected Housing Characteristics,string
+DP04,DP04_0008E,"Estimate!!UNITS IN STRUCTURE!!Total housing units!!1-unit, attached",Selected Housing Characteristics,int
+DP04,DP04_0008EA,"Annotation of Estimate!!UNITS IN STRUCTURE!!Total housing units!!1-unit, attached",Selected Housing Characteristics,string
+DP04,DP04_0008M,"Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!1-unit, attached",Selected Housing Characteristics,int
+DP04,DP04_0008MA,"Annotation of Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!1-unit, attached",Selected Housing Characteristics,string
+DP04,DP04_0008PE,"Percent!!UNITS IN STRUCTURE!!Total housing units!!1-unit, attached",Selected Housing Characteristics,float
+DP04,DP04_0008PEA,"Annotation of Percent!!UNITS IN STRUCTURE!!Total housing units!!1-unit, attached",Selected Housing Characteristics,string
+DP04,DP04_0008PM,"Percent Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!1-unit, attached",Selected Housing Characteristics,float
+DP04,DP04_0008PMA,"Annotation of Percent Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!1-unit, attached",Selected Housing Characteristics,string
+DP04,DP04_0009E,Estimate!!UNITS IN STRUCTURE!!Total housing units!!2 units,Selected Housing Characteristics,int
+DP04,DP04_0009EA,Annotation of Estimate!!UNITS IN STRUCTURE!!Total housing units!!2 units,Selected Housing Characteristics,string
+DP04,DP04_0009M,Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!2 units,Selected Housing Characteristics,int
+DP04,DP04_0009MA,Annotation of Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!2 units,Selected Housing Characteristics,string
+DP04,DP04_0009PE,Percent!!UNITS IN STRUCTURE!!Total housing units!!2 units,Selected Housing Characteristics,float
+DP04,DP04_0009PEA,Annotation of Percent!!UNITS IN STRUCTURE!!Total housing units!!2 units,Selected Housing Characteristics,string
+DP04,DP04_0009PM,Percent Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!2 units,Selected Housing Characteristics,float
+DP04,DP04_0009PMA,Annotation of Percent Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!2 units,Selected Housing Characteristics,string
+DP04,DP04_0010E,Estimate!!UNITS IN STRUCTURE!!Total housing units!!3 or 4 units,Selected Housing Characteristics,int
+DP04,DP04_0010EA,Annotation of Estimate!!UNITS IN STRUCTURE!!Total housing units!!3 or 4 units,Selected Housing Characteristics,string
+DP04,DP04_0010M,Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!3 or 4 units,Selected Housing Characteristics,int
+DP04,DP04_0010MA,Annotation of Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!3 or 4 units,Selected Housing Characteristics,string
+DP04,DP04_0010PE,Percent!!UNITS IN STRUCTURE!!Total housing units!!3 or 4 units,Selected Housing Characteristics,float
+DP04,DP04_0010PEA,Annotation of Percent!!UNITS IN STRUCTURE!!Total housing units!!3 or 4 units,Selected Housing Characteristics,string
+DP04,DP04_0010PM,Percent Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!3 or 4 units,Selected Housing Characteristics,float
+DP04,DP04_0010PMA,Annotation of Percent Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!3 or 4 units,Selected Housing Characteristics,string
+DP04,DP04_0011E,Estimate!!UNITS IN STRUCTURE!!Total housing units!!5 to 9 units,Selected Housing Characteristics,int
+DP04,DP04_0011EA,Annotation of Estimate!!UNITS IN STRUCTURE!!Total housing units!!5 to 9 units,Selected Housing Characteristics,string
+DP04,DP04_0011M,Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!5 to 9 units,Selected Housing Characteristics,int
+DP04,DP04_0011MA,Annotation of Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!5 to 9 units,Selected Housing Characteristics,string
+DP04,DP04_0011PE,Percent!!UNITS IN STRUCTURE!!Total housing units!!5 to 9 units,Selected Housing Characteristics,float
+DP04,DP04_0011PEA,Annotation of Percent!!UNITS IN STRUCTURE!!Total housing units!!5 to 9 units,Selected Housing Characteristics,string
+DP04,DP04_0011PM,Percent Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!5 to 9 units,Selected Housing Characteristics,float
+DP04,DP04_0011PMA,Annotation of Percent Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!5 to 9 units,Selected Housing Characteristics,string
+DP04,DP04_0012E,Estimate!!UNITS IN STRUCTURE!!Total housing units!!10 to 19 units,Selected Housing Characteristics,int
+DP04,DP04_0012EA,Annotation of Estimate!!UNITS IN STRUCTURE!!Total housing units!!10 to 19 units,Selected Housing Characteristics,string
+DP04,DP04_0012M,Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!10 to 19 units,Selected Housing Characteristics,int
+DP04,DP04_0012MA,Annotation of Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!10 to 19 units,Selected Housing Characteristics,string
+DP04,DP04_0012PE,Percent!!UNITS IN STRUCTURE!!Total housing units!!10 to 19 units,Selected Housing Characteristics,float
+DP04,DP04_0012PEA,Annotation of Percent!!UNITS IN STRUCTURE!!Total housing units!!10 to 19 units,Selected Housing Characteristics,string
+DP04,DP04_0012PM,Percent Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!10 to 19 units,Selected Housing Characteristics,float
+DP04,DP04_0012PMA,Annotation of Percent Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!10 to 19 units,Selected Housing Characteristics,string
+DP04,DP04_0013E,Estimate!!UNITS IN STRUCTURE!!Total housing units!!20 or more units,Selected Housing Characteristics,int
+DP04,DP04_0013EA,Annotation of Estimate!!UNITS IN STRUCTURE!!Total housing units!!20 or more units,Selected Housing Characteristics,string
+DP04,DP04_0013M,Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!20 or more units,Selected Housing Characteristics,int
+DP04,DP04_0013MA,Annotation of Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!20 or more units,Selected Housing Characteristics,string
+DP04,DP04_0013PE,Percent!!UNITS IN STRUCTURE!!Total housing units!!20 or more units,Selected Housing Characteristics,float
+DP04,DP04_0013PEA,Annotation of Percent!!UNITS IN STRUCTURE!!Total housing units!!20 or more units,Selected Housing Characteristics,string
+DP04,DP04_0013PM,Percent Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!20 or more units,Selected Housing Characteristics,float
+DP04,DP04_0013PMA,Annotation of Percent Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!20 or more units,Selected Housing Characteristics,string
+DP04,DP04_0014E,Estimate!!UNITS IN STRUCTURE!!Total housing units!!Mobile home,Selected Housing Characteristics,int
+DP04,DP04_0014EA,Annotation of Estimate!!UNITS IN STRUCTURE!!Total housing units!!Mobile home,Selected Housing Characteristics,string
+DP04,DP04_0014M,Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!Mobile home,Selected Housing Characteristics,int
+DP04,DP04_0014MA,Annotation of Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!Mobile home,Selected Housing Characteristics,string
+DP04,DP04_0014PE,Percent!!UNITS IN STRUCTURE!!Total housing units!!Mobile home,Selected Housing Characteristics,float
+DP04,DP04_0014PEA,Annotation of Percent!!UNITS IN STRUCTURE!!Total housing units!!Mobile home,Selected Housing Characteristics,string
+DP04,DP04_0014PM,Percent Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!Mobile home,Selected Housing Characteristics,float
+DP04,DP04_0014PMA,Annotation of Percent Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!Mobile home,Selected Housing Characteristics,string
+DP04,DP04_0015E,"Estimate!!UNITS IN STRUCTURE!!Total housing units!!Boat, RV, van, etc.",Selected Housing Characteristics,int
+DP04,DP04_0015EA,"Annotation of Estimate!!UNITS IN STRUCTURE!!Total housing units!!Boat, RV, van, etc.",Selected Housing Characteristics,string
+DP04,DP04_0015M,"Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!Boat, RV, van, etc.",Selected Housing Characteristics,int
+DP04,DP04_0015MA,"Annotation of Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!Boat, RV, van, etc.",Selected Housing Characteristics,string
+DP04,DP04_0015PE,"Percent!!UNITS IN STRUCTURE!!Total housing units!!Boat, RV, van, etc.",Selected Housing Characteristics,float
+DP04,DP04_0015PEA,"Annotation of Percent!!UNITS IN STRUCTURE!!Total housing units!!Boat, RV, van, etc.",Selected Housing Characteristics,string
+DP04,DP04_0015PM,"Percent Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!Boat, RV, van, etc.",Selected Housing Characteristics,float
+DP04,DP04_0015PMA,"Annotation of Percent Margin of Error!!UNITS IN STRUCTURE!!Total housing units!!Boat, RV, van, etc.",Selected Housing Characteristics,string
+DP04,DP04_0016E,Estimate!!YEAR STRUCTURE BUILT!!Total housing units,Selected Housing Characteristics,int
+DP04,DP04_0016EA,Annotation of Estimate!!YEAR STRUCTURE BUILT!!Total housing units,Selected Housing Characteristics,string
+DP04,DP04_0016M,Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units,Selected Housing Characteristics,int
+DP04,DP04_0016MA,Annotation of Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units,Selected Housing Characteristics,string
+DP04,DP04_0016PE,Percent!!YEAR STRUCTURE BUILT!!Total housing units,Selected Housing Characteristics,int
+DP04,DP04_0016PEA,Annotation of Percent!!YEAR STRUCTURE BUILT!!Total housing units,Selected Housing Characteristics,string
+DP04,DP04_0016PM,Percent Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units,Selected Housing Characteristics,int
+DP04,DP04_0016PMA,Annotation of Percent Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units,Selected Housing Characteristics,string
+DP04,DP04_0017E,Estimate!!YEAR STRUCTURE BUILT!!Total housing units!!Built 2020 or later,Selected Housing Characteristics,int
+DP04,DP04_0017EA,Annotation of Estimate!!YEAR STRUCTURE BUILT!!Total housing units!!Built 2020 or later,Selected Housing Characteristics,string
+DP04,DP04_0017M,Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 2020 or later,Selected Housing Characteristics,int
+DP04,DP04_0017MA,Annotation of Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 2020 or later,Selected Housing Characteristics,string
+DP04,DP04_0017PE,Percent!!YEAR STRUCTURE BUILT!!Total housing units!!Built 2020 or later,Selected Housing Characteristics,float
+DP04,DP04_0017PEA,Annotation of Percent!!YEAR STRUCTURE BUILT!!Total housing units!!Built 2020 or later,Selected Housing Characteristics,string
+DP04,DP04_0017PM,Percent Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 2020 or later,Selected Housing Characteristics,float
+DP04,DP04_0017PMA,Annotation of Percent Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 2020 or later,Selected Housing Characteristics,string
+DP04,DP04_0018E,Estimate!!YEAR STRUCTURE BUILT!!Total housing units!!Built 2010 to 2019,Selected Housing Characteristics,int
+DP04,DP04_0018EA,Annotation of Estimate!!YEAR STRUCTURE BUILT!!Total housing units!!Built 2010 to 2019,Selected Housing Characteristics,string
+DP04,DP04_0018M,Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 2010 to 2019,Selected Housing Characteristics,int
+DP04,DP04_0018MA,Annotation of Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 2010 to 2019,Selected Housing Characteristics,string
+DP04,DP04_0018PE,Percent!!YEAR STRUCTURE BUILT!!Total housing units!!Built 2010 to 2019,Selected Housing Characteristics,float
+DP04,DP04_0018PEA,Annotation of Percent!!YEAR STRUCTURE BUILT!!Total housing units!!Built 2010 to 2019,Selected Housing Characteristics,string
+DP04,DP04_0018PM,Percent Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 2010 to 2019,Selected Housing Characteristics,float
+DP04,DP04_0018PMA,Annotation of Percent Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 2010 to 2019,Selected Housing Characteristics,string
+DP04,DP04_0019E,Estimate!!YEAR STRUCTURE BUILT!!Total housing units!!Built 2000 to 2009,Selected Housing Characteristics,int
+DP04,DP04_0019EA,Annotation of Estimate!!YEAR STRUCTURE BUILT!!Total housing units!!Built 2000 to 2009,Selected Housing Characteristics,string
+DP04,DP04_0019M,Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 2000 to 2009,Selected Housing Characteristics,int
+DP04,DP04_0019MA,Annotation of Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 2000 to 2009,Selected Housing Characteristics,string
+DP04,DP04_0019PE,Percent!!YEAR STRUCTURE BUILT!!Total housing units!!Built 2000 to 2009,Selected Housing Characteristics,float
+DP04,DP04_0019PEA,Annotation of Percent!!YEAR STRUCTURE BUILT!!Total housing units!!Built 2000 to 2009,Selected Housing Characteristics,string
+DP04,DP04_0019PM,Percent Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 2000 to 2009,Selected Housing Characteristics,float
+DP04,DP04_0019PMA,Annotation of Percent Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 2000 to 2009,Selected Housing Characteristics,string
+DP04,DP04_0020E,Estimate!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1990 to 1999,Selected Housing Characteristics,int
+DP04,DP04_0020EA,Annotation of Estimate!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1990 to 1999,Selected Housing Characteristics,string
+DP04,DP04_0020M,Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1990 to 1999,Selected Housing Characteristics,int
+DP04,DP04_0020MA,Annotation of Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1990 to 1999,Selected Housing Characteristics,string
+DP04,DP04_0020PE,Percent!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1990 to 1999,Selected Housing Characteristics,float
+DP04,DP04_0020PEA,Annotation of Percent!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1990 to 1999,Selected Housing Characteristics,string
+DP04,DP04_0020PM,Percent Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1990 to 1999,Selected Housing Characteristics,float
+DP04,DP04_0020PMA,Annotation of Percent Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1990 to 1999,Selected Housing Characteristics,string
+DP04,DP04_0021E,Estimate!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1980 to 1989,Selected Housing Characteristics,int
+DP04,DP04_0021EA,Annotation of Estimate!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1980 to 1989,Selected Housing Characteristics,string
+DP04,DP04_0021M,Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1980 to 1989,Selected Housing Characteristics,int
+DP04,DP04_0021MA,Annotation of Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1980 to 1989,Selected Housing Characteristics,string
+DP04,DP04_0021PE,Percent!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1980 to 1989,Selected Housing Characteristics,float
+DP04,DP04_0021PEA,Annotation of Percent!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1980 to 1989,Selected Housing Characteristics,string
+DP04,DP04_0021PM,Percent Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1980 to 1989,Selected Housing Characteristics,float
+DP04,DP04_0021PMA,Annotation of Percent Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1980 to 1989,Selected Housing Characteristics,string
+DP04,DP04_0022E,Estimate!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1970 to 1979,Selected Housing Characteristics,int
+DP04,DP04_0022EA,Annotation of Estimate!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1970 to 1979,Selected Housing Characteristics,string
+DP04,DP04_0022M,Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1970 to 1979,Selected Housing Characteristics,int
+DP04,DP04_0022MA,Annotation of Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1970 to 1979,Selected Housing Characteristics,string
+DP04,DP04_0022PE,Percent!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1970 to 1979,Selected Housing Characteristics,float
+DP04,DP04_0022PEA,Annotation of Percent!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1970 to 1979,Selected Housing Characteristics,string
+DP04,DP04_0022PM,Percent Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1970 to 1979,Selected Housing Characteristics,float
+DP04,DP04_0022PMA,Annotation of Percent Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1970 to 1979,Selected Housing Characteristics,string
+DP04,DP04_0023E,Estimate!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1960 to 1969,Selected Housing Characteristics,int
+DP04,DP04_0023EA,Annotation of Estimate!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1960 to 1969,Selected Housing Characteristics,string
+DP04,DP04_0023M,Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1960 to 1969,Selected Housing Characteristics,int
+DP04,DP04_0023MA,Annotation of Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1960 to 1969,Selected Housing Characteristics,string
+DP04,DP04_0023PE,Percent!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1960 to 1969,Selected Housing Characteristics,float
+DP04,DP04_0023PEA,Annotation of Percent!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1960 to 1969,Selected Housing Characteristics,string
+DP04,DP04_0023PM,Percent Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1960 to 1969,Selected Housing Characteristics,float
+DP04,DP04_0023PMA,Annotation of Percent Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1960 to 1969,Selected Housing Characteristics,string
+DP04,DP04_0024E,Estimate!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1950 to 1959,Selected Housing Characteristics,int
+DP04,DP04_0024EA,Annotation of Estimate!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1950 to 1959,Selected Housing Characteristics,string
+DP04,DP04_0024M,Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1950 to 1959,Selected Housing Characteristics,int
+DP04,DP04_0024MA,Annotation of Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1950 to 1959,Selected Housing Characteristics,string
+DP04,DP04_0024PE,Percent!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1950 to 1959,Selected Housing Characteristics,float
+DP04,DP04_0024PEA,Annotation of Percent!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1950 to 1959,Selected Housing Characteristics,string
+DP04,DP04_0024PM,Percent Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1950 to 1959,Selected Housing Characteristics,float
+DP04,DP04_0024PMA,Annotation of Percent Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1950 to 1959,Selected Housing Characteristics,string
+DP04,DP04_0025E,Estimate!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1940 to 1949,Selected Housing Characteristics,int
+DP04,DP04_0025EA,Annotation of Estimate!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1940 to 1949,Selected Housing Characteristics,string
+DP04,DP04_0025M,Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1940 to 1949,Selected Housing Characteristics,int
+DP04,DP04_0025MA,Annotation of Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1940 to 1949,Selected Housing Characteristics,string
+DP04,DP04_0025PE,Percent!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1940 to 1949,Selected Housing Characteristics,float
+DP04,DP04_0025PEA,Annotation of Percent!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1940 to 1949,Selected Housing Characteristics,string
+DP04,DP04_0025PM,Percent Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1940 to 1949,Selected Housing Characteristics,float
+DP04,DP04_0025PMA,Annotation of Percent Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1940 to 1949,Selected Housing Characteristics,string
+DP04,DP04_0026E,Estimate!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1939 or earlier,Selected Housing Characteristics,int
+DP04,DP04_0026EA,Annotation of Estimate!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1939 or earlier,Selected Housing Characteristics,string
+DP04,DP04_0026M,Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1939 or earlier,Selected Housing Characteristics,int
+DP04,DP04_0026MA,Annotation of Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1939 or earlier,Selected Housing Characteristics,string
+DP04,DP04_0026PE,Percent!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1939 or earlier,Selected Housing Characteristics,float
+DP04,DP04_0026PEA,Annotation of Percent!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1939 or earlier,Selected Housing Characteristics,string
+DP04,DP04_0026PM,Percent Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1939 or earlier,Selected Housing Characteristics,float
+DP04,DP04_0026PMA,Annotation of Percent Margin of Error!!YEAR STRUCTURE BUILT!!Total housing units!!Built 1939 or earlier,Selected Housing Characteristics,string
+DP04,DP04_0027E,Estimate!!ROOMS!!Total housing units,Selected Housing Characteristics,int
+DP04,DP04_0027EA,Annotation of Estimate!!ROOMS!!Total housing units,Selected Housing Characteristics,string
+DP04,DP04_0027M,Margin of Error!!ROOMS!!Total housing units,Selected Housing Characteristics,int
+DP04,DP04_0027MA,Annotation of Margin of Error!!ROOMS!!Total housing units,Selected Housing Characteristics,string
+DP04,DP04_0027PE,Percent!!ROOMS!!Total housing units,Selected Housing Characteristics,int
+DP04,DP04_0027PEA,Annotation of Percent!!ROOMS!!Total housing units,Selected Housing Characteristics,string
+DP04,DP04_0027PM,Percent Margin of Error!!ROOMS!!Total housing units,Selected Housing Characteristics,int
+DP04,DP04_0027PMA,Annotation of Percent Margin of Error!!ROOMS!!Total housing units,Selected Housing Characteristics,string
+DP04,DP04_0028E,Estimate!!ROOMS!!Total housing units!!1 room,Selected Housing Characteristics,int
+DP04,DP04_0028EA,Annotation of Estimate!!ROOMS!!Total housing units!!1 room,Selected Housing Characteristics,string
+DP04,DP04_0028M,Margin of Error!!ROOMS!!Total housing units!!1 room,Selected Housing Characteristics,int
+DP04,DP04_0028MA,Annotation of Margin of Error!!ROOMS!!Total housing units!!1 room,Selected Housing Characteristics,string
+DP04,DP04_0028PE,Percent!!ROOMS!!Total housing units!!1 room,Selected Housing Characteristics,float
+DP04,DP04_0028PEA,Annotation of Percent!!ROOMS!!Total housing units!!1 room,Selected Housing Characteristics,string
+DP04,DP04_0028PM,Percent Margin of Error!!ROOMS!!Total housing units!!1 room,Selected Housing Characteristics,float
+DP04,DP04_0028PMA,Annotation of Percent Margin of Error!!ROOMS!!Total housing units!!1 room,Selected Housing Characteristics,string
+DP04,DP04_0029E,Estimate!!ROOMS!!Total housing units!!2 rooms,Selected Housing Characteristics,int
+DP04,DP04_0029EA,Annotation of Estimate!!ROOMS!!Total housing units!!2 rooms,Selected Housing Characteristics,string
+DP04,DP04_0029M,Margin of Error!!ROOMS!!Total housing units!!2 rooms,Selected Housing Characteristics,int
+DP04,DP04_0029MA,Annotation of Margin of Error!!ROOMS!!Total housing units!!2 rooms,Selected Housing Characteristics,string
+DP04,DP04_0029PE,Percent!!ROOMS!!Total housing units!!2 rooms,Selected Housing Characteristics,float
+DP04,DP04_0029PEA,Annotation of Percent!!ROOMS!!Total housing units!!2 rooms,Selected Housing Characteristics,string
+DP04,DP04_0029PM,Percent Margin of Error!!ROOMS!!Total housing units!!2 rooms,Selected Housing Characteristics,float
+DP04,DP04_0029PMA,Annotation of Percent Margin of Error!!ROOMS!!Total housing units!!2 rooms,Selected Housing Characteristics,string
+DP04,DP04_0030E,Estimate!!ROOMS!!Total housing units!!3 rooms,Selected Housing Characteristics,int
+DP04,DP04_0030EA,Annotation of Estimate!!ROOMS!!Total housing units!!3 rooms,Selected Housing Characteristics,string
+DP04,DP04_0030M,Margin of Error!!ROOMS!!Total housing units!!3 rooms,Selected Housing Characteristics,int
+DP04,DP04_0030MA,Annotation of Margin of Error!!ROOMS!!Total housing units!!3 rooms,Selected Housing Characteristics,string
+DP04,DP04_0030PE,Percent!!ROOMS!!Total housing units!!3 rooms,Selected Housing Characteristics,float
+DP04,DP04_0030PEA,Annotation of Percent!!ROOMS!!Total housing units!!3 rooms,Selected Housing Characteristics,string
+DP04,DP04_0030PM,Percent Margin of Error!!ROOMS!!Total housing units!!3 rooms,Selected Housing Characteristics,float
+DP04,DP04_0030PMA,Annotation of Percent Margin of Error!!ROOMS!!Total housing units!!3 rooms,Selected Housing Characteristics,string
+DP04,DP04_0031E,Estimate!!ROOMS!!Total housing units!!4 rooms,Selected Housing Characteristics,int
+DP04,DP04_0031EA,Annotation of Estimate!!ROOMS!!Total housing units!!4 rooms,Selected Housing Characteristics,string
+DP04,DP04_0031M,Margin of Error!!ROOMS!!Total housing units!!4 rooms,Selected Housing Characteristics,int
+DP04,DP04_0031MA,Annotation of Margin of Error!!ROOMS!!Total housing units!!4 rooms,Selected Housing Characteristics,string
+DP04,DP04_0031PE,Percent!!ROOMS!!Total housing units!!4 rooms,Selected Housing Characteristics,float
+DP04,DP04_0031PEA,Annotation of Percent!!ROOMS!!Total housing units!!4 rooms,Selected Housing Characteristics,string
+DP04,DP04_0031PM,Percent Margin of Error!!ROOMS!!Total housing units!!4 rooms,Selected Housing Characteristics,float
+DP04,DP04_0031PMA,Annotation of Percent Margin of Error!!ROOMS!!Total housing units!!4 rooms,Selected Housing Characteristics,string
+DP04,DP04_0032E,Estimate!!ROOMS!!Total housing units!!5 rooms,Selected Housing Characteristics,int
+DP04,DP04_0032EA,Annotation of Estimate!!ROOMS!!Total housing units!!5 rooms,Selected Housing Characteristics,string
+DP04,DP04_0032M,Margin of Error!!ROOMS!!Total housing units!!5 rooms,Selected Housing Characteristics,int
+DP04,DP04_0032MA,Annotation of Margin of Error!!ROOMS!!Total housing units!!5 rooms,Selected Housing Characteristics,string
+DP04,DP04_0032PE,Percent!!ROOMS!!Total housing units!!5 rooms,Selected Housing Characteristics,float
+DP04,DP04_0032PEA,Annotation of Percent!!ROOMS!!Total housing units!!5 rooms,Selected Housing Characteristics,string
+DP04,DP04_0032PM,Percent Margin of Error!!ROOMS!!Total housing units!!5 rooms,Selected Housing Characteristics,float
+DP04,DP04_0032PMA,Annotation of Percent Margin of Error!!ROOMS!!Total housing units!!5 rooms,Selected Housing Characteristics,string
+DP04,DP04_0033E,Estimate!!ROOMS!!Total housing units!!6 rooms,Selected Housing Characteristics,int
+DP04,DP04_0033EA,Annotation of Estimate!!ROOMS!!Total housing units!!6 rooms,Selected Housing Characteristics,string
+DP04,DP04_0033M,Margin of Error!!ROOMS!!Total housing units!!6 rooms,Selected Housing Characteristics,int
+DP04,DP04_0033MA,Annotation of Margin of Error!!ROOMS!!Total housing units!!6 rooms,Selected Housing Characteristics,string
+DP04,DP04_0033PE,Percent!!ROOMS!!Total housing units!!6 rooms,Selected Housing Characteristics,float
+DP04,DP04_0033PEA,Annotation of Percent!!ROOMS!!Total housing units!!6 rooms,Selected Housing Characteristics,string
+DP04,DP04_0033PM,Percent Margin of Error!!ROOMS!!Total housing units!!6 rooms,Selected Housing Characteristics,float
+DP04,DP04_0033PMA,Annotation of Percent Margin of Error!!ROOMS!!Total housing units!!6 rooms,Selected Housing Characteristics,string
+DP04,DP04_0034E,Estimate!!ROOMS!!Total housing units!!7 rooms,Selected Housing Characteristics,int
+DP04,DP04_0034EA,Annotation of Estimate!!ROOMS!!Total housing units!!7 rooms,Selected Housing Characteristics,string
+DP04,DP04_0034M,Margin of Error!!ROOMS!!Total housing units!!7 rooms,Selected Housing Characteristics,int
+DP04,DP04_0034MA,Annotation of Margin of Error!!ROOMS!!Total housing units!!7 rooms,Selected Housing Characteristics,string
+DP04,DP04_0034PE,Percent!!ROOMS!!Total housing units!!7 rooms,Selected Housing Characteristics,float
+DP04,DP04_0034PEA,Annotation of Percent!!ROOMS!!Total housing units!!7 rooms,Selected Housing Characteristics,string
+DP04,DP04_0034PM,Percent Margin of Error!!ROOMS!!Total housing units!!7 rooms,Selected Housing Characteristics,float
+DP04,DP04_0034PMA,Annotation of Percent Margin of Error!!ROOMS!!Total housing units!!7 rooms,Selected Housing Characteristics,string
+DP04,DP04_0035E,Estimate!!ROOMS!!Total housing units!!8 rooms,Selected Housing Characteristics,int
+DP04,DP04_0035EA,Annotation of Estimate!!ROOMS!!Total housing units!!8 rooms,Selected Housing Characteristics,string
+DP04,DP04_0035M,Margin of Error!!ROOMS!!Total housing units!!8 rooms,Selected Housing Characteristics,int
+DP04,DP04_0035MA,Annotation of Margin of Error!!ROOMS!!Total housing units!!8 rooms,Selected Housing Characteristics,string
+DP04,DP04_0035PE,Percent!!ROOMS!!Total housing units!!8 rooms,Selected Housing Characteristics,float
+DP04,DP04_0035PEA,Annotation of Percent!!ROOMS!!Total housing units!!8 rooms,Selected Housing Characteristics,string
+DP04,DP04_0035PM,Percent Margin of Error!!ROOMS!!Total housing units!!8 rooms,Selected Housing Characteristics,float
+DP04,DP04_0035PMA,Annotation of Percent Margin of Error!!ROOMS!!Total housing units!!8 rooms,Selected Housing Characteristics,string
+DP04,DP04_0036E,Estimate!!ROOMS!!Total housing units!!9 rooms or more,Selected Housing Characteristics,int
+DP04,DP04_0036EA,Annotation of Estimate!!ROOMS!!Total housing units!!9 rooms or more,Selected Housing Characteristics,string
+DP04,DP04_0036M,Margin of Error!!ROOMS!!Total housing units!!9 rooms or more,Selected Housing Characteristics,int
+DP04,DP04_0036MA,Annotation of Margin of Error!!ROOMS!!Total housing units!!9 rooms or more,Selected Housing Characteristics,string
+DP04,DP04_0036PE,Percent!!ROOMS!!Total housing units!!9 rooms or more,Selected Housing Characteristics,float
+DP04,DP04_0036PEA,Annotation of Percent!!ROOMS!!Total housing units!!9 rooms or more,Selected Housing Characteristics,string
+DP04,DP04_0036PM,Percent Margin of Error!!ROOMS!!Total housing units!!9 rooms or more,Selected Housing Characteristics,float
+DP04,DP04_0036PMA,Annotation of Percent Margin of Error!!ROOMS!!Total housing units!!9 rooms or more,Selected Housing Characteristics,string
+DP04,DP04_0037E,Estimate!!ROOMS!!Total housing units!!Median rooms,Selected Housing Characteristics,float
+DP04,DP04_0037EA,Annotation of Estimate!!ROOMS!!Total housing units!!Median rooms,Selected Housing Characteristics,string
+DP04,DP04_0037M,Margin of Error!!ROOMS!!Total housing units!!Median rooms,Selected Housing Characteristics,float
+DP04,DP04_0037MA,Annotation of Margin of Error!!ROOMS!!Total housing units!!Median rooms,Selected Housing Characteristics,string
+DP04,DP04_0037PE,Percent!!ROOMS!!Total housing units!!Median rooms,Selected Housing Characteristics,int
+DP04,DP04_0037PEA,Annotation of Percent!!ROOMS!!Total housing units!!Median rooms,Selected Housing Characteristics,string
+DP04,DP04_0037PM,Percent Margin of Error!!ROOMS!!Total housing units!!Median rooms,Selected Housing Characteristics,int
+DP04,DP04_0037PMA,Annotation of Percent Margin of Error!!ROOMS!!Total housing units!!Median rooms,Selected Housing Characteristics,string
+DP04,DP04_0038E,Estimate!!BEDROOMS!!Total housing units,Selected Housing Characteristics,int
+DP04,DP04_0038EA,Annotation of Estimate!!BEDROOMS!!Total housing units,Selected Housing Characteristics,string
+DP04,DP04_0038M,Margin of Error!!BEDROOMS!!Total housing units,Selected Housing Characteristics,int
+DP04,DP04_0038MA,Annotation of Margin of Error!!BEDROOMS!!Total housing units,Selected Housing Characteristics,string
+DP04,DP04_0038PE,Percent!!BEDROOMS!!Total housing units,Selected Housing Characteristics,int
+DP04,DP04_0038PEA,Annotation of Percent!!BEDROOMS!!Total housing units,Selected Housing Characteristics,string
+DP04,DP04_0038PM,Percent Margin of Error!!BEDROOMS!!Total housing units,Selected Housing Characteristics,int
+DP04,DP04_0038PMA,Annotation of Percent Margin of Error!!BEDROOMS!!Total housing units,Selected Housing Characteristics,string
+DP04,DP04_0039E,Estimate!!BEDROOMS!!Total housing units!!No bedroom,Selected Housing Characteristics,int
+DP04,DP04_0039EA,Annotation of Estimate!!BEDROOMS!!Total housing units!!No bedroom,Selected Housing Characteristics,string
+DP04,DP04_0039M,Margin of Error!!BEDROOMS!!Total housing units!!No bedroom,Selected Housing Characteristics,int
+DP04,DP04_0039MA,Annotation of Margin of Error!!BEDROOMS!!Total housing units!!No bedroom,Selected Housing Characteristics,string
+DP04,DP04_0039PE,Percent!!BEDROOMS!!Total housing units!!No bedroom,Selected Housing Characteristics,float
+DP04,DP04_0039PEA,Annotation of Percent!!BEDROOMS!!Total housing units!!No bedroom,Selected Housing Characteristics,string
+DP04,DP04_0039PM,Percent Margin of Error!!BEDROOMS!!Total housing units!!No bedroom,Selected Housing Characteristics,float
+DP04,DP04_0039PMA,Annotation of Percent Margin of Error!!BEDROOMS!!Total housing units!!No bedroom,Selected Housing Characteristics,string
+DP04,DP04_0040E,Estimate!!BEDROOMS!!Total housing units!!1 bedroom,Selected Housing Characteristics,int
+DP04,DP04_0040EA,Annotation of Estimate!!BEDROOMS!!Total housing units!!1 bedroom,Selected Housing Characteristics,string
+DP04,DP04_0040M,Margin of Error!!BEDROOMS!!Total housing units!!1 bedroom,Selected Housing Characteristics,int
+DP04,DP04_0040MA,Annotation of Margin of Error!!BEDROOMS!!Total housing units!!1 bedroom,Selected Housing Characteristics,string
+DP04,DP04_0040PE,Percent!!BEDROOMS!!Total housing units!!1 bedroom,Selected Housing Characteristics,float
+DP04,DP04_0040PEA,Annotation of Percent!!BEDROOMS!!Total housing units!!1 bedroom,Selected Housing Characteristics,string
+DP04,DP04_0040PM,Percent Margin of Error!!BEDROOMS!!Total housing units!!1 bedroom,Selected Housing Characteristics,float
+DP04,DP04_0040PMA,Annotation of Percent Margin of Error!!BEDROOMS!!Total housing units!!1 bedroom,Selected Housing Characteristics,string
+DP04,DP04_0041E,Estimate!!BEDROOMS!!Total housing units!!2 bedrooms,Selected Housing Characteristics,int
+DP04,DP04_0041EA,Annotation of Estimate!!BEDROOMS!!Total housing units!!2 bedrooms,Selected Housing Characteristics,string
+DP04,DP04_0041M,Margin of Error!!BEDROOMS!!Total housing units!!2 bedrooms,Selected Housing Characteristics,int
+DP04,DP04_0041MA,Annotation of Margin of Error!!BEDROOMS!!Total housing units!!2 bedrooms,Selected Housing Characteristics,string
+DP04,DP04_0041PE,Percent!!BEDROOMS!!Total housing units!!2 bedrooms,Selected Housing Characteristics,float
+DP04,DP04_0041PEA,Annotation of Percent!!BEDROOMS!!Total housing units!!2 bedrooms,Selected Housing Characteristics,string
+DP04,DP04_0041PM,Percent Margin of Error!!BEDROOMS!!Total housing units!!2 bedrooms,Selected Housing Characteristics,float
+DP04,DP04_0041PMA,Annotation of Percent Margin of Error!!BEDROOMS!!Total housing units!!2 bedrooms,Selected Housing Characteristics,string
+DP04,DP04_0042E,Estimate!!BEDROOMS!!Total housing units!!3 bedrooms,Selected Housing Characteristics,int
+DP04,DP04_0042EA,Annotation of Estimate!!BEDROOMS!!Total housing units!!3 bedrooms,Selected Housing Characteristics,string
+DP04,DP04_0042M,Margin of Error!!BEDROOMS!!Total housing units!!3 bedrooms,Selected Housing Characteristics,int
+DP04,DP04_0042MA,Annotation of Margin of Error!!BEDROOMS!!Total housing units!!3 bedrooms,Selected Housing Characteristics,string
+DP04,DP04_0042PE,Percent!!BEDROOMS!!Total housing units!!3 bedrooms,Selected Housing Characteristics,float
+DP04,DP04_0042PEA,Annotation of Percent!!BEDROOMS!!Total housing units!!3 bedrooms,Selected Housing Characteristics,string
+DP04,DP04_0042PM,Percent Margin of Error!!BEDROOMS!!Total housing units!!3 bedrooms,Selected Housing Characteristics,float
+DP04,DP04_0042PMA,Annotation of Percent Margin of Error!!BEDROOMS!!Total housing units!!3 bedrooms,Selected Housing Characteristics,string
+DP04,DP04_0043E,Estimate!!BEDROOMS!!Total housing units!!4 bedrooms,Selected Housing Characteristics,int
+DP04,DP04_0043EA,Annotation of Estimate!!BEDROOMS!!Total housing units!!4 bedrooms,Selected Housing Characteristics,string
+DP04,DP04_0043M,Margin of Error!!BEDROOMS!!Total housing units!!4 bedrooms,Selected Housing Characteristics,int
+DP04,DP04_0043MA,Annotation of Margin of Error!!BEDROOMS!!Total housing units!!4 bedrooms,Selected Housing Characteristics,string
+DP04,DP04_0043PE,Percent!!BEDROOMS!!Total housing units!!4 bedrooms,Selected Housing Characteristics,float
+DP04,DP04_0043PEA,Annotation of Percent!!BEDROOMS!!Total housing units!!4 bedrooms,Selected Housing Characteristics,string
+DP04,DP04_0043PM,Percent Margin of Error!!BEDROOMS!!Total housing units!!4 bedrooms,Selected Housing Characteristics,float
+DP04,DP04_0043PMA,Annotation of Percent Margin of Error!!BEDROOMS!!Total housing units!!4 bedrooms,Selected Housing Characteristics,string
+DP04,DP04_0044E,Estimate!!BEDROOMS!!Total housing units!!5 or more bedrooms,Selected Housing Characteristics,int
+DP04,DP04_0044EA,Annotation of Estimate!!BEDROOMS!!Total housing units!!5 or more bedrooms,Selected Housing Characteristics,string
+DP04,DP04_0044M,Margin of Error!!BEDROOMS!!Total housing units!!5 or more bedrooms,Selected Housing Characteristics,int
+DP04,DP04_0044MA,Annotation of Margin of Error!!BEDROOMS!!Total housing units!!5 or more bedrooms,Selected Housing Characteristics,string
+DP04,DP04_0044PE,Percent!!BEDROOMS!!Total housing units!!5 or more bedrooms,Selected Housing Characteristics,float
+DP04,DP04_0044PEA,Annotation of Percent!!BEDROOMS!!Total housing units!!5 or more bedrooms,Selected Housing Characteristics,string
+DP04,DP04_0044PM,Percent Margin of Error!!BEDROOMS!!Total housing units!!5 or more bedrooms,Selected Housing Characteristics,float
+DP04,DP04_0044PMA,Annotation of Percent Margin of Error!!BEDROOMS!!Total housing units!!5 or more bedrooms,Selected Housing Characteristics,string
+DP04,DP04_0045E,Estimate!!HOUSING TENURE!!Occupied housing units,Selected Housing Characteristics,int
+DP04,DP04_0045EA,Annotation of Estimate!!HOUSING TENURE!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0045M,Margin of Error!!HOUSING TENURE!!Occupied housing units,Selected Housing Characteristics,int
+DP04,DP04_0045MA,Annotation of Margin of Error!!HOUSING TENURE!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0045PE,Percent!!HOUSING TENURE!!Occupied housing units,Selected Housing Characteristics,int
+DP04,DP04_0045PEA,Annotation of Percent!!HOUSING TENURE!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0045PM,Percent Margin of Error!!HOUSING TENURE!!Occupied housing units,Selected Housing Characteristics,int
+DP04,DP04_0045PMA,Annotation of Percent Margin of Error!!HOUSING TENURE!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0046E,Estimate!!HOUSING TENURE!!Occupied housing units!!Owner-occupied,Selected Housing Characteristics,int
+DP04,DP04_0046EA,Annotation of Estimate!!HOUSING TENURE!!Occupied housing units!!Owner-occupied,Selected Housing Characteristics,string
+DP04,DP04_0046M,Margin of Error!!HOUSING TENURE!!Occupied housing units!!Owner-occupied,Selected Housing Characteristics,int
+DP04,DP04_0046MA,Annotation of Margin of Error!!HOUSING TENURE!!Occupied housing units!!Owner-occupied,Selected Housing Characteristics,string
+DP04,DP04_0046PE,Percent!!HOUSING TENURE!!Occupied housing units!!Owner-occupied,Selected Housing Characteristics,float
+DP04,DP04_0046PEA,Annotation of Percent!!HOUSING TENURE!!Occupied housing units!!Owner-occupied,Selected Housing Characteristics,string
+DP04,DP04_0046PM,Percent Margin of Error!!HOUSING TENURE!!Occupied housing units!!Owner-occupied,Selected Housing Characteristics,float
+DP04,DP04_0046PMA,Annotation of Percent Margin of Error!!HOUSING TENURE!!Occupied housing units!!Owner-occupied,Selected Housing Characteristics,string
+DP04,DP04_0047E,Estimate!!HOUSING TENURE!!Occupied housing units!!Renter-occupied,Selected Housing Characteristics,int
+DP04,DP04_0047EA,Annotation of Estimate!!HOUSING TENURE!!Occupied housing units!!Renter-occupied,Selected Housing Characteristics,string
+DP04,DP04_0047M,Margin of Error!!HOUSING TENURE!!Occupied housing units!!Renter-occupied,Selected Housing Characteristics,int
+DP04,DP04_0047MA,Annotation of Margin of Error!!HOUSING TENURE!!Occupied housing units!!Renter-occupied,Selected Housing Characteristics,string
+DP04,DP04_0047PE,Percent!!HOUSING TENURE!!Occupied housing units!!Renter-occupied,Selected Housing Characteristics,float
+DP04,DP04_0047PEA,Annotation of Percent!!HOUSING TENURE!!Occupied housing units!!Renter-occupied,Selected Housing Characteristics,string
+DP04,DP04_0047PM,Percent Margin of Error!!HOUSING TENURE!!Occupied housing units!!Renter-occupied,Selected Housing Characteristics,float
+DP04,DP04_0047PMA,Annotation of Percent Margin of Error!!HOUSING TENURE!!Occupied housing units!!Renter-occupied,Selected Housing Characteristics,string
+DP04,DP04_0048E,Estimate!!HOUSING TENURE!!Occupied housing units!!Average household size of owner-occupied unit,Selected Housing Characteristics,float
+DP04,DP04_0048EA,Annotation of Estimate!!HOUSING TENURE!!Occupied housing units!!Average household size of owner-occupied unit,Selected Housing Characteristics,string
+DP04,DP04_0048M,Margin of Error!!HOUSING TENURE!!Occupied housing units!!Average household size of owner-occupied unit,Selected Housing Characteristics,float
+DP04,DP04_0048MA,Annotation of Margin of Error!!HOUSING TENURE!!Occupied housing units!!Average household size of owner-occupied unit,Selected Housing Characteristics,string
+DP04,DP04_0048PE,Percent!!HOUSING TENURE!!Occupied housing units!!Average household size of owner-occupied unit,Selected Housing Characteristics,int
+DP04,DP04_0048PEA,Annotation of Percent!!HOUSING TENURE!!Occupied housing units!!Average household size of owner-occupied unit,Selected Housing Characteristics,string
+DP04,DP04_0048PM,Percent Margin of Error!!HOUSING TENURE!!Occupied housing units!!Average household size of owner-occupied unit,Selected Housing Characteristics,int
+DP04,DP04_0048PMA,Annotation of Percent Margin of Error!!HOUSING TENURE!!Occupied housing units!!Average household size of owner-occupied unit,Selected Housing Characteristics,string
+DP04,DP04_0049E,Estimate!!HOUSING TENURE!!Occupied housing units!!Average household size of renter-occupied unit,Selected Housing Characteristics,float
+DP04,DP04_0049EA,Annotation of Estimate!!HOUSING TENURE!!Occupied housing units!!Average household size of renter-occupied unit,Selected Housing Characteristics,string
+DP04,DP04_0049M,Margin of Error!!HOUSING TENURE!!Occupied housing units!!Average household size of renter-occupied unit,Selected Housing Characteristics,float
+DP04,DP04_0049MA,Annotation of Margin of Error!!HOUSING TENURE!!Occupied housing units!!Average household size of renter-occupied unit,Selected Housing Characteristics,string
+DP04,DP04_0049PE,Percent!!HOUSING TENURE!!Occupied housing units!!Average household size of renter-occupied unit,Selected Housing Characteristics,int
+DP04,DP04_0049PEA,Annotation of Percent!!HOUSING TENURE!!Occupied housing units!!Average household size of renter-occupied unit,Selected Housing Characteristics,string
+DP04,DP04_0049PM,Percent Margin of Error!!HOUSING TENURE!!Occupied housing units!!Average household size of renter-occupied unit,Selected Housing Characteristics,int
+DP04,DP04_0049PMA,Annotation of Percent Margin of Error!!HOUSING TENURE!!Occupied housing units!!Average household size of renter-occupied unit,Selected Housing Characteristics,string
+DP04,DP04_0050E,Estimate!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units,Selected Housing Characteristics,int
+DP04,DP04_0050EA,Annotation of Estimate!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0050M,Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units,Selected Housing Characteristics,int
+DP04,DP04_0050MA,Annotation of Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0050PE,Percent!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units,Selected Housing Characteristics,int
+DP04,DP04_0050PEA,Annotation of Percent!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0050PM,Percent Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units,Selected Housing Characteristics,int
+DP04,DP04_0050PMA,Annotation of Percent Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0051E,Estimate!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2023 or later,Selected Housing Characteristics,int
+DP04,DP04_0051EA,Annotation of Estimate!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2023 or later,Selected Housing Characteristics,string
+DP04,DP04_0051M,Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2023 or later,Selected Housing Characteristics,int
+DP04,DP04_0051MA,Annotation of Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2023 or later,Selected Housing Characteristics,string
+DP04,DP04_0051PE,Percent!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2023 or later,Selected Housing Characteristics,float
+DP04,DP04_0051PEA,Annotation of Percent!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2023 or later,Selected Housing Characteristics,string
+DP04,DP04_0051PM,Percent Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2023 or later,Selected Housing Characteristics,float
+DP04,DP04_0051PMA,Annotation of Percent Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2023 or later,Selected Housing Characteristics,string
+DP04,DP04_0052E,Estimate!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2020 to 2022,Selected Housing Characteristics,int
+DP04,DP04_0052EA,Annotation of Estimate!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2020 to 2022,Selected Housing Characteristics,string
+DP04,DP04_0052M,Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2020 to 2022,Selected Housing Characteristics,int
+DP04,DP04_0052MA,Annotation of Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2020 to 2022,Selected Housing Characteristics,string
+DP04,DP04_0052PE,Percent!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2020 to 2022,Selected Housing Characteristics,float
+DP04,DP04_0052PEA,Annotation of Percent!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2020 to 2022,Selected Housing Characteristics,string
+DP04,DP04_0052PM,Percent Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2020 to 2022,Selected Housing Characteristics,float
+DP04,DP04_0052PMA,Annotation of Percent Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2020 to 2022,Selected Housing Characteristics,string
+DP04,DP04_0053E,Estimate!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2010 to 2019,Selected Housing Characteristics,int
+DP04,DP04_0053EA,Annotation of Estimate!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2010 to 2019,Selected Housing Characteristics,string
+DP04,DP04_0053M,Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2010 to 2019,Selected Housing Characteristics,int
+DP04,DP04_0053MA,Annotation of Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2010 to 2019,Selected Housing Characteristics,string
+DP04,DP04_0053PE,Percent!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2010 to 2019,Selected Housing Characteristics,float
+DP04,DP04_0053PEA,Annotation of Percent!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2010 to 2019,Selected Housing Characteristics,string
+DP04,DP04_0053PM,Percent Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2010 to 2019,Selected Housing Characteristics,float
+DP04,DP04_0053PMA,Annotation of Percent Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2010 to 2019,Selected Housing Characteristics,string
+DP04,DP04_0054E,Estimate!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2000 to 2009,Selected Housing Characteristics,int
+DP04,DP04_0054EA,Annotation of Estimate!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2000 to 2009,Selected Housing Characteristics,string
+DP04,DP04_0054M,Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2000 to 2009,Selected Housing Characteristics,int
+DP04,DP04_0054MA,Annotation of Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2000 to 2009,Selected Housing Characteristics,string
+DP04,DP04_0054PE,Percent!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2000 to 2009,Selected Housing Characteristics,float
+DP04,DP04_0054PEA,Annotation of Percent!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2000 to 2009,Selected Housing Characteristics,string
+DP04,DP04_0054PM,Percent Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2000 to 2009,Selected Housing Characteristics,float
+DP04,DP04_0054PMA,Annotation of Percent Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 2000 to 2009,Selected Housing Characteristics,string
+DP04,DP04_0055E,Estimate!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 1990 to 1999,Selected Housing Characteristics,int
+DP04,DP04_0055EA,Annotation of Estimate!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 1990 to 1999,Selected Housing Characteristics,string
+DP04,DP04_0055M,Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 1990 to 1999,Selected Housing Characteristics,int
+DP04,DP04_0055MA,Annotation of Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 1990 to 1999,Selected Housing Characteristics,string
+DP04,DP04_0055PE,Percent!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 1990 to 1999,Selected Housing Characteristics,float
+DP04,DP04_0055PEA,Annotation of Percent!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 1990 to 1999,Selected Housing Characteristics,string
+DP04,DP04_0055PM,Percent Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 1990 to 1999,Selected Housing Characteristics,float
+DP04,DP04_0055PMA,Annotation of Percent Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 1990 to 1999,Selected Housing Characteristics,string
+DP04,DP04_0056E,Estimate!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 1989 and earlier,Selected Housing Characteristics,int
+DP04,DP04_0056EA,Annotation of Estimate!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 1989 and earlier,Selected Housing Characteristics,string
+DP04,DP04_0056M,Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 1989 and earlier,Selected Housing Characteristics,int
+DP04,DP04_0056MA,Annotation of Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 1989 and earlier,Selected Housing Characteristics,string
+DP04,DP04_0056PE,Percent!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 1989 and earlier,Selected Housing Characteristics,float
+DP04,DP04_0056PEA,Annotation of Percent!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 1989 and earlier,Selected Housing Characteristics,string
+DP04,DP04_0056PM,Percent Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 1989 and earlier,Selected Housing Characteristics,float
+DP04,DP04_0056PMA,Annotation of Percent Margin of Error!!YEAR HOUSEHOLDER MOVED INTO UNIT!!Occupied housing units!!Moved in 1989 and earlier,Selected Housing Characteristics,string
+DP04,DP04_0057E,Estimate!!VEHICLES AVAILABLE!!Occupied housing units,Selected Housing Characteristics,int
+DP04,DP04_0057EA,Annotation of Estimate!!VEHICLES AVAILABLE!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0057M,Margin of Error!!VEHICLES AVAILABLE!!Occupied housing units,Selected Housing Characteristics,int
+DP04,DP04_0057MA,Annotation of Margin of Error!!VEHICLES AVAILABLE!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0057PE,Percent!!VEHICLES AVAILABLE!!Occupied housing units,Selected Housing Characteristics,int
+DP04,DP04_0057PEA,Annotation of Percent!!VEHICLES AVAILABLE!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0057PM,Percent Margin of Error!!VEHICLES AVAILABLE!!Occupied housing units,Selected Housing Characteristics,int
+DP04,DP04_0057PMA,Annotation of Percent Margin of Error!!VEHICLES AVAILABLE!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0058E,Estimate!!VEHICLES AVAILABLE!!Occupied housing units!!No vehicles available,Selected Housing Characteristics,int
+DP04,DP04_0058EA,Annotation of Estimate!!VEHICLES AVAILABLE!!Occupied housing units!!No vehicles available,Selected Housing Characteristics,string
+DP04,DP04_0058M,Margin of Error!!VEHICLES AVAILABLE!!Occupied housing units!!No vehicles available,Selected Housing Characteristics,int
+DP04,DP04_0058MA,Annotation of Margin of Error!!VEHICLES AVAILABLE!!Occupied housing units!!No vehicles available,Selected Housing Characteristics,string
+DP04,DP04_0058PE,Percent!!VEHICLES AVAILABLE!!Occupied housing units!!No vehicles available,Selected Housing Characteristics,float
+DP04,DP04_0058PEA,Annotation of Percent!!VEHICLES AVAILABLE!!Occupied housing units!!No vehicles available,Selected Housing Characteristics,string
+DP04,DP04_0058PM,Percent Margin of Error!!VEHICLES AVAILABLE!!Occupied housing units!!No vehicles available,Selected Housing Characteristics,float
+DP04,DP04_0058PMA,Annotation of Percent Margin of Error!!VEHICLES AVAILABLE!!Occupied housing units!!No vehicles available,Selected Housing Characteristics,string
+DP04,DP04_0059E,Estimate!!VEHICLES AVAILABLE!!Occupied housing units!!1 vehicle available,Selected Housing Characteristics,int
+DP04,DP04_0059EA,Annotation of Estimate!!VEHICLES AVAILABLE!!Occupied housing units!!1 vehicle available,Selected Housing Characteristics,string
+DP04,DP04_0059M,Margin of Error!!VEHICLES AVAILABLE!!Occupied housing units!!1 vehicle available,Selected Housing Characteristics,int
+DP04,DP04_0059MA,Annotation of Margin of Error!!VEHICLES AVAILABLE!!Occupied housing units!!1 vehicle available,Selected Housing Characteristics,string
+DP04,DP04_0059PE,Percent!!VEHICLES AVAILABLE!!Occupied housing units!!1 vehicle available,Selected Housing Characteristics,float
+DP04,DP04_0059PEA,Annotation of Percent!!VEHICLES AVAILABLE!!Occupied housing units!!1 vehicle available,Selected Housing Characteristics,string
+DP04,DP04_0059PM,Percent Margin of Error!!VEHICLES AVAILABLE!!Occupied housing units!!1 vehicle available,Selected Housing Characteristics,float
+DP04,DP04_0059PMA,Annotation of Percent Margin of Error!!VEHICLES AVAILABLE!!Occupied housing units!!1 vehicle available,Selected Housing Characteristics,string
+DP04,DP04_0060E,Estimate!!VEHICLES AVAILABLE!!Occupied housing units!!2 vehicles available,Selected Housing Characteristics,int
+DP04,DP04_0060EA,Annotation of Estimate!!VEHICLES AVAILABLE!!Occupied housing units!!2 vehicles available,Selected Housing Characteristics,string
+DP04,DP04_0060M,Margin of Error!!VEHICLES AVAILABLE!!Occupied housing units!!2 vehicles available,Selected Housing Characteristics,int
+DP04,DP04_0060MA,Annotation of Margin of Error!!VEHICLES AVAILABLE!!Occupied housing units!!2 vehicles available,Selected Housing Characteristics,string
+DP04,DP04_0060PE,Percent!!VEHICLES AVAILABLE!!Occupied housing units!!2 vehicles available,Selected Housing Characteristics,float
+DP04,DP04_0060PEA,Annotation of Percent!!VEHICLES AVAILABLE!!Occupied housing units!!2 vehicles available,Selected Housing Characteristics,string
+DP04,DP04_0060PM,Percent Margin of Error!!VEHICLES AVAILABLE!!Occupied housing units!!2 vehicles available,Selected Housing Characteristics,float
+DP04,DP04_0060PMA,Annotation of Percent Margin of Error!!VEHICLES AVAILABLE!!Occupied housing units!!2 vehicles available,Selected Housing Characteristics,string
+DP04,DP04_0061E,Estimate!!VEHICLES AVAILABLE!!Occupied housing units!!3 or more vehicles available,Selected Housing Characteristics,int
+DP04,DP04_0061EA,Annotation of Estimate!!VEHICLES AVAILABLE!!Occupied housing units!!3 or more vehicles available,Selected Housing Characteristics,string
+DP04,DP04_0061M,Margin of Error!!VEHICLES AVAILABLE!!Occupied housing units!!3 or more vehicles available,Selected Housing Characteristics,int
+DP04,DP04_0061MA,Annotation of Margin of Error!!VEHICLES AVAILABLE!!Occupied housing units!!3 or more vehicles available,Selected Housing Characteristics,string
+DP04,DP04_0061PE,Percent!!VEHICLES AVAILABLE!!Occupied housing units!!3 or more vehicles available,Selected Housing Characteristics,float
+DP04,DP04_0061PEA,Annotation of Percent!!VEHICLES AVAILABLE!!Occupied housing units!!3 or more vehicles available,Selected Housing Characteristics,string
+DP04,DP04_0061PM,Percent Margin of Error!!VEHICLES AVAILABLE!!Occupied housing units!!3 or more vehicles available,Selected Housing Characteristics,float
+DP04,DP04_0061PMA,Annotation of Percent Margin of Error!!VEHICLES AVAILABLE!!Occupied housing units!!3 or more vehicles available,Selected Housing Characteristics,string
+DP04,DP04_0062E,Estimate!!HOUSE HEATING FUEL!!Occupied housing units,Selected Housing Characteristics,int
+DP04,DP04_0062EA,Annotation of Estimate!!HOUSE HEATING FUEL!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0062M,Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units,Selected Housing Characteristics,int
+DP04,DP04_0062MA,Annotation of Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0062PE,Percent!!HOUSE HEATING FUEL!!Occupied housing units,Selected Housing Characteristics,int
+DP04,DP04_0062PEA,Annotation of Percent!!HOUSE HEATING FUEL!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0062PM,Percent Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units,Selected Housing Characteristics,int
+DP04,DP04_0062PMA,Annotation of Percent Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0063E,Estimate!!HOUSE HEATING FUEL!!Occupied housing units!!Utility gas,Selected Housing Characteristics,int
+DP04,DP04_0063EA,Annotation of Estimate!!HOUSE HEATING FUEL!!Occupied housing units!!Utility gas,Selected Housing Characteristics,string
+DP04,DP04_0063M,Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Utility gas,Selected Housing Characteristics,int
+DP04,DP04_0063MA,Annotation of Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Utility gas,Selected Housing Characteristics,string
+DP04,DP04_0063PE,Percent!!HOUSE HEATING FUEL!!Occupied housing units!!Utility gas,Selected Housing Characteristics,float
+DP04,DP04_0063PEA,Annotation of Percent!!HOUSE HEATING FUEL!!Occupied housing units!!Utility gas,Selected Housing Characteristics,string
+DP04,DP04_0063PM,Percent Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Utility gas,Selected Housing Characteristics,float
+DP04,DP04_0063PMA,Annotation of Percent Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Utility gas,Selected Housing Characteristics,string
+DP04,DP04_0064E,"Estimate!!HOUSE HEATING FUEL!!Occupied housing units!!Bottled or tank gas (propane, butane, etc.)",Selected Housing Characteristics,int
+DP04,DP04_0064EA,"Annotation of Estimate!!HOUSE HEATING FUEL!!Occupied housing units!!Bottled or tank gas (propane, butane, etc.)",Selected Housing Characteristics,string
+DP04,DP04_0064M,"Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Bottled or tank gas (propane, butane, etc.)",Selected Housing Characteristics,int
+DP04,DP04_0064MA,"Annotation of Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Bottled or tank gas (propane, butane, etc.)",Selected Housing Characteristics,string
+DP04,DP04_0064PE,"Percent!!HOUSE HEATING FUEL!!Occupied housing units!!Bottled or tank gas (propane, butane, etc.)",Selected Housing Characteristics,float
+DP04,DP04_0064PEA,"Annotation of Percent!!HOUSE HEATING FUEL!!Occupied housing units!!Bottled or tank gas (propane, butane, etc.)",Selected Housing Characteristics,string
+DP04,DP04_0064PM,"Percent Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Bottled or tank gas (propane, butane, etc.)",Selected Housing Characteristics,float
+DP04,DP04_0064PMA,"Annotation of Percent Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Bottled or tank gas (propane, butane, etc.)",Selected Housing Characteristics,string
+DP04,DP04_0065E,Estimate!!HOUSE HEATING FUEL!!Occupied housing units!!Electricity,Selected Housing Characteristics,int
+DP04,DP04_0065EA,Annotation of Estimate!!HOUSE HEATING FUEL!!Occupied housing units!!Electricity,Selected Housing Characteristics,string
+DP04,DP04_0065M,Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Electricity,Selected Housing Characteristics,int
+DP04,DP04_0065MA,Annotation of Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Electricity,Selected Housing Characteristics,string
+DP04,DP04_0065PE,Percent!!HOUSE HEATING FUEL!!Occupied housing units!!Electricity,Selected Housing Characteristics,float
+DP04,DP04_0065PEA,Annotation of Percent!!HOUSE HEATING FUEL!!Occupied housing units!!Electricity,Selected Housing Characteristics,string
+DP04,DP04_0065PM,Percent Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Electricity,Selected Housing Characteristics,float
+DP04,DP04_0065PMA,Annotation of Percent Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Electricity,Selected Housing Characteristics,string
+DP04,DP04_0066E,"Estimate!!HOUSE HEATING FUEL!!Occupied housing units!!Fuel oil, kerosene, etc.",Selected Housing Characteristics,int
+DP04,DP04_0066EA,"Annotation of Estimate!!HOUSE HEATING FUEL!!Occupied housing units!!Fuel oil, kerosene, etc.",Selected Housing Characteristics,string
+DP04,DP04_0066M,"Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Fuel oil, kerosene, etc.",Selected Housing Characteristics,int
+DP04,DP04_0066MA,"Annotation of Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Fuel oil, kerosene, etc.",Selected Housing Characteristics,string
+DP04,DP04_0066PE,"Percent!!HOUSE HEATING FUEL!!Occupied housing units!!Fuel oil, kerosene, etc.",Selected Housing Characteristics,float
+DP04,DP04_0066PEA,"Annotation of Percent!!HOUSE HEATING FUEL!!Occupied housing units!!Fuel oil, kerosene, etc.",Selected Housing Characteristics,string
+DP04,DP04_0066PM,"Percent Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Fuel oil, kerosene, etc.",Selected Housing Characteristics,float
+DP04,DP04_0066PMA,"Annotation of Percent Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Fuel oil, kerosene, etc.",Selected Housing Characteristics,string
+DP04,DP04_0067E,Estimate!!HOUSE HEATING FUEL!!Occupied housing units!!Coal or coke,Selected Housing Characteristics,int
+DP04,DP04_0067EA,Annotation of Estimate!!HOUSE HEATING FUEL!!Occupied housing units!!Coal or coke,Selected Housing Characteristics,string
+DP04,DP04_0067M,Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Coal or coke,Selected Housing Characteristics,int
+DP04,DP04_0067MA,Annotation of Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Coal or coke,Selected Housing Characteristics,string
+DP04,DP04_0067PE,Percent!!HOUSE HEATING FUEL!!Occupied housing units!!Coal or coke,Selected Housing Characteristics,float
+DP04,DP04_0067PEA,Annotation of Percent!!HOUSE HEATING FUEL!!Occupied housing units!!Coal or coke,Selected Housing Characteristics,string
+DP04,DP04_0067PM,Percent Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Coal or coke,Selected Housing Characteristics,float
+DP04,DP04_0067PMA,Annotation of Percent Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Coal or coke,Selected Housing Characteristics,string
+DP04,DP04_0068E,Estimate!!HOUSE HEATING FUEL!!Occupied housing units!!Wood,Selected Housing Characteristics,int
+DP04,DP04_0068EA,Annotation of Estimate!!HOUSE HEATING FUEL!!Occupied housing units!!Wood,Selected Housing Characteristics,string
+DP04,DP04_0068M,Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Wood,Selected Housing Characteristics,int
+DP04,DP04_0068MA,Annotation of Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Wood,Selected Housing Characteristics,string
+DP04,DP04_0068PE,Percent!!HOUSE HEATING FUEL!!Occupied housing units!!Wood,Selected Housing Characteristics,float
+DP04,DP04_0068PEA,Annotation of Percent!!HOUSE HEATING FUEL!!Occupied housing units!!Wood,Selected Housing Characteristics,string
+DP04,DP04_0068PM,Percent Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Wood,Selected Housing Characteristics,float
+DP04,DP04_0068PMA,Annotation of Percent Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Wood,Selected Housing Characteristics,string
+DP04,DP04_0069E,Estimate!!HOUSE HEATING FUEL!!Occupied housing units!!Solar energy,Selected Housing Characteristics,int
+DP04,DP04_0069EA,Annotation of Estimate!!HOUSE HEATING FUEL!!Occupied housing units!!Solar energy,Selected Housing Characteristics,string
+DP04,DP04_0069M,Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Solar energy,Selected Housing Characteristics,int
+DP04,DP04_0069MA,Annotation of Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Solar energy,Selected Housing Characteristics,string
+DP04,DP04_0069PE,Percent!!HOUSE HEATING FUEL!!Occupied housing units!!Solar energy,Selected Housing Characteristics,float
+DP04,DP04_0069PEA,Annotation of Percent!!HOUSE HEATING FUEL!!Occupied housing units!!Solar energy,Selected Housing Characteristics,string
+DP04,DP04_0069PM,Percent Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Solar energy,Selected Housing Characteristics,float
+DP04,DP04_0069PMA,Annotation of Percent Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Solar energy,Selected Housing Characteristics,string
+DP04,DP04_0070E,Estimate!!HOUSE HEATING FUEL!!Occupied housing units!!Other fuel,Selected Housing Characteristics,int
+DP04,DP04_0070EA,Annotation of Estimate!!HOUSE HEATING FUEL!!Occupied housing units!!Other fuel,Selected Housing Characteristics,string
+DP04,DP04_0070M,Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Other fuel,Selected Housing Characteristics,int
+DP04,DP04_0070MA,Annotation of Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Other fuel,Selected Housing Characteristics,string
+DP04,DP04_0070PE,Percent!!HOUSE HEATING FUEL!!Occupied housing units!!Other fuel,Selected Housing Characteristics,float
+DP04,DP04_0070PEA,Annotation of Percent!!HOUSE HEATING FUEL!!Occupied housing units!!Other fuel,Selected Housing Characteristics,string
+DP04,DP04_0070PM,Percent Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Other fuel,Selected Housing Characteristics,float
+DP04,DP04_0070PMA,Annotation of Percent Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!Other fuel,Selected Housing Characteristics,string
+DP04,DP04_0071E,Estimate!!HOUSE HEATING FUEL!!Occupied housing units!!No fuel used,Selected Housing Characteristics,int
+DP04,DP04_0071EA,Annotation of Estimate!!HOUSE HEATING FUEL!!Occupied housing units!!No fuel used,Selected Housing Characteristics,string
+DP04,DP04_0071M,Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!No fuel used,Selected Housing Characteristics,int
+DP04,DP04_0071MA,Annotation of Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!No fuel used,Selected Housing Characteristics,string
+DP04,DP04_0071PE,Percent!!HOUSE HEATING FUEL!!Occupied housing units!!No fuel used,Selected Housing Characteristics,float
+DP04,DP04_0071PEA,Annotation of Percent!!HOUSE HEATING FUEL!!Occupied housing units!!No fuel used,Selected Housing Characteristics,string
+DP04,DP04_0071PM,Percent Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!No fuel used,Selected Housing Characteristics,float
+DP04,DP04_0071PMA,Annotation of Percent Margin of Error!!HOUSE HEATING FUEL!!Occupied housing units!!No fuel used,Selected Housing Characteristics,string
+DP04,DP04_0072E,Estimate!!SELECTED CHARACTERISTICS!!Occupied housing units,Selected Housing Characteristics,int
+DP04,DP04_0072EA,Annotation of Estimate!!SELECTED CHARACTERISTICS!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0072M,Margin of Error!!SELECTED CHARACTERISTICS!!Occupied housing units,Selected Housing Characteristics,int
+DP04,DP04_0072MA,Annotation of Margin of Error!!SELECTED CHARACTERISTICS!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0072PE,Percent!!SELECTED CHARACTERISTICS!!Occupied housing units,Selected Housing Characteristics,int
+DP04,DP04_0072PEA,Annotation of Percent!!SELECTED CHARACTERISTICS!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0072PM,Percent Margin of Error!!SELECTED CHARACTERISTICS!!Occupied housing units,Selected Housing Characteristics,int
+DP04,DP04_0072PMA,Annotation of Percent Margin of Error!!SELECTED CHARACTERISTICS!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0073E,Estimate!!SELECTED CHARACTERISTICS!!Occupied housing units!!Lacking complete plumbing facilities,Selected Housing Characteristics,int
+DP04,DP04_0073EA,Annotation of Estimate!!SELECTED CHARACTERISTICS!!Occupied housing units!!Lacking complete plumbing facilities,Selected Housing Characteristics,string
+DP04,DP04_0073M,Margin of Error!!SELECTED CHARACTERISTICS!!Occupied housing units!!Lacking complete plumbing facilities,Selected Housing Characteristics,int
+DP04,DP04_0073MA,Annotation of Margin of Error!!SELECTED CHARACTERISTICS!!Occupied housing units!!Lacking complete plumbing facilities,Selected Housing Characteristics,string
+DP04,DP04_0073PE,Percent!!SELECTED CHARACTERISTICS!!Occupied housing units!!Lacking complete plumbing facilities,Selected Housing Characteristics,float
+DP04,DP04_0073PEA,Annotation of Percent!!SELECTED CHARACTERISTICS!!Occupied housing units!!Lacking complete plumbing facilities,Selected Housing Characteristics,string
+DP04,DP04_0073PM,Percent Margin of Error!!SELECTED CHARACTERISTICS!!Occupied housing units!!Lacking complete plumbing facilities,Selected Housing Characteristics,float
+DP04,DP04_0073PMA,Annotation of Percent Margin of Error!!SELECTED CHARACTERISTICS!!Occupied housing units!!Lacking complete plumbing facilities,Selected Housing Characteristics,string
+DP04,DP04_0074E,Estimate!!SELECTED CHARACTERISTICS!!Occupied housing units!!Lacking complete kitchen facilities,Selected Housing Characteristics,int
+DP04,DP04_0074EA,Annotation of Estimate!!SELECTED CHARACTERISTICS!!Occupied housing units!!Lacking complete kitchen facilities,Selected Housing Characteristics,string
+DP04,DP04_0074M,Margin of Error!!SELECTED CHARACTERISTICS!!Occupied housing units!!Lacking complete kitchen facilities,Selected Housing Characteristics,int
+DP04,DP04_0074MA,Annotation of Margin of Error!!SELECTED CHARACTERISTICS!!Occupied housing units!!Lacking complete kitchen facilities,Selected Housing Characteristics,string
+DP04,DP04_0074PE,Percent!!SELECTED CHARACTERISTICS!!Occupied housing units!!Lacking complete kitchen facilities,Selected Housing Characteristics,float
+DP04,DP04_0074PEA,Annotation of Percent!!SELECTED CHARACTERISTICS!!Occupied housing units!!Lacking complete kitchen facilities,Selected Housing Characteristics,string
+DP04,DP04_0074PM,Percent Margin of Error!!SELECTED CHARACTERISTICS!!Occupied housing units!!Lacking complete kitchen facilities,Selected Housing Characteristics,float
+DP04,DP04_0074PMA,Annotation of Percent Margin of Error!!SELECTED CHARACTERISTICS!!Occupied housing units!!Lacking complete kitchen facilities,Selected Housing Characteristics,string
+DP04,DP04_0075E,Estimate!!SELECTED CHARACTERISTICS!!Occupied housing units!!No telephone service available,Selected Housing Characteristics,int
+DP04,DP04_0075EA,Annotation of Estimate!!SELECTED CHARACTERISTICS!!Occupied housing units!!No telephone service available,Selected Housing Characteristics,string
+DP04,DP04_0075M,Margin of Error!!SELECTED CHARACTERISTICS!!Occupied housing units!!No telephone service available,Selected Housing Characteristics,int
+DP04,DP04_0075MA,Annotation of Margin of Error!!SELECTED CHARACTERISTICS!!Occupied housing units!!No telephone service available,Selected Housing Characteristics,string
+DP04,DP04_0075PE,Percent!!SELECTED CHARACTERISTICS!!Occupied housing units!!No telephone service available,Selected Housing Characteristics,float
+DP04,DP04_0075PEA,Annotation of Percent!!SELECTED CHARACTERISTICS!!Occupied housing units!!No telephone service available,Selected Housing Characteristics,string
+DP04,DP04_0075PM,Percent Margin of Error!!SELECTED CHARACTERISTICS!!Occupied housing units!!No telephone service available,Selected Housing Characteristics,float
+DP04,DP04_0075PMA,Annotation of Percent Margin of Error!!SELECTED CHARACTERISTICS!!Occupied housing units!!No telephone service available,Selected Housing Characteristics,string
+DP04,DP04_0076E,Estimate!!OCCUPANTS PER ROOM!!Occupied housing units,Selected Housing Characteristics,int
+DP04,DP04_0076EA,Annotation of Estimate!!OCCUPANTS PER ROOM!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0076M,Margin of Error!!OCCUPANTS PER ROOM!!Occupied housing units,Selected Housing Characteristics,int
+DP04,DP04_0076MA,Annotation of Margin of Error!!OCCUPANTS PER ROOM!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0076PE,Percent!!OCCUPANTS PER ROOM!!Occupied housing units,Selected Housing Characteristics,int
+DP04,DP04_0076PEA,Annotation of Percent!!OCCUPANTS PER ROOM!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0076PM,Percent Margin of Error!!OCCUPANTS PER ROOM!!Occupied housing units,Selected Housing Characteristics,int
+DP04,DP04_0076PMA,Annotation of Percent Margin of Error!!OCCUPANTS PER ROOM!!Occupied housing units,Selected Housing Characteristics,string
+DP04,DP04_0077E,Estimate!!OCCUPANTS PER ROOM!!Occupied housing units!!1.00 or less,Selected Housing Characteristics,int
+DP04,DP04_0077EA,Annotation of Estimate!!OCCUPANTS PER ROOM!!Occupied housing units!!1.00 or less,Selected Housing Characteristics,string
+DP04,DP04_0077M,Margin of Error!!OCCUPANTS PER ROOM!!Occupied housing units!!1.00 or less,Selected Housing Characteristics,int
+DP04,DP04_0077MA,Annotation of Margin of Error!!OCCUPANTS PER ROOM!!Occupied housing units!!1.00 or less,Selected Housing Characteristics,string
+DP04,DP04_0077PE,Percent!!OCCUPANTS PER ROOM!!Occupied housing units!!1.00 or less,Selected Housing Characteristics,float
+DP04,DP04_0077PEA,Annotation of Percent!!OCCUPANTS PER ROOM!!Occupied housing units!!1.00 or less,Selected Housing Characteristics,string
+DP04,DP04_0077PM,Percent Margin of Error!!OCCUPANTS PER ROOM!!Occupied housing units!!1.00 or less,Selected Housing Characteristics,float
+DP04,DP04_0077PMA,Annotation of Percent Margin of Error!!OCCUPANTS PER ROOM!!Occupied housing units!!1.00 or less,Selected Housing Characteristics,string
+DP04,DP04_0078E,Estimate!!OCCUPANTS PER ROOM!!Occupied housing units!!1.01 to 1.50,Selected Housing Characteristics,int
+DP04,DP04_0078EA,Annotation of Estimate!!OCCUPANTS PER ROOM!!Occupied housing units!!1.01 to 1.50,Selected Housing Characteristics,string
+DP04,DP04_0078M,Margin of Error!!OCCUPANTS PER ROOM!!Occupied housing units!!1.01 to 1.50,Selected Housing Characteristics,int
+DP04,DP04_0078MA,Annotation of Margin of Error!!OCCUPANTS PER ROOM!!Occupied housing units!!1.01 to 1.50,Selected Housing Characteristics,string
+DP04,DP04_0078PE,Percent!!OCCUPANTS PER ROOM!!Occupied housing units!!1.01 to 1.50,Selected Housing Characteristics,float
+DP04,DP04_0078PEA,Annotation of Percent!!OCCUPANTS PER ROOM!!Occupied housing units!!1.01 to 1.50,Selected Housing Characteristics,string
+DP04,DP04_0078PM,Percent Margin of Error!!OCCUPANTS PER ROOM!!Occupied housing units!!1.01 to 1.50,Selected Housing Characteristics,float
+DP04,DP04_0078PMA,Annotation of Percent Margin of Error!!OCCUPANTS PER ROOM!!Occupied housing units!!1.01 to 1.50,Selected Housing Characteristics,string
+DP04,DP04_0079E,Estimate!!OCCUPANTS PER ROOM!!Occupied housing units!!1.51 or more,Selected Housing Characteristics,int
+DP04,DP04_0079EA,Annotation of Estimate!!OCCUPANTS PER ROOM!!Occupied housing units!!1.51 or more,Selected Housing Characteristics,string
+DP04,DP04_0079M,Margin of Error!!OCCUPANTS PER ROOM!!Occupied housing units!!1.51 or more,Selected Housing Characteristics,int
+DP04,DP04_0079MA,Annotation of Margin of Error!!OCCUPANTS PER ROOM!!Occupied housing units!!1.51 or more,Selected Housing Characteristics,string
+DP04,DP04_0079PE,Percent!!OCCUPANTS PER ROOM!!Occupied housing units!!1.51 or more,Selected Housing Characteristics,float
+DP04,DP04_0079PEA,Annotation of Percent!!OCCUPANTS PER ROOM!!Occupied housing units!!1.51 or more,Selected Housing Characteristics,string
+DP04,DP04_0079PM,Percent Margin of Error!!OCCUPANTS PER ROOM!!Occupied housing units!!1.51 or more,Selected Housing Characteristics,float
+DP04,DP04_0079PMA,Annotation of Percent Margin of Error!!OCCUPANTS PER ROOM!!Occupied housing units!!1.51 or more,Selected Housing Characteristics,string
+DP04,DP04_0080E,Estimate!!VALUE!!Owner-occupied units,Selected Housing Characteristics,int
+DP04,DP04_0080EA,Annotation of Estimate!!VALUE!!Owner-occupied units,Selected Housing Characteristics,string
+DP04,DP04_0080M,Margin of Error!!VALUE!!Owner-occupied units,Selected Housing Characteristics,int
+DP04,DP04_0080MA,Annotation of Margin of Error!!VALUE!!Owner-occupied units,Selected Housing Characteristics,string
+DP04,DP04_0080PE,Percent!!VALUE!!Owner-occupied units,Selected Housing Characteristics,int
+DP04,DP04_0080PEA,Annotation of Percent!!VALUE!!Owner-occupied units,Selected Housing Characteristics,string
+DP04,DP04_0080PM,Percent Margin of Error!!VALUE!!Owner-occupied units,Selected Housing Characteristics,int
+DP04,DP04_0080PMA,Annotation of Percent Margin of Error!!VALUE!!Owner-occupied units,Selected Housing Characteristics,string
+DP04,DP04_0081E,"Estimate!!VALUE!!Owner-occupied units!!Less than $50,000",Selected Housing Characteristics,int
+DP04,DP04_0081EA,"Annotation of Estimate!!VALUE!!Owner-occupied units!!Less than $50,000",Selected Housing Characteristics,string
+DP04,DP04_0081M,"Margin of Error!!VALUE!!Owner-occupied units!!Less than $50,000",Selected Housing Characteristics,int
+DP04,DP04_0081MA,"Annotation of Margin of Error!!VALUE!!Owner-occupied units!!Less than $50,000",Selected Housing Characteristics,string
+DP04,DP04_0081PE,"Percent!!VALUE!!Owner-occupied units!!Less than $50,000",Selected Housing Characteristics,float
+DP04,DP04_0081PEA,"Annotation of Percent!!VALUE!!Owner-occupied units!!Less than $50,000",Selected Housing Characteristics,string
+DP04,DP04_0081PM,"Percent Margin of Error!!VALUE!!Owner-occupied units!!Less than $50,000",Selected Housing Characteristics,float
+DP04,DP04_0081PMA,"Annotation of Percent Margin of Error!!VALUE!!Owner-occupied units!!Less than $50,000",Selected Housing Characteristics,string
+DP04,DP04_0082E,"Estimate!!VALUE!!Owner-occupied units!!$50,000 to $99,999",Selected Housing Characteristics,int
+DP04,DP04_0082EA,"Annotation of Estimate!!VALUE!!Owner-occupied units!!$50,000 to $99,999",Selected Housing Characteristics,string
+DP04,DP04_0082M,"Margin of Error!!VALUE!!Owner-occupied units!!$50,000 to $99,999",Selected Housing Characteristics,int
+DP04,DP04_0082MA,"Annotation of Margin of Error!!VALUE!!Owner-occupied units!!$50,000 to $99,999",Selected Housing Characteristics,string
+DP04,DP04_0082PE,"Percent!!VALUE!!Owner-occupied units!!$50,000 to $99,999",Selected Housing Characteristics,float
+DP04,DP04_0082PEA,"Annotation of Percent!!VALUE!!Owner-occupied units!!$50,000 to $99,999",Selected Housing Characteristics,string
+DP04,DP04_0082PM,"Percent Margin of Error!!VALUE!!Owner-occupied units!!$50,000 to $99,999",Selected Housing Characteristics,float
+DP04,DP04_0082PMA,"Annotation of Percent Margin of Error!!VALUE!!Owner-occupied units!!$50,000 to $99,999",Selected Housing Characteristics,string
+DP04,DP04_0083E,"Estimate!!VALUE!!Owner-occupied units!!$100,000 to $149,999",Selected Housing Characteristics,int
+DP04,DP04_0083EA,"Annotation of Estimate!!VALUE!!Owner-occupied units!!$100,000 to $149,999",Selected Housing Characteristics,string
+DP04,DP04_0083M,"Margin of Error!!VALUE!!Owner-occupied units!!$100,000 to $149,999",Selected Housing Characteristics,int
+DP04,DP04_0083MA,"Annotation of Margin of Error!!VALUE!!Owner-occupied units!!$100,000 to $149,999",Selected Housing Characteristics,string
+DP04,DP04_0083PE,"Percent!!VALUE!!Owner-occupied units!!$100,000 to $149,999",Selected Housing Characteristics,float
+DP04,DP04_0083PEA,"Annotation of Percent!!VALUE!!Owner-occupied units!!$100,000 to $149,999",Selected Housing Characteristics,string
+DP04,DP04_0083PM,"Percent Margin of Error!!VALUE!!Owner-occupied units!!$100,000 to $149,999",Selected Housing Characteristics,float
+DP04,DP04_0083PMA,"Annotation of Percent Margin of Error!!VALUE!!Owner-occupied units!!$100,000 to $149,999",Selected Housing Characteristics,string
+DP04,DP04_0084E,"Estimate!!VALUE!!Owner-occupied units!!$150,000 to $199,999",Selected Housing Characteristics,int
+DP04,DP04_0084EA,"Annotation of Estimate!!VALUE!!Owner-occupied units!!$150,000 to $199,999",Selected Housing Characteristics,string
+DP04,DP04_0084M,"Margin of Error!!VALUE!!Owner-occupied units!!$150,000 to $199,999",Selected Housing Characteristics,int
+DP04,DP04_0084MA,"Annotation of Margin of Error!!VALUE!!Owner-occupied units!!$150,000 to $199,999",Selected Housing Characteristics,string
+DP04,DP04_0084PE,"Percent!!VALUE!!Owner-occupied units!!$150,000 to $199,999",Selected Housing Characteristics,float
+DP04,DP04_0084PEA,"Annotation of Percent!!VALUE!!Owner-occupied units!!$150,000 to $199,999",Selected Housing Characteristics,string
+DP04,DP04_0084PM,"Percent Margin of Error!!VALUE!!Owner-occupied units!!$150,000 to $199,999",Selected Housing Characteristics,float
+DP04,DP04_0084PMA,"Annotation of Percent Margin of Error!!VALUE!!Owner-occupied units!!$150,000 to $199,999",Selected Housing Characteristics,string
+DP04,DP04_0085E,"Estimate!!VALUE!!Owner-occupied units!!$200,000 to $299,999",Selected Housing Characteristics,int
+DP04,DP04_0085EA,"Annotation of Estimate!!VALUE!!Owner-occupied units!!$200,000 to $299,999",Selected Housing Characteristics,string
+DP04,DP04_0085M,"Margin of Error!!VALUE!!Owner-occupied units!!$200,000 to $299,999",Selected Housing Characteristics,int
+DP04,DP04_0085MA,"Annotation of Margin of Error!!VALUE!!Owner-occupied units!!$200,000 to $299,999",Selected Housing Characteristics,string
+DP04,DP04_0085PE,"Percent!!VALUE!!Owner-occupied units!!$200,000 to $299,999",Selected Housing Characteristics,float
+DP04,DP04_0085PEA,"Annotation of Percent!!VALUE!!Owner-occupied units!!$200,000 to $299,999",Selected Housing Characteristics,string
+DP04,DP04_0085PM,"Percent Margin of Error!!VALUE!!Owner-occupied units!!$200,000 to $299,999",Selected Housing Characteristics,float
+DP04,DP04_0085PMA,"Annotation of Percent Margin of Error!!VALUE!!Owner-occupied units!!$200,000 to $299,999",Selected Housing Characteristics,string
+DP04,DP04_0086E,"Estimate!!VALUE!!Owner-occupied units!!$300,000 to $499,999",Selected Housing Characteristics,int
+DP04,DP04_0086EA,"Annotation of Estimate!!VALUE!!Owner-occupied units!!$300,000 to $499,999",Selected Housing Characteristics,string
+DP04,DP04_0086M,"Margin of Error!!VALUE!!Owner-occupied units!!$300,000 to $499,999",Selected Housing Characteristics,int
+DP04,DP04_0086MA,"Annotation of Margin of Error!!VALUE!!Owner-occupied units!!$300,000 to $499,999",Selected Housing Characteristics,string
+DP04,DP04_0086PE,"Percent!!VALUE!!Owner-occupied units!!$300,000 to $499,999",Selected Housing Characteristics,float
+DP04,DP04_0086PEA,"Annotation of Percent!!VALUE!!Owner-occupied units!!$300,000 to $499,999",Selected Housing Characteristics,string
+DP04,DP04_0086PM,"Percent Margin of Error!!VALUE!!Owner-occupied units!!$300,000 to $499,999",Selected Housing Characteristics,float
+DP04,DP04_0086PMA,"Annotation of Percent Margin of Error!!VALUE!!Owner-occupied units!!$300,000 to $499,999",Selected Housing Characteristics,string
+DP04,DP04_0087E,"Estimate!!VALUE!!Owner-occupied units!!$500,000 to $999,999",Selected Housing Characteristics,int
+DP04,DP04_0087EA,"Annotation of Estimate!!VALUE!!Owner-occupied units!!$500,000 to $999,999",Selected Housing Characteristics,string
+DP04,DP04_0087M,"Margin of Error!!VALUE!!Owner-occupied units!!$500,000 to $999,999",Selected Housing Characteristics,int
+DP04,DP04_0087MA,"Annotation of Margin of Error!!VALUE!!Owner-occupied units!!$500,000 to $999,999",Selected Housing Characteristics,string
+DP04,DP04_0087PE,"Percent!!VALUE!!Owner-occupied units!!$500,000 to $999,999",Selected Housing Characteristics,float
+DP04,DP04_0087PEA,"Annotation of Percent!!VALUE!!Owner-occupied units!!$500,000 to $999,999",Selected Housing Characteristics,string
+DP04,DP04_0087PM,"Percent Margin of Error!!VALUE!!Owner-occupied units!!$500,000 to $999,999",Selected Housing Characteristics,float
+DP04,DP04_0087PMA,"Annotation of Percent Margin of Error!!VALUE!!Owner-occupied units!!$500,000 to $999,999",Selected Housing Characteristics,string
+DP04,DP04_0088E,"Estimate!!VALUE!!Owner-occupied units!!$1,000,000 or more",Selected Housing Characteristics,int
+DP04,DP04_0088EA,"Annotation of Estimate!!VALUE!!Owner-occupied units!!$1,000,000 or more",Selected Housing Characteristics,string
+DP04,DP04_0088M,"Margin of Error!!VALUE!!Owner-occupied units!!$1,000,000 or more",Selected Housing Characteristics,int
+DP04,DP04_0088MA,"Annotation of Margin of Error!!VALUE!!Owner-occupied units!!$1,000,000 or more",Selected Housing Characteristics,string
+DP04,DP04_0088PE,"Percent!!VALUE!!Owner-occupied units!!$1,000,000 or more",Selected Housing Characteristics,float
+DP04,DP04_0088PEA,"Annotation of Percent!!VALUE!!Owner-occupied units!!$1,000,000 or more",Selected Housing Characteristics,string
+DP04,DP04_0088PM,"Percent Margin of Error!!VALUE!!Owner-occupied units!!$1,000,000 or more",Selected Housing Characteristics,float
+DP04,DP04_0088PMA,"Annotation of Percent Margin of Error!!VALUE!!Owner-occupied units!!$1,000,000 or more",Selected Housing Characteristics,string
+DP04,DP04_0089E,Estimate!!VALUE!!Owner-occupied units!!Median (dollars),Selected Housing Characteristics,int
+DP04,DP04_0089EA,Annotation of Estimate!!VALUE!!Owner-occupied units!!Median (dollars),Selected Housing Characteristics,string
+DP04,DP04_0089M,Margin of Error!!VALUE!!Owner-occupied units!!Median (dollars),Selected Housing Characteristics,int
+DP04,DP04_0089MA,Annotation of Margin of Error!!VALUE!!Owner-occupied units!!Median (dollars),Selected Housing Characteristics,string
+DP04,DP04_0089PE,Percent!!VALUE!!Owner-occupied units!!Median (dollars),Selected Housing Characteristics,int
+DP04,DP04_0089PEA,Annotation of Percent!!VALUE!!Owner-occupied units!!Median (dollars),Selected Housing Characteristics,string
+DP04,DP04_0089PM,Percent Margin of Error!!VALUE!!Owner-occupied units!!Median (dollars),Selected Housing Characteristics,int
+DP04,DP04_0089PMA,Annotation of Percent Margin of Error!!VALUE!!Owner-occupied units!!Median (dollars),Selected Housing Characteristics,string
+DP04,DP04_0090E,Estimate!!MORTGAGE STATUS!!Owner-occupied units,Selected Housing Characteristics,int
+DP04,DP04_0090EA,Annotation of Estimate!!MORTGAGE STATUS!!Owner-occupied units,Selected Housing Characteristics,string
+DP04,DP04_0090M,Margin of Error!!MORTGAGE STATUS!!Owner-occupied units,Selected Housing Characteristics,int
+DP04,DP04_0090MA,Annotation of Margin of Error!!MORTGAGE STATUS!!Owner-occupied units,Selected Housing Characteristics,string
+DP04,DP04_0090PE,Percent!!MORTGAGE STATUS!!Owner-occupied units,Selected Housing Characteristics,int
+DP04,DP04_0090PEA,Annotation of Percent!!MORTGAGE STATUS!!Owner-occupied units,Selected Housing Characteristics,string
+DP04,DP04_0090PM,Percent Margin of Error!!MORTGAGE STATUS!!Owner-occupied units,Selected Housing Characteristics,int
+DP04,DP04_0090PMA,Annotation of Percent Margin of Error!!MORTGAGE STATUS!!Owner-occupied units,Selected Housing Characteristics,string
+DP04,DP04_0091E,Estimate!!MORTGAGE STATUS!!Owner-occupied units!!Housing units with a mortgage,Selected Housing Characteristics,int
+DP04,DP04_0091EA,Annotation of Estimate!!MORTGAGE STATUS!!Owner-occupied units!!Housing units with a mortgage,Selected Housing Characteristics,string
+DP04,DP04_0091M,Margin of Error!!MORTGAGE STATUS!!Owner-occupied units!!Housing units with a mortgage,Selected Housing Characteristics,int
+DP04,DP04_0091MA,Annotation of Margin of Error!!MORTGAGE STATUS!!Owner-occupied units!!Housing units with a mortgage,Selected Housing Characteristics,string
+DP04,DP04_0091PE,Percent!!MORTGAGE STATUS!!Owner-occupied units!!Housing units with a mortgage,Selected Housing Characteristics,float
+DP04,DP04_0091PEA,Annotation of Percent!!MORTGAGE STATUS!!Owner-occupied units!!Housing units with a mortgage,Selected Housing Characteristics,string
+DP04,DP04_0091PM,Percent Margin of Error!!MORTGAGE STATUS!!Owner-occupied units!!Housing units with a mortgage,Selected Housing Characteristics,float
+DP04,DP04_0091PMA,Annotation of Percent Margin of Error!!MORTGAGE STATUS!!Owner-occupied units!!Housing units with a mortgage,Selected Housing Characteristics,string
+DP04,DP04_0092E,Estimate!!MORTGAGE STATUS!!Owner-occupied units!!Housing units without a mortgage,Selected Housing Characteristics,int
+DP04,DP04_0092EA,Annotation of Estimate!!MORTGAGE STATUS!!Owner-occupied units!!Housing units without a mortgage,Selected Housing Characteristics,string
+DP04,DP04_0092M,Margin of Error!!MORTGAGE STATUS!!Owner-occupied units!!Housing units without a mortgage,Selected Housing Characteristics,int
+DP04,DP04_0092MA,Annotation of Margin of Error!!MORTGAGE STATUS!!Owner-occupied units!!Housing units without a mortgage,Selected Housing Characteristics,string
+DP04,DP04_0092PE,Percent!!MORTGAGE STATUS!!Owner-occupied units!!Housing units without a mortgage,Selected Housing Characteristics,float
+DP04,DP04_0092PEA,Annotation of Percent!!MORTGAGE STATUS!!Owner-occupied units!!Housing units without a mortgage,Selected Housing Characteristics,string
+DP04,DP04_0092PM,Percent Margin of Error!!MORTGAGE STATUS!!Owner-occupied units!!Housing units without a mortgage,Selected Housing Characteristics,float
+DP04,DP04_0092PMA,Annotation of Percent Margin of Error!!MORTGAGE STATUS!!Owner-occupied units!!Housing units without a mortgage,Selected Housing Characteristics,string
+DP04,DP04_0093E,Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage,Selected Housing Characteristics,int
+DP04,DP04_0093EA,Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage,Selected Housing Characteristics,string
+DP04,DP04_0093M,Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage,Selected Housing Characteristics,int
+DP04,DP04_0093MA,Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage,Selected Housing Characteristics,string
+DP04,DP04_0093PE,Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage,Selected Housing Characteristics,int
+DP04,DP04_0093PEA,Annotation of Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage,Selected Housing Characteristics,string
+DP04,DP04_0093PM,Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage,Selected Housing Characteristics,int
+DP04,DP04_0093PMA,Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage,Selected Housing Characteristics,string
+DP04,DP04_0094E,Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!Less than $500,Selected Housing Characteristics,int
+DP04,DP04_0094EA,Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!Less than $500,Selected Housing Characteristics,string
+DP04,DP04_0094M,Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!Less than $500,Selected Housing Characteristics,int
+DP04,DP04_0094MA,Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!Less than $500,Selected Housing Characteristics,string
+DP04,DP04_0094PE,Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!Less than $500,Selected Housing Characteristics,float
+DP04,DP04_0094PEA,Annotation of Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!Less than $500,Selected Housing Characteristics,string
+DP04,DP04_0094PM,Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!Less than $500,Selected Housing Characteristics,float
+DP04,DP04_0094PMA,Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!Less than $500,Selected Housing Characteristics,string
+DP04,DP04_0095E,Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$500 to $999,Selected Housing Characteristics,int
+DP04,DP04_0095EA,Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$500 to $999,Selected Housing Characteristics,string
+DP04,DP04_0095M,Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$500 to $999,Selected Housing Characteristics,int
+DP04,DP04_0095MA,Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$500 to $999,Selected Housing Characteristics,string
+DP04,DP04_0095PE,Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$500 to $999,Selected Housing Characteristics,float
+DP04,DP04_0095PEA,Annotation of Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$500 to $999,Selected Housing Characteristics,string
+DP04,DP04_0095PM,Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$500 to $999,Selected Housing Characteristics,float
+DP04,DP04_0095PMA,Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$500 to $999,Selected Housing Characteristics,string
+DP04,DP04_0096E,"Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$1,000 to $1,499",Selected Housing Characteristics,int
+DP04,DP04_0096EA,"Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$1,000 to $1,499",Selected Housing Characteristics,string
+DP04,DP04_0096M,"Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$1,000 to $1,499",Selected Housing Characteristics,int
+DP04,DP04_0096MA,"Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$1,000 to $1,499",Selected Housing Characteristics,string
+DP04,DP04_0096PE,"Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$1,000 to $1,499",Selected Housing Characteristics,float
+DP04,DP04_0096PEA,"Annotation of Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$1,000 to $1,499",Selected Housing Characteristics,string
+DP04,DP04_0096PM,"Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$1,000 to $1,499",Selected Housing Characteristics,float
+DP04,DP04_0096PMA,"Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$1,000 to $1,499",Selected Housing Characteristics,string
+DP04,DP04_0097E,"Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$1,500 to $1,999",Selected Housing Characteristics,int
+DP04,DP04_0097EA,"Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$1,500 to $1,999",Selected Housing Characteristics,string
+DP04,DP04_0097M,"Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$1,500 to $1,999",Selected Housing Characteristics,int
+DP04,DP04_0097MA,"Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$1,500 to $1,999",Selected Housing Characteristics,string
+DP04,DP04_0097PE,"Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$1,500 to $1,999",Selected Housing Characteristics,float
+DP04,DP04_0097PEA,"Annotation of Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$1,500 to $1,999",Selected Housing Characteristics,string
+DP04,DP04_0097PM,"Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$1,500 to $1,999",Selected Housing Characteristics,float
+DP04,DP04_0097PMA,"Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$1,500 to $1,999",Selected Housing Characteristics,string
+DP04,DP04_0098E,"Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$2,000 to $2,499",Selected Housing Characteristics,int
+DP04,DP04_0098EA,"Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$2,000 to $2,499",Selected Housing Characteristics,string
+DP04,DP04_0098M,"Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$2,000 to $2,499",Selected Housing Characteristics,int
+DP04,DP04_0098MA,"Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$2,000 to $2,499",Selected Housing Characteristics,string
+DP04,DP04_0098PE,"Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$2,000 to $2,499",Selected Housing Characteristics,float
+DP04,DP04_0098PEA,"Annotation of Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$2,000 to $2,499",Selected Housing Characteristics,string
+DP04,DP04_0098PM,"Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$2,000 to $2,499",Selected Housing Characteristics,float
+DP04,DP04_0098PMA,"Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$2,000 to $2,499",Selected Housing Characteristics,string
+DP04,DP04_0099E,"Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$2,500 to $2,999",Selected Housing Characteristics,int
+DP04,DP04_0099EA,"Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$2,500 to $2,999",Selected Housing Characteristics,string
+DP04,DP04_0099M,"Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$2,500 to $2,999",Selected Housing Characteristics,int
+DP04,DP04_0099MA,"Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$2,500 to $2,999",Selected Housing Characteristics,string
+DP04,DP04_0099PE,"Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$2,500 to $2,999",Selected Housing Characteristics,float
+DP04,DP04_0099PEA,"Annotation of Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$2,500 to $2,999",Selected Housing Characteristics,string
+DP04,DP04_0099PM,"Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$2,500 to $2,999",Selected Housing Characteristics,float
+DP04,DP04_0099PMA,"Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$2,500 to $2,999",Selected Housing Characteristics,string
+DP04,DP04_0100E,"Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$3,000 or more",Selected Housing Characteristics,int
+DP04,DP04_0100EA,"Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$3,000 or more",Selected Housing Characteristics,string
+DP04,DP04_0100M,"Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$3,000 or more",Selected Housing Characteristics,int
+DP04,DP04_0100MA,"Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$3,000 or more",Selected Housing Characteristics,string
+DP04,DP04_0100PE,"Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$3,000 or more",Selected Housing Characteristics,float
+DP04,DP04_0100PEA,"Annotation of Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$3,000 or more",Selected Housing Characteristics,string
+DP04,DP04_0100PM,"Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$3,000 or more",Selected Housing Characteristics,float
+DP04,DP04_0100PMA,"Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!$3,000 or more",Selected Housing Characteristics,string
+DP04,DP04_0101E,Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!Median (dollars),Selected Housing Characteristics,int
+DP04,DP04_0101EA,Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!Median (dollars),Selected Housing Characteristics,string
+DP04,DP04_0101M,Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!Median (dollars),Selected Housing Characteristics,int
+DP04,DP04_0101MA,Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!Median (dollars),Selected Housing Characteristics,string
+DP04,DP04_0101PE,Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!Median (dollars),Selected Housing Characteristics,int
+DP04,DP04_0101PEA,Annotation of Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!Median (dollars),Selected Housing Characteristics,string
+DP04,DP04_0101PM,Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!Median (dollars),Selected Housing Characteristics,int
+DP04,DP04_0101PMA,Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units with a mortgage!!Median (dollars),Selected Housing Characteristics,string
+DP04,DP04_0102E,Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage,Selected Housing Characteristics,int
+DP04,DP04_0102EA,Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage,Selected Housing Characteristics,string
+DP04,DP04_0102M,Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage,Selected Housing Characteristics,int
+DP04,DP04_0102MA,Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage,Selected Housing Characteristics,string
+DP04,DP04_0102PE,Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage,Selected Housing Characteristics,int
+DP04,DP04_0102PEA,Annotation of Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage,Selected Housing Characteristics,string
+DP04,DP04_0102PM,Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage,Selected Housing Characteristics,int
+DP04,DP04_0102PMA,Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage,Selected Housing Characteristics,string
+DP04,DP04_0103E,Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!Less than $250,Selected Housing Characteristics,int
+DP04,DP04_0103EA,Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!Less than $250,Selected Housing Characteristics,string
+DP04,DP04_0103M,Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!Less than $250,Selected Housing Characteristics,int
+DP04,DP04_0103MA,Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!Less than $250,Selected Housing Characteristics,string
+DP04,DP04_0103PE,Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!Less than $250,Selected Housing Characteristics,float
+DP04,DP04_0103PEA,Annotation of Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!Less than $250,Selected Housing Characteristics,string
+DP04,DP04_0103PM,Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!Less than $250,Selected Housing Characteristics,float
+DP04,DP04_0103PMA,Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!Less than $250,Selected Housing Characteristics,string
+DP04,DP04_0104E,Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$250 to $399,Selected Housing Characteristics,int
+DP04,DP04_0104EA,Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$250 to $399,Selected Housing Characteristics,string
+DP04,DP04_0104M,Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$250 to $399,Selected Housing Characteristics,int
+DP04,DP04_0104MA,Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$250 to $399,Selected Housing Characteristics,string
+DP04,DP04_0104PE,Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$250 to $399,Selected Housing Characteristics,float
+DP04,DP04_0104PEA,Annotation of Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$250 to $399,Selected Housing Characteristics,string
+DP04,DP04_0104PM,Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$250 to $399,Selected Housing Characteristics,float
+DP04,DP04_0104PMA,Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$250 to $399,Selected Housing Characteristics,string
+DP04,DP04_0105E,Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$400 to $599,Selected Housing Characteristics,int
+DP04,DP04_0105EA,Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$400 to $599,Selected Housing Characteristics,string
+DP04,DP04_0105M,Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$400 to $599,Selected Housing Characteristics,int
+DP04,DP04_0105MA,Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$400 to $599,Selected Housing Characteristics,string
+DP04,DP04_0105PE,Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$400 to $599,Selected Housing Characteristics,float
+DP04,DP04_0105PEA,Annotation of Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$400 to $599,Selected Housing Characteristics,string
+DP04,DP04_0105PM,Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$400 to $599,Selected Housing Characteristics,float
+DP04,DP04_0105PMA,Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$400 to $599,Selected Housing Characteristics,string
+DP04,DP04_0106E,Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$600 to $799,Selected Housing Characteristics,int
+DP04,DP04_0106EA,Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$600 to $799,Selected Housing Characteristics,string
+DP04,DP04_0106M,Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$600 to $799,Selected Housing Characteristics,int
+DP04,DP04_0106MA,Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$600 to $799,Selected Housing Characteristics,string
+DP04,DP04_0106PE,Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$600 to $799,Selected Housing Characteristics,float
+DP04,DP04_0106PEA,Annotation of Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$600 to $799,Selected Housing Characteristics,string
+DP04,DP04_0106PM,Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$600 to $799,Selected Housing Characteristics,float
+DP04,DP04_0106PMA,Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$600 to $799,Selected Housing Characteristics,string
+DP04,DP04_0107E,Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$800 to $999,Selected Housing Characteristics,int
+DP04,DP04_0107EA,Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$800 to $999,Selected Housing Characteristics,string
+DP04,DP04_0107M,Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$800 to $999,Selected Housing Characteristics,int
+DP04,DP04_0107MA,Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$800 to $999,Selected Housing Characteristics,string
+DP04,DP04_0107PE,Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$800 to $999,Selected Housing Characteristics,float
+DP04,DP04_0107PEA,Annotation of Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$800 to $999,Selected Housing Characteristics,string
+DP04,DP04_0107PM,Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$800 to $999,Selected Housing Characteristics,float
+DP04,DP04_0107PMA,Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$800 to $999,Selected Housing Characteristics,string
+DP04,DP04_0108E,"Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$1,000 or more",Selected Housing Characteristics,int
+DP04,DP04_0108EA,"Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$1,000 or more",Selected Housing Characteristics,string
+DP04,DP04_0108M,"Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$1,000 or more",Selected Housing Characteristics,int
+DP04,DP04_0108MA,"Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$1,000 or more",Selected Housing Characteristics,string
+DP04,DP04_0108PE,"Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$1,000 or more",Selected Housing Characteristics,float
+DP04,DP04_0108PEA,"Annotation of Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$1,000 or more",Selected Housing Characteristics,string
+DP04,DP04_0108PM,"Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$1,000 or more",Selected Housing Characteristics,float
+DP04,DP04_0108PMA,"Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!$1,000 or more",Selected Housing Characteristics,string
+DP04,DP04_0109E,Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!Median (dollars),Selected Housing Characteristics,int
+DP04,DP04_0109EA,Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!Median (dollars),Selected Housing Characteristics,string
+DP04,DP04_0109M,Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!Median (dollars),Selected Housing Characteristics,int
+DP04,DP04_0109MA,Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!Median (dollars),Selected Housing Characteristics,string
+DP04,DP04_0109PE,Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!Median (dollars),Selected Housing Characteristics,int
+DP04,DP04_0109PEA,Annotation of Percent!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!Median (dollars),Selected Housing Characteristics,string
+DP04,DP04_0109PM,Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!Median (dollars),Selected Housing Characteristics,int
+DP04,DP04_0109PMA,Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS (SMOC)!!Housing units without a mortgage!!Median (dollars),Selected Housing Characteristics,string
+DP04,DP04_0110E,Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed),Selected Housing Characteristics,int
+DP04,DP04_0110EA,Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed),Selected Housing Characteristics,string
+DP04,DP04_0110M,Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed),Selected Housing Characteristics,int
+DP04,DP04_0110MA,Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed),Selected Housing Characteristics,string
+DP04,DP04_0110PE,Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed),Selected Housing Characteristics,int
+DP04,DP04_0110PEA,Annotation of Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed),Selected Housing Characteristics,string
+DP04,DP04_0110PM,Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed),Selected Housing Characteristics,int
+DP04,DP04_0110PMA,Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed),Selected Housing Characteristics,string
+DP04,DP04_0111E,Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!Less than 20.0 percent,Selected Housing Characteristics,int
+DP04,DP04_0111EA,Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!Less than 20.0 percent,Selected Housing Characteristics,string
+DP04,DP04_0111M,Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!Less than 20.0 percent,Selected Housing Characteristics,int
+DP04,DP04_0111MA,Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!Less than 20.0 percent,Selected Housing Characteristics,string
+DP04,DP04_0111PE,Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!Less than 20.0 percent,Selected Housing Characteristics,float
+DP04,DP04_0111PEA,Annotation of Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!Less than 20.0 percent,Selected Housing Characteristics,string
+DP04,DP04_0111PM,Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!Less than 20.0 percent,Selected Housing Characteristics,float
+DP04,DP04_0111PMA,Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!Less than 20.0 percent,Selected Housing Characteristics,string
+DP04,DP04_0112E,Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!20.0 to 24.9 percent,Selected Housing Characteristics,int
+DP04,DP04_0112EA,Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!20.0 to 24.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0112M,Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!20.0 to 24.9 percent,Selected Housing Characteristics,int
+DP04,DP04_0112MA,Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!20.0 to 24.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0112PE,Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!20.0 to 24.9 percent,Selected Housing Characteristics,float
+DP04,DP04_0112PEA,Annotation of Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!20.0 to 24.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0112PM,Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!20.0 to 24.9 percent,Selected Housing Characteristics,float
+DP04,DP04_0112PMA,Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!20.0 to 24.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0113E,Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!25.0 to 29.9 percent,Selected Housing Characteristics,int
+DP04,DP04_0113EA,Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!25.0 to 29.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0113M,Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!25.0 to 29.9 percent,Selected Housing Characteristics,int
+DP04,DP04_0113MA,Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!25.0 to 29.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0113PE,Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!25.0 to 29.9 percent,Selected Housing Characteristics,float
+DP04,DP04_0113PEA,Annotation of Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!25.0 to 29.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0113PM,Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!25.0 to 29.9 percent,Selected Housing Characteristics,float
+DP04,DP04_0113PMA,Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!25.0 to 29.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0114E,Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!30.0 to 34.9 percent,Selected Housing Characteristics,int
+DP04,DP04_0114EA,Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!30.0 to 34.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0114M,Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!30.0 to 34.9 percent,Selected Housing Characteristics,int
+DP04,DP04_0114MA,Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!30.0 to 34.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0114PE,Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!30.0 to 34.9 percent,Selected Housing Characteristics,float
+DP04,DP04_0114PEA,Annotation of Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!30.0 to 34.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0114PM,Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!30.0 to 34.9 percent,Selected Housing Characteristics,float
+DP04,DP04_0114PMA,Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!30.0 to 34.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0115E,Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!35.0 percent or more,Selected Housing Characteristics,int
+DP04,DP04_0115EA,Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!35.0 percent or more,Selected Housing Characteristics,string
+DP04,DP04_0115M,Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!35.0 percent or more,Selected Housing Characteristics,int
+DP04,DP04_0115MA,Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!35.0 percent or more,Selected Housing Characteristics,string
+DP04,DP04_0115PE,Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!35.0 percent or more,Selected Housing Characteristics,float
+DP04,DP04_0115PEA,Annotation of Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!35.0 percent or more,Selected Housing Characteristics,string
+DP04,DP04_0115PM,Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!35.0 percent or more,Selected Housing Characteristics,float
+DP04,DP04_0115PMA,Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!35.0 percent or more,Selected Housing Characteristics,string
+DP04,DP04_0116E,Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!Not computed,Selected Housing Characteristics,int
+DP04,DP04_0116EA,Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!Not computed,Selected Housing Characteristics,string
+DP04,DP04_0116M,Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!Not computed,Selected Housing Characteristics,int
+DP04,DP04_0116MA,Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!Not computed,Selected Housing Characteristics,string
+DP04,DP04_0116PE,Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!Not computed,Selected Housing Characteristics,int
+DP04,DP04_0116PEA,Annotation of Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!Not computed,Selected Housing Characteristics,string
+DP04,DP04_0116PM,Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!Not computed,Selected Housing Characteristics,int
+DP04,DP04_0116PMA,Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing units with a mortgage (excluding units where SMOCAPI cannot be computed)!!Not computed,Selected Housing Characteristics,string
+DP04,DP04_0117E,Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed),Selected Housing Characteristics,int
+DP04,DP04_0117EA,Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed),Selected Housing Characteristics,string
+DP04,DP04_0117M,Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed),Selected Housing Characteristics,int
+DP04,DP04_0117MA,Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed),Selected Housing Characteristics,string
+DP04,DP04_0117PE,Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed),Selected Housing Characteristics,int
+DP04,DP04_0117PEA,Annotation of Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed),Selected Housing Characteristics,string
+DP04,DP04_0117PM,Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed),Selected Housing Characteristics,int
+DP04,DP04_0117PMA,Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed),Selected Housing Characteristics,string
+DP04,DP04_0118E,Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!Less than 10.0 percent,Selected Housing Characteristics,int
+DP04,DP04_0118EA,Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!Less than 10.0 percent,Selected Housing Characteristics,string
+DP04,DP04_0118M,Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!Less than 10.0 percent,Selected Housing Characteristics,int
+DP04,DP04_0118MA,Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!Less than 10.0 percent,Selected Housing Characteristics,string
+DP04,DP04_0118PE,Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!Less than 10.0 percent,Selected Housing Characteristics,float
+DP04,DP04_0118PEA,Annotation of Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!Less than 10.0 percent,Selected Housing Characteristics,string
+DP04,DP04_0118PM,Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!Less than 10.0 percent,Selected Housing Characteristics,float
+DP04,DP04_0118PMA,Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!Less than 10.0 percent,Selected Housing Characteristics,string
+DP04,DP04_0119E,Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!10.0 to 14.9 percent,Selected Housing Characteristics,int
+DP04,DP04_0119EA,Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!10.0 to 14.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0119M,Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!10.0 to 14.9 percent,Selected Housing Characteristics,int
+DP04,DP04_0119MA,Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!10.0 to 14.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0119PE,Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!10.0 to 14.9 percent,Selected Housing Characteristics,float
+DP04,DP04_0119PEA,Annotation of Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!10.0 to 14.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0119PM,Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!10.0 to 14.9 percent,Selected Housing Characteristics,float
+DP04,DP04_0119PMA,Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!10.0 to 14.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0120E,Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!15.0 to 19.9 percent,Selected Housing Characteristics,int
+DP04,DP04_0120EA,Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!15.0 to 19.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0120M,Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!15.0 to 19.9 percent,Selected Housing Characteristics,int
+DP04,DP04_0120MA,Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!15.0 to 19.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0120PE,Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!15.0 to 19.9 percent,Selected Housing Characteristics,float
+DP04,DP04_0120PEA,Annotation of Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!15.0 to 19.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0120PM,Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!15.0 to 19.9 percent,Selected Housing Characteristics,float
+DP04,DP04_0120PMA,Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!15.0 to 19.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0121E,Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!20.0 to 24.9 percent,Selected Housing Characteristics,int
+DP04,DP04_0121EA,Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!20.0 to 24.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0121M,Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!20.0 to 24.9 percent,Selected Housing Characteristics,int
+DP04,DP04_0121MA,Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!20.0 to 24.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0121PE,Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!20.0 to 24.9 percent,Selected Housing Characteristics,float
+DP04,DP04_0121PEA,Annotation of Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!20.0 to 24.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0121PM,Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!20.0 to 24.9 percent,Selected Housing Characteristics,float
+DP04,DP04_0121PMA,Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!20.0 to 24.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0122E,Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!25.0 to 29.9 percent,Selected Housing Characteristics,int
+DP04,DP04_0122EA,Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!25.0 to 29.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0122M,Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!25.0 to 29.9 percent,Selected Housing Characteristics,int
+DP04,DP04_0122MA,Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!25.0 to 29.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0122PE,Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!25.0 to 29.9 percent,Selected Housing Characteristics,float
+DP04,DP04_0122PEA,Annotation of Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!25.0 to 29.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0122PM,Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!25.0 to 29.9 percent,Selected Housing Characteristics,float
+DP04,DP04_0122PMA,Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!25.0 to 29.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0123E,Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!30.0 to 34.9 percent,Selected Housing Characteristics,int
+DP04,DP04_0123EA,Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!30.0 to 34.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0123M,Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!30.0 to 34.9 percent,Selected Housing Characteristics,int
+DP04,DP04_0123MA,Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!30.0 to 34.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0123PE,Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!30.0 to 34.9 percent,Selected Housing Characteristics,float
+DP04,DP04_0123PEA,Annotation of Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!30.0 to 34.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0123PM,Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!30.0 to 34.9 percent,Selected Housing Characteristics,float
+DP04,DP04_0123PMA,Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!30.0 to 34.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0124E,Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!35.0 percent or more,Selected Housing Characteristics,int
+DP04,DP04_0124EA,Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!35.0 percent or more,Selected Housing Characteristics,string
+DP04,DP04_0124M,Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!35.0 percent or more,Selected Housing Characteristics,int
+DP04,DP04_0124MA,Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!35.0 percent or more,Selected Housing Characteristics,string
+DP04,DP04_0124PE,Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!35.0 percent or more,Selected Housing Characteristics,float
+DP04,DP04_0124PEA,Annotation of Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!35.0 percent or more,Selected Housing Characteristics,string
+DP04,DP04_0124PM,Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!35.0 percent or more,Selected Housing Characteristics,float
+DP04,DP04_0124PMA,Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!35.0 percent or more,Selected Housing Characteristics,string
+DP04,DP04_0125E,Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!Not computed,Selected Housing Characteristics,int
+DP04,DP04_0125EA,Annotation of Estimate!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!Not computed,Selected Housing Characteristics,string
+DP04,DP04_0125M,Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!Not computed,Selected Housing Characteristics,int
+DP04,DP04_0125MA,Annotation of Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!Not computed,Selected Housing Characteristics,string
+DP04,DP04_0125PE,Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!Not computed,Selected Housing Characteristics,int
+DP04,DP04_0125PEA,Annotation of Percent!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!Not computed,Selected Housing Characteristics,string
+DP04,DP04_0125PM,Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!Not computed,Selected Housing Characteristics,int
+DP04,DP04_0125PMA,Annotation of Percent Margin of Error!!SELECTED MONTHLY OWNER COSTS AS A PERCENTAGE OF HOUSEHOLD INCOME (SMOCAPI)!!Housing unit without a mortgage (excluding units where SMOCAPI cannot be computed)!!Not computed,Selected Housing Characteristics,string
+DP04,DP04_0126E,Estimate!!GROSS RENT!!Occupied units paying rent,Selected Housing Characteristics,int
+DP04,DP04_0126EA,Annotation of Estimate!!GROSS RENT!!Occupied units paying rent,Selected Housing Characteristics,string
+DP04,DP04_0126M,Margin of Error!!GROSS RENT!!Occupied units paying rent,Selected Housing Characteristics,int
+DP04,DP04_0126MA,Annotation of Margin of Error!!GROSS RENT!!Occupied units paying rent,Selected Housing Characteristics,string
+DP04,DP04_0126PE,Percent!!GROSS RENT!!Occupied units paying rent,Selected Housing Characteristics,int
+DP04,DP04_0126PEA,Annotation of Percent!!GROSS RENT!!Occupied units paying rent,Selected Housing Characteristics,string
+DP04,DP04_0126PM,Percent Margin of Error!!GROSS RENT!!Occupied units paying rent,Selected Housing Characteristics,int
+DP04,DP04_0126PMA,Annotation of Percent Margin of Error!!GROSS RENT!!Occupied units paying rent,Selected Housing Characteristics,string
+DP04,DP04_0127E,Estimate!!GROSS RENT!!Occupied units paying rent!!Less than $500,Selected Housing Characteristics,int
+DP04,DP04_0127EA,Annotation of Estimate!!GROSS RENT!!Occupied units paying rent!!Less than $500,Selected Housing Characteristics,string
+DP04,DP04_0127M,Margin of Error!!GROSS RENT!!Occupied units paying rent!!Less than $500,Selected Housing Characteristics,int
+DP04,DP04_0127MA,Annotation of Margin of Error!!GROSS RENT!!Occupied units paying rent!!Less than $500,Selected Housing Characteristics,string
+DP04,DP04_0127PE,Percent!!GROSS RENT!!Occupied units paying rent!!Less than $500,Selected Housing Characteristics,float
+DP04,DP04_0127PEA,Annotation of Percent!!GROSS RENT!!Occupied units paying rent!!Less than $500,Selected Housing Characteristics,string
+DP04,DP04_0127PM,Percent Margin of Error!!GROSS RENT!!Occupied units paying rent!!Less than $500,Selected Housing Characteristics,float
+DP04,DP04_0127PMA,Annotation of Percent Margin of Error!!GROSS RENT!!Occupied units paying rent!!Less than $500,Selected Housing Characteristics,string
+DP04,DP04_0128E,Estimate!!GROSS RENT!!Occupied units paying rent!!$500 to $999,Selected Housing Characteristics,int
+DP04,DP04_0128EA,Annotation of Estimate!!GROSS RENT!!Occupied units paying rent!!$500 to $999,Selected Housing Characteristics,string
+DP04,DP04_0128M,Margin of Error!!GROSS RENT!!Occupied units paying rent!!$500 to $999,Selected Housing Characteristics,int
+DP04,DP04_0128MA,Annotation of Margin of Error!!GROSS RENT!!Occupied units paying rent!!$500 to $999,Selected Housing Characteristics,string
+DP04,DP04_0128PE,Percent!!GROSS RENT!!Occupied units paying rent!!$500 to $999,Selected Housing Characteristics,float
+DP04,DP04_0128PEA,Annotation of Percent!!GROSS RENT!!Occupied units paying rent!!$500 to $999,Selected Housing Characteristics,string
+DP04,DP04_0128PM,Percent Margin of Error!!GROSS RENT!!Occupied units paying rent!!$500 to $999,Selected Housing Characteristics,float
+DP04,DP04_0128PMA,Annotation of Percent Margin of Error!!GROSS RENT!!Occupied units paying rent!!$500 to $999,Selected Housing Characteristics,string
+DP04,DP04_0129E,"Estimate!!GROSS RENT!!Occupied units paying rent!!$1,000 to $1,499",Selected Housing Characteristics,int
+DP04,DP04_0129EA,"Annotation of Estimate!!GROSS RENT!!Occupied units paying rent!!$1,000 to $1,499",Selected Housing Characteristics,string
+DP04,DP04_0129M,"Margin of Error!!GROSS RENT!!Occupied units paying rent!!$1,000 to $1,499",Selected Housing Characteristics,int
+DP04,DP04_0129MA,"Annotation of Margin of Error!!GROSS RENT!!Occupied units paying rent!!$1,000 to $1,499",Selected Housing Characteristics,string
+DP04,DP04_0129PE,"Percent!!GROSS RENT!!Occupied units paying rent!!$1,000 to $1,499",Selected Housing Characteristics,float
+DP04,DP04_0129PEA,"Annotation of Percent!!GROSS RENT!!Occupied units paying rent!!$1,000 to $1,499",Selected Housing Characteristics,string
+DP04,DP04_0129PM,"Percent Margin of Error!!GROSS RENT!!Occupied units paying rent!!$1,000 to $1,499",Selected Housing Characteristics,float
+DP04,DP04_0129PMA,"Annotation of Percent Margin of Error!!GROSS RENT!!Occupied units paying rent!!$1,000 to $1,499",Selected Housing Characteristics,string
+DP04,DP04_0130E,"Estimate!!GROSS RENT!!Occupied units paying rent!!$1,500 to $1,999",Selected Housing Characteristics,int
+DP04,DP04_0130EA,"Annotation of Estimate!!GROSS RENT!!Occupied units paying rent!!$1,500 to $1,999",Selected Housing Characteristics,string
+DP04,DP04_0130M,"Margin of Error!!GROSS RENT!!Occupied units paying rent!!$1,500 to $1,999",Selected Housing Characteristics,int
+DP04,DP04_0130MA,"Annotation of Margin of Error!!GROSS RENT!!Occupied units paying rent!!$1,500 to $1,999",Selected Housing Characteristics,string
+DP04,DP04_0130PE,"Percent!!GROSS RENT!!Occupied units paying rent!!$1,500 to $1,999",Selected Housing Characteristics,float
+DP04,DP04_0130PEA,"Annotation of Percent!!GROSS RENT!!Occupied units paying rent!!$1,500 to $1,999",Selected Housing Characteristics,string
+DP04,DP04_0130PM,"Percent Margin of Error!!GROSS RENT!!Occupied units paying rent!!$1,500 to $1,999",Selected Housing Characteristics,float
+DP04,DP04_0130PMA,"Annotation of Percent Margin of Error!!GROSS RENT!!Occupied units paying rent!!$1,500 to $1,999",Selected Housing Characteristics,string
+DP04,DP04_0131E,"Estimate!!GROSS RENT!!Occupied units paying rent!!$2,000 to $2,499",Selected Housing Characteristics,int
+DP04,DP04_0131EA,"Annotation of Estimate!!GROSS RENT!!Occupied units paying rent!!$2,000 to $2,499",Selected Housing Characteristics,string
+DP04,DP04_0131M,"Margin of Error!!GROSS RENT!!Occupied units paying rent!!$2,000 to $2,499",Selected Housing Characteristics,int
+DP04,DP04_0131MA,"Annotation of Margin of Error!!GROSS RENT!!Occupied units paying rent!!$2,000 to $2,499",Selected Housing Characteristics,string
+DP04,DP04_0131PE,"Percent!!GROSS RENT!!Occupied units paying rent!!$2,000 to $2,499",Selected Housing Characteristics,float
+DP04,DP04_0131PEA,"Annotation of Percent!!GROSS RENT!!Occupied units paying rent!!$2,000 to $2,499",Selected Housing Characteristics,string
+DP04,DP04_0131PM,"Percent Margin of Error!!GROSS RENT!!Occupied units paying rent!!$2,000 to $2,499",Selected Housing Characteristics,float
+DP04,DP04_0131PMA,"Annotation of Percent Margin of Error!!GROSS RENT!!Occupied units paying rent!!$2,000 to $2,499",Selected Housing Characteristics,string
+DP04,DP04_0132E,"Estimate!!GROSS RENT!!Occupied units paying rent!!$2,500 to $2,999",Selected Housing Characteristics,int
+DP04,DP04_0132EA,"Annotation of Estimate!!GROSS RENT!!Occupied units paying rent!!$2,500 to $2,999",Selected Housing Characteristics,string
+DP04,DP04_0132M,"Margin of Error!!GROSS RENT!!Occupied units paying rent!!$2,500 to $2,999",Selected Housing Characteristics,int
+DP04,DP04_0132MA,"Annotation of Margin of Error!!GROSS RENT!!Occupied units paying rent!!$2,500 to $2,999",Selected Housing Characteristics,string
+DP04,DP04_0132PE,"Percent!!GROSS RENT!!Occupied units paying rent!!$2,500 to $2,999",Selected Housing Characteristics,float
+DP04,DP04_0132PEA,"Annotation of Percent!!GROSS RENT!!Occupied units paying rent!!$2,500 to $2,999",Selected Housing Characteristics,string
+DP04,DP04_0132PM,"Percent Margin of Error!!GROSS RENT!!Occupied units paying rent!!$2,500 to $2,999",Selected Housing Characteristics,float
+DP04,DP04_0132PMA,"Annotation of Percent Margin of Error!!GROSS RENT!!Occupied units paying rent!!$2,500 to $2,999",Selected Housing Characteristics,string
+DP04,DP04_0133E,"Estimate!!GROSS RENT!!Occupied units paying rent!!$3,000 or more",Selected Housing Characteristics,int
+DP04,DP04_0133EA,"Annotation of Estimate!!GROSS RENT!!Occupied units paying rent!!$3,000 or more",Selected Housing Characteristics,string
+DP04,DP04_0133M,"Margin of Error!!GROSS RENT!!Occupied units paying rent!!$3,000 or more",Selected Housing Characteristics,int
+DP04,DP04_0133MA,"Annotation of Margin of Error!!GROSS RENT!!Occupied units paying rent!!$3,000 or more",Selected Housing Characteristics,string
+DP04,DP04_0133PE,"Percent!!GROSS RENT!!Occupied units paying rent!!$3,000 or more",Selected Housing Characteristics,float
+DP04,DP04_0133PEA,"Annotation of Percent!!GROSS RENT!!Occupied units paying rent!!$3,000 or more",Selected Housing Characteristics,string
+DP04,DP04_0133PM,"Percent Margin of Error!!GROSS RENT!!Occupied units paying rent!!$3,000 or more",Selected Housing Characteristics,float
+DP04,DP04_0133PMA,"Annotation of Percent Margin of Error!!GROSS RENT!!Occupied units paying rent!!$3,000 or more",Selected Housing Characteristics,string
+DP04,DP04_0134E,Estimate!!GROSS RENT!!Occupied units paying rent!!Median (dollars),Selected Housing Characteristics,int
+DP04,DP04_0134EA,Annotation of Estimate!!GROSS RENT!!Occupied units paying rent!!Median (dollars),Selected Housing Characteristics,string
+DP04,DP04_0134M,Margin of Error!!GROSS RENT!!Occupied units paying rent!!Median (dollars),Selected Housing Characteristics,int
+DP04,DP04_0134MA,Annotation of Margin of Error!!GROSS RENT!!Occupied units paying rent!!Median (dollars),Selected Housing Characteristics,string
+DP04,DP04_0134PE,Percent!!GROSS RENT!!Occupied units paying rent!!Median (dollars),Selected Housing Characteristics,int
+DP04,DP04_0134PEA,Annotation of Percent!!GROSS RENT!!Occupied units paying rent!!Median (dollars),Selected Housing Characteristics,string
+DP04,DP04_0134PM,Percent Margin of Error!!GROSS RENT!!Occupied units paying rent!!Median (dollars),Selected Housing Characteristics,int
+DP04,DP04_0134PMA,Annotation of Percent Margin of Error!!GROSS RENT!!Occupied units paying rent!!Median (dollars),Selected Housing Characteristics,string
+DP04,DP04_0135E,Estimate!!GROSS RENT!!Occupied units paying rent!!No rent paid,Selected Housing Characteristics,int
+DP04,DP04_0135EA,Annotation of Estimate!!GROSS RENT!!Occupied units paying rent!!No rent paid,Selected Housing Characteristics,string
+DP04,DP04_0135M,Margin of Error!!GROSS RENT!!Occupied units paying rent!!No rent paid,Selected Housing Characteristics,int
+DP04,DP04_0135MA,Annotation of Margin of Error!!GROSS RENT!!Occupied units paying rent!!No rent paid,Selected Housing Characteristics,string
+DP04,DP04_0135PE,Percent!!GROSS RENT!!Occupied units paying rent!!No rent paid,Selected Housing Characteristics,int
+DP04,DP04_0135PEA,Annotation of Percent!!GROSS RENT!!Occupied units paying rent!!No rent paid,Selected Housing Characteristics,string
+DP04,DP04_0135PM,Percent Margin of Error!!GROSS RENT!!Occupied units paying rent!!No rent paid,Selected Housing Characteristics,int
+DP04,DP04_0135PMA,Annotation of Percent Margin of Error!!GROSS RENT!!Occupied units paying rent!!No rent paid,Selected Housing Characteristics,string
+DP04,DP04_0136E,Estimate!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed),Selected Housing Characteristics,int
+DP04,DP04_0136EA,Annotation of Estimate!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed),Selected Housing Characteristics,string
+DP04,DP04_0136M,Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed),Selected Housing Characteristics,int
+DP04,DP04_0136MA,Annotation of Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed),Selected Housing Characteristics,string
+DP04,DP04_0136PE,Percent!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed),Selected Housing Characteristics,int
+DP04,DP04_0136PEA,Annotation of Percent!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed),Selected Housing Characteristics,string
+DP04,DP04_0136PM,Percent Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed),Selected Housing Characteristics,int
+DP04,DP04_0136PMA,Annotation of Percent Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed),Selected Housing Characteristics,string
+DP04,DP04_0137E,Estimate!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!Less than 15.0 percent,Selected Housing Characteristics,int
+DP04,DP04_0137EA,Annotation of Estimate!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!Less than 15.0 percent,Selected Housing Characteristics,string
+DP04,DP04_0137M,Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!Less than 15.0 percent,Selected Housing Characteristics,int
+DP04,DP04_0137MA,Annotation of Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!Less than 15.0 percent,Selected Housing Characteristics,string
+DP04,DP04_0137PE,Percent!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!Less than 15.0 percent,Selected Housing Characteristics,float
+DP04,DP04_0137PEA,Annotation of Percent!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!Less than 15.0 percent,Selected Housing Characteristics,string
+DP04,DP04_0137PM,Percent Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!Less than 15.0 percent,Selected Housing Characteristics,float
+DP04,DP04_0137PMA,Annotation of Percent Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!Less than 15.0 percent,Selected Housing Characteristics,string
+DP04,DP04_0138E,Estimate!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!15.0 to 19.9 percent,Selected Housing Characteristics,int
+DP04,DP04_0138EA,Annotation of Estimate!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!15.0 to 19.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0138M,Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!15.0 to 19.9 percent,Selected Housing Characteristics,int
+DP04,DP04_0138MA,Annotation of Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!15.0 to 19.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0138PE,Percent!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!15.0 to 19.9 percent,Selected Housing Characteristics,float
+DP04,DP04_0138PEA,Annotation of Percent!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!15.0 to 19.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0138PM,Percent Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!15.0 to 19.9 percent,Selected Housing Characteristics,float
+DP04,DP04_0138PMA,Annotation of Percent Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!15.0 to 19.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0139E,Estimate!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!20.0 to 24.9 percent,Selected Housing Characteristics,int
+DP04,DP04_0139EA,Annotation of Estimate!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!20.0 to 24.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0139M,Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!20.0 to 24.9 percent,Selected Housing Characteristics,int
+DP04,DP04_0139MA,Annotation of Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!20.0 to 24.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0139PE,Percent!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!20.0 to 24.9 percent,Selected Housing Characteristics,float
+DP04,DP04_0139PEA,Annotation of Percent!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!20.0 to 24.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0139PM,Percent Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!20.0 to 24.9 percent,Selected Housing Characteristics,float
+DP04,DP04_0139PMA,Annotation of Percent Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!20.0 to 24.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0140E,Estimate!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!25.0 to 29.9 percent,Selected Housing Characteristics,int
+DP04,DP04_0140EA,Annotation of Estimate!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!25.0 to 29.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0140M,Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!25.0 to 29.9 percent,Selected Housing Characteristics,int
+DP04,DP04_0140MA,Annotation of Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!25.0 to 29.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0140PE,Percent!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!25.0 to 29.9 percent,Selected Housing Characteristics,float
+DP04,DP04_0140PEA,Annotation of Percent!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!25.0 to 29.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0140PM,Percent Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!25.0 to 29.9 percent,Selected Housing Characteristics,float
+DP04,DP04_0140PMA,Annotation of Percent Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!25.0 to 29.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0141E,Estimate!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!30.0 to 34.9 percent,Selected Housing Characteristics,int
+DP04,DP04_0141EA,Annotation of Estimate!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!30.0 to 34.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0141M,Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!30.0 to 34.9 percent,Selected Housing Characteristics,int
+DP04,DP04_0141MA,Annotation of Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!30.0 to 34.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0141PE,Percent!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!30.0 to 34.9 percent,Selected Housing Characteristics,float
+DP04,DP04_0141PEA,Annotation of Percent!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!30.0 to 34.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0141PM,Percent Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!30.0 to 34.9 percent,Selected Housing Characteristics,float
+DP04,DP04_0141PMA,Annotation of Percent Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!30.0 to 34.9 percent,Selected Housing Characteristics,string
+DP04,DP04_0142E,Estimate!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!35.0 percent or more,Selected Housing Characteristics,int
+DP04,DP04_0142EA,Annotation of Estimate!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!35.0 percent or more,Selected Housing Characteristics,string
+DP04,DP04_0142M,Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!35.0 percent or more,Selected Housing Characteristics,int
+DP04,DP04_0142MA,Annotation of Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!35.0 percent or more,Selected Housing Characteristics,string
+DP04,DP04_0142PE,Percent!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!35.0 percent or more,Selected Housing Characteristics,float
+DP04,DP04_0142PEA,Annotation of Percent!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!35.0 percent or more,Selected Housing Characteristics,string
+DP04,DP04_0142PM,Percent Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!35.0 percent or more,Selected Housing Characteristics,float
+DP04,DP04_0142PMA,Annotation of Percent Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!35.0 percent or more,Selected Housing Characteristics,string
+DP04,DP04_0143E,Estimate!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!Not computed,Selected Housing Characteristics,int
+DP04,DP04_0143EA,Annotation of Estimate!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!Not computed,Selected Housing Characteristics,string
+DP04,DP04_0143M,Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!Not computed,Selected Housing Characteristics,int
+DP04,DP04_0143MA,Annotation of Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!Not computed,Selected Housing Characteristics,string
+DP04,DP04_0143PE,Percent!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!Not computed,Selected Housing Characteristics,int
+DP04,DP04_0143PEA,Annotation of Percent!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!Not computed,Selected Housing Characteristics,string
+DP04,DP04_0143PM,Percent Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!Not computed,Selected Housing Characteristics,int
+DP04,DP04_0143PMA,Annotation of Percent Margin of Error!!GROSS RENT AS A PERCENTAGE OF HOUSEHOLD INCOME (GRAPI)!!Occupied units paying rent (excluding units where GRAPI cannot be computed)!!Not computed,Selected Housing Characteristics,string
+DP04,GEO_ID,Geography,Selected Social Characteristics in the United States;Selected Social Characteristics in Puerto Rico;Selected Economic Characteristics;Selected Housing Characteristics;ACS Demographic and Housing Estimates,string
+DP04,NAME,Geographic Area Name,Selected Social Characteristics in the United States;Selected Social Characteristics in Puerto Rico;Selected Economic Characteristics;Selected Housing Characteristics;ACS Demographic and Housing Estimates,string

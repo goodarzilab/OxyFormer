@@ -1,0 +1,53 @@
+{
+  "phase1_master_rows": 3233,
+  "phase2_master_rows": 3233,
+  "phase2_master_columns": 2218,
+  "sources": {
+    "places": {
+      "status": "loaded",
+      "path": "data/public/raw/places_county_2025.csv",
+      "rows": 2638,
+      "features": 11
+    },
+    "svi": {
+      "status": "loaded",
+      "path": "data/public/raw/svi_2022_county.csv",
+      "rows": 2827,
+      "features": 20
+    },
+    "rucc": {
+      "status": "loaded",
+      "path": "data/public/raw/rucc_2023.csv",
+      "rows": 2917,
+      "features": 3
+    },
+    "acs_dp02": {
+      "status": "loaded",
+      "path": "data/public/raw/acs5_profile_2024_dp02.csv",
+      "rows": 3222,
+      "features": 616
+    },
+    "acs_dp03": {
+      "status": "loaded",
+      "path": "data/public/raw/acs5_profile_2024_dp03.csv",
+      "rows": 3222,
+      "features": 548
+    },
+    "acs_dp04": {
+      "status": "loaded",
+      "path": "data/public/raw/acs5_profile_2024_dp04.csv",
+      "rows": 3222,
+      "features": 572
+    },
+    "acs_dp05": {
+      "status": "loaded",
+      "path": "data/public/raw/acs5_profile_2024_dp05.csv",
+      "rows": 3222,
+      "features": 432
+    }
+  },
+  "outputs": {
+    "county_master_table_phase2": "outputs/phase2/county_master_table_phase2.csv",
+    "phase2_feature_catalog": "outputs/phase2/phase2_feature_catalog.csv"
+  }
+}

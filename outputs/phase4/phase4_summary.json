@@ -1,0 +1,85 @@
+{
+  "treatment": "hypoxia_burden",
+  "seeds": [
+    20260306
+  ],
+  "min_state_rows": 200,
+  "site_models_included": false,
+  "uses_foundation_embeddings": true,
+  "foundation_embedding_count": 24,
+  "foundation_embedding_path": "outputs/phase26/county_foundation_embeddings.csv",
+  "selected_site_models": [],
+  "models": [
+    {
+      "model_name": "incidence_total_effect",
+      "analysis_group": "all_cancer",
+      "event_type": "Incidence",
+      "site": "All Cancer Sites Combined",
+      "effect_type": "total_effect",
+      "support_count": NaN,
+      "full_slope": -285.9230251334221,
+      "full_p_value": 3.470526136209905e-08,
+      "seed_slope_sd": 0.0,
+      "seed_sign_consistent": true,
+      "states_tested": 1,
+      "leave_one_state_sign_consistent": true,
+      "max_abs_state_shift_pct": 0.0,
+      "most_influential_state_fips": "48"
+    },
+    {
+      "model_name": "incidence_direct_effect",
+      "analysis_group": "all_cancer",
+      "event_type": "Incidence",
+      "site": "All Cancer Sites Combined",
+      "effect_type": "direct_effect",
+      "support_count": NaN,
+      "full_slope": -296.82165735843296,
+      "full_p_value": 3.271268235887044e-08,
+      "seed_slope_sd": 0.0,
+      "seed_sign_consistent": true,
+      "states_tested": 1,
+      "leave_one_state_sign_consistent": true,
+      "max_abs_state_shift_pct": 0.0,
+      "most_influential_state_fips": "48"
+    },
+    {
+      "model_name": "mortality_total_effect",
+      "analysis_group": "all_cancer",
+      "event_type": "Mortality",
+      "site": "All Cancer Sites Combined",
+      "effect_type": "total_effect",
+      "support_count": NaN,
+      "full_slope": -97.01157748359255,
+      "full_p_value": 0.003330654960475997,
+      "seed_slope_sd": 0.0,
+      "seed_sign_consistent": true,
+      "states_tested": 1,
+      "leave_one_state_sign_consistent": true,
+      "max_abs_state_shift_pct": 0.0,
+      "most_influential_state_fips": "48"
+    },
+    {
+      "model_name": "mortality_direct_effect",
+      "analysis_group": "all_cancer",
+      "event_type": "Mortality",
+      "site": "All Cancer Sites Combined",
+      "effect_type": "direct_effect",
+      "support_count": NaN,
+      "full_slope": -96.56735564516028,
+      "full_p_value": 0.003864853211737115,
+      "seed_slope_sd": 0.0,
+      "seed_sign_consistent": true,
+      "states_tested": 1,
+      "leave_one_state_sign_consistent": true,
+      "max_abs_state_shift_pct": 0.0,
+      "most_influential_state_fips": "48"
+    }
+  ],
+  "outputs": {
+    "full_model_effects": "outputs/phase4/full_model_effects.csv",
+    "seed_sensitivity": "outputs/phase4/seed_sensitivity.csv",
+    "seed_sensitivity_summary": "outputs/phase4/seed_sensitivity_summary.csv",
+    "leave_one_state_out": "outputs/phase4/leave_one_state_out.csv",
+    "leave_one_state_out_summary": "outputs/phase4/leave_one_state_out_summary.csv"
+  }
+}

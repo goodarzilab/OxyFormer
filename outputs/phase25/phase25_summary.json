@@ -1,0 +1,20 @@
+{
+  "curated_rows": 3233,
+  "curated_columns": 67,
+  "model_matrix_rows": 3233,
+  "model_matrix_columns": 121,
+  "curated_feature_count": 58,
+  "model_feature_count": 56,
+  "incidence_rows": 1023,
+  "mortality_rows": 1211,
+  "mean_model_feature_observed_fraction": 0.921899164862357,
+  "min_model_feature_observed_fraction": 0.8159604082895144,
+  "outputs": {
+    "curated_county_features": "outputs/phase25/curated_county_features.csv",
+    "curated_model_matrix": "outputs/phase25/curated_model_matrix.csv",
+    "incidence_modeling_table": "outputs/phase25/incidence_modeling_table.csv",
+    "mortality_modeling_table": "outputs/phase25/mortality_modeling_table.csv",
+    "feature_manifest": "outputs/phase25/feature_manifest.csv",
+    "missingness_summary": "outputs/phase25/missingness_summary.csv"
+  }
+}

@@ -1,0 +1,53 @@
+event_type,site,counties_with_covariates,rows
+Incidence,All Cancer Sites Combined,1023,1023
+Incidence,Prostate,981,981
+Incidence,Lung and Bronchus,976,976
+Incidence,Male and Female Breast,975,975
+Incidence,Colon and Rectum,954,954
+Incidence,Melanomas of the Skin,801,801
+Incidence,Urinary Bladder,797,797
+Incidence,Kidney and Renal Pelvis,786,786
+Incidence,Non-Hodgkin Lymphoma,754,754
+Incidence,Leukemias,681,681
+Incidence,Oral Cavity and Pharynx,661,661
+Incidence,Pancreas,661,661
+Incidence,"Corpus and Uterus, NOS",651,651
+Incidence,"Male and Female Breast, <i>in situ</i>",560,560
+Incidence,Thyroid,551,551
+Incidence,Liver and Intrahepatic Bile Duct,498,498
+Incidence,Myeloma,433,433
+Incidence,Stomach,390,390
+Incidence,Brain and Other Nervous System,378,378
+Incidence,Esophagus,377,377
+Incidence,Ovary,335,335
+Incidence,Larynx,315,315
+Incidence,Cervix,290,290
+Incidence,Hodgkin Lymphoma,207,207
+Incidence,Testis,201,201
+Incidence,Mesothelioma,103,103
+Incidence,Kaposi Sarcoma,33,33
+Mortality,All Cancer Sites Combined,1211,1211
+Mortality,Lung and Bronchus,1103,1103
+Mortality,Colon and Rectum,866,866
+Mortality,Pancreas,703,703
+Mortality,Male and Female Breast,653,653
+Mortality,Prostate,562,562
+Mortality,Liver and Intrahepatic Bile Duct,499,499
+Mortality,Leukemias,475,475
+Mortality,Non-Hodgkin Lymphoma,415,415
+Mortality,Esophagus,376,376
+Mortality,Brain and Other Nervous System,374,374
+Mortality,Urinary Bladder,373,373
+Mortality,Kidney and Renal Pelvis,358,358
+Mortality,Ovary,303,303
+Mortality,Myeloma,287,287
+Mortality,Oral Cavity and Pharynx,278,278
+Mortality,Stomach,252,252
+Mortality,"Corpus and Uterus, NOS",249,249
+Mortality,Melanomas of the Skin,222,222
+Mortality,Cervix,128,128
+Mortality,Larynx,126,126
+Mortality,Mesothelioma,85,85
+Mortality,Thyroid,66,66
+Mortality,Hodgkin Lymphoma,22,22
+Mortality,Testis,7,7

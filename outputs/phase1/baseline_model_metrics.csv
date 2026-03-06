@@ -1,0 +1,5 @@
+outcome,exposure,n_rows,aic,deviance,pearson_chi2,model_name
+all_cancer_mortality_rate,elevation_m,1210,12343.943027818821,3943.7314556488086,4150.260572291868,mortality_elevation_reproduction
+all_cancer_incidence_rate,elevation_m,1022,14869.731786346318,6728.448877065997,6950.79308196456,incidence_elevation_primary
+all_cancer_mortality_rate,oxygen_proxy_mmhg,1210,12356.818026074285,3956.6064539042573,4161.676242809949,mortality_oxygen_proxy
+all_cancer_incidence_rate,oxygen_proxy_mmhg,1022,14896.550800962264,6755.267891681939,6975.436352424311,incidence_oxygen_proxy_primary

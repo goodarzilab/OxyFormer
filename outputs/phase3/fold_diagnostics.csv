@@ -1,0 +1,181 @@
+model_name,analysis_group,event_type,site,fold,n_test,outcome_r2,treatment_r2
+incidence_total_effect,all_cancer,Incidence,All Cancer Sites Combined,0,205,0.28425366404396857,0.8166806121749455
+incidence_total_effect,all_cancer,Incidence,All Cancer Sites Combined,1,205,0.547620066032468,0.8303591630378745
+incidence_total_effect,all_cancer,Incidence,All Cancer Sites Combined,2,205,0.48222558860442366,0.8214182484955701
+incidence_total_effect,all_cancer,Incidence,All Cancer Sites Combined,3,204,0.4760794071150386,0.8172596711569714
+incidence_total_effect,all_cancer,Incidence,All Cancer Sites Combined,4,204,0.5201943003815586,0.7578935948164192
+incidence_direct_effect,all_cancer,Incidence,All Cancer Sites Combined,0,205,0.2880151818563792,0.8158176684780847
+incidence_direct_effect,all_cancer,Incidence,All Cancer Sites Combined,1,205,0.5449001301566616,0.8420309802328043
+incidence_direct_effect,all_cancer,Incidence,All Cancer Sites Combined,2,205,0.48407008145129693,0.8239730086053787
+incidence_direct_effect,all_cancer,Incidence,All Cancer Sites Combined,3,204,0.46836221924407895,0.8103223724179748
+incidence_direct_effect,all_cancer,Incidence,All Cancer Sites Combined,4,204,0.5273345430542216,0.7542608087434254
+mortality_total_effect,all_cancer,Mortality,All Cancer Sites Combined,0,243,0.6010249284393403,0.8310750658032227
+mortality_total_effect,all_cancer,Mortality,All Cancer Sites Combined,1,242,0.38210896918706505,0.7964014628936351
+mortality_total_effect,all_cancer,Mortality,All Cancer Sites Combined,2,242,0.5243258952831114,0.8183494383496448
+mortality_total_effect,all_cancer,Mortality,All Cancer Sites Combined,3,242,0.3489304129219627,0.7185452428162549
+mortality_total_effect,all_cancer,Mortality,All Cancer Sites Combined,4,242,0.5643897074059137,0.8232412066971827
+mortality_direct_effect,all_cancer,Mortality,All Cancer Sites Combined,0,243,0.5920168054740121,0.8300203079355957
+mortality_direct_effect,all_cancer,Mortality,All Cancer Sites Combined,1,242,0.3850871366487547,0.7915006234011808
+mortality_direct_effect,all_cancer,Mortality,All Cancer Sites Combined,2,242,0.5264266995781749,0.8181286604743815
+mortality_direct_effect,all_cancer,Mortality,All Cancer Sites Combined,3,242,0.34841648235790046,0.7312253791096324
+mortality_direct_effect,all_cancer,Mortality,All Cancer Sites Combined,4,242,0.5623494970954471,0.8259009650985667
+site_incidence__prostate__total_effect,site,Incidence,Prostate,0,197,0.4621398095258984,0.7953145829064294
+site_incidence__prostate__total_effect,site,Incidence,Prostate,1,196,0.4580910297848082,0.8376925300874539
+site_incidence__prostate__total_effect,site,Incidence,Prostate,2,196,0.45196987029581936,0.8095575634048634
+site_incidence__prostate__total_effect,site,Incidence,Prostate,3,196,0.29315205986860593,0.8006170976707593
+site_incidence__prostate__total_effect,site,Incidence,Prostate,4,196,0.47108511867018954,0.8399630085010922
+site_incidence__prostate__direct_effect,site,Incidence,Prostate,0,197,0.45820500112296136,0.7971282978514888
+site_incidence__prostate__direct_effect,site,Incidence,Prostate,1,196,0.4570604346325178,0.841776229381179
+site_incidence__prostate__direct_effect,site,Incidence,Prostate,2,196,0.44964514065022165,0.8138366273610254
+site_incidence__prostate__direct_effect,site,Incidence,Prostate,3,196,0.29243006528566806,0.8058802432083977
+site_incidence__prostate__direct_effect,site,Incidence,Prostate,4,196,0.4724096726744281,0.8420185305366152
+site_incidence__lung_and_bronchus__total_effect,site,Incidence,Lung and Bronchus,0,196,0.6449979620721935,0.8098716126033285
+site_incidence__lung_and_bronchus__total_effect,site,Incidence,Lung and Bronchus,1,195,0.6957514764278878,0.7757777734571989
+site_incidence__lung_and_bronchus__total_effect,site,Incidence,Lung and Bronchus,2,195,0.638130137025797,0.8204640964754487
+site_incidence__lung_and_bronchus__total_effect,site,Incidence,Lung and Bronchus,3,195,0.6049949150046501,0.7793838949637288
+site_incidence__lung_and_bronchus__total_effect,site,Incidence,Lung and Bronchus,4,195,0.6425609839841231,0.7956772880489215
+site_incidence__lung_and_bronchus__direct_effect,site,Incidence,Lung and Bronchus,0,196,0.6447948064640658,0.8140784894313382
+site_incidence__lung_and_bronchus__direct_effect,site,Incidence,Lung and Bronchus,1,195,0.6998899299797812,0.7725783084771102
+site_incidence__lung_and_bronchus__direct_effect,site,Incidence,Lung and Bronchus,2,195,0.636557568967804,0.825507046828729
+site_incidence__lung_and_bronchus__direct_effect,site,Incidence,Lung and Bronchus,3,195,0.5927019465114354,0.7825549672032892
+site_incidence__lung_and_bronchus__direct_effect,site,Incidence,Lung and Bronchus,4,195,0.6447295360285096,0.792597955810832
+site_incidence__male_and_female_breast__total_effect,site,Incidence,Male and Female Breast,0,195,0.1987559714550743,0.8477251235234367
+site_incidence__male_and_female_breast__total_effect,site,Incidence,Male and Female Breast,1,195,0.18041077085972568,0.8273579561126876
+site_incidence__male_and_female_breast__total_effect,site,Incidence,Male and Female Breast,2,195,0.10004044068544427,0.7953185891237667
+site_incidence__male_and_female_breast__total_effect,site,Incidence,Male and Female Breast,3,195,0.06986227321352156,0.7532145346180361
+site_incidence__male_and_female_breast__total_effect,site,Incidence,Male and Female Breast,4,195,0.1493320235914598,0.8209582665588732
+site_incidence__male_and_female_breast__direct_effect,site,Incidence,Male and Female Breast,0,195,0.19700371723512378,0.8498156580871091
+site_incidence__male_and_female_breast__direct_effect,site,Incidence,Male and Female Breast,1,195,0.18074443214655012,0.8285958120363679
+site_incidence__male_and_female_breast__direct_effect,site,Incidence,Male and Female Breast,2,195,0.09195868645853311,0.8022643867236638
+site_incidence__male_and_female_breast__direct_effect,site,Incidence,Male and Female Breast,3,195,0.07535005006449114,0.7546946800481809
+site_incidence__male_and_female_breast__direct_effect,site,Incidence,Male and Female Breast,4,195,0.1423249475137518,0.8220870328676396
+site_incidence__colon_and_rectum__total_effect,site,Incidence,Colon and Rectum,0,191,0.4074225057551155,0.7837564026473784
+site_incidence__colon_and_rectum__total_effect,site,Incidence,Colon and Rectum,1,191,0.27368006331721284,0.7398542794720693
+site_incidence__colon_and_rectum__total_effect,site,Incidence,Colon and Rectum,2,191,0.32424738198443803,0.7802155632098586
+site_incidence__colon_and_rectum__total_effect,site,Incidence,Colon and Rectum,3,191,0.4071977879064197,0.8003830134576392
+site_incidence__colon_and_rectum__total_effect,site,Incidence,Colon and Rectum,4,190,0.48912817458026536,0.8361750272355858
+site_incidence__colon_and_rectum__direct_effect,site,Incidence,Colon and Rectum,0,191,0.4143167466322456,0.7785917141873655
+site_incidence__colon_and_rectum__direct_effect,site,Incidence,Colon and Rectum,1,191,0.2770607085269189,0.7498864440533513
+site_incidence__colon_and_rectum__direct_effect,site,Incidence,Colon and Rectum,2,191,0.3267437648998922,0.7901236677171343
+site_incidence__colon_and_rectum__direct_effect,site,Incidence,Colon and Rectum,3,191,0.4031585925014235,0.8063240331510102
+site_incidence__colon_and_rectum__direct_effect,site,Incidence,Colon and Rectum,4,190,0.4987254984059317,0.8342137768359976
+site_incidence__melanomas_of_the_skin__total_effect,site,Incidence,Melanomas of the Skin,0,161,0.42397336045807976,0.8327600558359475
+site_incidence__melanomas_of_the_skin__total_effect,site,Incidence,Melanomas of the Skin,1,160,0.40353345651192707,0.824660640283708
+site_incidence__melanomas_of_the_skin__total_effect,site,Incidence,Melanomas of the Skin,2,160,0.42500589908321695,0.738036432521939
+site_incidence__melanomas_of_the_skin__total_effect,site,Incidence,Melanomas of the Skin,3,160,0.4626562055024992,0.8220689012216482
+site_incidence__melanomas_of_the_skin__total_effect,site,Incidence,Melanomas of the Skin,4,160,0.3838880338046923,0.7391550820312951
+site_incidence__melanomas_of_the_skin__direct_effect,site,Incidence,Melanomas of the Skin,0,161,0.4190735190805599,0.8281488254165873
+site_incidence__melanomas_of_the_skin__direct_effect,site,Incidence,Melanomas of the Skin,1,160,0.40348345321245416,0.8298403410200231
+site_incidence__melanomas_of_the_skin__direct_effect,site,Incidence,Melanomas of the Skin,2,160,0.41923770405873384,0.7518046480326104
+site_incidence__melanomas_of_the_skin__direct_effect,site,Incidence,Melanomas of the Skin,3,160,0.46454521936812365,0.8203770206334255
+site_incidence__melanomas_of_the_skin__direct_effect,site,Incidence,Melanomas of the Skin,4,160,0.38200149031101927,0.747664904232587
+site_incidence__urinary_bladder__total_effect,site,Incidence,Urinary Bladder,0,160,0.15960687174987842,0.7453250670027853
+site_incidence__urinary_bladder__total_effect,site,Incidence,Urinary Bladder,1,160,0.27748755132826153,0.8350378236630528
+site_incidence__urinary_bladder__total_effect,site,Incidence,Urinary Bladder,2,159,0.27222422218754894,0.75447143821592
+site_incidence__urinary_bladder__total_effect,site,Incidence,Urinary Bladder,3,159,0.3760777099379392,0.8100791888844
+site_incidence__urinary_bladder__total_effect,site,Incidence,Urinary Bladder,4,159,0.2602056447580682,0.717286475013137
+site_incidence__urinary_bladder__direct_effect,site,Incidence,Urinary Bladder,0,160,0.1640355717741614,0.7589513185368048
+site_incidence__urinary_bladder__direct_effect,site,Incidence,Urinary Bladder,1,160,0.2848613454513771,0.8379641705993914
+site_incidence__urinary_bladder__direct_effect,site,Incidence,Urinary Bladder,2,159,0.2644394549579574,0.7551720347305593
+site_incidence__urinary_bladder__direct_effect,site,Incidence,Urinary Bladder,3,159,0.37842834443176043,0.8096852781360735
+site_incidence__urinary_bladder__direct_effect,site,Incidence,Urinary Bladder,4,159,0.2568258451566031,0.7166045722187064
+site_incidence__kidney_and_renal_pelvis__total_effect,site,Incidence,Kidney and Renal Pelvis,0,158,0.33684403719289124,0.737002134412597
+site_incidence__kidney_and_renal_pelvis__total_effect,site,Incidence,Kidney and Renal Pelvis,1,157,0.3634429761033602,0.7604122088631143
+site_incidence__kidney_and_renal_pelvis__total_effect,site,Incidence,Kidney and Renal Pelvis,2,157,0.36238346031774793,0.7844365934911087
+site_incidence__kidney_and_renal_pelvis__total_effect,site,Incidence,Kidney and Renal Pelvis,3,157,0.4566905271807499,0.7677381633631073
+site_incidence__kidney_and_renal_pelvis__total_effect,site,Incidence,Kidney and Renal Pelvis,4,157,0.4678902484053662,0.7098432232660288
+site_incidence__kidney_and_renal_pelvis__direct_effect,site,Incidence,Kidney and Renal Pelvis,0,158,0.32317493411774634,0.7466092458152931
+site_incidence__kidney_and_renal_pelvis__direct_effect,site,Incidence,Kidney and Renal Pelvis,1,157,0.3711671410286289,0.7749980398572366
+site_incidence__kidney_and_renal_pelvis__direct_effect,site,Incidence,Kidney and Renal Pelvis,2,157,0.34200249343780253,0.7858085685793454
+site_incidence__kidney_and_renal_pelvis__direct_effect,site,Incidence,Kidney and Renal Pelvis,3,157,0.45091158009411914,0.7632751074711916
+site_incidence__kidney_and_renal_pelvis__direct_effect,site,Incidence,Kidney and Renal Pelvis,4,157,0.4717453430305145,0.7111565005198972
+site_incidence__non_hodgkin_lymphoma__total_effect,site,Incidence,Non-Hodgkin Lymphoma,0,151,0.18322583331764508,0.7747718511329419
+site_incidence__non_hodgkin_lymphoma__total_effect,site,Incidence,Non-Hodgkin Lymphoma,1,151,0.1586365491633568,0.8651351975896518
+site_incidence__non_hodgkin_lymphoma__total_effect,site,Incidence,Non-Hodgkin Lymphoma,2,151,0.2256688993306598,0.7853815839051784
+site_incidence__non_hodgkin_lymphoma__total_effect,site,Incidence,Non-Hodgkin Lymphoma,3,151,0.1004395567982932,0.7743235230843285
+site_incidence__non_hodgkin_lymphoma__total_effect,site,Incidence,Non-Hodgkin Lymphoma,4,150,0.19466427145611953,0.6544549485209277
+site_incidence__non_hodgkin_lymphoma__direct_effect,site,Incidence,Non-Hodgkin Lymphoma,0,151,0.19681795875707753,0.7813446416246034
+site_incidence__non_hodgkin_lymphoma__direct_effect,site,Incidence,Non-Hodgkin Lymphoma,1,151,0.16328489764432363,0.8613260311905251
+site_incidence__non_hodgkin_lymphoma__direct_effect,site,Incidence,Non-Hodgkin Lymphoma,2,151,0.23085012753977263,0.7779002520057334
+site_incidence__non_hodgkin_lymphoma__direct_effect,site,Incidence,Non-Hodgkin Lymphoma,3,151,0.11038301893586377,0.774005175438393
+site_incidence__non_hodgkin_lymphoma__direct_effect,site,Incidence,Non-Hodgkin Lymphoma,4,150,0.17083150679103698,0.6840000510362538
+site_mortality__lung_and_bronchus__total_effect,site,Mortality,Lung and Bronchus,0,221,0.658634252229334,0.8079007568909873
+site_mortality__lung_and_bronchus__total_effect,site,Mortality,Lung and Bronchus,1,221,0.6385916484333833,0.8102237884263379
+site_mortality__lung_and_bronchus__total_effect,site,Mortality,Lung and Bronchus,2,221,0.6157728161147882,0.7282669498686678
+site_mortality__lung_and_bronchus__total_effect,site,Mortality,Lung and Bronchus,3,220,0.6500814248855081,0.7103578390095505
+site_mortality__lung_and_bronchus__total_effect,site,Mortality,Lung and Bronchus,4,220,0.6941029049692674,0.7430363360987777
+site_mortality__lung_and_bronchus__direct_effect,site,Mortality,Lung and Bronchus,0,221,0.6622190941135075,0.8065507948595085
+site_mortality__lung_and_bronchus__direct_effect,site,Mortality,Lung and Bronchus,1,221,0.6315581013122679,0.8087194314249052
+site_mortality__lung_and_bronchus__direct_effect,site,Mortality,Lung and Bronchus,2,221,0.6120731169552203,0.7291277429794805
+site_mortality__lung_and_bronchus__direct_effect,site,Mortality,Lung and Bronchus,3,220,0.6510052257681158,0.7249860960532151
+site_mortality__lung_and_bronchus__direct_effect,site,Mortality,Lung and Bronchus,4,220,0.6959953542720587,0.7498690939761166
+site_mortality__colon_and_rectum__total_effect,site,Mortality,Colon and Rectum,0,174,0.45874437703155535,0.7020473109668488
+site_mortality__colon_and_rectum__total_effect,site,Mortality,Colon and Rectum,1,173,0.43067426289269173,0.7501362303590343
+site_mortality__colon_and_rectum__total_effect,site,Mortality,Colon and Rectum,2,173,0.29564146498682475,0.6901649144911457
+site_mortality__colon_and_rectum__total_effect,site,Mortality,Colon and Rectum,3,173,0.32154123336691964,0.6281116931007005
+site_mortality__colon_and_rectum__total_effect,site,Mortality,Colon and Rectum,4,173,0.28625996475139603,0.7525425944426611
+site_mortality__colon_and_rectum__direct_effect,site,Mortality,Colon and Rectum,0,174,0.4702105517118015,0.7148068653310473
+site_mortality__colon_and_rectum__direct_effect,site,Mortality,Colon and Rectum,1,173,0.4362625392819466,0.7518656968082327
+site_mortality__colon_and_rectum__direct_effect,site,Mortality,Colon and Rectum,2,173,0.30615396257574967,0.6860821146037719
+site_mortality__colon_and_rectum__direct_effect,site,Mortality,Colon and Rectum,3,173,0.3305212855722315,0.6462636657442014
+site_mortality__colon_and_rectum__direct_effect,site,Mortality,Colon and Rectum,4,173,0.2933721107867985,0.7480251700536968
+site_mortality__pancreas__total_effect,site,Mortality,Pancreas,0,141,0.05235095788510136,0.6815330576932428
+site_mortality__pancreas__total_effect,site,Mortality,Pancreas,1,141,0.16398551994680843,0.7393813392417588
+site_mortality__pancreas__total_effect,site,Mortality,Pancreas,2,141,0.12478049459382712,0.8083846571603743
+site_mortality__pancreas__total_effect,site,Mortality,Pancreas,3,140,0.13307983148630276,0.7681873584334775
+site_mortality__pancreas__total_effect,site,Mortality,Pancreas,4,140,0.14293674167731052,0.628023451210586
+site_mortality__pancreas__direct_effect,site,Mortality,Pancreas,0,141,0.058449472593462115,0.692784049135177
+site_mortality__pancreas__direct_effect,site,Mortality,Pancreas,1,141,0.16978805569247657,0.7453039264324768
+site_mortality__pancreas__direct_effect,site,Mortality,Pancreas,2,141,0.13160465710133384,0.8107617732261236
+site_mortality__pancreas__direct_effect,site,Mortality,Pancreas,3,140,0.11007289801987274,0.7711361038689314
+site_mortality__pancreas__direct_effect,site,Mortality,Pancreas,4,140,0.16707938074709883,0.6278271040835495
+site_mortality__male_and_female_breast__total_effect,site,Mortality,Male and Female Breast,0,131,0.2699787659381079,0.7126833950739067
+site_mortality__male_and_female_breast__total_effect,site,Mortality,Male and Female Breast,1,131,0.17608336735736518,0.6917159501579698
+site_mortality__male_and_female_breast__total_effect,site,Mortality,Male and Female Breast,2,131,0.06040010922612027,0.7658099103632301
+site_mortality__male_and_female_breast__total_effect,site,Mortality,Male and Female Breast,3,130,0.11091975476915805,0.8143319924173648
+site_mortality__male_and_female_breast__total_effect,site,Mortality,Male and Female Breast,4,130,0.22435581161134555,0.6665805963270075
+site_mortality__male_and_female_breast__direct_effect,site,Mortality,Male and Female Breast,0,131,0.2523519469812946,0.711091743897891
+site_mortality__male_and_female_breast__direct_effect,site,Mortality,Male and Female Breast,1,131,0.167778944897376,0.6988935875317237
+site_mortality__male_and_female_breast__direct_effect,site,Mortality,Male and Female Breast,2,131,0.048058985995804604,0.7671520096564332
+site_mortality__male_and_female_breast__direct_effect,site,Mortality,Male and Female Breast,3,130,0.11170431561762728,0.8153800259517485
+site_mortality__male_and_female_breast__direct_effect,site,Mortality,Male and Female Breast,4,130,0.2336980698240012,0.6684540048560814
+site_mortality__prostate__total_effect,site,Mortality,Prostate,0,113,0.4198636038913708,0.7874778306892773
+site_mortality__prostate__total_effect,site,Mortality,Prostate,1,113,0.24287103414593736,0.7280104399848042
+site_mortality__prostate__total_effect,site,Mortality,Prostate,2,112,0.3668460421557985,0.7436745082933989
+site_mortality__prostate__total_effect,site,Mortality,Prostate,3,112,0.21654069814830745,0.7065841159468886
+site_mortality__prostate__total_effect,site,Mortality,Prostate,4,112,0.3680094596381306,0.5353865639014888
+site_mortality__prostate__direct_effect,site,Mortality,Prostate,0,113,0.4287959611812949,0.7760893960676007
+site_mortality__prostate__direct_effect,site,Mortality,Prostate,1,113,0.2398629624658165,0.7214125597222989
+site_mortality__prostate__direct_effect,site,Mortality,Prostate,2,112,0.3641090859898388,0.75468423295034
+site_mortality__prostate__direct_effect,site,Mortality,Prostate,3,112,0.22748843092971194,0.7191814642876091
+site_mortality__prostate__direct_effect,site,Mortality,Prostate,4,112,0.3636759405164065,0.5419997050283384
+site_mortality__liver_and_intrahepatic_bile_duct__total_effect,site,Mortality,Liver and Intrahepatic Bile Duct,0,100,0.3590232887017579,0.7697166812200384
+site_mortality__liver_and_intrahepatic_bile_duct__total_effect,site,Mortality,Liver and Intrahepatic Bile Duct,1,100,0.23334769978456016,0.7058289168319147
+site_mortality__liver_and_intrahepatic_bile_duct__total_effect,site,Mortality,Liver and Intrahepatic Bile Duct,2,100,0.4627407528258215,0.6733199897536266
+site_mortality__liver_and_intrahepatic_bile_duct__total_effect,site,Mortality,Liver and Intrahepatic Bile Duct,3,100,0.37733661985121625,0.6557539131286199
+site_mortality__liver_and_intrahepatic_bile_duct__total_effect,site,Mortality,Liver and Intrahepatic Bile Duct,4,99,0.3646129197931627,0.26378671128389697
+site_mortality__liver_and_intrahepatic_bile_duct__direct_effect,site,Mortality,Liver and Intrahepatic Bile Duct,0,100,0.387050605631137,0.7625336534044277
+site_mortality__liver_and_intrahepatic_bile_duct__direct_effect,site,Mortality,Liver and Intrahepatic Bile Duct,1,100,0.23535713924005996,0.7109939773909989
+site_mortality__liver_and_intrahepatic_bile_duct__direct_effect,site,Mortality,Liver and Intrahepatic Bile Duct,2,100,0.5017527878846015,0.6761510190073681
+site_mortality__liver_and_intrahepatic_bile_duct__direct_effect,site,Mortality,Liver and Intrahepatic Bile Duct,3,100,0.40796400957701184,0.6687225505871672
+site_mortality__liver_and_intrahepatic_bile_duct__direct_effect,site,Mortality,Liver and Intrahepatic Bile Duct,4,99,0.3752225398317566,0.2535661353824987
+site_mortality__leukemias__total_effect,site,Mortality,Leukemias,0,95,0.2525636134898104,0.6889252785739759
+site_mortality__leukemias__total_effect,site,Mortality,Leukemias,1,95,0.1589401389745887,0.7387651096539751
+site_mortality__leukemias__total_effect,site,Mortality,Leukemias,2,95,0.27517848899018216,0.6779797310626464
+site_mortality__leukemias__total_effect,site,Mortality,Leukemias,3,95,0.14520496088292356,0.7210565552103205
+site_mortality__leukemias__total_effect,site,Mortality,Leukemias,4,95,0.20442930707689333,0.70892265603003
+site_mortality__leukemias__direct_effect,site,Mortality,Leukemias,0,95,0.24057323150506826,0.7114195681913509
+site_mortality__leukemias__direct_effect,site,Mortality,Leukemias,1,95,0.1514976836456855,0.7451950209695161
+site_mortality__leukemias__direct_effect,site,Mortality,Leukemias,2,95,0.27975008932779566,0.6608188212066628
+site_mortality__leukemias__direct_effect,site,Mortality,Leukemias,3,95,0.13186150212133585,0.7381014831334565
+site_mortality__leukemias__direct_effect,site,Mortality,Leukemias,4,95,0.18795279312147128,0.7217101104025558
+site_mortality__non_hodgkin_lymphoma__total_effect,site,Mortality,Non-Hodgkin Lymphoma,0,83,0.13695411661190582,0.6140668667695177
+site_mortality__non_hodgkin_lymphoma__total_effect,site,Mortality,Non-Hodgkin Lymphoma,1,83,0.41897180682790414,0.698354846603021
+site_mortality__non_hodgkin_lymphoma__total_effect,site,Mortality,Non-Hodgkin Lymphoma,2,83,0.1828345877273887,0.6715897971657152
+site_mortality__non_hodgkin_lymphoma__total_effect,site,Mortality,Non-Hodgkin Lymphoma,3,83,0.5262629880536648,0.6142970091672062
+site_mortality__non_hodgkin_lymphoma__total_effect,site,Mortality,Non-Hodgkin Lymphoma,4,83,0.26463861039792436,0.7123064535937588
+site_mortality__non_hodgkin_lymphoma__direct_effect,site,Mortality,Non-Hodgkin Lymphoma,0,83,0.11819099017660695,0.6211841754336946
+site_mortality__non_hodgkin_lymphoma__direct_effect,site,Mortality,Non-Hodgkin Lymphoma,1,83,0.40734493170055974,0.7121683719866059
+site_mortality__non_hodgkin_lymphoma__direct_effect,site,Mortality,Non-Hodgkin Lymphoma,2,83,0.2074599628888657,0.6842759330171713
+site_mortality__non_hodgkin_lymphoma__direct_effect,site,Mortality,Non-Hodgkin Lymphoma,3,83,0.5343565194091006,0.6363855629804305
+site_mortality__non_hodgkin_lymphoma__direct_effect,site,Mortality,Non-Hodgkin Lymphoma,4,83,0.23780291600885417,0.6942918629347747
