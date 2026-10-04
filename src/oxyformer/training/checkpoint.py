@@ -77,7 +77,11 @@ class CheckpointArtifact(Immutable):
 
 
 class CheckpointRequest:
-    """Handlers only set a flag; checkpoint I/O occurs at an optimizer boundary."""
+    """A latched, one-attempt request; handlers perform no checkpoint I/O.
+
+    A requested object stays requested. Resume with a fresh CheckpointRequest
+    (or stop_request=None); automatic clearing could discard a genuine signal.
+    """
 
     def __init__(self):
         self.requested = False
