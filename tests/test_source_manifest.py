@@ -644,7 +644,7 @@ def test_chunked_terminal_witness(manifest, tmp_path, monkeypatch, trailers, val
 
 @pytest.mark.parametrize('data', [b'\xef\xbb\xbf<?xml version="1.0"?><metadata/>', b'<root/>',
     b'\xff\xfe' + '<root>\u00e9</root>'.encode('utf-16le'),
-    b'\xfe\xff' + '<root>\u00e9</root>'.encode('utf-16be'), b'<x:root xmlns:x="urn:test"/>',
+    b'\xfe\xff' + '<root>\u00e9</root>'.encode('utf-16be'), b'<x:root xmlns:x="urn:test"/>', b'<!DOCTYPE html_data><html_data/>',
     b'<!--' + b'x' * 65537 + b'--><root/>'])
 @pytest.mark.parametrize('local', [False, True])
 def test_xml_original_bytes_to_eof(manifest, tmp_path, monkeypatch, data, local):

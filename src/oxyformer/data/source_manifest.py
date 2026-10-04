@@ -309,8 +309,8 @@ def _check_content(resource, prefix, content_type):
     fmt = resource['format']
     lower = prefix.lstrip().lower()
     if fmt != 'html':
-        _require('text/html' not in content_type.lower() and not lower.startswith(
-            (b'<!doctype html', b'<html')), 'Unexpected HTML/login/challenge response')
+        _require('text/html' not in content_type.lower() and (fmt == 'xml' or not lower.startswith(
+            (b'<!doctype html', b'<html'))), 'Unexpected HTML/login/challenge response')
     if fmt == 'zip':
         _require(prefix.startswith((b'PK\x03\x04', b'PK\x05\x06')), 'Expected ZIP signature')
     elif fmt == 'pdf':
