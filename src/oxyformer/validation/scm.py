@@ -272,10 +272,12 @@ def effect(a, config):
 
 
 def structural_mean(a_true, frame, row, state, config):
-    baseline = 50 + .25 * sum(v for v in frame.x[row] if v is not None)
-    mean = (baseline + effect(np.asarray(a_true) - config.migration * state.illness, config)
-            + config.local_strength * state.local + config.regional_strength * state.regional
-            + 2 * state.illness)
+    # Cancel the complete dose-independent affine expression before rounding.
+    # Even bounded X can leave a tiny positive baseline after large cancellation.
+    baseline = (Fraction(50) + sum((exact(v) for v in frame.x[row] if v is not None), Fraction(0))/4
+                + exact(config.local_strength)*exact(state.local)
+                + exact(config.regional_strength)*exact(state.regional) + 2*exact(state.illness))
+    mean = wide(baseline) + effect(np.asarray(a_true) - config.migration * state.illness, config)
     return config.registration_probability * mean / state.denominator_factor
 
 
@@ -381,6 +383,24 @@ def observation_log_probability(a_observed, state, config):
     if config.missing_biomarkers:
         value += log_expit(1-.1*a-.8*state.illness)
     return value
+
+
+def observation_transition_points(state, config):
+    """Resolve every active logistic gate in its own logit units.
+
+    Broad assignment panels must not jump across selection transitions. Cuts
+    include both tails and each gate separately, including products of gates.
+    These are integration panels only; no positive mass is discarded.
+    """
+    gates = []
+    if config.selected_outcome:
+        gates.append((exact(1)-exact(1.2)*exact(state.illness), exact(.2)))
+    if config.survey_inclusion:
+        gates.append((exact(.7)+exact(.5)*exact(state.local), exact(.12)))
+    if config.missing_biomarkers:
+        gates.append((exact(1)-exact(.8)*exact(state.illness), exact(.1)))
+    logits = (-64, -32, -16, -8, -4, -2, -1, 0, 1, 2, 4, 8, 16, 32, 64)
+    return tuple((intercept-logit)/slope for intercept, slope in gates for logit in logits)
 
 
 class AssignmentLaw:
