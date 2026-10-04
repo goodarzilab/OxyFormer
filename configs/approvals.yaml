@@ -66,7 +66,61 @@ owner_decisions:
       staging_dir: /mnt/weka/home/hgoodarzi/oxyformer-swarm/staging/dane_births   # one subfolder per year; shared filesystem read by login and compute nodes
       fallback: "Colombia is dropped from month 1 if nobody can hand-download the DANE 2023-2025 birth files. The orchestrator records that determination here, and no further owner approval is needed. Files being absent from the staging folder do not by themselves meet this condition: a unit that finds them absent stops and reports to the orchestrator. After a drop, the birth anchor proceeds with INEC (Ecuador) alone, and the Peru ENDES hemoglobin anchor is unaffected."
 
+  # Approved by the owner on 2026-10-04 ("I approve Covariate list") from the sign-off page
+  # https://claude.ai/artifact/Y3H73yyAUDn81wkNu7JPbC (plan section 3.2). Approval covers this analysis registry. It does not
+  # certify control of unmeasured confounding (smoking is not measured by any approved source) or a total lifelong
+  # oxygen-exposure effect.
+  endpoint_covariates:
+    usaleep_life_expectancy:
+      source: acs_2006_2010_5yr           # line n means estimate variable <table>_<nnn>E
+      transforms:
+        share: "sum of numerator lines / denominator line, in [0, 1]; standardized within training folds"
+        income: "asinh(published value / 10000)"
+      missing: "valid estimates are kept; a zero denominator is missing, never zero; imputation uses training folds only"
+      margins_of_error: "kept as quality metadata, not predictors"
+      concepts:
+        female_share: {family: sex_composition, table: B01001, num: [26], den: 1, transform: share}
+        age_under_18_share: {family: age_structure, table: B01001, num: [3, 4, 5, 6, 27, 28, 29, 30], den: 1, transform: share}
+        age_18_34_share: {family: age_structure, table: B01001, num: [7, 8, 9, 10, 11, 12, 31, 32, 33, 34, 35, 36], den: 1, transform: share}
+        age_35_44_share: {family: age_structure, table: B01001, num: [13, 14, 37, 38], den: 1, transform: share}
+        age_45_54_share: {family: age_structure, table: B01001, num: [15, 16, 39, 40], den: 1, transform: share}
+        age_55_64_share: {family: age_structure, table: B01001, num: [17, 18, 19, 41, 42, 43], den: 1, transform: share}
+        age_65_plus_share: {family: age_structure, table: B01001, num: [20, 21, 22, 23, 24, 25, 44, 45, 46, 47, 48, 49], den: 1, transform: share}
+        nh_white_share: {family: race_ethnicity, table: B03002, num: [3], den: 1, transform: share}
+        nh_black_share: {family: race_ethnicity, table: B03002, num: [4], den: 1, transform: share}
+        nh_aian_share: {family: race_ethnicity, table: B03002, num: [5], den: 1, transform: share}
+        nh_asian_share: {family: race_ethnicity, table: B03002, num: [6], den: 1, transform: share}
+        nh_nhpi_share: {family: race_ethnicity, table: B03002, num: [7], den: 1, transform: share}
+        nh_other_race_share: {family: race_ethnicity, table: B03002, num: [8], den: 1, transform: share}
+        nh_multiracial_share: {family: race_ethnicity, table: B03002, num: [9], den: 1, transform: share}
+        hispanic_share: {family: race_ethnicity, table: B03002, num: [12], den: 1, transform: share}
+        education_less_hs_share: {family: education, table: B15002, num: [3, 4, 5, 6, 7, 8, 9, 10, 20, 21, 22, 23, 24, 25, 26, 27], den: 1, transform: share}
+        education_hs_only_share: {family: education, table: B15002, num: [11, 28], den: 1, transform: share}
+        education_some_college_share: {family: education, table: B15002, num: [12, 13, 29, 30], den: 1, transform: share}
+        education_associate_share: {family: education, table: B15002, num: [14, 31], den: 1, transform: share}
+        education_bachelors_plus_share: {family: education, table: B15002, num: [15, 16, 17, 18, 32, 33, 34, 35], den: 1, transform: share}
+        median_household_income: {family: material_resources, table: B19013, num: [1], transform: income}
+        per_capita_income: {family: material_resources, table: B19301, num: [1], transform: income}
+        household_income_lt_25k_share: {family: material_resources, table: B19001, num: [2, 3, 4, 5], den: 1, transform: share}
+        household_income_25k_50k_share: {family: material_resources, table: B19001, num: [6, 7, 8, 9, 10], den: 1, transform: share}
+        household_income_50k_100k_share: {family: material_resources, table: B19001, num: [11, 12, 13], den: 1, transform: share}
+        household_income_100k_plus_share: {family: material_resources, table: B19001, num: [14, 15, 16, 17], den: 1, transform: share}
+        poverty_ratio_lt_050_share: {family: material_resources, table: C17002, num: [2], den: 1, transform: share}
+        poverty_ratio_050_099_share: {family: material_resources, table: C17002, num: [3], den: 1, transform: share}
+        poverty_ratio_100_199_share: {family: material_resources, table: C17002, num: [4, 5, 6, 7], den: 1, transform: share}
+        poverty_ratio_200_plus_share: {family: material_resources, table: C17002, num: [8], den: 1, transform: share}
+      masking_families:                 # mask every member of a family together during self-supervised pretraining
+        sex_composition: [female_share]
+        age_structure: [age_under_18_share, age_18_34_share, age_35_44_share, age_45_54_share, age_55_64_share, age_65_plus_share]
+        race_ethnicity: [nh_white_share, nh_black_share, nh_aian_share, nh_asian_share, nh_nhpi_share, nh_other_race_share, nh_multiracial_share, hispanic_share]
+        education: [education_less_hs_share, education_hs_only_share, education_some_college_share, education_associate_share, education_bachelors_plus_share]
+        material_resources: [median_household_income, per_capita_income, household_income_lt_25k_share, household_income_25k_50k_share, household_income_50k_100k_share, household_income_100k_plus_share, poverty_ratio_lt_050_share, poverty_ratio_050_099_share, poverty_ratio_100_199_share, poverty_ratio_200_plus_share]
+      preregistered_sensitivities:
+        - drop the material-resources block
+        - drop the demographic block
+      additions: "any addition needs a documented causal-role amendment"
+      exclusions: "every variable not listed above is excluded"
+
 # Not yet approved. A unit that needs one of these must stop and report; the orchestrator brings it to the owner.
 pending_owner_approval:
-  - endpoint covariate concepts for the US tract analysis (section 3.2 asks for 30-60 endpoint-approved concepts)
   - any relief, flag or distance sensitivity analyses beyond plan_fixed
