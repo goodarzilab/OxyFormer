@@ -138,7 +138,7 @@ owner_decisions:
     bin_width_mmhg: 1.0                 # exposure bins; replicated interior bins only, the two outermost bins are discarded
     min_bin_tracts: 2                   # distinct design-set tracts required in every bin along the shift path
     raw_x_radius_iqr: 1.0               # comparison neighbors: same county, within 25 km, within 1 IQR on every approved covariate
-    revisit_rule: "The outcome-blind tract gate reports the supported tract count before any outcome is unsealed; if support is too thin, the owner may revise these values then."
+    revisit_rule: "The outcome-blind tract gate reports the supported tract count before any outcome is unsealed; if support is too thin, the owner may widen these values then."
   # Approved by the owner on 2026-10-04 ("Approved on both") from the sign-off page https://claude.ai/artifact/1FxDYK6hp2C2A2j5wd2rYz.
   birth_anchor_recipe:
     exposure:
@@ -150,14 +150,14 @@ owner_decisions:
       placement: maternal_residence_population_weighted   # municipality (COL); parish, else canton (ECU); no points, seats or hospitals
       residence_fields: {COL: [CODPTORE, CODMUNRE], ECU: [prov_res, cant_res, parr_res]}
       computation: "elevation -> pressure -> P_IO2 deficit at each fine location with owner_decisions.exposure constants, before population averaging"
-      unmatched_codes: fail closed; boundary changes need a reviewed crosswalk; no nearest-name matching
+      unmatched_codes: unmatched or ambiguous area codes stop the run; boundary changes need a reviewed crosswalk
     covariates:
       primary: {COL: [EDAD_MADRE, NIV_EDUM], ECU: [edad_mad, niv_inst, etnia]}
       sensitivity: {COL: [EST_CIVM], ECU: [est_civil]}
       excluded: [gestational age, prenatal visits, delivery type, APGAR, newborn length, hospital or occurrence or registration geography, reproductive-history counts, COL IDPERTET as maternal ethnicity]
       area_level_sensitivity: {COL: municipal unmet basic needs (NBI) 2018, ECU: deferred}
-      coding: "original codes and missingness flags kept; categories never converted to numbers; ECU 2015 runs only after its codes and historical geography are verified"
-    data_terms: "DANE birth microdata are public with no application but may not be redistributed; payloads stay in attempt folders and are never committed or shared"
+      coding: "original codes and missingness flags kept; age kept as categories (no invented exact ages); education is nominal, not years of schooling; ECU 2015 runs only after its codes and historical geography are verified"
+    data_terms: "DANE birth microdata are free and public but may not be redistributed without written permission; the run keeps payloads in attempt folders and never commits or shares them"
     interpretation: "consistency of a residence-pressure association with birth outcomes, not oxygen-specific identification"
 
 # Not yet approved. A unit that needs one of these must stop and report; the orchestrator brings it to the owner.
