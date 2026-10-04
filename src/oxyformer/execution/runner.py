@@ -59,6 +59,7 @@ def verify_dependency_result(root):
     require(Path(request.output_dir).resolve() == root, 'dependency attempt owner mismatch')
     require(result.status == 'pass', 'dependency stage did not pass')
     result.verify(request)
+    return result
 
 
 def verify_continuation(task, deps):
@@ -142,8 +143,23 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         require(isinstance(needs[unit], list) and needs[unit], 'dependency requires explicit files')
         for relative in needs[unit]:
             files.append(dependency_file(root, relative))
-        if (root / '_execution/result.json').exists():
-            verify_dependency_result(root)
+        # Acquisition commands predate the common stage API and publish source
+        # receipts instead. Only the committed registry can declare that format;
+        # a task cannot exempt a failed/incomplete stage by omitting its receipt.
+        acquisition_receipt = settings.get('acquisition_receipts', {}).get(unit)
+        if acquisition_receipt is not None:
+            require(acquisition_receipt in needs[unit], 'acquisition receipt must be a declared input')
+        if acquisition_receipt is None or (root / '_execution/result.json').exists():
+            require((root / '_execution/result.json').is_file(), f'stage receipt missing: {unit}')
+            result = verify_dependency_result(root)
+            allowed = {a.path for a in result.artifacts} | {
+                '_execution/task.json', '_execution/request.json', '_execution/result.json',
+                '_execution/environment.json', '_execution/identity.json'}
+            require(set(needs[unit]) <= allowed, 'dependency file not declared by passing stage')
+            for relative in ('_execution/request.json', '_execution/result.json'):
+                path = dependency_file(root, relative)
+                if path not in files:
+                    files.append(path)
     require(len(set(files)) == len(files), 'duplicate dependency files')
     for relative in task.get('outputs', []):
         require(not relative.startswith('_execution/'), 'reserved execution output')

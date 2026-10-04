@@ -46,7 +46,8 @@ def runtime(tmp_path, monkeypatch):
     (repo / 'src/science.py').write_text('value = 1\n')
     (repo / 'README.md').write_text('fixture\n')
     (repo / 'configs/execution/stages.yaml').write_text(yaml.safe_dump({
-        'schema_version': 1, 'stages': {'dummy': {'module': 'oxyformer.dummy'}}}))
+        'schema_version': 1, 'stages': {'dummy': {'module': 'oxyformer.dummy',
+        'acquisition_receipts': {'data-unit': 'receipts.json'}}}}))
     (repo / 'configs/approvals.yaml').write_text('schema_version: 1\napproved_by: fixture\n')
     git(repo, 'init', '-q')
     commit(repo)
@@ -113,9 +114,10 @@ def test_upstream_unchanged_and_output_overlap_rejected(runtime, tmp_path, monke
     upstream.mkdir()
     source = upstream / 'data.json'
     source.write_text('{"fixture":1}')
+    (upstream / 'receipts.json').write_text('{}')
     before = source.read_bytes(), source.stat().st_mode, source.stat().st_mtime_ns
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(upstream))
-    task = task_file(out, needs={'data-unit': ['data.json']})
+    task = task_file(out, needs={'data-unit': ['data.json', 'receipts.json']})
     assert run('dummy', out, repo, deps_env=True, task_file=task).status == 'pass'
     assert (source.read_bytes(), source.stat().st_mode, source.stat().st_mtime_ns) == before
     nested = upstream / 'child'
@@ -184,8 +186,16 @@ def test_cli_selects_task(runtime):
 
 def locked_task(repo, out, upstream, monkeypatch):
     upstream.mkdir()
+    (upstream / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
     lock = upstream / 'recipe_lock.json'
-    lock.write_text(json.dumps({'scientific_fingerprint': scientific_fingerprint(repo)}))
+    def producer(request):
+        result = dummy(request)
+        lock.write_text(json.dumps({'scientific_fingerprint': scientific_fingerprint(repo)}))
+        return replace(result, artifacts=(replace(result.artifacts[0], sha256=file_hash(lock)),))
+    with monkeypatch.context() as patch:
+        patch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=producer))
+        assert run('dummy', upstream, repo,
+                   task_file=task_file(upstream, outputs=['recipe_lock.json'])).status == 'pass'
     monkeypatch.setenv('SWARM_DEP_CAMPAIGN_LOCK', str(upstream))
     return task_file(out, needs={'campaign-lock': ['recipe_lock.json']},
                      recipe_lock={'dependency': 'campaign-lock', 'path': 'recipe_lock.json',
@@ -408,3 +418,120 @@ def test_locked_approvals_cannot_be_replaced(runtime, tmp_path, monkeypatch):
     other.write_text('schema_version: 1\napproved_by: different\n')
     with pytest.raises(ContractError, match='locked approvals'):
         run('dummy', out, repo, deps_env=True, task_file=task, approvals=other)
+
+
+def test_stage_dependency_without_receipt_is_rejected(runtime, tmp_path, monkeypatch):
+    repo, out = runtime
+    upstream = tmp_path / 'incomplete-stage'
+    upstream.mkdir()
+    (upstream / 'data.json').write_text('{}')
+    monkeypatch.setenv('SWARM_DEP_INCOMPLETE', str(upstream))
+    with pytest.raises(ContractError, match='stage receipt missing'):
+        run('dummy', out, repo, deps_env=True,
+            task_file=task_file(out, needs={'incomplete': ['data.json']}))
+
+
+def test_slurm_minute_rounding_is_included_in_gpu_bound():
+    from oxyformer.execution.campaign import resources
+    with pytest.raises(ContractError, match='four GPU-hours'):
+        resources(7, 2057)  # Slurm grants 35 minutes: 4.0833 GPU-hours.
+    flags, gpu_hours = resources(2, 61)
+    assert '--time=00:02:00' in flags
+    assert gpu_hours == pytest.approx(2 * 120 / 3600)
+
+
+def test_safe_tar_accepts_dot_prefix_without_traversal(tmp_path):
+    archive = tmp_path / 'payload.tar'
+    with tarfile.open(archive, 'w') as tar:
+        directory = tarfile.TarInfo('.')
+        directory.type = tarfile.DIRTYPE
+        tar.addfile(directory)
+        member = tarfile.TarInfo('./nested/data')
+        member.size = 4
+        tar.addfile(member, io.BytesIO(b'tiny'))
+    target = safe_extract(archive, tmp_path, 'unpacked')
+    assert (target / 'nested/data').read_bytes() == b'tiny'
+
+
+def test_campaign_lock_uses_unit_id_distinct_from_stage_name(runtime, tmp_path, monkeypatch):
+    repo, out = runtime
+    actual = yaml.safe_load((Path(__file__).parents[1] / 'configs/execution/stages.yaml').read_text())
+    lock_settings = deepcopy(actual['stages']['campaign-lock'])
+    assert 'tract-gate' in lock_settings['needs']
+    assert 'tract-support-gate' not in lock_settings['needs']
+    lock_settings['module'] = 'oxyformer.dummy'
+    stages = {'campaign-lock': lock_settings}
+    for stage, unit in [('tract-support-gate', 'tract-gate'), ('simulation-smoke', 'simulation-smoke')]:
+        stages[stage] = {'module': 'oxyformer.dummy', 'outputs': lock_settings['needs'][unit]}
+    (repo / 'configs/execution/stages.yaml').write_text(yaml.safe_dump({'schema_version': 1, 'stages': stages}))
+    head = commit(repo)
+    (out / 'code_commit.txt').write_text(head)
+    for stage, unit in [('tract-support-gate', 'tract-gate'), ('simulation-smoke', 'simulation-smoke')]:
+        upstream = tmp_path / unit
+        upstream.mkdir()
+        (upstream / 'code_commit.txt').write_text(head)
+        assert run(stage, upstream, repo).status == 'pass'
+        monkeypatch.setenv(dependency_variable(unit), str(upstream))
+    assert run('campaign-lock', out, repo, deps_env=True).status == 'pass'
+
+
+def test_acquisition_exemption_requires_declared_source_receipt(runtime, tmp_path, monkeypatch):
+    repo, out = runtime
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'data.json').write_text('{}')
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
+    with pytest.raises(ContractError, match='acquisition receipt must be a declared input'):
+        run('dummy', out, repo, deps_env=True,
+            task_file=task_file(out, needs={'data-unit': ['data.json']}))
+
+
+def test_task_cannot_exempt_an_incomplete_stage(runtime, tmp_path, monkeypatch):
+    repo, out = runtime
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'data.json').write_text('{}')
+    (source / 'receipts.json').write_text('{}')
+    monkeypatch.setenv('SWARM_DEP_INCOMPLETE', str(source))
+    with pytest.raises(ContractError, match='stage receipt missing'):
+        run('dummy', out, repo, deps_env=True, task_file=task_file(
+            out, needs={'incomplete': ['data.json', 'receipts.json']},
+            acquisition_receipts={'incomplete': 'receipts.json'}))
+
+
+def test_safe_tar_dot_prefix_does_not_hide_traversal_or_duplicates(tmp_path):
+    for index, names in enumerate([['./../escape'], ['./same', 'same']]):
+        archive = tmp_path / f'bad-{index}.tar'
+        with tarfile.open(archive, 'w') as tar:
+            for name in names:
+                tar.addfile(tarfile.TarInfo(name))
+        with pytest.raises(ContractError):
+            safe_extract(archive, tmp_path, f'unpacked-{index}')
+        assert not (tmp_path / f'unpacked-{index}').exists()
+
+
+def test_cli_import_from_pristine_repo_keeps_bytecode_ignored(runtime, tmp_path):
+    import inspect
+    repo, out = runtime
+    original = Path(__file__).parents[1]
+    shutil.copytree(original / 'src/oxyformer', repo / 'src/oxyformer',
+                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    shutil.copyfile(original / '.gitignore', repo / '.gitignore')
+    imports = '''from pathlib import Path
+import os
+import json
+from hashlib import sha256
+from oxyformer.contracts import StageResult
+from oxyformer.provenance import ArtifactLineage, ArtifactRecord, file_hash
+from oxyformer.execution.paths import atomic_json
+'''
+    (repo / 'src/oxyformer/dummy.py').write_text(imports + inspect.getsource(dummy) + '\nrun_stage = dummy\n')
+    (out / 'code_commit.txt').write_text(commit(repo))
+    task = task_file(out)
+    env = dict(os.environ, PYTHONPATH=str(repo / 'src'), CUDA_VISIBLE_DEVICES='')
+    process = subprocess.run([sys.executable, '-m', 'oxyformer.cli', 'run-stage',
+                              '--stage', 'dummy', '--repo', str(repo), '--out', str(out),
+                              '--task', str(task)], cwd=tmp_path, env=env, text=True, capture_output=True)
+    assert process.returncode == 0, process.stdout + process.stderr
+    assert list((repo / 'src/oxyformer/__pycache__').glob('*.pyc'))
+    assert git(repo, 'status', '--porcelain', '--untracked-files=all') == ''
