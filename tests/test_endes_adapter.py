@@ -663,3 +663,34 @@ def test_informational_absence_does_not_hide_other_blockers(release, year, issue
     assert EndesAudit.from_json(audit.to_json()) == audit
     with pytest.raises(ContractError, match=error):
         audit.assert_inference_ready()
+
+
+@pytest.mark.parametrize("year", [2023, 2024])
+@pytest.mark.parametrize("excluded_child", [False, True])
+def test_excluded_absence_retained_without_requiring_child_biomarker(release, year, excluded_child):
+    def mutate(tables):
+        if excluded_child:
+            tables["RECH1"][0]["HV120"] = "0"
+            tables["RECH6"].pop(0)
+    args = release(year, mutate=mutate)
+    records, audit = load_endes(*args)
+    row = first_child(records) if excluded_child else next(r for r in records if r.person_number == "02")
+    assert len(records) == 5 and row.original_id in audit.entity_graph.original_ids
+    assert row.eligibility == row.state == "excluded"
+    assert row.reasons == ("outside_child_biomarker_population",)
+    assert row.hc53_raw is None and row.hc55_raw is None
+    assert row.raw_hb_state == row.measurement_status == "no_biomarker_record"
+    assert dict(row.raw_fields)["RECH1.HV120"] == "0"
+    assert row.survey_weight is None and not row.analysis_eligible
+    excluded = 2 if excluded_child else 1
+    assert dict(audit.counts) == {"excluded": excluded, "measured": 5 - excluded}
+    assert sum(dict(audit.counts).values()) == len(records)
+    assert dict(audit.reason_counts)["outside_child_biomarker_population"] == excluded
+    assert dict(audit.eligible_status_counts) == {"measured": 5 - excluded}
+    assert audit.eligible_count == 5 - excluded
+    assert audit.eligible_weight_sum == audit.measured_weight_sum == (9.0 if excluded_child else 10.0)
+    assert row.review_flags == ()
+    assert audit.review_records == audit.blocking_review_records == ()
+    audit.assert_inference_ready()
+    assert EndesAudit.from_json(audit.to_json()) == audit
+    assert load_endes(*args) == (records, audit)

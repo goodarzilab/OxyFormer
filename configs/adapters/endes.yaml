@@ -34,13 +34,19 @@ source_notes:
     HV120 as eligibility for under-five measurements. When HC1 is unavailable,
     completed ages 1-4 establish the documented 4-59-month age domain without
     imputing an exact month. Age 0 or unknown age cannot establish this domain.
-    Other selection/residence requirements still apply. Missing records remain
-    flagged for review and never enter the measured-Hb set. A sole absence flag
+    Other selection/residence requirements still apply. For eligible people or
+    people whose eligibility is unresolved, absent records remain flagged for
+    review and never enter the measured-Hb set. A sole absence flag
     on a known-eligible absent record is informational; unresolved eligibility,
     discordance and any additional or unrecognized flag still block readiness.
     Absence is not equated with refusal or unspecified HC55 status. Eligible status
     counts and weight sums partition only the independently eligible population;
     reported measured status still needs valid raw Hb for analysis eligibility.
+    Excluded roster members are retained with their exclusion reasons, counts,
+    lineage and raw biomarker-presence states, outside eligible denominators.
+    A missing child biomarker record for an excluded person (for example an
+    adult with HV120=0) does not itself create a review flag. The review lists
+    contain flagged issues, not the complete roster or the exclusion audit.
   eligibility_references:
     - https://proyectos.inei.gob.pe/endes/2023/DOCUMENTOS/FICHA_TECNICA_ENDES_2023.pdf
     - https://proyectos.inei.gob.pe/iinei/srienaho/Descarga/FichaTecnica/968-Ficha.pdf

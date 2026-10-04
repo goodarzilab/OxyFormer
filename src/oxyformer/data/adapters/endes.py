@@ -114,6 +114,8 @@ class EndesAudit(Immutable):
     weighted_eligible_status_sums: tuple[tuple[str, float], ...]
     eligible_weight_sum: float
     measured_weight_sum: float
+    # Flagged issues only; the full roster also includes unflagged exclusions,
+    # retained in counts/reason_counts, records and entity_graph.
     review_records: tuple[tuple[str, tuple[str, ...]], ...]
     blocking_review_records: tuple[tuple[str, tuple[str, ...]], ...]
     sampled_psus_by_stratum: tuple[tuple[str, tuple[str, ...]], ...]
