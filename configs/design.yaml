@@ -1,0 +1,27 @@
+schema_version: 1
+stage: tract_design
+support_design_fraction: 0.20
+min_observed_tracts: 4
+min_relief_m: 300.0
+max_comparison_km: 25.0
+min_outer_training_tracts: 8
+min_inner_fitting_tracts: 4
+outer_folds: 5
+inner_folds: 3
+seeds: [1103, 2207, 3301]
+buffers_km: [0.0, 10.0, 25.0]
+shift_mmhg: 2.0
+# Prespecified conservative empirical estimator, fixed across folds/buffers.
+support:
+  bin_width_mmhg: 1.0
+  min_bin_tracts: 2
+  raw_x_radius: 1.0
+# task_path JSON: {"dependencies": {<role>: <absolute dependency path>}}.
+# Every path must occur in StageRequest.dependency_paths/hashes.
+# Roles: approvals (owner YAML), data_manifest (DataManifest),
+# covariates (CovariateView, nuisance use), geography (GeographyTable),
+# atlas (CollectedAtlas), entity_graph (EntityGraph).
+# All scientific records use canonical Immutable envelopes and contain no Y.
+# No production source fields or data are invented here. Reviewed adapters
+# bind county, subblock, assignment geography and flag/availability metadata.
+# Consumers use each resulting frozen DataManifest and validate its splits.
