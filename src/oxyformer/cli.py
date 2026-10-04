@@ -1,5 +1,6 @@
 """Common stage CLI. Import scientific modules only after validating a request."""
 import argparse
+import subprocess
 import sys
 
 
@@ -19,7 +20,7 @@ def main(argv=None):
     from oxyformer.execution.runner import run
     try:
         result = run(**args)
-    except (ValueError, OSError, KeyError) as exc:
+    except (ValueError, OSError, KeyError, TypeError, subprocess.CalledProcessError) as exc:
         print(f'blocked: {exc}', file=sys.stderr)
         return 2
     print(result.to_json())
