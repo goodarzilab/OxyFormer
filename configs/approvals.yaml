@@ -77,7 +77,7 @@ owner_decisions:
         share: "sum of numerator lines / denominator line, in [0, 1]; standardized within training folds"
         income: "asinh(published value / 10000)"
       missing: "valid estimates are kept; a zero denominator is missing, never zero; imputation uses training folds only"
-      margins_of_error: "kept as quality metadata, never as predictor tokens"
+      margins_of_error: "kept as quality metadata, not predictors"
       concepts:
         female_share: {family: sex_composition, table: B01001, num: [26], den: 1, transform: share}
         age_under_18_share: {family: age_structure, table: B01001, num: [3, 4, 5, 6, 27, 28, 29, 30], den: 1, transform: share}
@@ -116,10 +116,10 @@ owner_decisions:
         education: [education_less_hs_share, education_hs_only_share, education_some_college_share, education_associate_share, education_bachelors_plus_share]
         material_resources: [median_household_income, per_capita_income, household_income_lt_25k_share, household_income_25k_50k_share, household_income_50k_100k_share, household_income_100k_plus_share, poverty_ratio_lt_050_share, poverty_ratio_050_099_share, poverty_ratio_100_199_share, poverty_ratio_200_plus_share]
       preregistered_sensitivities:
-        - drop the material_resources family
-        - drop the demographic composition families (sex_composition, age_structure, race_ethnicity)
+        - drop the material-resources block
+        - drop the demographic block
       additions: "any addition needs a documented causal-role amendment"
-      exclusions: "every variable not listed above is excluded; the sign-off page records the reason for each legacy and other variable left out"
+      exclusions: "every variable not listed above is excluded"
 
 # Not yet approved. A unit that needs one of these must stop and report; the orchestrator brings it to the owner.
 pending_owner_approval:
