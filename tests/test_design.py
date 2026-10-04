@@ -305,3 +305,45 @@ def test_missing_covariates_are_conditioning_patterns_not_full_frame_imputation(
     values[index] = (.5,)
     different = freeze_support(rows, reservation.design_ids, atlas, replace(cov, values=values))
     assert dict(different.policy.components_by_key)[rows[index].assignment_geography] == ()
+
+
+def test_assignment_geography_can_span_distinct_tract_centroids():
+    v = make_inputs()
+    rows = list(v["geography"].rows)
+    first = rows[0]
+    atlas = {r.tract_id: r.exposure_mmhg for r in v["atlas"].rows}
+    second = next(i for i, r in enumerate(rows) if r.subblock != first.subblock
+                  and atlas[r.tract_id] == atlas[first.tract_id])
+    rows[second] = replace(rows[second], assignment_geography=first.assignment_geography)
+    reviewed = replace(v["geography"], rows=rows)
+    assert reviewed.rows[0].longitude != reviewed.rows[second].longitude
+    assert reviewed.rows[0].assignment_geography == reviewed.rows[second].assignment_geography
+
+
+def test_zero_shift_is_disclosed_without_an_unapproved_failure_threshold(tmp_path):
+    v = make_inputs()
+    reservation = reserve_design(v["geography"].rows, v["entity_graph"])
+    sealed = set(reservation.design_ids)
+    v["atlas"] = replace(v["atlas"], rows=tuple(
+        replace(r, exposure_mmhg=(5.25 + i % 3 if r.tract_id in sealed else 6.25 + .5 * (i % 2)))
+        for i, r in enumerate(v["atlas"].rows)))
+    request = make_request(tmp_path, v)
+    result = run_stage(request)
+    assert result.status == "pass", result.message
+    report = json.loads((Path(request.output_dir) / "support_report.json").read_text())
+    assert report["scenarios"][0]["shifted_fraction"] == 0
+    assert report["scenarios"][0]["warning"] == "policy_moves_no_tracts"
+    assert json.loads((Path(request.output_dir) / "gate.json").read_text())["effect_release_authorized"] is False
+
+
+def test_duplicate_endpoint_tract_is_not_counted_as_two_equal_weight_tracts(tmp_path):
+    # This stage is the single-release equal-tract USALEEP endpoint. A duplicate
+    # row in that frame is not an individual-record endpoint with group weights.
+    v = make_inputs()
+    rows = list(v["geography"].rows)
+    rows[1] = replace(rows[0], original_id=rows[1].original_id)
+    v["geography"] = replace(v["geography"], rows=rows)
+    request = make_request(tmp_path, v)
+    result = run_stage(request)
+    assert result.status == "fail"
+    assert "duplicate tract observations" in result.message

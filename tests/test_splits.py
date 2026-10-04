@@ -193,3 +193,33 @@ def test_small_county_exclusion_does_not_remove_adequate_county():
     by_id = {r.original_id: r for r in rows}
     assert {by_id[oid].county for oid in result.outer.original_ids} == {"c0"}
     assert len(result.exclusions) == 30
+
+
+def test_one_unsupported_tract_does_not_delete_supported_county():
+    from oxyformer.contracts import CovariateView
+    from oxyformer.design.eligibility import AtlasRow
+    from oxyformer.design.policies import ShiftOrStayPolicy
+    from oxyformer.design.support import FrozenSupport, SupportRecipe
+    rows, graph, manifest, reservation = split_fixture(40)
+    covariates = CovariateView(spec=manifest.spec, registry=manifest.registry,
+                              original_ids=manifest.original_ids, columns=("female_share",),
+                              values=((.5,),) * len(rows), use="nuisance", lineage=manifest.lineage)
+    atlas = {r.tract_id: AtlasRow(tract_id=r.tract_id,
+                                  exposure_mmhg=3.25 if i == 0 else 1.25 + .5 * (i % 2),
+                                  inhabited_elevation_m=100 + 40 * i,
+                                  population=100, allocation_qualified=True)
+             for i, r in enumerate(rows)}
+    # A previously frozen disconnected map: each component is narrower than
+    # delta, so all stay. Only row 0 lacks conditional training replication.
+    policy = ShiftOrStayPolicy(support_design_hash=digest("sealed-fixture"),
+                               components_by_key=tuple((r.assignment_geography, ((1., 2.), (3., 4.))) for r in rows))
+    support = FrozenSupport(design_ids=(), feature_names=covariates.columns,
+                            feature_registry_hash=manifest.registry.content_hash, scales=(0.,),
+                            spline_knots=(1, 1.2, 1.4, 1.6, 1.8, 4), recipe=SupportRecipe(),
+                            policy=policy, comparison_strata=tuple((r.assignment_geography, r.county) for r in rows))
+    result = build_scenario(rows, graph, manifest, reservation, manifest.original_ids, {}, radius_km=0,
+                            policy_id=policy.policy_id, atlas=atlas, covariates=covariates, support=support)
+    assert result.status == "pass"
+    assert len(result.outer.original_ids) == 39
+    assert result.exclusions == ((rows[0].original_id, "outer_conditional_support"),)
+    assert all(a.outer_training_tracts >= 8 and min(a.inner_fitting_tracts) >= 4 for a in result.count_audit)

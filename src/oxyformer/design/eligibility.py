@@ -54,7 +54,12 @@ class GeographyTable(Immutable):
         for field in ("tract_id", "assignment_geography"):
             seen = {}
             for row in self.rows:
-                value = (row.county, row.state, row.subblock, row.latitude, row.longitude)
+                # An assignment area can contain several tract centroids and
+                # subblocks. Only repetitions of the SAME tract must retain
+                # identical geometry; both group types share county/state.
+                value = (row.county, row.state)
+                if field == "tract_id":
+                    value += (row.subblock, row.latitude, row.longitude)
                 require(seen.setdefault(getattr(row, field), value) == value,
                         f"inconsistent repeated {field}")
 

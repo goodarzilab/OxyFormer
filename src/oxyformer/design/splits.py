@@ -210,6 +210,7 @@ def build_scenario(rows, graph, manifest, reservation, candidate_ids, initial_re
         current = [by_id[oid] for oid in sorted(active)]
         counties = sorted({r.county for r in current})
         failures = {}
+        unsupported = {}
         audits, inner_plans = [], []
         if atlas is not None:
             for county, screen in county_screen(current, atlas).items():
@@ -241,18 +242,23 @@ def build_scenario(rows, graph, manifest, reservation, candidate_ids, initial_re
             if support is not None:
                 failed = recheck_support(evaluation, training, atlas, covariates, support)
                 for oid in failed:
-                    failures[by_id[oid].county] = "outer_conditional_support"
+                    unsupported.setdefault(oid, "outer_conditional_support")
                 for fold in range(3):
                     held = [r for r in inner_rows if inner_folds[r.original_id] == fold]
                     fit = [r for r in inner_rows if inner_folds[r.original_id] != fold]
                     for oid in recheck_support(held, fit, atlas, covariates, support):
-                        failures[by_id[oid].county] = "inner_conditional_support"
+                        unsupported.setdefault(oid, "inner_conditional_support")
             inner_plans.append((outer, train_ids, inner_folds, inner_buffer))
-        if not failures:
+        if not failures and not unsupported:
             break
-        removed = close_groups({r.original_id for r in current if r.county in failures}, groups)
+        # A row-level support failure is not a county-level failure. Exclude
+        # its complete geographic/dependence component, then recompute all
+        # county minima and conditional support on the remaining fixed target.
+        removed = close_groups({r.original_id for r in current if r.county in failures}
+                               | set(unsupported), groups)
         for oid in removed:
-            reasons.setdefault(oid, failures.get(by_id[oid].county, "linked_county_exclusion"))
+            reason = failures.get(by_id[oid].county, unsupported.get(oid, "linked_component_exclusion"))
+            reasons.setdefault(oid, reason)
         active -= removed
     excluded = all_ids - active - design_ids
     for oid in excluded:
