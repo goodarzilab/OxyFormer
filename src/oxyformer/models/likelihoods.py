@@ -2,7 +2,17 @@
 
 Weights are target masses. Population is a distinct likelihood exposure. Losses
 sum by default; ``mean`` divides by total target mass, never by population.
-All-zero-mass minibatches contribute zero loss and gradient for every reduction.
+All-zero-mass and zero-row minibatches contribute zero loss and gradient; ``none``
+preserves the input shape. Dataset-level mass requirements belong to the caller.
+
+Zero-weight operands cannot affect objectives, active gradients or profiled
+offsets. Validate original inputs before numerical exclusion, then protect
+residuals and offset addition before arithmetic. Finite-input, binary-label,
+nonnegative-count, positive-population and ownership checks include excluded
+rows. This contract covers the weighted endpoint, origin, Riesz and offset
+paths in FP32/FP64 when active-only arithmetic is representable. Unweighted
+model forwards/inverse links are separate APIs; undefined class priors remain
+errors. Profiling still requires nonempty, complete training-ID coverage.
 """
 from __future__ import annotations
 
@@ -18,14 +28,15 @@ FAMILIES = ("identity", "bernoulli", "poisson")
 
 
 def _aligned(prediction: Tensor, target: Tensor, weights: Tensor) -> None:
-    require(prediction.shape == target.shape == weights.shape and prediction.numel() > 0,
-            "prediction, target and target weights must have identical nonempty shapes")
+    require(prediction.shape == target.shape == weights.shape,
+            "prediction, target and target weights must have identical shapes")
     require(all(bool(torch.isfinite(x).all()) for x in (prediction, target, weights)),
             "nonfinite likelihood inputs")
     require(bool((weights >= 0).all()), "invalid target weights")
 
 
 def weighted_reduce(values: Tensor, weights: Tensor, reduction: str = "sum") -> Tensor:
+    """Reduce finite per-row values; callers protect upstream arithmetic."""
     require(values.shape == weights.shape, "weight alignment mismatch")
     require(reduction in ("none", "sum", "mean"), "unknown loss reduction")
     weighted = values * weights
@@ -41,7 +52,8 @@ def weighted_reduce(values: Tensor, weights: Tensor, reduction: str = "sum") -> 
 
 def squared_loss(mean: Tensor, target: Tensor, weights: Tensor, *, reduction="sum") -> Tensor:
     _aligned(mean, target, weights)
-    residual = (mean - target).masked_fill(weights == 0, 0)
+    excluded = weights == 0
+    residual = mean.masked_fill(excluded, 0) - target.masked_fill(excluded, 0)
     return weighted_reduce(residual.square(), weights, reduction)
 
 
@@ -106,8 +118,9 @@ class CountyOffsets(nn.Module):
     are reprofiled after changes to f_theta using ``update_identity``. Other
     families have trainable link-scale intercepts: optimize ``training_loss``
     jointly with the network. Labels enter only these training-ID-checked APIs.
-    Profiling requires complete training-ID coverage; repeated rows contribute
+    Profiling requires nonempty complete training-ID coverage; repeated rows contribute
     their supplied weights, as in training_loss. Callers own multiplicity weights.
+    Empty training_loss subsets are allowed with aligned empty vectors.
     Prediction accepts routes alone; unseen strata receive zero. The adapter
     must declare the actual exposure assignment level, so offsets cannot be
     fitted at that exact level. No geographic embedding is constructed.
@@ -144,10 +157,10 @@ class CountyOffsets(nn.Module):
 
     def _training_routes(self, original_ids: tuple[str, ...], *, complete: bool = False):
         ids = tuple(original_ids)
-        require(bool(ids) and set(ids) <= set(self.training_ids),
+        require(set(ids) <= set(self.training_ids),
                 "offset labels must belong only to permitted training IDs")
         if complete:
-            require(set(ids) == set(self.training_ids), "profiling requires all training IDs")
+            require(bool(ids) and set(ids) == set(self.training_ids), "profiling requires all training IDs")
         return tuple(self._routes[oid] for oid in ids)
 
     @torch.no_grad()
@@ -157,7 +170,8 @@ class CountyOffsets(nn.Module):
         routes = self._training_routes(original_ids, complete=True)
         _aligned(base_mean, target, weights)
         require(target.shape == (len(routes),), "training label alignment mismatch")
-        residual = target - base_mean
+        excluded = weights == 0
+        residual = target.masked_fill(excluded, 0) - base_mean.masked_fill(excluded, 0)
         for county, index in self._indices.items():
             mask = torch.tensor([c == county for c in routes], device=target.device)
             mass = weights[mask].sum()
@@ -168,5 +182,10 @@ class CountyOffsets(nn.Module):
                       target: Tensor, weights: Tensor, *, population=None, reduction="sum") -> Tensor:
         routes = self._training_routes(original_ids)
         require(base_predictor.shape == (len(routes),), "training prediction alignment mismatch")
-        return endpoint_loss(base_predictor + self(routes), target, weights,
+        _aligned(base_predictor, target, weights)
+        offset = self(routes)
+        require(bool(torch.isfinite(offset).all()), "nonfinite county offsets")
+        excluded = weights == 0
+        predictor = base_predictor.masked_fill(excluded, 0) + offset.masked_fill(excluded, 0)
+        return endpoint_loss(predictor, target, weights,
                              family=self.family, population=population, reduction=reduction)
