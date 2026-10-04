@@ -351,7 +351,7 @@ def test_continuation_plan_ownership_mutation(spec):
 
 @pytest.mark.parametrize('mutation,error', [
     ('too_many', 'forty'), ('too_long', 'four GPU-hours'), ('multi_gpu', 'four GPU-hours'),
-    ('template', 'concrete'), ('collision', 'normalization collision'), ('escape', 'relative path')])
+    ('template', 'unresolved template'), ('collision', 'normalization collision'), ('escape', 'relative path')])
 def test_invalid_campaigns(spec, mutation, error):
     if mutation == 'too_many':
         spec['work'][0]['slices'] *= 21
@@ -535,3 +535,82 @@ from oxyformer.execution.paths import atomic_json
     assert process.returncode == 0, process.stdout + process.stderr
     assert list((repo / 'src/oxyformer/__pycache__').glob('*.pyc'))
     assert git(repo, 'status', '--porcelain', '--untracked-files=all') == ''
+
+
+def test_locked_primary_stage_cannot_omit_recipe(runtime):
+    repo, out = runtime
+    original = Path(__file__).parents[1]
+    settings = yaml.safe_load((original / 'configs/execution/stages.yaml').read_text())['stages']['primary']
+    settings['module'] = 'oxyformer.dummy'
+    (repo / 'configs/execution/stages.yaml').write_text(yaml.safe_dump({
+        'schema_version': 1, 'stages': {'primary': settings}}))
+    (out / 'code_commit.txt').write_text(commit(repo))
+    with pytest.raises(ContractError, match='requires a recipe lock'):
+        run('primary', out, repo, task_file=task_file(out, stage='primary'))
+
+
+@pytest.mark.parametrize('seconds,allocation', [((360, 720, 13320), 4.0), ((360, 720, 1080), 0.6)])
+def test_exact_campaign_allocation_is_not_rejected_by_float_sum(spec, seconds, allocation):
+    spec['kind'] = 'final-coverage'
+    spec['work'] = spec['work'][:1]
+    spec['work'][0]['slices'] = [{'gpus': 1, 'wall_seconds': value} for value in seconds]
+    approvals = {'owner_decisions': {'campaign_allocations': {spec['id']: {'kind': 'final-coverage', 'gpu_hours': allocation}}}}
+    assert expand_campaign(spec, approvals)['units']
+    approvals['owner_decisions']['campaign_allocations'][spec['id']]['gpu_hours'] = allocation - 1e-9
+    with pytest.raises(ContractError, match='allocation does not cover'):
+        expand_campaign(spec, approvals)
+
+
+def test_json_task_preserves_exponent_number_types(runtime):
+    repo, out = runtime
+    parameters = {'lr': 1e-5, 'large': 1e20, 'numeric_label': '1e-05'}
+    assert run('dummy', out, repo, task_file=task_file(out, parameters=parameters)).status == 'pass'
+    actual = json.loads((out / '_execution/task.json').read_text())['parameters']
+    assert actual == parameters
+    assert isinstance(actual['lr'], float) and isinstance(actual['large'], float)
+
+
+@pytest.mark.parametrize('field', ['outputs', 'parameters'])
+def test_single_brace_campaign_templates_rejected(spec, field):
+    if field == 'outputs':
+        spec['work'][0]['outputs'] = ['result-{fold}.json']
+    else:
+        spec['work'][0]['parameters']['fold'] = '{fold:02d}'
+    with pytest.raises(ContractError, match='unresolved template'):
+        expand_campaign(spec, {})
+
+
+def test_cli_invalid_repo_is_blocked_instead_of_a_traceback(tmp_path, monkeypatch):
+    monkeypatch.delenv('SWARM_UNIT_DIR', raising=False)
+    repo, out = tmp_path / 'not-a-repo', tmp_path / 'attempt'
+    repo.mkdir()
+    out.mkdir()
+    assert main(['run-stage', '--stage', 'dummy', '--repo', str(repo), '--out', str(out)]) == 2
+
+
+def test_campaign_task_requires_lock_even_for_generic_stage(runtime):
+    repo, out = runtime
+    with pytest.raises(ContractError, match='requires a recipe lock'):
+        run('dummy', out, repo, task_file=task_file(out, campaign='screen-01'))
+
+
+def test_cli_malformed_task_types_are_blocked(runtime):
+    repo, out = runtime
+    task = task_file(out, outputs=None)
+    assert main(['run-stage', '--stage', 'dummy', '--repo', str(repo), '--out', str(out),
+                 '--task', str(task)]) == 2
+
+
+def test_json_content_keeps_types_regardless_of_filename(tmp_path):
+    from oxyformer.execution.runner import read_mapping
+    task = tmp_path / 'task.yaml'
+    task.write_text(json.dumps({'lr': 1e-5}))
+    assert read_mapping(task)['lr'] == 1e-5
+
+
+def test_invalid_json_never_falls_back_to_yaml(tmp_path):
+    from oxyformer.execution.runner import read_mapping
+    task = tmp_path / 'task.json'
+    task.write_text('lr: 1.0e-5\n')
+    with pytest.raises(ContractError, match='invalid JSON'):
+        read_mapping(task)

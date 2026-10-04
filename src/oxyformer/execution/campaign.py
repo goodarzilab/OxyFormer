@@ -5,6 +5,7 @@ rederive every required work slice and collector edge. Code prerequisite IDs go
 straight into `needs`: coordinator code completion already means merged into dev.
 """
 from copy import deepcopy
+from decimal import Decimal
 from hashlib import sha256
 import math
 import re
@@ -26,7 +27,7 @@ def concrete_id(value):
 
 def concrete(value):
     if isinstance(value, str):
-        require(not any(marker in value for marker in ('${', '{{', '}}', '<TEMPLATE', '<ID>')),
+        require(not any(marker in value for marker in ('{', '}', '<TEMPLATE', '<ID>')),
                 'unresolved template')
     elif isinstance(value, dict):
         for key, item in value.items():
@@ -109,14 +110,14 @@ def _spec_check(spec, approvals):
             relative_artifact_path(path)
     count = sum(len(w['slices']) for w in spec['work'])
     require(0 < count <= 40, 'campaign exceeds forty leaves')
-    total = 0
+    total_gpu_seconds = 0
     for work in spec['work']:
         concrete_id(work['stage'])
         outputs_valid(work['outputs'])
         require(work['slices'], 'empty continuation chain')
         for segment in work['slices']:
-            _, hours = resources(segment['gpus'], segment['wall_seconds'])
-            total += hours
+            resources(segment['gpus'], segment['wall_seconds'])
+            total_gpu_seconds += segment['gpus'] * ((segment['wall_seconds'] + 59) // 60) * 60
     collector = spec['collector']
     concrete_id(collector['stage'])
     outputs_valid(collector['outputs'])
@@ -126,7 +127,8 @@ def _spec_check(spec, approvals):
         require(isinstance(allocation, dict) and allocation.get('kind') == spec['kind'],
                 'missing owner campaign allocation')
         amount = allocation.get('gpu_hours')
-        require(type(amount) in (int, float) and math.isfinite(amount) and amount >= total,
+        require(type(amount) in (int, float) and math.isfinite(amount)
+                and Decimal(str(amount)) * 3600 >= total_gpu_seconds,
                 'owner allocation does not cover campaign')
     return external
 
@@ -246,7 +248,9 @@ UNIT_SCHEMA = {
     'limits': {'leaves': 40, 'gpu_hours_per_leaf': 4, 'id_length': 32, 'arrays': False},
     'dependency_environment': 'SWARM_DEP_' + '<uppercase ID; nonalphanumeric replaced by underscore>',
     'stage_receipts': 'Stage inputs require a verified passing StageResult; only registry acquisition_receipts may name a source receipt format.',
-    'slurm_accounting': 'GPU-hours use wall_seconds rounded up to whole minutes, matching the emitted time limit.',
+    'slurm_accounting': 'GPU-hours use whole-minute limits; campaign admission compares integer GPU-seconds to the decimal owner allocation.',
+    'concrete_strings': 'String fields may not contain curly braces or template markers; nested JSON values must be mappings/lists.',
+    'locked_stages': 'Registry requires_recipe or a campaign field makes recipe_lock mandatory.',
     'merge_barrier': 'code prerequisite needs are satisfied only by coordinator merged receipts',
     'fingerprint': 'tracked-science-v1: all tracked paths except non-plan docs/** and *.md',
     'validation': 'oxyformer.execution.campaign.validate_plan(expansion, owner_approvals)',
