@@ -22,6 +22,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from xml.parsers import expat
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CHUNK = 1024 * 1024
@@ -239,10 +240,69 @@ class HTTPSRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+def _framing(headers):
+    def values(name):
+        raw = headers.get_all(name, []) if hasattr(headers, 'get_all') else (
+            [headers[name]] if name in headers else [])
+        return [v.strip(' \t') for item in raw for v in item.split(',')]
+    encoding = ','.join(v.lower() for v in values('Content-Encoding')) or 'identity'
+    transfer = values('Transfer-Encoding')
+    if transfer:
+        _require([v.lower() for v in transfer] == ['chunked'], 'Unsupported Transfer-Encoding')
+        return 'chunked', None, encoding
+    lengths = values('Content-Length')
+    if not lengths:
+        return 'close', None, encoding
+    _require(all(v.isascii() and v.isdigit() for v in lengths), 'Invalid Content-Length')
+    try:
+        numbers = [int(v) for v in lengths]
+    except ValueError as exc:
+        raise ManifestError('Invalid Content-Length') from exc
+    _require(len(set(numbers)) == 1, 'Conflicting Content-Length values')
+    return 'content_length', numbers[0], encoding
+
+
+class AcquisitionResponse(http.client.HTTPResponse):
+    """One effective framing decision, installed before the first body read."""
+    def begin(self):
+        if self.headers is not None:
+            return
+        super().begin()
+        self.framing, self.declared_length, self.content_encoding = _framing(self.headers)
+        self.chunked = self.framing == 'chunked'
+        self.chunk_left = None
+        self.length = self.declared_length
+        self.will_close = self._check_close() or self.framing == 'close'
+        if self.status in (204, 304) or 100 <= self.status < 200 or self._method == 'HEAD':
+            self.length, self.chunked = 0, False
+
+    def _read_and_discard_trailer(self):
+        total = 0
+        for count in range(101):
+            line = self.fp.readline(65537 - total)
+            total += len(line)
+            _require(total <= 65536, 'Trailer byte ceiling exceeded')
+            if line == b'\r\n':
+                return
+            if not line:
+                raise http.client.IncompleteRead(b'')
+            _require(line.endswith(b'\r\n') and count < 100, 'Invalid or excessive trailers')
+
+
+class AcquisitionHTTPSConnection(http.client.HTTPSConnection):
+    response_class = AcquisitionResponse
+
+
+class AcquisitionHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, request):
+        return self.do_open(AcquisitionHTTPSConnection, request,
+                            context=self._context, check_hostname=self._check_hostname)
+
+
 def _open_url(url, timeout):
     request = urllib.request.Request(url, headers={
         'User-Agent': 'OxyFormer-source-fetch/1.0', 'Accept-Encoding': 'identity'})
-    return urllib.request.build_opener(HTTPSRedirectHandler()).open(request, timeout=timeout)
+    return urllib.request.build_opener(AcquisitionHTTPSHandler(), HTTPSRedirectHandler()).open(request, timeout=timeout)
 
 
 def _check_content(resource, prefix, content_type):
@@ -258,15 +318,36 @@ def _check_content(resource, prefix, content_type):
     elif fmt == 'tiff':
         _require(prefix.startswith((b'II*\x00', b'MM\x00*', b'II+\x00', b'MM\x00+')),
                  'Expected TIFF signature')
-    elif fmt == 'xml':
-        _require(lower.startswith((b'<?xml', b'<metadata')), 'Expected XML metadata')
     elif fmt == 'tar_gz':
         _require(prefix.startswith(b'\x1f\x8b'), 'Expected gzip signature')
+
+
+def _xml_parser(resource):
+    if resource['format'] != 'xml':
+        return None
+    parser = expat.ParserCreate(namespace_separator='}')
+    def root(name, attributes):
+        _require(name.lower() not in ('html', 'http://www.w3.org/1999/xhtml}html'),
+                 'Unexpected HTML/XML challenge response')
+        parser.StartElementHandler = None
+    parser.StartElementHandler = root
+    parser.SetParamEntityParsing(expat.XML_PARAM_ENTITY_PARSING_NEVER)
+    parser.ExternalEntityRefHandler = lambda *args: 0
+    return parser
+
+
+def _xml_feed(parser, block, final=False):
+    if parser is not None:
+        try:
+            parser.Parse(block, final)
+        except expat.ExpatError as exc:
+            raise ManifestError('Invalid XML resource') from exc
 
 
 def _download(resource, path, *, attempts, timeout, log):
     for attempt in range(1, attempts + 1):
         digest, count, prefix = hashlib.sha256(), 0, b''
+        xml = _xml_parser(resource)
         log.write(f"resource={resource['id']} attempt={attempt}\n")
         log.flush()
         try:
@@ -274,17 +355,10 @@ def _download(resource, path, *, attempts, timeout, log):
                 _require(response.status == 200, f'Unexpected HTTP status {response.status}')
                 final_url = response.geturl()
                 _https(final_url)
-                encoding = response.headers.get('Content-Encoding', 'identity')
-                _require(encoding.strip(' \t').lower() == 'identity', 'Unexpected transfer content encoding')
-                # Select one framing authority before any length-related check.
-                # HTTPResponse has already selected/validated chunked decoding;
-                # in that mode raw Content-Length is not a body constraint.
-                chunked = getattr(response, 'chunked', False) is True
-                length = None if chunked else response.headers.get('Content-Length')
+                _require(response.content_encoding == 'identity', 'Unexpected transfer content encoding')
+                chunked = response.framing == 'chunked'
+                length = response.declared_length
                 if length is not None:
-                    length = length.strip(' \t')
-                    _require(length.isascii() and length.isdigit(), 'Invalid Content-Length')
-                    length = int(length)
                     _require(0 < length <= resource['max_bytes'], 'Content-Length exceeds byte ceiling or is empty')
                 expected_bytes = resource.get('expected_bytes')
                 _require(length is not None or chunked or expected_bytes is not None
@@ -300,6 +374,7 @@ def _download(resource, path, *, attempts, timeout, log):
                     _require(count <= resource['max_bytes'], 'Stream exceeds byte ceiling')
                     if len(prefix) < 512:
                         prefix += block[:512 - len(prefix)]
+                    _xml_feed(xml, block)
                     digest.update(block)
                     output.write(block)
                 _require(count > 0, 'Empty resource')
@@ -307,6 +382,7 @@ def _download(resource, path, *, attempts, timeout, log):
                     raise http.client.IncompleteRead(b'', length - count)
                 if expected_bytes is not None:
                     _require(count == expected_bytes, 'Resource length disagrees with expected_bytes')
+                _xml_feed(xml, b'', True)
                 _check_content(resource, prefix, response.headers.get('Content-Type', ''))
                 hexdigest = digest.hexdigest()
                 expected = resource.get('expected_sha256')
@@ -340,6 +416,7 @@ def _copy_local(resource, path, *, log):
              'Local resource escapes staging or uses a symlink')
     fd = os.open(source, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     digest, count, prefix = hashlib.sha256(), 0, b''
+    xml = _xml_parser(resource)
     with os.fdopen(fd, 'rb') as stream, path.open('wb') as output:
         info = os.fstat(stream.fileno())
         _require(stat.S_ISREG(info.st_mode), 'Local resource must be a regular file')
@@ -352,10 +429,12 @@ def _copy_local(resource, path, *, log):
             _require(count <= resource['max_bytes'], 'Local resource exceeds byte ceiling')
             if len(prefix) < 512:
                 prefix += block[:512 - len(prefix)]
+            _xml_feed(xml, block)
             digest.update(block)
             output.write(block)
     _require(count == resource['expected_bytes'], 'Local recorded size mismatch')
     _require(digest.hexdigest() == resource['expected_sha256'], 'Local SHA-256 mismatch')
+    _xml_feed(xml, b'', True)
     _check_content(resource, prefix, '')
     log.write(f"read-only staged resource={resource['id']}\n")
     return {'id': resource['id'], 'url': resource['url'], 'local_path': str(source),

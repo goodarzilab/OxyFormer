@@ -46,6 +46,7 @@ class Response(io.BytesIO):
     def __init__(self, data=b'synthetic bytes', headers=None, url='https://example.test/final'):
         super().__init__(data)
         self.headers = {'Content-Length': str(len(data))} if headers is None else headers
+        self.framing, self.declared_length, self.content_encoding = sm._framing(self.headers)
         self.url = url
         self.read_sizes = []
 
@@ -318,7 +319,7 @@ def chunked_response(body):
     class FakeSocket:
         def makefile(self, mode):
             return io.BytesIO(b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n' + body)
-    response = http.client.HTTPResponse(FakeSocket())
+    response = sm.AcquisitionResponse(FakeSocket())
     response.begin()
     response.url = 'https://example.test/chunked'
     return response
@@ -362,7 +363,7 @@ def raw_response(headers, body):
     class FakeSocket:
         def makefile(self, mode):
             return io.BytesIO(b'HTTP/1.1 200 OK\r\n' + headers + b'\r\n' + body)
-    response = http.client.HTTPResponse(FakeSocket())
+    response = sm.AcquisitionResponse(FakeSocket())
     response.begin()
     response.url = 'https://example.test/parser'
     return response
@@ -608,3 +609,97 @@ def test_shard_contract_rejects_unapproved_or_inconsistent_selection(change):
 def test_dem_formats_accept_real_signatures_and_reject_html(fmt, content):
     sm._check_content({'format': fmt}, content, '')
     with pytest.raises(sm.ManifestError): sm._check_content({'format': fmt}, b'<html>challenge</html>', 'text/html')
+
+
+@pytest.mark.parametrize('coding', ['chunked', ' ChUnKeD \t', '\tchunked '])
+def test_production_opener_uses_normalized_decoder(manifest, tmp_path, monkeypatch, coding):
+    wire = b'HTTP/1.1 200 OK\r\nTransfer-Encoding: ' + coding.encode() + b'\r\nContent-Length: invalid\r\n\r\n4\r\ndata\r\n0\r\n\r\n'
+    class Socket:
+        def makefile(self, mode): return io.BytesIO(wire)
+        def sendall(self, data): pass
+        def close(self): pass
+    monkeypatch.setattr(http.client.HTTPSConnection, 'connect', lambda self: setattr(self, 'sock', Socket()))
+    result = fetch(manifest, tmp_path)
+    assert all(r['bytes'] == 4 and r['sha256'] == hashlib.sha256(b'data').hexdigest()
+               and r['transfer_integrity'] == 'chunked' for r in result['resources'])
+    with tarfile.open(tmp_path / 'result/payload.tar') as archive:
+        assert all(archive.extractfile(m).read() == b'data' for m in archive.getmembers())
+
+
+@pytest.mark.parametrize('trailers,valid', [(b'\r\n', True), (b'X: y\r\n' * 100 + b'\r\n', True),
+    (b'X:' + b'x' * 65530 + b'\r\n\r\n', True), (b'', False),
+    (b'X: y\r\n' * 101 + b'\r\n', False), (b'X:' + b'x' * 65531 + b'\r\n\r\n', False)])
+def test_chunked_terminal_witness(manifest, tmp_path, monkeypatch, trailers, valid):
+    for r in manifest['resources']:
+        r.update(expected_bytes=4, expected_sha256=hashlib.sha256(b'data').hexdigest())
+    monkeypatch.setattr(sm, '_open_url', lambda *a: raw_response(
+        b'Transfer-Encoding: chunked\r\n', b'4\r\ndata\r\n0\r\n' + trailers))
+    if valid:
+        assert all(r['bytes'] == 4 for r in fetch(manifest, tmp_path)['resources'])
+    else:
+        with pytest.raises((sm.ManifestError, http.client.IncompleteRead)):
+            fetch(manifest, tmp_path, attempts=1)
+        assert_failed_artifacts(tmp_path)
+
+
+@pytest.mark.parametrize('data', [b'\xef\xbb\xbf<?xml version="1.0"?><metadata/>', b'<root/>',
+    b'\xff\xfe' + '<root>\u00e9</root>'.encode('utf-16le'),
+    b'\xfe\xff' + '<root>\u00e9</root>'.encode('utf-16be'), b'<x:root xmlns:x="urn:test"/>',
+    b'<!--' + b'x' * 65537 + b'--><root/>'])
+@pytest.mark.parametrize('local', [False, True])
+def test_xml_original_bytes_to_eof(manifest, tmp_path, monkeypatch, data, local):
+    root = tmp_path / 'staging'
+    if local:
+        (root / '2023').mkdir(parents=True)
+        monkeypatch.setattr(sm, 'DANE_STAGING_DIR', root)
+    monkeypatch.setattr(sm, 'CHUNK', 17)  # Splits UTF-16 code units across reads.
+    for r in manifest['resources']:
+        r.update(format='xml', max_bytes=len(data), expected_bytes=len(data),
+                 expected_sha256=hashlib.sha256(data).hexdigest())
+        if local:
+            r.update(transport='local', local_path='2023/' + r['id'])
+            p = root / r['local_path']; p.write_bytes(data); p.chmod(0o400)
+    monkeypatch.setattr(sm, '_open_url', lambda *a: Response(data))
+    result = fetch(manifest, tmp_path)
+    assert all(r['sha256'] == hashlib.sha256(data).hexdigest() for r in result['resources'])
+    with tarfile.open(tmp_path / 'result/payload.tar') as archive:
+        assert all(archive.extractfile(m).read() == data for m in archive.getmembers())
+    if local:
+        assert all(p.read_bytes() == data and p.stat().st_mode & 0o777 == 0o400
+                   for p in (root / '2023').iterdir())
+
+
+@pytest.mark.parametrize('data', [b'<root>', b'<root/>junk', b'not xml',
+    b'\xef\xbb\xbf<html/>', b'<html xmlns="http://www.w3.org/1999/xhtml"/>',
+    b'\xff\xfe' + '<html/>'.encode('utf-16le'),
+    b'<!DOCTYPE root [<!ENTITY e SYSTEM "https://example.test/entity">]><root>&e;</root>'])
+def test_xml_invalid_or_challenge_never_publishes(manifest, tmp_path, monkeypatch, data):
+    for r in manifest['resources']: r.update(format='xml', max_bytes=1000)
+    monkeypatch.setattr(sm, '_open_url', lambda *a: Response(data))
+    with pytest.raises(sm.ManifestError): fetch(manifest, tmp_path, attempts=1)
+    assert_failed_artifacts(tmp_path)
+
+
+@pytest.mark.parametrize('headers,valid', [(b'Content-Length: 4\r\nContent-Length: 4\r\n', True),
+    (b'Content-Length: 4, 4\r\n', True), (b'Content-Length: 4, 5\r\n', False),
+    (b'Transfer-Encoding: gzip\r\n', False), (b'Transfer-Encoding: gzip, chunked\r\n', False),
+    (b'Content-Encoding: gzip\r\nContent-Length: 4\r\n', False)])
+def test_finite_header_profile(manifest, tmp_path, monkeypatch, headers, valid):
+    monkeypatch.setattr(sm, '_open_url', lambda *a: raw_response(headers, b'data'))
+    if valid: assert all(r['bytes'] == 4 for r in fetch(manifest, tmp_path)['resources'])
+    else:
+        with pytest.raises(sm.ManifestError): fetch(manifest, tmp_path, attempts=1)
+        assert_failed_artifacts(tmp_path)
+
+
+def test_xml_retry_resets_parser(manifest, tmp_path, monkeypatch):
+    calls = []
+    for r in manifest['resources']: r.update(format='xml', expected_bytes=7)
+    def network(*args):
+        calls.append(args)
+        return raw_response(b'Content-Length: 7\r\n', b'<root>' if len(calls) == 1 else b'<root/>')
+    monkeypatch.setattr(sm, '_open_url', network)
+    monkeypatch.setattr(sm.time, 'sleep', lambda n: None)
+    result = fetch(manifest, tmp_path, attempts=2)
+    assert len(calls) == 4 and result['resources'][0]['attempts'] == 2
+    assert all(r['sha256'] == hashlib.sha256(b'<root/>').hexdigest() for r in result['resources'])
