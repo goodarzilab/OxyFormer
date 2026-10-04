@@ -246,3 +246,50 @@ def test_inconsistent_model_lineage_refused_on_load(tmp_path):
     artifact = replace(first, path=str(path), sha256=sha256(payload).hexdigest())
     with pytest.raises(ContractError, match="model hash"):
         load_checkpoint(artifact, first.identity)
+
+
+@pytest.fixture
+def cuda_rng_on_cpu(monkeypatch):
+    """Exercise real CUDA RNG wrappers with CPU generators, never a GPU."""
+    generators = [torch.Generator().manual_seed(1), torch.Generator().manual_seed(2)]
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda.random, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.cuda.random, "_lazy_init", lambda: None)
+    monkeypatch.setattr(torch.cuda.random, "_lazy_call", lambda fn, **kw: fn())
+    monkeypatch.setattr(torch.cuda.random, "device_count", lambda: len(generators))
+    monkeypatch.setattr(torch.cuda.random, "current_device", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "default_generators", generators)
+    return generators
+
+
+def test_selected_cuda_rng_survives_removal_of_unused_gpu(cuda_rng_on_cpu):
+    generators = cuda_rng_on_cpu
+    state = capture_rng("cuda:0")
+    expected = torch.rand(5, generator=generators[0])
+    generators.pop()  # Same selected GPU; the other visible GPU disappears.
+    restore_rng(state, "cuda:0")
+    torch.testing.assert_close(torch.rand(5, generator=generators[0]), expected, rtol=0, atol=0)
+
+
+def test_nondefault_cuda_rng_restores_only_selected_generator(cuda_rng_on_cpu):
+    generators = cuda_rng_on_cpu
+    state = capture_rng("cuda:1")
+    expected = torch.rand(5, generator=generators[1])
+    torch.rand(7, generator=generators[0])  # Unrelated work is not rewound.
+    untouched = generators[0].get_state().clone()
+    restore_rng(state, "cuda:1")
+    torch.testing.assert_close(torch.rand(5, generator=generators[1]), expected, rtol=0, atol=0)
+    assert torch.equal(generators[0].get_state(), untouched)
+
+
+def test_cpu_rng_ignores_previously_initialized_cuda(cuda_rng_on_cpu, monkeypatch):
+    state = capture_rng("cpu")
+    assert state["cuda"] is None
+    expected = torch.rand(5)
+    cuda_rng_on_cpu.clear()
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    restore_rng(state, "cpu")
+    torch.testing.assert_close(torch.rand(5), expected, rtol=0, atol=0)
+    with pytest.raises(ContractError, match="RNG device mismatch"):
+        restore_rng(state, "cuda:0")

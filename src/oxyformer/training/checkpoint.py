@@ -100,24 +100,35 @@ class CheckpointRequest:
                 signal.signal(sig, handler)
 
 
-def capture_rng() -> dict:
+def capture_rng(device: torch.device | str = "cpu") -> dict:
+    """Capture global CPU RNGs and only the selected training accelerator.
+
+    Unused visible GPUs are not part of this single-device training state.
+    A CPU run never acquires a dependency on previously initialized CUDA state.
+    """
+    device = torch.device(device)
+    require(device.type in ("cpu", "cuda"), "unsupported RNG device")
     numpy_state = np.random.get_state()
     return {
         "python": random.getstate(),
         "numpy": (numpy_state[0], numpy_state[1].tolist(), *numpy_state[2:]),
         "torch": torch.get_rng_state(),
-        "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else [],
+        "cuda": torch.cuda.get_rng_state(device) if device.type == "cuda" else None,
     }
 
 
-def restore_rng(state: dict) -> None:
+def restore_rng(state: dict, device: torch.device | str = "cpu") -> None:
+    device = torch.device(device)
+    require(device.type in ("cpu", "cuda"), "unsupported RNG device")
+    require((state["cuda"] is not None) == (device.type == "cuda"), "RNG device mismatch")
+    if device.type == "cuda":
+        require(torch.cuda.is_available(), "checkpoint requires CUDA RNG")
     random.setstate(state["python"])
     kind, keys, pos, gaussian, cached = state["numpy"]
     np.random.set_state((kind, np.asarray(keys, dtype=np.uint32), pos, gaussian, cached))
     torch.set_rng_state(state["torch"])
-    if state["cuda"]:
-        require(torch.cuda.is_available(), "checkpoint requires CUDA RNG")
-        torch.cuda.set_rng_state_all(state["cuda"])
+    if device.type == "cuda":
+        torch.cuda.set_rng_state(state["cuda"], device)
 
 
 def _encode(value, arrays: list) -> dict:
