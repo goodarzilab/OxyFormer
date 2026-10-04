@@ -121,13 +121,15 @@ class SCMConfig(Immutable):
     def has_illness(self):
         return bool(self.migration or self.selected_outcome or self.missing_biomarkers)
 
-    def validate_policy(self, policy: ShiftOrStayPolicy, frame: CovariateFrame):
+    def validate_policy(self, policy: ShiftOrStayPolicy, frame: CovariateFrame, *, eligible_by_key=None):
         support = dict(policy.components_by_key)
         require(set(frame.support_keys) <= support.keys(), "unknown frame support key")
         used = [support[k] for k in set(frame.support_keys)]
         require(all(components for components in used), "SCM assignment needs nonempty support")
         require(self.support_gaps == any(len(c) > 1 for c in used), "support_gaps switch disagrees with frozen support")
-        eligible = [any(hi - lo >= policy.delta_mmhg for lo, hi in c) for c in used]
+        if eligible_by_key is None:
+            eligible_by_key = {key:exact_shift_intervals(c,policy.delta_mmhg) for key,c in support.items()}
+        eligible = [bool(eligible_by_key[key]) for key in set(frame.support_keys)]
         heterogeneous = any(eligible) and not all(eligible)
         require(self.heterogeneous_eligibility == heterogeneous, "eligibility switch disagrees with frozen support")
 
@@ -196,6 +198,20 @@ def observation_probabilities(a_observed, state, config):
 def exact(value):
     """Exact geometry of a declared float, not a decimal reinterpretation."""
     return value if isinstance(value, Fraction) else Fraction(float(value))
+
+
+def exact_shift_intervals(components, delta):
+    """The frozen mathematical S=[L,U-delta] on exact declared float values.
+
+    Derive widths and cutoffs before any rounding, so a shifted eligible dose
+    remains in its origin component even when the law is narrower than an ULP.
+    This continuous truth geometry precedes serialization of observed doses.
+    """
+    shift = exact(delta)
+    if shift == 0:
+        return ()
+    bounds = tuple((exact(lo),exact(hi)) for lo,hi in components)
+    return tuple((lo,hi-shift) for lo,hi in bounds if hi-lo >= shift)
 
 
 def wide(value):
@@ -393,22 +409,28 @@ class AssignmentLaw:
         return tuple(rules)
 
 
-def validate_count_rates(frame, config, policy):
+def validate_count_rates(frame, config, policy, *, eligible_by_key=None):
     """Check the entire factual/intervention support, not only sampled events."""
     if config.registration_probability == 1 and config.denominator_error == 0:
         return
     support = dict(policy.components_by_key)
+    if eligible_by_key is None:
+        eligible_by_key = {key:exact_shift_intervals(c,policy.delta_mmhg) for key,c in support.items()}
+    delta = exact(policy.delta_mmhg)
     for row in range(len(frame.original_ids)):
-        components = support[frame.support_keys[row]]
+        key = frame.support_keys[row]
+        components = tuple((exact(lo),exact(hi)) for lo,hi in support[key])
         for state, _ in latent_states(config):
             intervals = list(components)
+            error = exact(state.error)
             for lo, hi in components:
-                for p_lo, p_hi in components:
-                    start = max(lo, p_lo-state.error)
-                    end = min(hi, p_hi-policy.delta_mmhg-state.error)
+                for p_lo, p_hi in eligible_by_key[key]:
+                    start = max(lo, p_lo-error)
+                    end = min(hi, p_hi-error)
                     if start <= end:
-                        intervals.append((start+policy.delta_mmhg, end+policy.delta_mmhg))
-            for lo, hi in intervals:
+                        intervals.append((start+delta, end+delta))
+            for lower, upper in intervals:
+                lo,hi = wide(lower),wide(upper)
                 critical = [lo, hi]
                 displacement = config.migration*state.illness
                 if config.effect == "nonlinear":
