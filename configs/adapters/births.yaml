@@ -1,0 +1,332 @@
+# Inspected observation metadata only. This file grants NO source, exposure,
+# population-selection or predictor approval. No real data or mappings live here.
+# Each year is explicit; no profile inheritance or geography carry-forward.
+# BirthMapping must pin profile_hash(), release.content_hash and SourceManifest.
+# Existing owner approvals remain read-only. Future residence approval must bind
+# owner_decisions.birth_exposure.<COL|ECU> = {status: approved, manifest_hash: <sha256>}
+# to the complete ResidenceExposure.content_hash; there is currently no such grant.
+# Optional population rules must be explicitly approved by their content hashes in
+# owner_decisions.birth_population_exclusions. No default population exclusions.
+# Reviewed SourceManifest.schema_hash uses ordered, nonnullable string ColumnSpecs
+# for the CSV header. All raw cells are retained, even missing/invalid values.
+# Status/period/geography information belongs in BirthRelease and is never guessed.
+# ResidenceExposure source_kind and placement are reviewed semantic declarations,
+# not guessed from URI text. US 3DEP and hospital/capital-city placement are refused.
+# Structurally short/long CSV rows retain raw_cells; they block anchor fitting.
+schema_version: 1
+profiles:
+  dane_2023:
+    country: COL
+    dictionary_year: 2023
+    dictionary_uri: https://microdatos.dane.gov.co/index.php/metadata/export/876/ddi
+    dictionary_sha256: 1ac7802f08a02308b947510f42341ef8787a02f2eda23e2bc43869b9909060d7
+    inspected_on: '2026-10-04'
+    weight: PESO_NAC
+    residence:
+    - CODPTORE
+    - CODMUNRE
+    delivery:
+    - COD_DPTO
+    - COD_MUNIC
+    occurrence:
+    - ANO
+    - MES
+    registration: []
+    weight_unknown:
+    - '9'
+    bands:
+      '1':
+      - null
+      - 999
+      '2':
+      - 1000
+      - 1499
+      '3':
+      - 1500
+      - 1999
+      '4':
+      - 2000
+      - 2499
+      '5':
+      - 2500
+      - 2999
+      '6':
+      - 3000
+      - 3499
+      '7':
+      - 3500
+      - 3999
+      '8':
+      - 4000
+      - null
+    covariate_roles:
+      baseline_candidate:
+      - EDAD_MADRE
+      - NIV_EDUM
+      - EST_CIVM
+      gestational_mediator:
+      - T_GES
+      - T_GES_AGRU_CIE
+      - NUMCONSUL
+      - TIPO_PARTO
+      post_outcome:
+      - APGAR1
+      - APGAR2
+      - TALLA_NAC
+    identifier_note: No maternal or certificate identifier in the inspected public
+      birth variable list. Preserve separately documented identifiers if supplied;
+      never infer them.
+    release_note: Require explicit status, registration coverage and geography vintage;
+      year alone is insufficient.
+    municipality:
+    - CODPTORE
+    - CODMUNRE
+  dane_2024:
+    country: COL
+    dictionary_year: 2024
+    dictionary_uri: https://microdatos.dane.gov.co/index.php/metadata/export/878/ddi
+    dictionary_sha256: b0fa6a6f4aebad43f3205676b20970a808c6a83f9b108036aeafe1a3b452c796
+    inspected_on: '2026-10-04'
+    weight: PESO_NAC
+    residence:
+    - CODPTORE
+    - CODMUNRE
+    delivery:
+    - COD_DPTO
+    - COD_MUNIC
+    occurrence:
+    - ANO
+    - MES
+    registration: []
+    weight_unknown:
+    - '9'
+    bands:
+      '1':
+      - null
+      - 999
+      '2':
+      - 1000
+      - 1499
+      '3':
+      - 1500
+      - 1999
+      '4':
+      - 2000
+      - 2499
+      '5':
+      - 2500
+      - 2999
+      '6':
+      - 3000
+      - 3499
+      '7':
+      - 3500
+      - 3999
+      '8':
+      - 4000
+      - null
+    covariate_roles:
+      baseline_candidate:
+      - EDAD_MADRE
+      - NIV_EDUM
+      - EST_CIVM
+      gestational_mediator:
+      - T_GES
+      - T_GES_AGRU_CIE
+      - NUMCONSUL
+      - TIPO_PARTO
+      post_outcome:
+      - APGAR1
+      - APGAR2
+      - TALLA_NAC
+    identifier_note: No maternal or certificate identifier in the inspected public
+      birth variable list. Preserve separately documented identifiers if supplied;
+      never infer them.
+    release_note: Require explicit status, registration coverage and geography vintage;
+      year alone is insufficient.
+    municipality:
+    - CODPTORE
+    - CODMUNRE
+  dane_2025:
+    country: COL
+    dictionary_year: 2025
+    dictionary_uri: https://microdatos.dane.gov.co/index.php/metadata/export/915/ddi
+    dictionary_sha256: 781906cf75b01b939017e48be0df917dfbaa66760394c9738cefe00ca20d30d2
+    inspected_on: '2026-10-04'
+    weight: PESO_NAC
+    residence:
+    - CODPTORE
+    - CODMUNRE
+    delivery:
+    - COD_DPTO
+    - COD_MUNIC
+    occurrence:
+    - ANO
+    - MES
+    registration: []
+    weight_unknown:
+    - '9'
+    bands:
+      '1':
+      - null
+      - 999
+      '2':
+      - 1000
+      - 1499
+      '3':
+      - 1500
+      - 1999
+      '4':
+      - 2000
+      - 2499
+      '5':
+      - 2500
+      - 2999
+      '6':
+      - 3000
+      - 3499
+      '7':
+      - 3500
+      - 3999
+      '8':
+      - 4000
+      - null
+    covariate_roles:
+      baseline_candidate:
+      - EDAD_MADRE
+      - NIV_EDUM
+      - EST_CIVM
+      gestational_mediator:
+      - T_GES
+      - T_GES_AGRU_CIE
+      - NUMCONSUL
+      - TIPO_PARTO
+      post_outcome:
+      - APGAR1
+      - APGAR2
+      - TALLA_NAC
+    identifier_note: No maternal or certificate identifier in the inspected public
+      birth variable list. Preserve separately documented identifiers if supplied;
+      never infer them.
+    release_note: Require explicit status, registration coverage and geography vintage;
+      year alone is insufficient.
+    municipality:
+    - CODPTORE
+    - CODMUNRE
+  inec_2015:
+    country: ECU
+    dictionary_year: 2015
+    dictionary_uri: https://anda.inec.gob.ec/anda5/index.php/metadata/export/575/ddi
+    dictionary_sha256: b582da081798ab9ab22ea259f8cf23fd7ee77ac22ff3e4bfda6b720b21eab889
+    inspected_on: '2026-10-04'
+    weight: peso
+    residence:
+    - prov_res
+    - cant_res
+    - parr_res
+    delivery:
+    - prov_nac
+    - cant_nac
+    - parr_nac
+    occurrence:
+    - anio_nac
+    - mes_nac
+    - dia_nac
+    registration:
+    - anio_insc
+    - mes_insc
+    - dia_insc
+    weight_unknown:
+    - Sin información
+    weight_ambiguous:
+    - '99'
+    gram_range:
+    - 500
+    - 5000
+    range_interpretation: Outside documented source range is flagged, never clipped;
+      this is a source validation range, not a claim of biological impossibility.
+    covariate_roles:
+      baseline_candidate:
+      - edad_mad
+      - niv_inst
+      - est_civil
+      - etnia
+      gestational_mediator:
+      - sem_gest
+      - con_pren
+      - tipo_part
+      post_outcome:
+      - apgar1
+      - apgar5
+      - talla
+      - hij_viv
+    identifier_note: No person/certificate ID in the 47-field public dictionary. Date
+      of birth of the mother is not an identifier.
+    release_note: Registration and occurrence years differ; retain every row unless
+      an explicit approved population exclusion applies.
+    measurement_evidence: DDI peso question specifies grams, interviewer range 500–5000.
+      The unlabeled 99 in valrng is kept explicitly ambiguous, never interpreted as
+      99 grams.
+    municipality:
+    - prov_res
+    - cant_res
+  inec_2024:
+    country: ECU
+    dictionary_year: 2024
+    dictionary_uri: https://www.ecuadorencifras.gob.ec/documentos/web-inec/Poblacion_y_Demografia/Nacimientos_Defunciones/2024/Diccionario_de_variables_ENV_EDF_2024.zip
+    dictionary_sha256: 49a2a37aefdc85ce65909c79771eb0a56616aca12a48403f4cdb99c4969f841e
+    inspected_on: '2026-10-04'
+    weight: peso
+    residence:
+    - prov_res
+    - cant_res
+    - parr_res
+    delivery:
+    - prov_nac
+    - cant_nac
+    - parr_nac
+    occurrence:
+    - anio_nac
+    - mes_nac
+    - dia_nac
+    registration:
+    - anio_insc
+    - mes_insc
+    - dia_insc
+    weight_unknown:
+    - '99'
+    - Sin información
+    weight_ambiguous: []
+    gram_range:
+    - 500
+    - 5500
+    range_interpretation: Outside documented source range is flagged, never clipped;
+      this is a source validation range, not a claim of biological impossibility.
+    covariate_roles:
+      baseline_candidate:
+      - edad_mad
+      - niv_inst
+      - est_civil
+      - etnia
+      gestational_mediator:
+      - sem_gest
+      - con_pren
+      - tipo_part
+      post_outcome:
+      - apgar1
+      - apgar5
+      - talla
+      - hij_viv
+    identifier_note: No person/certificate ID in the 47-field public dictionary. Date
+      of birth of the mother is not an identifier.
+    release_note: Registration and occurrence years differ; retain every row unless
+      an explicit approved population exclusion applies.
+    measurement_evidence:
+      uri: https://www.ecuadorencifras.gob.ec/documentos/web-inec/Poblacion_y_Demografia/Nacimientos_Defunciones/2024/Sintaxis_ENV_EDF_2024_vf.zip
+      sha256: 8e31907d68f6b8a6706d6e758cec09ba57a8f3b82935e144bae9fe6360b72bcd
+      member: Sintaxis_ENV_2024.sps
+      interpretation: Published pesogrupo syntax covers 500–5500, uses gram labels
+        and assigns peso=99 to Sin información. This range differs from 2015.
+    municipality:
+    - prov_res
+    - cant_res
