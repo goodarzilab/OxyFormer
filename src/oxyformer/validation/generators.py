@@ -20,7 +20,7 @@ from oxyformer.validation.analytic_truth import UniformShiftTruth
 from oxyformer.validation.scm import (
     AssignmentLaw, CovariateFrame, LatentState, SCMConfig, adjustment_key,
     latent_states, observation_probabilities, observation_log_probability, structural_mean, validate_count_rates,
-    LocalCoordinates, exact, wide,
+    LocalCoordinates, exact, exact_shift_intervals, wide,
 )
 
 
@@ -216,11 +216,12 @@ def _groups(frame, config, policy):
     return {key:list(terms.values()) for key,terms in groups.items()}
 
 
-def _integration_breakpoints(terms, components, delta, config):
+def _integration_breakpoints(terms, components, delta, config, shift_intervals):
     delta = exact(delta)
     boundaries = {v for term in terms for v in term.law.breakpoints}
     for lo,hi in components:
-        boundaries.update([exact(lo),exact(hi),exact(hi-float(delta))])
+        boundaries.update([exact(lo),exact(hi)])
+    boundaries.update(v for interval in shift_intervals for v in interval)
     # Exact kernel geometry plus a separately retained finite log-odds offset.
     # Never round a crossing or its shifted preimage to an absolute exposure.
     for i,first in enumerate(terms):
@@ -291,14 +292,12 @@ def _posterior_mean(at, terms, frame, config):
     return np.sum(weights*means,axis=0)
 
 
-def _integrate(frame, config, policy, groups, order, boundaries_by_key):
+def _integrate(frame, config, policy, groups, order, boundaries_by_key, eligible_by_key):
     mean_contrasts = np.zeros(2,dtype=np.longdouble)
     log_mass = -np.inf
     assignment_mass_error = 0.
     for key,terms in groups.items():
-        components = dict(policy.components_by_key)[key[1]]
-        shift_intervals = tuple((lo,hi-policy.delta_mmhg) for lo,hi in components
-                                if policy.delta_mmhg > 0 and hi-lo >= policy.delta_mmhg)
+        shift_intervals = eligible_by_key[key[1]]
         for term in terms:
             rules = term.law.quadrature(order,boundaries_by_key[key])
             represented_mass = logsumexp(np.concatenate([rule.log_weights for rule in rules]))
@@ -336,7 +335,8 @@ _OBSERVED_TARGET = (
     "E[mu(d(A_recorded),X)-mu(A_recorded,X)]; X includes its missingness, support stratum, coarse region/county and measured "
     "confounders only. mu and exposure law are conditional on the same factual selection. "
     "Endpoint is Y as recorded (registered events / noisy denominator when enabled). "
-    "Truth uses the declared continuous exposure law before float serialization of observations."
+    "Truth uses the declared continuous exposure law and mathematical shift on the exact declared float parameters, "
+    "before float serialization of observations."
 )
 _CAUSAL_TARGET = (
     "Same fixed-frame origin-weighted, factually selected population and recorded endpoint. "
@@ -366,8 +366,9 @@ def generate_suite_a(frame: CovariateFrame, config: SCMConfig, policy: ShiftOrSt
     conditional on the supplied fixed covariate frame. No estimator fits enter.
     """
     require(tolerance > 0 and max_order >= 32, "invalid integration controls")
-    config.validate_policy(policy, frame)
-    validate_count_rates(frame, config, policy)
+    eligible_by_key = {key:exact_shift_intervals(c,policy.delta_mmhg) for key,c in policy.components_by_key}
+    config.validate_policy(policy, frame, eligible_by_key=eligible_by_key)
+    validate_count_rates(frame, config, policy, eligible_by_key=eligible_by_key)
     observations = _sample_observations(frame, config, policy, seed)
     common = dict(policy_id=policy.policy_id, config_hash=config.content_hash, generator_configuration=config.to_json(),
                   frame_hash=frame.content_hash, observation_hash=observations.content_hash)
@@ -385,13 +386,13 @@ def generate_suite_a(frame: CovariateFrame, config: SCMConfig, policy: ShiftOrSt
     grouped_log_mass = logsumexp([term.log_weight for terms in groups.values() for term in terms])
     grouped_error = float(abs(np.expm1(grouped_log_mass-_log_origin_mass(frame,eligible_only=True))))
     require(grouped_error <= 1e-10, "grouped origin/latent mass was not preserved")
-    boundaries = {key:_integration_breakpoints(terms,dict(policy.components_by_key)[key[1]],policy.delta_mmhg,config)
+    boundaries = {key:_integration_breakpoints(terms,dict(policy.components_by_key)[key[1]],policy.delta_mmhg,config,eligible_by_key[key[1]])
                   for key,terms in groups.items()}
     order = 16
-    previous, previous_log_mass, _ = _integrate(frame,config,policy,groups,order,boundaries)
+    previous, previous_log_mass, _ = _integrate(frame,config,policy,groups,order,boundaries,eligible_by_key)
     while order*2 <= max_order:
         order *= 2
-        values, log_mass, mass_error = _integrate(frame,config,policy,groups,order,boundaries)
+        values, log_mass, mass_error = _integrate(frame,config,policy,groups,order,boundaries,eligible_by_key)
         difference = np.abs(values-previous)
         mass_difference = float(abs(np.expm1(log_mass-previous_log_mass)))
         converged = bool(np.max(difference) <= tolerance and mass_difference <= tolerance and mass_error <= 1e-10)
@@ -412,18 +413,35 @@ def generate_suite_a(frame: CovariateFrame, config: SCMConfig, policy: ShiftOrSt
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PairedWorld(Immutable):
-    """Evaluator-only structural response; S and epsilon stay fixed under do(A)."""
+    """Evaluator-only response anchored at the shared factual outcome.
+
+    Primitive coefficients c and tau remain separate. The equivalent response
+    Y_factual + tau*(a-h(S)) retains the defining c even when c-tau would round
+    to -tau. The stored factual rounding residual stays fixed under intervention.
+    """
     structural_effect: float
-    location_effect: float
+    factual_location_effect: float
     baseline: tuple[float, ...]
     h_s: tuple[float, ...]
     epsilon: tuple[float, ...]
+    factual_y: tuple[float, ...]
+
+    def __post_init__(self):
+        Immutable.__post_init__(self)
+        require(len(self.baseline) == len(self.h_s) == len(self.epsilon) == len(self.factual_y) > 0,
+                "paired structural world alignment")
 
     def intervene(self, a):
         dose = np.asarray(a, dtype=float)
         require(dose.shape == (len(self.h_s),) and np.isfinite(dose).all(), "intervention alignment")
-        return (np.asarray(self.baseline) + self.structural_effect*dose
-                + self.location_effect*np.asarray(self.h_s) + np.asarray(self.epsilon))
+        tau = exact(self.structural_effect)
+        try:
+            response = np.array([float(exact(y)+tau*(exact(d)-exact(s)))
+                                 for y,d,s in zip(self.factual_y,dose,self.h_s)])
+        except OverflowError as exc:
+            raise ContractError("nonfinite intervention response") from exc
+        require(bool(np.isfinite(response).all()), "nonfinite intervention response")
+        return response
 
 
 @dataclass(frozen=True, slots=True)
@@ -460,9 +478,9 @@ def observational_equivalence_pair(*, n_geographies=100, cluster_size=3, seed=0,
             a=tuple(s.tolist()), y=tuple(y_shared.tolist()), flag_available=(True,)*n,
             survey_included=(True,)*n, biomarker_available=(True,)*n,
             registered_events=(None,)*n, observed_denominator=(None,)*n)
-    world0 = PairedWorld(structural_effect=0., location_effect=c, baseline=tuple(baseline.tolist()),
-                         h_s=tuple(s.tolist()), epsilon=tuple(epsilon.tolist()))
-    worldtau = replace(world0, structural_effect=tau, location_effect=c-tau)
+    world0 = PairedWorld(structural_effect=0., factual_location_effect=c, baseline=tuple(baseline.tolist()),
+                         h_s=tuple(s.tolist()), epsilon=tuple(epsilon.tolist()), factual_y=observations.y)
+    worldtau = replace(world0, structural_effect=tau)
     policy = ShiftOrStayPolicy(support_design_hash=frame.content_hash, components_by_key=(("s", ((0., 10.),)),))
     analytic = UniformShiftTruth()
     uncertainty = IntegrationUncertainty(method="closed-form uniform shift", observed_absolute_difference=0.,
