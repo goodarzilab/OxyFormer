@@ -209,3 +209,40 @@ def test_atomic_archive_publication_failure_has_no_descriptor(tmp_path, monkeypa
     with pytest.raises(OSError, match="publication interruption"):
         pretrain(view, split, replace(config, max_batches=1), 1103)
     assert list((Path(config.output_dir) / "ssl").iterdir()) == []
+
+
+def test_inconsistent_model_lineage_refused_on_publish(tmp_path):
+    view, split, config = make_case(tmp_path)
+    first = pretrain(view, split, replace(config, max_batches=1), 1103)
+    state = load_checkpoint(first, first.identity)
+    key = next(iter(state["model"]))
+    state["model"][key] = state["model"][key] + 1
+    root = tmp_path / "substituted"
+    root.mkdir()
+    with pytest.raises(ContractError, match="model hash"):
+        save_checkpoint(root, identity=first.identity, lineage=first.lineage, state=state,
+                        complete=False, reason="batch_limit")
+    assert list(root.iterdir()) == []
+
+
+def test_inconsistent_model_lineage_refused_on_load(tmp_path):
+    from io import BytesIO
+    import zipfile
+    view, split, config = make_case(tmp_path)
+    first = pretrain(view, split, replace(config, max_batches=1), 1103)
+    stream = BytesIO()
+    with zipfile.ZipFile(first.path) as original, zipfile.ZipFile(stream, "w") as changed:
+        for name in original.namelist():
+            payload = original.read(name)
+            if name == "tensors/0.npy":
+                values = np.load(BytesIO(payload), allow_pickle=False)
+                array = BytesIO()
+                np.save(array, values + 1, allow_pickle=False)
+                payload = array.getvalue()
+            changed.writestr(name, payload)
+    payload = stream.getvalue()
+    path = tmp_path / "substituted.ofc"
+    path.write_bytes(payload)
+    artifact = replace(first, path=str(path), sha256=sha256(payload).hexdigest())
+    with pytest.raises(ContractError, match="model hash"):
+        load_checkpoint(artifact, first.identity)
