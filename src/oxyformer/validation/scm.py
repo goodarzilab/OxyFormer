@@ -12,8 +12,8 @@ from itertools import product
 from typing import Literal
 
 import numpy as np
-from scipy.special import expit
-from scipy.stats import laplace
+from scipy.special import expit, log_expit, logsumexp
+from numpy.polynomial.legendre import leggauss
 
 from oxyformer.design.policies import ShiftOrStayPolicy
 from oxyformer.provenance import Immutable, require, unique
@@ -191,11 +191,47 @@ def observation_probabilities(a_observed, state, config):
     return flag, survey, bio
 
 
-class AssignmentLaw:
-    """Continuous exponential tilt or near-deterministic Laplace on components.
+@dataclass(frozen=True)
+class _ExponentialPiece:
+    lower: float
+    upper: float
+    rate: float
+    log_probability: float
 
-    Atoms are generated explicitly by the harness and never passed as densities.
-    Error is a shared geography-level additive measurement error; no clipping.
+    @property
+    def peak(self):
+        return self.upper if self.rate > 0 else self.lower
+
+    @property
+    def log_integral(self):
+        width = self.upper-self.lower
+        if self.rate == 0:
+            return np.log(width)
+        k = abs(self.rate)
+        return np.log(-np.expm1(-k*width))-np.log(k)
+
+
+def observation_log_probability(a_observed, state, config):
+    """Selected-law weights without underflow of positive logistic probabilities."""
+    a = np.asarray(a_observed, dtype=float)
+    value = np.zeros_like(a)
+    if config.selected_outcome:
+        value += log_expit(1-.2*a-1.2*state.illness)
+    if config.survey_inclusion:
+        value += log_expit(.7-.12*a+.5*state.local)
+    if config.missing_biomarkers:
+        value += log_expit(1-.1*a-.8*state.illness)
+    return value
+
+
+class AssignmentLaw:
+    """A normalized mixture of truncated exponential pieces.
+
+    Splitting Laplace components at the mode makes normalization, sampling and
+    integration use the same stable law. Relative peak heights avoid subtracting
+    huge log normalizers when the mode lies in a support gap. Positive tail
+    densities stay in log form for posterior calculations; support is geometric.
+    Atoms are generated separately and never represented by these densities.
     """
     def __init__(self, frame, row, state, config, components):
         self.components = components
@@ -204,56 +240,104 @@ class AssignmentLaw:
         self.near = config.assignment == "near_deterministic"
         self.rate = (-4. if config.extreme_ratios else 0.) + .3*state.local + .2*state.regional - .25*state.illness
         lo, hi = components[0][0], components[-1][1]
-        self.center = lo + (hi-lo) * float(expit(frame.coordinates[row][0] + .2*state.local + .1*state.regional - .2*state.illness))
-        self.anchor = hi if self.rate > 0 else lo
-        self.masses = np.array([self._mass(l, h) for l, h in components])
-        self.total = float(self.masses.sum())
-        require(self.total > 0 and np.isfinite(self.total), "assignment normalization failed")
-
-    def _mass(self, lo, hi):
+        self.center = lo+(hi-lo)*float(expit(frame.coordinates[row][0]+.2*state.local+.1*state.regional-.2*state.illness))
+        intervals = []
+        for lower, upper in components:
+            edges = [lower, upper]
+            if self.near and lower < self.center < upper:
+                edges.insert(1, self.center)
+            for left, right in zip(edges[:-1], edges[1:]):
+                rate = (1/self.scale if right <= self.center else -1/self.scale) if self.near else self.rate
+                intervals.append(_ExponentialPiece(left, right, rate, 0.))
         if self.near:
-            # Survival differences on the right avoid subtraction near one.
-            if lo >= self.center:
-                return laplace.sf(lo, self.center, self.scale) - laplace.sf(hi, self.center, self.scale)
-            return laplace.cdf(hi, self.center, self.scale) - laplace.cdf(lo, self.center, self.scale)
-        if self.rate == 0:
-            return hi-lo
-        return (np.exp(self.rate*(hi-self.anchor)) - np.exp(self.rate*(lo-self.anchor))) / self.rate
+            distances = np.array([abs(piece.peak-self.center) for piece in intervals])
+            relative_heights = -(distances-distances.min())/self.scale
+        else:
+            peaks = np.array([piece.peak for piece in intervals])
+            anchor = max(peaks) if self.rate > 0 else min(peaks)
+            relative_heights = self.rate*(peaks-anchor)
+        log_masses = relative_heights+np.array([p.log_integral for p in intervals])
+        # Subtract the largest mass BEFORE computing the normalizer: even the
+        # largest unnormalized mass may be exp(-millions) inside a support gap.
+        log_masses -= log_masses.max()
+        log_probabilities = log_masses-logsumexp(log_masses)
+        self.pieces = tuple(_ExponentialPiece(p.lower,p.upper,p.rate,float(logp))
+                            for p,logp in zip(intervals,log_probabilities))
+        self.probabilities = np.exp(log_probabilities)
+        require(np.isfinite(self.probabilities).all(), "assignment normalization failed")
 
     @property
     def breakpoints(self):
-        points = [v+self.error for comp in self.components for v in comp]
-        if self.near:
-            points.append(self.center+self.error)
-        return points
+        return [v+self.error for p in self.pieces for v in (p.lower,p.upper)]
+
+    def contains(self, a_observed):
+        a = np.asarray(a_observed)-self.error
+        return np.logical_or.reduce([(a >= lo) & (a <= hi) for lo,hi in self.components])
+
+    def log_density(self, a_observed):
+        a = np.asarray(a_observed)-self.error
+        value = np.full(a.shape, -np.inf)
+        for p in self.pieces:
+            inside = (a >= p.lower) & (a <= p.upper)
+            density = p.log_probability+p.rate*(a-p.peak)-p.log_integral
+            # At the mode both pieces give the same density, not double mass.
+            value = np.where(inside,density,value)
+        return value
 
     def density(self, a_observed):
-        a = np.asarray(a_observed) - self.error
-        inside = np.zeros(a.shape, dtype=bool)
-        for lo, hi in self.components:
-            inside |= (a >= lo) & (a <= hi)
-        if self.near:
-            raw = laplace.pdf(a, self.center, self.scale)
-        else:
-            # Evaluate only on support, avoiding overflow outside the law.
-            raw = np.exp(self.rate*(np.where(inside, a, self.anchor)-self.anchor))
-        return np.where(inside, raw / self.total, 0.)
+        return np.exp(self.log_density(a_observed))
 
     def sample(self, rng):
-        lo, hi = self.components[rng.choice(len(self.components), p=self.masses/self.total)]
+        p = self.pieces[rng.choice(len(self.pieces),p=self.probabilities)]
         u = rng.random()
-        if self.near:
-            if lo >= self.center:
-                survival = laplace.sf(lo, self.center, self.scale) - u*self._mass(lo, hi)
-                value = laplace.isf(survival, self.center, self.scale)
-            else:
-                value = laplace.ppf(laplace.cdf(lo, self.center, self.scale) + u*self._mass(lo, hi), self.center, self.scale)
-        elif self.rate == 0:
-            value = lo + u*(hi-lo)
+        if p.rate == 0:
+            value = p.lower+u*(p.upper-p.lower)
         else:
-            left, right = np.exp(self.rate*(lo-self.anchor)), np.exp(self.rate*(hi-self.anchor))
-            value = self.anchor + np.log(left + u*(right-left))/self.rate
-        return float(value + self.error)
+            k = abs(p.rate)
+            distance = -np.log1p(-u*(-np.expm1(-k*(p.upper-p.lower))))/k
+            value = p.peak+(-distance if p.rate > 0 else distance)
+        return float(value+self.error)
+
+    def quadrature(self, order, breakpoints):
+        """Integrate the assignment measure in its own length scale.
+
+        Every component's full support is included. Panels resolve the decay
+        near its density maximum, irrespective of its width in exposure units.
+        The returned weights must separately pass the unit-mass certificate.
+        Keep exposure coordinates in extended precision until policy branching:
+        FP64 rounding can move a whole narrow panel across a policy cutoff.
+        """
+        nodes, weights = leggauss(order)
+        points, masses = [], []
+        for p in self.pieces:
+            probability = np.exp(p.log_probability)
+            if probability == 0:
+                continue  # This component's total mass is below FP64 range.
+            if p.rate == 0:
+                edges = sorted({p.lower,p.upper} | {v-self.error for v in breakpoints
+                               if p.lower < v-self.error < p.upper})
+                for lo,hi in zip(edges[:-1],edges[1:]):
+                    points.append((np.longdouble(lo)+hi)/2
+                                  +np.longdouble(hi-lo)/2*nodes+self.error)
+                    masses.append(probability*(hi-lo)/(p.upper-p.lower)*weights/2)
+            else:
+                k = abs(p.rate)
+                direction = -1 if p.rate > 0 else 1
+                extent = k*(p.upper-p.lower)
+                edges = {0.,extent}
+                edges.update(v for v in (1.,2.,4.,8.,16.,32.,64.) if v < extent)
+                edges.update(k*direction*(v-self.error-p.peak) for v in breakpoints
+                             if p.lower < v-self.error < p.upper)
+                edges = sorted(edges)
+                normalizer = -np.expm1(-extent)
+                for lo,hi in zip(edges[:-1],edges[1:]):
+                    t = (lo+hi)/2+(hi-lo)/2*nodes
+                    mass = probability*(hi-lo)/2*weights*np.exp(-t)/normalizer
+                    keep = mass > 0
+                    if keep.any():
+                        points.append(np.longdouble(p.peak)+direction*t[keep].astype(np.longdouble)/k+self.error)
+                        masses.append(mass[keep])
+        return np.concatenate(points), np.concatenate(masses)
 
 
 def validate_count_rates(frame, config, policy):
