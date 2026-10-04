@@ -29,7 +29,12 @@ def _publish(root, name, text):
         temporary = Path(stream.name)
         stream.write(text)
     try:
-        os.link(temporary, destination)
+        try:
+            os.link(temporary, destination)
+        except FileExistsError:
+            require(not destination.is_symlink() and destination.is_file() and
+                    destination.read_bytes() == text.encode("utf-8"),
+                    f"report output conflict: {name}; use a new isolated output_dir")
     finally:
         temporary.unlink()
     return destination
@@ -66,6 +71,15 @@ def run_stage(request: StageRequest) -> StageResult:
         report["gates"].append({"gate": "inputs", "status": "failed", "reason": str(exc)})
     report["request_hash"] = request.content_hash
     report["code_identity"] = request.code_identity
+    try:
+        return _write_report(request, report, bundle)
+    except (ContractError, OSError) as exc:
+        # Never reference a stale released report as evidence for this failure.
+        return StageResult(request_hash=request.content_hash, status="fail", artifacts=(),
+                           message=f"report output unavailable: {exc}")
+
+
+def _write_report(request, report, bundle):
     root = Path(request.output_dir).resolve()
     repository = OWNER_APPROVALS.resolve().parents[1]
     for protected in (repository / "outputs", repository / "report", repository / "src", repository / "configs"):
@@ -80,10 +94,19 @@ def run_stage(request: StageRequest) -> StageResult:
         parent_hashes=(request.content_hash,) + request.dependency_hashes, split_hash=None,
         config_hash=request.config_hash, model_hash=None,
         environment=(("python", platform.python_version()),), seed=None, parameter_count=None)
+    outputs = (("report.json", canonical_json(report), "evidence_report"),
+               ("report.html", render_html(report), "evidence_html"),
+               ("estimators.svg", render_forest(report), "diagnostic_forest"))
+    # Recompute from verified inputs on every invocation, then verify all existing
+    # bytes before filling missing files. Matching partial publication can resume;
+    # differing bytes never get overwritten or returned as a current report.
+    for name, content, _ in outputs:
+        path = root / name
+        if path.exists() or path.is_symlink():
+            require(not path.is_symlink() and path.is_file() and path.read_bytes() == content.encode("utf-8"),
+                    f"report output conflict: {name}; use a new isolated output_dir")
     artifacts = []
-    for name, content, kind in (("report.json", canonical_json(report), "evidence_report"),
-                                ("report.html", render_html(report), "evidence_html"),
-                                ("estimators.svg", render_forest(report), "diagnostic_forest")):
+    for name, content, kind in outputs:
         path = _publish(root, name, content)
         artifacts.append(ArtifactRecord(path=name, sha256=file_hash(path), lineage=lineage, kind=kind))
     status = "fail" if report["state"] == "failed" else "blocked" if report["state"] in ("missing", "blocked") else "pass"
