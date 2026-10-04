@@ -37,7 +37,10 @@ one-step and CV-TMLE separately. State shares sum these county information
 shares and are descriptive. This uses the orchestrator's clarified PR #18 gate
 instead of inventing a state/block metric or a different information definition.
 Zero D fails this confirmatory gate, including a scientifically exact identity
-contrast. Failure retains the point estimates as diagnostic-only; no trimming,
+contrast. Positive D outside float64 range is preserved as `D_scientific`
+with a null numeric D; positivity is checked before squaring. The family alias
+`cv_tmle` and the merged likelihood-specific names use identical gates.
+Failure retains the point estimates as diagnostic-only; no trimming,
 ratio capping, reweighting or favorable-estimator selection is performed.
 
 ESS is `(sum v)^2 / sum(v^2)` for nonnegative weights only. Target `v=w` and
