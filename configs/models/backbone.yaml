@@ -1,0 +1,22 @@
+# Frozen starting architecture: OXYFORMER_V2_PLAN.md sections 2, 3.2 and 3.3.
+feature_encoder:
+  width: 64
+  layers: 3
+  heads: 4
+  feedforward_width: 128
+  activation: gelu
+  normalization: pre_layer_norm
+  pooling: cls
+  dropout: 0.10
+  feature_order_encoding: false
+  geographic_embeddings: false
+county_context:
+  pooling: pma
+  seeds: 4
+  heads: 4
+  dropout: 0.10
+  references: all_permitted_training_covariates
+  exclude_training_query: true
+  empty_county: zero_tokens
+  cache: eval_without_gradients_only
+nuisance_parameter_cap: 1000000
