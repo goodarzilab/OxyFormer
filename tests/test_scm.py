@@ -914,3 +914,40 @@ def test_recipe_domain_matches_enforced_box_and_has_at_least_100x_margin(tmp_pat
 def test_seed_rejected_before_random_sampling(seed):
     with pytest.raises(ContractError, match="seed must be"):
         generate_suite_a(frame(), config(), policy(), seed=seed)
+
+
+def test_wide_uniform_selected_truth_matches_logistic_antiderivative():
+    intercept, slope = .7, .12
+    f = replace(frame(2, 1), support_keys=("s", "stay"), columns=("x",), x=((0.,), (0.,)),
+                coordinates=((0., 0.), (0., 0.)), region_ids=("r0", "r0"))
+    p = replace(policy(), components_by_key=(("s", ((-10010., 10010.),)), ("stay", ((0., 1.),))))
+    c = config(survey_inclusion=True, heterogeneous_eligibility=True)
+    def selected_mass(lo, hi):
+        return (np.logaddexp(0., intercept-slope*lo)
+                -np.logaddexp(0., intercept-slope*hi))/(slope*(hi-lo))
+    mass_wide = selected_mass(-10010., 10010.)
+    mass_stay = selected_mass(0., 1.)
+    moved_mass = (np.logaddexp(0., intercept+slope*10010.)
+                  -np.logaddexp(0., intercept-slope*10008.))/(slope*20020.)
+    expected = 2*moved_mass/(mass_wide+mass_stay)
+    result = generate_suite_a(f, c, p)
+    assert result.observed_law_truth.value == pytest.approx(expected, abs=1e-8, rel=0)
+    assert result.structural_causal_truth.value == pytest.approx(expected, abs=1e-8, rel=0)
+    assert result.integration_uncertainty.selected_mass_fraction == pytest.approx(
+        (mass_wide+mass_stay)/2, abs=1e-10, rel=0)
+
+
+def test_positive_count_rate_survives_exact_covariate_baseline_cancellation():
+    from fractions import Fraction
+    from oxyformer.validation.scm import structural_mean
+    f = replace(frame(1, 1), columns=("x", "z", "tiny"), x=((-100., -100., 1e-14),),
+                coordinates=((0., 0.),))
+    c = config("null", local_confounding="measured", local_strength=1e-15,
+               registration_probability=.65)
+    for local in (-1., 1.):
+        expected = float((Fraction(1e-14)/4+Fraction(local)*Fraction(1e-15))*Fraction(.65))
+        mean = structural_mean([0., 10.], f, 0, LatentState(local=local), c)
+        assert_allclose(mean, expected, rtol=1e-15, atol=0)
+        assert (mean > 0).all()
+    result = generate_suite_a(f, c, policy())
+    assert result.observed_law_truth.value == result.structural_causal_truth.value == 0.
