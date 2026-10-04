@@ -75,6 +75,9 @@ profiles:
       never infer them.
     release_note: Require explicit status, registration coverage and geography vintage;
       year alone is insufficient.
+    municipality:
+    - CODPTORE
+    - CODMUNRE
   dane_2024:
     country: COL
     dictionary_year: 2024
@@ -138,6 +141,9 @@ profiles:
       never infer them.
     release_note: Require explicit status, registration coverage and geography vintage;
       year alone is insufficient.
+    municipality:
+    - CODPTORE
+    - CODMUNRE
   dane_2025:
     country: COL
     dictionary_year: 2025
@@ -201,6 +207,9 @@ profiles:
       never infer them.
     release_note: Require explicit status, registration coverage and geography vintage;
       year alone is insufficient.
+    municipality:
+    - CODPTORE
+    - CODMUNRE
   inec_2015:
     country: ECU
     dictionary_year: 2015
@@ -255,6 +264,9 @@ profiles:
     measurement_evidence: DDI peso question specifies grams, interviewer range 500–5000.
       The unlabeled 99 in valrng is kept explicitly ambiguous, never interpreted as
       99 grams.
+    municipality:
+    - prov_res
+    - cant_res
   inec_2024:
     country: ECU
     dictionary_year: 2024
@@ -312,3 +324,6 @@ profiles:
       member: Sintaxis_ENV_2024.sps
       interpretation: Published pesogrupo syntax covers 500–5500, uses gram labels
         and assigns peso=99 to Sin información. This range differs from 2015.
+    municipality:
+    - prov_res
+    - cant_res

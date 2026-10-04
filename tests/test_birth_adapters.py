@@ -331,3 +331,22 @@ def test_empty_file_has_zero_balanced_accounting(make):
     assert audit.input_count == audit.eligible_count == audit.excluded_count == 0
     with pytest.raises(ContractError, match='no eligible'):
         audit.assert_anchor_ready()
+
+
+def test_ecuador_parishes_share_canton_link_even_with_missing_parish(make, monkeypatch):
+    case = make('inec_2024', ('2500', '2600', '2700'),
+                [{}, {'parr_res': '010102'}, {'parr_res': ''}])
+    exposure = case['exposure_manifest']
+    extra = dane.ResidenceAssignment(residence=('01', '0101', '010102'), exposure_mmhg=12,
+                                    lineage_namespace='synthetic:geography', lineage_id='another-parish')
+    exposure = replace(exposure, assignments=exposure.assignments + (extra,))
+    monkeypatch.setattr(dane, '_owner_approvals', lambda: {'owner_decisions': {'birth_exposure': {
+        'ECU': {'status': 'approved', 'manifest_hash': exposure.content_hash}}}})
+    records, audit = load(case, exposure_manifest=exposure,
+                          mapping=replace(case['mapping'], expected_exposure_hash=exposure.content_hash))
+    keys = [[(link.namespace, link.entity_id) for link in r.links if link.relation == 'municipality']
+            for r in records]
+    assert keys[0] == keys[1] == keys[2]
+    assert [r.exposure_mmhg for r in records] == [10, 12, None]
+    assert records[2].maternal_residence is None
+    assert not records[2].observation_eligible

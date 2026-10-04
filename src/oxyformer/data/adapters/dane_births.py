@@ -356,10 +356,11 @@ def _load(bundle, release, mapping, exposure_manifest, country, weight_reader, s
         elif assignment is None:
             reasons.append('unmapped_residence')
         links, identifiers = [], []
-        if residence is not None:
+        municipality = _geography(row, profile['municipality'])
+        if municipality is not None:
             links.append(EntityLink(observation_id=oid, relation='municipality',
                                     namespace=f'{country}:{release.geography_vintage}',
-                                    entity_id=canonical_json(residence)))
+                                    entity_id=canonical_json(municipality)))
         if assignment is not None:
             links.append(EntityLink(observation_id=oid, relation='repeated_geography',
                                     namespace=assignment.lineage_namespace, entity_id=assignment.lineage_id))
