@@ -8,6 +8,7 @@ observed law, including measurement error, without fitting an oracle regression.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from types import MappingProxyType
 from itertools import product
 from fractions import Fraction
 from typing import Literal
@@ -18,6 +19,78 @@ from numpy.polynomial.legendre import leggauss
 
 from oxyformer.design.policies import ShiftOrStayPolicy
 from oxyformer.provenance import Immutable, require, unique
+
+
+# Registered recipe envelopes, also declared in configs/validation/suite_a.yaml.
+# Signed quantities contain zero; positive scales retain a nonzero lower bound.
+# Physical probability constraints are checked separately after widening.
+REGISTERED_NUMERIC_BOX = MappingProxyType({
+    "dose": (0., 10.), "delta": (2., 2.), "near_scale": (.05, .05),
+    "coefficient": (-2., 2.), "noise_sd": (1., 1.),
+    "exposure_error": (.4, .4), "migration": (2., 2.),
+    "registration_probability": (.65, 1.), "denominator_error": (.2, .2),
+    "coordinate": (0., 10.), "covariate": (-1., 1.), "weight": (1., 1.),
+    "paired_c": (-1.5, 1.5), "paired_tau": (-2., 2.), "intervention_dose": (0., 10.),
+})
+SIGNED_QUANTITIES = frozenset({"dose", "coefficient", "coordinate", "covariate",
+                               "paired_c", "paired_tau", "intervention_dose"})
+NUMERIC_MARGIN = 100.
+_expanded_numeric_box = {
+    name: ((-NUMERIC_MARGIN*max(abs(lo), abs(hi)), NUMERIC_MARGIN*max(abs(lo), abs(hi)))
+           if name in SIGNED_QUANTITIES else (lo/NUMERIC_MARGIN, hi*NUMERIC_MARGIN))
+    for name, (lo, hi) in REGISTERED_NUMERIC_BOX.items()
+}
+# Wider, independently exercised axes retain the inherited stress regressions.
+# They do NOT widen beta/confounding coefficients or the positive shift floor.
+# Pair coefficients/doses use exact rational intervention arithmetic, unlike
+# nonlinear SCM responses. No attempt to support every float64 box is made.
+_expanded_numeric_box.update({
+    "dose": (-10010., 10010.),
+    "near_scale": (float(np.nextafter(0., 1.)), 1000.),
+    "weight": (float(np.nextafter(0., 1.)), 1.7e308),
+    "paired_c": (-1e307, 1e307), "paired_tau": (-1e300, 1e300),
+    "intervention_dose": (-1e308, 1e308),
+})
+NUMERIC_DOMAIN = MappingProxyType(_expanded_numeric_box)
+del _expanded_numeric_box
+
+
+def validate_numeric(values, kind, name, *, allow_zero=False):
+    """Refuse unsupported inputs before arithmetic; never normalize or clip.
+
+    The domain is fixed, not caller-configurable. Zero is an explicit disabled
+    mechanism/zero-weight/identity exception for otherwise positive quantities.
+    This check is for declared inputs, not intermediate values or Gaussian draws.
+    """
+    lower, upper = NUMERIC_DOMAIN[kind]
+    array = np.asarray(values)
+    require(array.dtype.kind in "fiu", f"{name} must be numeric")
+    valid = np.isfinite(array) & (array >= lower) & (array <= upper)
+    if allow_zero:
+        valid |= array == 0
+    require(bool(valid.all()),
+            f"{name} outside supported numeric domain: [{lower}, {upper}]"
+            + (" or zero" if allow_zero else ""))
+
+
+def validate_components(components):
+    require(bool(components), "SCM assignment needs nonempty support")
+    validate_numeric(components, "dose", "support endpoints")
+    require(all(lo < hi for lo, hi in components), "invalid support component")
+    require(all(first[1] < second[0] for first, second in zip(components, components[1:])),
+            "support components must be sorted and separated")
+
+
+def validate_policy_domain(policy):
+    validate_numeric(policy.delta_mmhg, "delta", "delta", allow_zero=True)
+    for _, components in policy.components_by_key:
+        # Unused empty policy strata are legitimate; assignment strata are not.
+        if components:
+            validate_components(components)
+
+
+def validate_seed(seed):
+    require(type(seed) is int and 0 <= seed < 2**64, "seed must be an integer in [0, 2**64)")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -43,6 +116,9 @@ class CovariateFrame(Immutable):
 
     def __post_init__(self):
         Immutable.__post_init__(self)
+        validate_numeric(self.coordinates, "coordinate", "coordinates")
+        validate_numeric([v for row in self.x for v in row if v is not None], "covariate", "X")
+        validate_numeric(self.weights, "weight", "origin weights", allow_zero=True)
         n = len(self.original_ids)
         require(n > 0, "empty covariate frame")
         unique(self.original_ids, "original IDs")
@@ -73,6 +149,7 @@ class SCMConfig(Immutable):
     """
     name: str
     active_mechanisms: tuple[str, ...]
+    numeric_domain: Literal["suite-a-100x-v1"] = "suite-a-100x-v1"
     effect: Literal["null", "linear", "nonlinear", "sign_changing"] = "linear"
     beta: float = 1.0
     local_confounding: Literal["none", "measured", "omitted"] = "none"
@@ -95,6 +172,12 @@ class SCMConfig(Immutable):
 
     def __post_init__(self):
         Immutable.__post_init__(self)
+        validate_numeric((self.beta, self.local_strength, self.regional_strength),
+                         "coefficient", "effect/confounding coefficients")
+        for name in ("near_scale", "noise_sd", "exposure_error", "migration",
+                     "registration_probability", "denominator_error"):
+            validate_numeric(getattr(self, name), name, name,
+                             allow_zero=name not in ("near_scale", "registration_probability"))
         expected = {self.effect}
         for scale in ("local", "regional"):
             kind = getattr(self, scale + "_confounding")
@@ -122,6 +205,7 @@ class SCMConfig(Immutable):
         return bool(self.migration or self.selected_outcome or self.missing_biomarkers)
 
     def validate_policy(self, policy: ShiftOrStayPolicy, frame: CovariateFrame, *, eligible_by_key=None):
+        validate_policy_domain(policy)
         support = dict(policy.components_by_key)
         require(set(frame.support_keys) <= support.keys(), "unknown frame support key")
         used = [support[k] for k in set(frame.support_keys)]
@@ -141,6 +225,13 @@ class LatentState:
     illness: float = 0.0
     error: float = 0.0
     denominator_factor: float = 1.0
+
+    def __post_init__(self):
+        require(self.local in (-1., 0., 1.) and self.regional in (-1., 0., 1.)
+                and self.illness in (0., 1.), "invalid latent causes")
+        validate_numeric(abs(self.error), "exposure_error", "latent exposure error", allow_zero=True)
+        require(np.isfinite(self.denominator_factor) and 0 < self.denominator_factor < 2,
+                "invalid latent denominator factor")
 
 
 def latent_states(config: SCMConfig):
@@ -167,7 +258,9 @@ def adjustment_key(frame, row, state, config):
 
 
 def effect(a, config):
-    a = np.asarray(a, dtype=float)
+    # Keep the retained dose precision through the bounded nonlinear response;
+    # converting here to float64 loses supported shifts at large centers.
+    a = np.asarray(a, dtype=np.longdouble)
     if config.effect == "null":
         return np.zeros_like(a)
     if config.effect == "linear":
@@ -207,6 +300,9 @@ def exact_shift_intervals(components, delta):
     remains in its origin component even when the law is narrower than an ULP.
     This continuous truth geometry precedes serialization of observed doses.
     """
+    validate_numeric(delta, "delta", "delta", allow_zero=True)
+    if components:
+        validate_components(components)
     shift = exact(delta)
     if shift == 0:
         return ()
@@ -296,6 +392,8 @@ class AssignmentLaw:
     because its ordinary probability underflows. Public draws are floats.
     """
     def __init__(self, frame, row, state, config, components):
+        validate_components(components)
+        require(type(row) is int and 0 <= row < len(frame.original_ids), "invalid frame row")
         self.components = components
         self.error = exact(state.error)
         self.scale = exact(config.near_scale)
@@ -411,6 +509,7 @@ class AssignmentLaw:
 
 def validate_count_rates(frame, config, policy, *, eligible_by_key=None):
     """Check the entire factual/intervention support, not only sampled events."""
+    validate_policy_domain(policy)
     if config.registration_probability == 1 and config.denominator_error == 0:
         return
     support = dict(policy.components_by_key)

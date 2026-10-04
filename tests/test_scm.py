@@ -811,3 +811,106 @@ def test_count_reachable_intervals_use_exact_measurement_error_preimages(monkeyp
         # Comparison occurs only at the smooth-rate evaluation boundary.
         values = tuple(np.longdouble(str(v.numerator))/np.longdouble(str(v.denominator)) for v in reference)
         assert actual == values
+
+
+@pytest.mark.parametrize("case", ["amplified_sign_change", "overflowing_null_support"])
+def test_final_review_counterexamples_are_refused_before_computation(case, monkeypatch):
+    import oxyformer.validation.generators as generators
+    def forbidden(*args, **kwargs):
+        pytest.fail("unsupported inputs reached simulator computation")
+    monkeypatch.setattr(generators, "_sample_observations", forbidden)
+    monkeypatch.setattr(generators, "exact_shift_intervals", forbidden)
+    f = replace(frame(1, 1), coordinates=((0., 0.),), columns=("x",), x=((0.,),))
+    with pytest.raises(ContractError, match="outside supported numeric domain"):
+        if case == "amplified_sign_change":
+            generate_suite_a(f, config("sign_changing", beta=1e34,
+                             assignment="near_deterministic", near_scale=1e-100, noise_sd=0.),
+                             policy(delta=1e-16))
+        else:
+            generate_suite_a(f, config("null", noise_sd=0.), policy(((-1e308, 1e308),)))
+
+
+@pytest.mark.parametrize("center", [5., 10000., -10000.])
+@pytest.mark.parametrize("beta", [-200., 200.])
+def test_supported_sign_changing_boundary_against_exact_reference(center, beta):
+    from fractions import Fraction
+    f = replace(frame(1, 1), coordinates=((0., 0.),), columns=("x",), x=((0.,),))
+    delta = .02
+    c = config("sign_changing", beta=beta, assignment="near_deterministic",
+               near_scale=1e-100, noise_sd=0.)
+    sample = generate_suite_a(f, c, policy(((center-5, center+5),), delta=delta))
+    # The symmetric Laplace's mean displacement is zero; excluded tails are
+    # exp(-5e100), far below this absolute tolerance. Independent exact algebra.
+    expected = float(Fraction(beta)*(2*(Fraction(center)-5)*Fraction(delta)
+                                     +Fraction(delta)**2)/10)
+    assert sample.observed_law_truth.value == pytest.approx(expected, abs=1e-8, rel=0)
+    assert sample.structural_causal_truth.value == pytest.approx(expected, abs=1e-8, rel=0)
+
+
+def test_supported_null_support_boundary_returns_zero_truths():
+    f = replace(frame(1, 1), coordinates=((0., 0.),))
+    sample = generate_suite_a(f, config("null", noise_sd=0.), policy(((-10010., 10010.),)))
+    assert sample.observed_law_truth.value == sample.structural_causal_truth.value == 0.
+
+
+@pytest.mark.parametrize("name,value", [
+    ("beta", 201.), ("local_strength", -201.), ("regional_strength", 201.),
+    ("near_scale", 1001.), ("noise_sd", 101.), ("noise_sd", .001),
+    ("exposure_error", 41.), ("exposure_error", .001),
+    ("migration", 201.), ("migration", .001),
+    ("registration_probability", .001), ("denominator_error", .001),
+])
+def test_each_mechanism_numeric_input_is_validated(name, value):
+    with pytest.raises(ContractError, match="outside supported numeric domain"):
+        config(**{name:value})
+
+
+@pytest.mark.parametrize("field,value", [
+    ("coordinates", ((1001., 0.),)), ("x", ((101., None),)),
+    ("weights", (1.71e308,)),
+])
+def test_fixed_frame_numeric_inputs_are_validated(field, value):
+    with pytest.raises(ContractError, match="outside supported numeric domain"):
+        replace(frame(1, 1), **{field:value})
+
+
+@pytest.mark.parametrize("delta", [1e-16, .019, 201.])
+def test_policy_shift_domain_is_checked_before_sampling(delta, monkeypatch):
+    import oxyformer.validation.generators as generators
+    monkeypatch.setattr(generators, "_sample_observations",
+                        lambda *args: pytest.fail("sampling preceded domain validation"))
+    with pytest.raises(ContractError, match="delta outside supported numeric domain"):
+        generate_suite_a(frame(), config(), policy(delta=delta))
+
+
+def test_standalone_assignment_rejects_unsupported_support_before_center():
+    with pytest.raises(ContractError, match="support endpoints outside supported numeric domain"):
+        AssignmentLaw(frame(1, 1), 0, LatentState(), config("null"), ((-1e308, 1e308),))
+
+
+def test_recipe_domain_matches_enforced_box_and_has_at_least_100x_margin(tmp_path):
+    import yaml
+    from oxyformer.validation.scm import REGISTERED_NUMERIC_BOX, NUMERIC_DOMAIN, SIGNED_QUANTITIES
+    path = Path(__file__).parents[1]/"configs/validation/suite_a.yaml"
+    recipe = yaml.safe_load(path.read_text())
+    assert recipe["numeric_domain"]["registered_box"] == {k:list(v) for k,v in REGISTERED_NUMERIC_BOX.items()}
+    for name, (lo, hi) in REGISTERED_NUMERIC_BOX.items():
+        lower, upper = NUMERIC_DOMAIN[name]
+        if name in SIGNED_QUANTITIES:
+            assert lower <= -100*max(abs(lo),abs(hi))
+            assert upper >= 100*max(abs(lo),abs(hi))
+        else:
+            assert 0 < lower <= lo/100
+            assert upper >= hi*100
+    # A caller cannot silently widen/disable the enforced bounds in a recipe.
+    recipe["numeric_domain"]["supported_box"]["coefficient"] = [-1e100, 1e100]
+    altered = tmp_path/"altered.yaml"
+    altered.write_text(yaml.safe_dump(recipe))
+    with pytest.raises(ContractError, match="differs from enforced domain"):
+        load_suite_a(altered)
+
+
+@pytest.mark.parametrize("seed", [-1, 1.5, 2**64])
+def test_seed_rejected_before_random_sampling(seed):
+    with pytest.raises(ContractError, match="seed must be"):
+        generate_suite_a(frame(), config(), policy(), seed=seed)
