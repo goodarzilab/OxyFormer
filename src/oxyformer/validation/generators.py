@@ -247,32 +247,21 @@ def _posterior_mean(at, terms, frame, config):
     return np.sum(weights*means,axis=0)
 
 
-def _quadrature_shift_mask(points, policy, support_key):
-    """Evaluate the frozen map without rounding integration nodes to FP64.
-
-    These are integration coordinates, not recorded exposures. The intervals
-    and endpoint arithmetic are exactly those of ShiftOrStayPolicy.shift_mask;
-    retaining the node precision avoids moving positive mass across a cutoff.
-    """
-    moved = np.zeros(len(points), dtype=bool)
-    if policy.delta_mmhg:
-        for lo,hi in dict(policy.components_by_key)[support_key]:
-            if hi-lo >= policy.delta_mmhg:
-                moved |= (lo <= points) & (points <= hi-policy.delta_mmhg)
-    return moved
-
-
 def _integrate(frame, config, policy, groups, order):
     mean_contrasts = np.zeros(2)
     log_mass = -np.inf
     assignment_mass_error = 0.
     for key,terms in groups.items():
         support_key = key[1]
-        boundaries = _integration_breakpoints(terms,dict(policy.components_by_key)[support_key],policy.delta_mmhg,config)
+        components = dict(policy.components_by_key)[support_key]
+        boundaries = _integration_breakpoints(terms,components,policy.delta_mmhg,config)
+        # Use precisely the frozen policy intervals; classify mass before
+        # rounding a node into exposure units, even for sub-ULP scale laws.
+        shift_intervals = tuple((lo,hi-policy.delta_mmhg) for lo,hi in components
+                                if policy.delta_mmhg > 0 and hi-lo >= policy.delta_mmhg)
         for term in terms:
-            points,quadrature = term.law.quadrature(order,boundaries)
+            points,quadrature,moved = term.law.quadrature(order,boundaries,shift_intervals=shift_intervals)
             assignment_mass_error = max(assignment_mass_error,abs(float(quadrature.sum())-1))
-            moved = _quadrature_shift_mask(points,policy,support_key)
             shifted = points+policy.delta_mmhg*moved
             mu = _posterior_mean(points,terms,frame,config)
             mu_d = _posterior_mean(shifted,terms,frame,config)
