@@ -532,3 +532,45 @@ def test_empty_profile_and_empty_shape_mismatch_remain_invalid(split):
 def test_class_prior_remains_undefined_without_target_mass(size):
     with pytest.raises(ContractError, match="invalid origin pair weights"):
         weighted_class_prior(origin_pairs_with_weights(torch.zeros(size)))
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("target_dtype", [torch.bool, torch.int64, torch.float32, torch.float64])
+@pytest.mark.parametrize("entrypoint", ["direct", "endpoint", "profile"])
+@pytest.mark.parametrize("reduction", ["none", "sum", "mean"])
+def test_identity_binary_representations_values_and_gradients(dtype, target_dtype, entrypoint, reduction, split):
+    base = torch.tensor([.25, .75, .5, .5], dtype=dtype, requires_grad=True)
+    target = torch.tensor([0, 1, 0, 1], dtype=target_dtype)
+    weights = torch.tensor([1., 3., 0., 2.], dtype=dtype)
+    expected_prediction = base
+    if entrypoint == "direct":
+        loss = squared_loss(base, target, weights, reduction=reduction)
+    elif entrypoint == "endpoint":
+        loss = endpoint_loss(base, target, weights, family="identity", reduction=reduction)
+    else:
+        offsets = CountyOffsets(split, 0, ("c", "c", "d", "d"), family="identity",
+                                exposure_assignment_level="tract").to(dtype=dtype)
+        offsets.update_identity(split.training_ids(0), target, base, weights)
+        torch.testing.assert_close(offsets.values, base.new_tensor([.125, .5]), rtol=0, atol=0)
+        loss = offsets.training_loss(split.training_ids(0), base, target, weights, reduction=reduction)
+        expected_prediction = base + base.new_tensor([.125, .125, .5, .5])
+    residual = expected_prediction - target.to(torch.promote_types(target_dtype, dtype))
+    rows = weights * residual.square()
+    expected = rows if reduction == "none" else rows.sum()
+    expected_gradient = 2 * weights * residual
+    if reduction == "mean":
+        expected = expected / weights.sum()
+        expected_gradient = expected_gradient / weights.sum()
+    torch.testing.assert_close(loss, expected, rtol=0, atol=0)
+    gradient, = torch.autograd.grad(loss.sum(), base)
+    torch.testing.assert_close(gradient, expected_gradient.to(dtype), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("size", [0, 4])
+def test_boolean_identity_zero_mass_keeps_autograd(size):
+    base = torch.zeros(size, requires_grad=True)
+    target = torch.zeros(size, dtype=torch.bool)
+    loss = squared_loss(base, target, torch.zeros(size), reduction="mean")
+    torch.testing.assert_close(loss, torch.tensor(0.), rtol=0, atol=0)
+    gradient, = torch.autograd.grad(loss, base)
+    torch.testing.assert_close(gradient, torch.zeros_like(base), rtol=0, atol=0)
