@@ -3,9 +3,14 @@ schema_version: 1
 # execution. Each module receives the unchanged contracts.StageRequest API.
 # needs maps original unit IDs to immutable, relative input files. Code units
 # are coordinator merge barriers, never sources of unmerged scientific code.
+# Acquisition producers use source receipts rather than StageResult; only the
+# registry can declare that exemption. All other dependency attempts must carry
+# a passing, verified StageResult, even if a task omits its receipt from needs.
+# Unit IDs and stage names differ: unit tract-gate runs tract-support-gate.
 stages:
   exposure-atlas:
     module: oxyformer.exposure.build
+    acquisition_receipts: {fetch-census: receipts.json, fetch-dem: receipts.json}
     needs:
       fetch-census: [payload.tar, receipts.json]
       fetch-dem: [payload.tar, receipts.json]
@@ -25,6 +30,7 @@ stages:
     outputs: [atlas.parquet, quality.json, artifact_manifest.json]
   tract-support-gate:
     module: oxyformer.design.gate
+    acquisition_receipts: {fetch-us: receipts.json}
     needs:
       fetch-us: [payload.tar, receipts.json]
       atlas-collect: [atlas.parquet, quality.json, artifact_manifest.json]
@@ -42,20 +48,29 @@ stages:
       simulation-smoke: [result.json, timing.json, artifact_manifest.json]
     outputs: [recipe_lock.json, task_manifest.json, expanded_units.json, budget.json, gate.json]
   coverage:
+    requires_recipe: true
     module: oxyformer.validation.coverage
   campaign-collect:
+    requires_recipe: true
     module: oxyformer.validation.campaign
   primary:
+    requires_recipe: true
     module: oxyformer.training.nested_cv
   ablation:
+    requires_recipe: true
     module: oxyformer.training.nested_cv
   anchor:
+    requires_recipe: true
     module: oxyformer.training.nested_cv
   refit-audit:
+    requires_recipe: true
     module: oxyformer.training.nested_cv
   anchor-review:
+    requires_recipe: true
     module: oxyformer.reporting
   audit-collect:
+    requires_recipe: true
     module: oxyformer.reporting
   tract-release:
+    requires_recipe: true
     module: oxyformer.reporting
