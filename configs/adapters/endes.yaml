@@ -51,7 +51,10 @@ source_notes:
     No singleton correction, finite-population fraction or replicate-weight
     procedure is invented. HV033 is preserved without interpreting it as an FPC.
   exposure: >-
-    HV040 is documented cluster altitude in metres. Quantified altitude
+    HV040 is documented cluster altitude in metres. The household dictionaries
+    explicitly give its range as -24:5100 (2023 PDF page 2; 2024 PDF page 3,
+    RECH0 row 32). Their SHA-256 hashes and URLs are pinned in each year mapping.
+    Quantified altitude
     uncertainty is not supplied by these dictionaries: altitude_uncertainty_m
     is null (unknown), never zero. This does not authorize a null altitude_m:
     a numeric HV040 value is a required exposure prerequisite. Missing HV040

@@ -575,3 +575,18 @@ def test_roster_age_eligibility_does_not_require_outcome_record(release, year, a
     assert row.state == ("biomarker_record_absent" if absent else "measured")
     assert row.analysis_eligible is not absent
     assert audit.eligible_weight_sum == 10.0
+
+
+@pytest.mark.parametrize("year", [2023, 2024])
+@pytest.mark.parametrize("altitude,valid", [(-25, False), (-24, True), (5100, True), (5101, False)])
+def test_year_dictionary_altitude_range(release, year, altitude, valid):
+    # HV040 row 32 explicitly lists -24:5100: 2023 household PDF p2,
+    # 2024 household PDF p3. Bounds are source encoding, not invented support.
+    args = release(year, mutate=lambda t: t["RECH0"][0].update(HV040=str(altitude)))
+    if valid:
+        records, audit = load_endes(*args)
+        assert first_child(records).altitude_m == float(altitude)
+        audit.assert_inference_ready()
+    else:
+        with pytest.raises(ContractError, match="altitude outside year-documented range"):
+            load_endes(*args)
