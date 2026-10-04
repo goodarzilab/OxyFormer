@@ -515,3 +515,23 @@ def test_geometric_support_gate_still_rejects_an_actual_gap():
     law = AssignmentLaw(f,0,LatentState(),c,((0.,3.),(7.,10.)))
     with pytest.raises(ContractError,match="leaves conditional observed-law support"):
         _posterior_mean(np.array([5.]),[_Term(0,LatentState(),1.,law)],f,c)
+
+
+@pytest.mark.parametrize("scale", [.05, .25, .5])
+def test_extreme_ratio_tilt_composes_with_near_deterministic_assignment(scale):
+    from oxyformer.validation.scm import AssignmentLaw, LatentState
+    f = replace(frame(2), coordinates=((0.,0.),)*2)
+    c = config("nonlinear", assignment="near_deterministic", near_scale=scale, extreme_ratios=True)
+    law = AssignmentLaw(f,0,LatentState(),c,((0.,10.),))
+    # Independent tilted-Laplace density, including the exactly flat left
+    # piece at scale=.25 and the monotone density at scale=.5.
+    def unnormalized(a):
+        return np.exp(-abs(a-5)/scale-4*a)
+    normalizer = quad(unnormalized,0,10,points=[5],epsabs=1e-25,epsrel=1e-11)[0]
+    at = np.array([1.,4.,8.])
+    assert_allclose(law.density(at),unnormalized(at)/normalizer,rtol=1e-11,atol=0)
+    expected = quad(lambda a: unnormalized(a)/normalizer*(np.sin((a+2)/2)-np.sin(a/2)),
+                    0,8,points=[5],epsabs=1e-11)[0]
+    result = generate_suite_a(f,c,policy())
+    assert result.observed_law_truth.value == pytest.approx(expected,abs=1e-9)
+    assert result.structural_causal_truth.value == pytest.approx(expected,abs=1e-9)

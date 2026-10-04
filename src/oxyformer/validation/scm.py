@@ -68,6 +68,7 @@ class SCMConfig(Immutable):
     Assignment log-density slope is .3 U_local + .2 U_region - .25 illness
     when the corresponding mechanism is enabled. Near-deterministic assignment
     instead uses a truncated Laplace law around a location-dependent center.
+    extreme_ratios adds a -4*A log-density tilt to either continuous law.
     """
     name: str
     active_mechanisms: tuple[str, ...]
@@ -238,7 +239,9 @@ class AssignmentLaw:
         self.error = state.error
         self.scale = config.near_scale
         self.near = config.assignment == "near_deterministic"
-        self.rate = (-4. if config.extreme_ratios else 0.) + .3*state.local + .2*state.regional - .25*state.illness
+        self.rate = -4. if config.extreme_ratios else 0.
+        if not self.near:
+            self.rate += .3*state.local + .2*state.regional - .25*state.illness
         lo, hi = components[0][0], components[-1][1]
         self.center = lo+(hi-lo)*float(expit(frame.coordinates[row][0]+.2*state.local+.1*state.regional-.2*state.illness))
         intervals = []
@@ -247,15 +250,16 @@ class AssignmentLaw:
             if self.near and lower < self.center < upper:
                 edges.insert(1, self.center)
             for left, right in zip(edges[:-1], edges[1:]):
-                rate = (1/self.scale if right <= self.center else -1/self.scale) if self.near else self.rate
+                rate = self.rate
+                if self.near:
+                    rate += 1/self.scale if right <= self.center else -1/self.scale
                 intervals.append(_ExponentialPiece(left, right, rate, 0.))
+        peaks = np.array([piece.peak for piece in intervals])
+        anchor = max(peaks) if self.rate > 0 else min(peaks)
+        relative_heights = self.rate*(peaks-anchor)
         if self.near:
-            distances = np.array([abs(piece.peak-self.center) for piece in intervals])
-            relative_heights = -(distances-distances.min())/self.scale
-        else:
-            peaks = np.array([piece.peak for piece in intervals])
-            anchor = max(peaks) if self.rate > 0 else min(peaks)
-            relative_heights = self.rate*(peaks-anchor)
+            distances = np.abs(peaks-self.center)
+            relative_heights -= (distances-distances.min())/self.scale
         log_masses = relative_heights+np.array([p.log_integral for p in intervals])
         # Subtract the largest mass BEFORE computing the normalizer: even the
         # largest unnormalized mass may be exp(-millions) inside a support gap.
