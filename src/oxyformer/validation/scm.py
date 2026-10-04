@@ -26,6 +26,7 @@ class CovariateFrame(Immutable):
     Every row is retained, including missing outcomes/biomarkers. Thus geometry,
     X (including None), origin weights and all cluster sizes survive simulation.
     Coordinates refer to current residence. Migration models prior residence.
+    Dependence clusters may cross assignment geographies (e.g. linked households).
     """
     original_ids: tuple[str, ...]
     geography_ids: tuple[str, ...]
@@ -51,12 +52,10 @@ class CovariateFrame(Immutable):
         require(all(len(v) == len(self.columns) for v in self.x), "X width")
         require(all(w >= 0 for w in self.weights) and sum(self.weights) > 0, "invalid weights")
         by_geo = {}
-        by_cluster = {}
-        for geo, region, cluster, coord, key in zip(self.geography_ids, self.region_ids,
-                self.cluster_ids, self.coordinates, self.support_keys):
+        for geo, region, coord, key in zip(self.geography_ids, self.region_ids,
+                self.coordinates, self.support_keys):
             value = (region, coord, key)
             require(by_geo.setdefault(geo, value) == value, "inconsistent assignment geography")
-            require(by_cluster.setdefault(cluster, geo) == geo, "cluster spans assignment geographies")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
