@@ -14,6 +14,7 @@ from hashlib import sha256
 from importlib import import_module, metadata
 from pathlib import Path
 import platform
+import operator
 import re
 
 import numpy as np
@@ -115,7 +116,12 @@ class TabICLComparator:
         require(task in ("outcome", "origin"), "unknown nuisance task")
         require(family in ("identity", "bernoulli") and (task != "origin" or family == "bernoulli"),
                 "unsupported outcome family; comparator blocked")
-        require(type(seed) is int and seed >= 0, "explicit nonnegative seed required")
+        require(not isinstance(seed, (bool, np.bool_)), "explicit nonnegative integer seed required")
+        try:
+            seed = operator.index(seed)
+        except TypeError as exc:
+            raise ContractError("explicit nonnegative integer seed required") from exc
+        require(seed >= 0, "explicit nonnegative integer seed required")
         role = "regressor" if family == "identity" else "classifier"
         require(role in checkpoint.filename, "checkpoint task/family mismatch")
         self.checkpoint, self.task, self.family, self.seed = checkpoint, task, family, seed
@@ -200,11 +206,14 @@ class TabICLComparator:
         held_out = {oid for oid, fold in zip(self.split.original_ids, self.split.fold_ids) if fold == self.fold}
         require(set(view.original_ids) <= held_out, "queries must belong to this fitted fold's held-out IDs")
         raw = _matrix(view)
-        supplied_tensor = torch.as_tensor(raw_x)
-        require(supplied_tensor.is_floating_point(), "raw-X must use floating representation")
-        supplied = supplied_tensor.detach().cpu().numpy()
-        require(supplied.shape == raw.shape and
-                np.array_equal(supplied, raw.astype(supplied.dtype), equal_nan=True),
+        supplied_tensor = torch.as_tensor(raw_x).detach().cpu()
+        require(not supplied_tensor.is_complex(), "raw-X must be real numeric/binary values")
+        supplied = supplied_tensor.to(torch.float64).numpy()
+        # Floating representations may round the immutable view values. Integer
+        # and boolean representations must match without truncation/coercion.
+        expected = (torch.as_tensor(raw, dtype=supplied_tensor.dtype).to(torch.float64).numpy()
+                    if supplied_tensor.is_floating_point() else raw)
+        require(supplied.shape == raw.shape and np.array_equal(supplied, expected, equal_nan=True),
                 "complete approved raw-X bypass required")
         for value in (context, group_offset):
             require(value is None or (not getattr(value, "requires_grad", False) and
