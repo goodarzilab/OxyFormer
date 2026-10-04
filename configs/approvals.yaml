@@ -160,6 +160,25 @@ owner_decisions:
     data_terms: "DANE birth microdata are free and public but may not be redistributed without written permission; the run keeps payloads in attempt folders and never commits or shares them"
     interpretation: "consistency of a residence-pressure association with birth outcomes, not oxygen-specific identification"
 
+  # Approved by the owner on 2026-10-04 ("I regardless approve what you listed above"): plan section 6.4's proposed gates as
+  # written, and an influence-concentration gate drafted with gpt-6-astra for the metric the plan names but does not define.
+  release_gates:
+    min_repetitions_per_scenario: 1000
+    coverage_one_sided_95_lower_bound_min: 0.925
+    null_rejection_upper_bound_max: 0.075
+    abs_bias_over_empirical_sd_max: 0.10
+    abs_bias_over_empirical_sd_investigate: 0.20
+    mean_se_over_empirical_sd_range: [0.90, 1.10]
+    numerical_failure_upper_bound_max: 0.01
+    publish_all_failures_and_retry_rules: true
+  influence_concentration_gate:
+    applies_to: [one_step, cv_tmle]          # each estimator separately, from final seed-aggregated contributions
+    definitions: "U_g = sum of u_i over county g (unkernelized); D = sum_g U_g^2; s_g = U_g^2 / D; s_max = max_g s_g; G_eff = 1 / sum_g s_g^2"
+    s_max_max: 0.10
+    g_eff_min: 30
+    require: "D > 0 and every contribution finite"
+    on_failure: "block confirmatory release; publish the estimate as diagnostic-only with s_max, G_eff and ranked county contributions; never trim counties, cap ratios or reweight post hoc"
+
 # Not yet approved. A unit that needs one of these must stop and report; the orchestrator brings it to the owner.
 pending_owner_approval:
   - any relief, flag or distance sensitivity analyses beyond plan_fixed
