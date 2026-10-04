@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Callable, Literal, Protocol
 
 import numpy as np
-from numpy.polynomial.legendre import leggauss
+from scipy.special import logsumexp
 import yaml
 
 from oxyformer.design.policies import ShiftOrStayPolicy
@@ -19,7 +19,7 @@ from oxyformer.provenance import Immutable, ContractError, require, write_artifa
 from oxyformer.validation.analytic_truth import UniformShiftTruth
 from oxyformer.validation.scm import (
     AssignmentLaw, CovariateFrame, LatentState, SCMConfig, adjustment_key,
-    latent_states, observation_probabilities, structural_mean, validate_count_rates,
+    latent_states, observation_probabilities, observation_log_probability, structural_mean, validate_count_rates,
 )
 
 
@@ -68,6 +68,9 @@ class IntegrationUncertainty(Immutable):
     causal_absolute_difference: float | None
     order: int
     converged: bool
+    assignment_mass_error: float | None = None
+    selected_mass_fraction: float | None = None
+    selected_mass_relative_difference: float | None = None
     # Differences between nested orders are diagnostics, not certified bounds.
     interpretation: str = "Successive-order absolute differences; not sampling SEs or rigorous error bounds."
 
@@ -180,56 +183,113 @@ def _groups(frame, config, policy):
             continue
         for state, probability in latent_states(config):
             key = adjustment_key(frame, row, state, config)
-            law = AssignmentLaw(frame, row, state, config, support[frame.support_keys[row]])
-            groups.setdefault(key, []).append(_Term(row, state, frame.weights[row]*probability, law))
-    return groups
+            # Rows with the same X, geometry and state have identical laws and
+            # response means. Combine their weights, retaining their population
+            # mass without repeating identical posterior calculations.
+            identity = (frame.coordinates[row], state)
+            terms = groups.setdefault(key, {})
+            if identity in terms:
+                terms[identity].weight += frame.weights[row]*probability
+            else:
+                law = AssignmentLaw(frame, row, state, config, support[frame.support_keys[row]])
+                terms[identity] = _Term(row, state, frame.weights[row]*probability, law)
+    return {key:list(terms.values()) for key,terms in groups.items()}
+
+
+def _integration_breakpoints(terms, components, delta, config):
+    boundaries = {v for term in terms for v in term.law.breakpoints}
+    for lo,hi in components:
+        boundaries.update([lo,hi,hi-delta])
+    # Mixture posterior transitions can be narrow even when their shifted
+    # preimage falls in a broad assignment component. Resolve pairwise crossings
+    # on their own log-density slope scale, including factual selection weights.
+    for i,first in enumerate(terms):
+        for second in terms[i+1:]:
+            for p in first.law.pieces:
+                for q in second.law.pieces:
+                    slope = p.rate-q.rate
+                    if slope == 0:
+                        continue
+                    lo = max(p.lower+first.state.error,q.lower+second.state.error)
+                    hi = min(p.upper+first.state.error,q.upper+second.state.error)
+                    if lo >= hi:
+                        continue
+                    middle = (lo+hi)/2
+                    difference = (np.log(first.weight)+p.log_probability-p.log_integral
+                                  +p.rate*(middle-first.state.error-p.peak)
+                                  +observation_log_probability(middle,first.state,config)
+                                  -np.log(second.weight)-q.log_probability+q.log_integral
+                                  -q.rate*(middle-second.state.error-q.peak)
+                                  -observation_log_probability(middle,second.state,config))
+                    root = float(middle-difference/slope)
+                    if lo <= root <= hi:
+                        boundaries.add(root)
+                        for distance in (1.,2.,4.,8.,16.,32.):
+                            for sign in (-1,1):
+                                value = root+sign*distance/abs(slope)
+                                if lo < value < hi:
+                                    boundaries.add(value)
+    boundaries.update(v-delta for v in tuple(boundaries))
+    return boundaries
+
+
+def _posterior_mean(at, terms, frame, config):
+    supported = np.logical_or.reduce([term.law.contains(at) for term in terms])
+    require(bool(supported.all()), "policy leaves conditional observed-law support")
+    log_weights = np.array([np.log(t.weight)+t.law.log_density(at)
+                           +observation_log_probability(at,t.state,config) for t in terms])
+    # Shift by the maximum before summation. No ordinary density, including a
+    # shifted density as small as exp(-millions), must be representable.
+    log_weights -= np.max(log_weights,axis=0)
+    weights = np.exp(log_weights)
+    weights /= weights.sum(axis=0)
+    means = np.array([structural_mean(at-t.state.error,frame,t.row,t.state,config) for t in terms])
+    return np.sum(weights*means,axis=0)
+
+
+def _quadrature_shift_mask(points, policy, support_key):
+    """Evaluate the frozen map without rounding integration nodes to FP64.
+
+    These are integration coordinates, not recorded exposures. The intervals
+    and endpoint arithmetic are exactly those of ShiftOrStayPolicy.shift_mask;
+    retaining the node precision avoids moving positive mass across a cutoff.
+    """
+    moved = np.zeros(len(points), dtype=bool)
+    if policy.delta_mmhg:
+        for lo,hi in dict(policy.components_by_key)[support_key]:
+            if hi-lo >= policy.delta_mmhg:
+                moved |= (lo <= points) & (points <= hi-policy.delta_mmhg)
+    return moved
 
 
 def _integrate(frame, config, policy, groups, order):
-    nodes, weights = leggauss(order)
-    observed, causal, mass = 0., 0., 0.
-    for key, terms in groups.items():
+    mean_contrasts = np.zeros(2)
+    log_mass = -np.inf
+    assignment_mass_error = 0.
+    for key,terms in groups.items():
         support_key = key[1]
-        boundaries = {v for term in terms for v in term.law.breakpoints}
-        for lo, hi in dict(policy.components_by_key)[support_key]:
-            boundaries.update([lo, hi, hi-policy.delta_mmhg])
-        # The posterior mean at d(a) changes when d crosses a mixture boundary.
-        boundaries.update([v-policy.delta_mmhg for v in tuple(boundaries)])
-        lower = min(v for t in terms for v in t.law.breakpoints)
-        upper = max(v for t in terms for v in t.law.breakpoints)
-        breaks = sorted({lower, upper} | {v for v in boundaries if lower < v < upper})
-        points = np.concatenate([(lo+hi)/2 + (hi-lo)/2*nodes for lo, hi in zip(breaks[:-1], breaks[1:])])
-        quadrature = np.concatenate([(hi-lo)/2*weights for lo, hi in zip(breaks[:-1], breaks[1:])])
-        moved = policy.shift_mask(points, (support_key,)*len(points))
-        shifted = points + policy.delta_mmhg*moved
-
-        def joint(at):
-            density = np.zeros_like(at)
-            numerator = np.zeros_like(at)
-            for term in terms:
-                prob = observation_probabilities(at, term.state, config)
-                joint_weight = term.weight * term.law.density(at) * prob[0]*prob[1]*prob[2]
-                density += joint_weight
-                numerator += joint_weight * structural_mean(at-term.state.error, frame, term.row, term.state, config)
-            return density, numerator
-
-        density, numerator = joint(points)
-        shifted_density, shifted_numerator = joint(shifted)
-        require(not np.any((density > 0) & (shifted_density <= 0)), "policy leaves conditional observed-law support")
-        mu = np.divide(numerator, density, out=np.zeros_like(points), where=density > 0)
-        mu_d = np.divide(shifted_numerator, shifted_density, out=np.zeros_like(points), where=shifted_density > 0)
-        observed += float(quadrature @ (density*(mu_d-mu)))
-        mass += float(quadrature @ density)
-        causal_integrand = np.zeros_like(points)
+        boundaries = _integration_breakpoints(terms,dict(policy.components_by_key)[support_key],policy.delta_mmhg,config)
         for term in terms:
-            p = observation_probabilities(points, term.state, config)
-            joint_weight = term.weight * term.law.density(points) * p[0]*p[1]*p[2]
-            difference = (structural_mean(shifted-term.state.error, frame, term.row, term.state, config)
-                          - structural_mean(points-term.state.error, frame, term.row, term.state, config))
-            causal_integrand += joint_weight*difference
-        causal += float(quadrature @ causal_integrand)
-    require(mass > 0, "selected population has zero target mass")
-    return np.array([observed/mass, causal/mass])
+            points,quadrature = term.law.quadrature(order,boundaries)
+            assignment_mass_error = max(assignment_mass_error,abs(float(quadrature.sum())-1))
+            moved = _quadrature_shift_mask(points,policy,support_key)
+            shifted = points+policy.delta_mmhg*moved
+            mu = _posterior_mean(points,terms,frame,config)
+            mu_d = _posterior_mean(shifted,terms,frame,config)
+            causal = (structural_mean(shifted-term.state.error,frame,term.row,term.state,config)
+                      -structural_mean(points-term.state.error,frame,term.row,term.state,config))
+            log_weights = (np.log(term.weight)+np.log(quadrature)
+                           +observation_log_probability(points,term.state,config))
+            local_log_mass = float(logsumexp(log_weights))
+            weights = np.exp(log_weights-log_weights.max())
+            weights /= weights.sum()
+            local = np.array([weights@(mu_d-mu),weights@causal])
+            total_log_mass = float(np.logaddexp(log_mass,local_log_mass))
+            mean_contrasts = (np.exp(log_mass-total_log_mass)*mean_contrasts
+                              +np.exp(local_log_mass-total_log_mass)*local)
+            log_mass = total_log_mass
+    require(np.isfinite(log_mass), "truth integration failed to represent positive target mass")
+    return mean_contrasts, log_mass-np.log(sum(frame.weights)), assignment_mass_error
 
 
 _OBSERVED_TARGET = (
@@ -283,20 +343,25 @@ def generate_suite_a(frame: CovariateFrame, config: SCMConfig, policy: ShiftOrSt
     if not groups:
         return _unavailable_truth(observations, common, "empty_target", "selected population has zero target mass")
     order = 16
-    previous = _integrate(frame, config, policy, groups, order)
+    previous, previous_log_mass, _ = _integrate(frame,config,policy,groups,order)
     while order*2 <= max_order:
         order *= 2
-        values = _integrate(frame, config, policy, groups, order)
+        values, log_mass, mass_error = _integrate(frame,config,policy,groups,order)
         difference = np.abs(values-previous)
-        if np.max(difference) <= tolerance:
+        mass_difference = float(abs(np.expm1(log_mass-previous_log_mass)))
+        converged = bool(np.max(difference) <= tolerance and mass_difference <= tolerance and mass_error <= 1e-10)
+        if converged:
             break
-        previous = values
-    require(np.max(difference) <= tolerance, "truth integration did not converge; increase max_order")
+        previous,previous_log_mass = values,log_mass
+    require(converged, "truth integration did not converge; increase max_order")
     observed = TruthArtifact(kind="observed_law", value=float(values[0]), status="integrated", target=_OBSERVED_TARGET, **common)
     causal = TruthArtifact(kind="structural_causal", value=float(values[1]), status="integrated", target=_CAUSAL_TARGET, **common)
-    uncertainty = IntegrationUncertainty(method="piecewise Gauss-Legendre, doubled order", observed_absolute_difference=float(difference[0]),
-                                        causal_absolute_difference=float(difference[1]), order=order, converged=True)
+    uncertainty = IntegrationUncertainty(method="law-scaled Gauss-Legendre with independent unit-mass check, doubled order",
+        observed_absolute_difference=float(difference[0]), causal_absolute_difference=float(difference[1]),
+        order=order, converged=True, assignment_mass_error=float(mass_error),
+        selected_mass_fraction=float(np.exp(log_mass)), selected_mass_relative_difference=mass_difference)
     return GeneratedSample(observations, observed, causal, uncertainty)
+
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
