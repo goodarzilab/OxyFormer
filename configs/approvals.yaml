@@ -75,9 +75,9 @@ owner_decisions:
       source: acs_2006_2010_5yr           # line n means estimate variable <table>_<nnn>E
       transforms:
         share: "sum of numerator lines / denominator line, in [0, 1]; standardized within training folds"
-        income: "asinh(published value / 10000); standardized within training folds"
-      missing: "a zero or invalid denominator is missing, never zero; imputation uses training folds only; imputed values are not SSL targets"
-      margins_of_error: "kept as quality metadata and for uncertainty propagation, never as predictor tokens"
+        income: "asinh(published value / 10000)"
+      missing: "valid estimates are kept; a zero denominator is missing, never zero; imputation uses training folds only"
+      margins_of_error: "kept as quality metadata, never as predictor tokens"
       concepts:
         female_share: {family: sex_composition, table: B01001, num: [26], den: 1, transform: share}
         age_under_18_share: {family: age_structure, table: B01001, num: [3, 4, 5, 6, 27, 28, 29, 30], den: 1, transform: share}
@@ -115,10 +115,10 @@ owner_decisions:
         race_ethnicity: [nh_white_share, nh_black_share, nh_aian_share, nh_asian_share, nh_nhpi_share, nh_other_race_share, nh_multiracial_share, hispanic_share]
         education: [education_less_hs_share, education_hs_only_share, education_some_college_share, education_associate_share, education_bachelors_plus_share]
         material_resources: [median_household_income, per_capita_income, household_income_lt_25k_share, household_income_25k_50k_share, household_income_50k_100k_share, household_income_100k_plus_share, poverty_ratio_lt_050_share, poverty_ratio_050_099_share, poverty_ratio_100_199_share, poverty_ratio_200_plus_share]
-      preregistered_sensitivities:      # changed adjustment sets need not identify the same functional
+      preregistered_sensitivities:
         - drop the material_resources family
         - drop the demographic composition families (sex_composition, age_structure, race_ethnicity)
-      additions: "any further concept needs a documented causal-role amendment, verified release fields and renewed support diagnostics"
+      additions: "any addition needs a documented causal-role amendment"
       exclusions: "every variable not listed above is excluded; the sign-off page records the reason for each legacy and other variable left out"
 
 # Not yet approved. A unit that needs one of these must stop and report; the orchestrator brings it to the owner.
