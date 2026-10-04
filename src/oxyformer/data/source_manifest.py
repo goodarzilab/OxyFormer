@@ -25,10 +25,17 @@ import urllib.parse
 import urllib.request
 from xml.parsers import expat
 
+import yaml
+
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CHUNK = 1024 * 1024
-DANE_STAGING_DIR = Path('/mnt/weka/home/hgoodarzi/oxyformer-swarm/staging/dane_births')
 DEM_URL = 'https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/current/'
+DEM_FALLBACK_URL = 'https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/1/TIFF/current/'
+# The eight gaps in the approved, outcome-blind 962-cell footprint.
+DEM_FALLBACK_CELLS = frozenset({
+    'n27w080', 'n29w091', 'n40w074', 'n41w072',
+    'n43w070', 'n46w083', 'n48w086', 'n49w088',
+})
 DIVISIONS = {
     'new_england': 'CT ME MA NH RI VT'.split(),
     'middle_atlantic': 'NJ NY PA'.split(),
@@ -72,6 +79,29 @@ def _destination(value):
     _require(not path.is_absolute() and all(p not in ('', '.', '..') for p in value.split('/')),
              'Destination traversal is forbidden')
     return path
+
+
+def _manual_acquisition():
+    approvals = yaml.safe_load((REPO_ROOT / 'configs/approvals.yaml').read_text())
+    return approvals['owner_decisions']['manual_acquisition']
+
+
+def _local_source(resource):
+    """Resolve only an owner-approved staging key, never a manifest-supplied root."""
+    approved = _manual_acquisition()
+    key = resource.get('staging_key')
+    _require(isinstance(key, str) and key in approved, 'Unapproved local staging key')
+    entry = approved[key]
+    local = _destination(resource.get('local_path'))
+    if 'file' in entry:
+        _require(str(local) == entry['file'], 'Local file differs from owner approval')
+    if key == 'dane_births_2023_2025':
+        _require(local.parts[0] in ('2023', '2024', '2025') and len(local.parts) > 1,
+                 'Local DANE resource must be under an approved year directory')
+    root = Path(entry['staging_dir'])
+    _require(root.is_absolute(), 'Approved staging root must be absolute')
+    # The owner may name a root alias; symlinks below that root remain forbidden.
+    return root.resolve() / local
 
 
 def validate_manifest(manifest):
@@ -120,11 +150,10 @@ def validate_manifest(manifest):
                  'Invalid expected SHA-256')
         _require(resource.get('transport', 'https') in ('https', 'local'), 'Invalid transport')
         if resource.get('transport') == 'local':
-            local = _destination(resource.get('local_path'))
-            _require(local.parts[0] in ('2023', '2024', '2025') and len(local.parts) > 1,
-                     'Local DANE resource must be under an approved year directory')
+            _local_source(resource)
             _require(expected_bytes is not None and digest is not None,
                      'Local resources require recorded size and SHA-256')
+    by_id = {r['id']: r for r in resources}
     requirements = manifest.get('requirements')
     _require(isinstance(requirements, list) and requirements, 'Required resource checklist missing')
     requirement_ids = set()
@@ -138,6 +167,8 @@ def validate_manifest(manifest):
                  'Requirement refers to unknown resources')
         if item['status'] == 'ready':
             _require(ids, 'Ready requirement has no resources')
+            _require(all(by_id[rid]['availability'] == 'verified' for rid in ids),
+                     'Unverified resource blocks requirement')
         else:
             _require(item.get('reason'), 'Blocked requirement needs a reason')
     if manifest['status'] == 'ready':
@@ -185,8 +216,12 @@ def validate_shards(atlas, dem=None):
         _require(group.get('max_bytes') == budget and _positive(budget), 'Wrong DEM byte ceiling')
         if group['status'] == 'ready':
             _require(dem['status'] == 'ready', 'Blocked DEM cannot authorize a ready shard')
+            _require(not group.get('missing_tiles'), 'Missing tiles block shard')
+        _require(set(group.get('missing_tiles', [])) <= set(dem['coverage']['missing_tiles']),
+                 'Shard has an unrecorded missing tile')
     _require(assigned == tiles, 'Tile inventory and shards disagree')
-    _require(atlas.get('national_dem_coverage') == 'incomplete', 'National DEM coverage is incomplete')
+    _require(atlas.get('national_dem_coverage') == dem['coverage']['national'],
+             'Atlas and DEM coverage disagree')
     return atlas
 
 
@@ -213,6 +248,7 @@ def _unpack_manifest(manifest):
                 ids.append(rid)
                 manifest['resources'].append({
                     'id': rid, 'release': 'USGS_13_' + tile + '_' + date,
+                    'product': 'usgs_3dep_one_third_arc_second_seamless',
                     'url': DEM_URL + stem + ('.tif' if fmt == 'tiff' else '.xml'),
                     'destination': 'dem/' + tile + ('.tif' if fmt == 'tiff' else '.xml'),
                     'role': role, 'format': fmt, 'max_bytes': length, 'expected_bytes': length,
@@ -221,6 +257,15 @@ def _unpack_manifest(manifest):
                 })
         manifest['requirements'] = [dict(r, resource_ids=ids) if r['id'] == 'approved_tiles'
                                     else r for r in manifest['requirements']]
+        for resource in manifest['resources']:
+            if '/StagedProducts/Elevation/1/' in resource['url']:
+                tile = resource['id'].removesuffix('_metadata')
+                _require(resource.get('product') == 'usgs_3dep_one_arc_second_seamless'
+                         and tile in DEM_FALLBACK_CELLS and tile not in ids,
+                         'DEM fallback is restricted to the eight approved gaps')
+                extension = 'tif' if resource['role'] == 'data' else 'xml'
+                _require(resource['url'] == DEM_FALLBACK_URL + tile + '/USGS_1_' + tile + '.' + extension,
+                         'Unexpected DEM fallback product URL')
     return manifest
 
 
@@ -419,10 +464,9 @@ def _download(resource, path, *, attempts, timeout, log):
 
 
 def _copy_local(resource, path, *, log):
-    """Read an owner-staged DANE resource without changing its bytes or permissions."""
-    root = DANE_STAGING_DIR.resolve(strict=True)
-    source = root / resource['local_path']
-    _require(source.resolve(strict=True) == source and source.is_relative_to(root),
+    """Read an owner-staged resource without changing its bytes or permissions."""
+    source = _local_source(resource)
+    _require(source.resolve(strict=True) == source,
              'Local resource escapes staging or uses a symlink')
     fd = os.open(source, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
     digest, count, prefix = hashlib.sha256(), 0, b''
