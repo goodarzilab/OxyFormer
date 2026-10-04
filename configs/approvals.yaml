@@ -156,7 +156,7 @@ owner_decisions:
       sensitivity: {COL: [EST_CIVM], ECU: [est_civil]}
       excluded: [gestational age, prenatal visits, delivery type, APGAR, newborn length, hospital or occurrence or registration geography, reproductive-history counts, COL IDPERTET as maternal ethnicity]
       area_level_sensitivity: {COL: municipal unmet basic needs (NBI) 2018, ECU: deferred}
-      coding: "original codes and missingness flags kept; age kept as categories (no invented exact ages); education is nominal, not years of schooling; ECU 2015 runs only after its codes and historical geography are verified"
+      coding: "age at delivery kept as categories; education is nominal, not years of schooling; ECU 2015 runs only after its codes and historical geography are verified"
     data_terms: "DANE birth microdata are free and public but may not be redistributed without written permission; the run keeps payloads in attempt folders and never commits or shares them"
     interpretation: "consistency of a residence-pressure association with birth outcomes, not oxygen-specific identification"
 
