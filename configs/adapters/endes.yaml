@@ -26,6 +26,18 @@ source_notes:
     anthropometry. This is not the six-month cutoff of anemia indicators.
     RECH6 covers children under five. Downstream frozen target/support
     restrictions remain the responsibility of the analysis design.
+  attrition: >-
+    HC53=999 with blank HC55 is biomarker missing with an unspecified blank
+    status, not a blank/not-applicable Hb value; it adds no discordance flag.
+    An absent RECH6 record is distinct from every HC55 code and blank fields.
+    The year-specific household dictionaries define RECH1.HV105 as age and
+    HV120 as eligibility for under-five measurements. When HC1 is unavailable,
+    completed ages 1-4 establish the documented 4-59-month age domain without
+    imputing an exact month. Age 0 or unknown age cannot establish this domain.
+    Other selection/residence requirements still apply. Missing records remain
+    flagged for review and never enter the measured-Hb set. Eligible status
+    counts and weight sums partition only the independently eligible population;
+    reported measured status still needs valid raw Hb for analysis eligibility.
   eligibility_references:
     - https://proyectos.inei.gob.pe/endes/2023/DOCUMENTOS/FICHA_TECNICA_ENDES_2023.pdf
     - https://proyectos.inei.gob.pe/iinei/srienaho/Descarga/FichaTecnica/968-Ficha.pdf

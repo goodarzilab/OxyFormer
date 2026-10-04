@@ -155,6 +155,13 @@ def test_conversion_weights_lineage_and_roundtrip(release):
     ("", "9", "biomarker_missing", None, "not_applicable", "missing_unspecified", ()),
     ("", "0", "discordant", None, "not_applicable", "measured", ("measured_status_without_hb",)),
     ("120", "0", "measured", 12., "observed", "measured", ()),
+    ("120", "4", "discordant", 12., "observed", "refused", ("valid_hb_nonmeasurement_status",)),
+    ("120", "6", "discordant", 12., "observed", "other", ("valid_hb_nonmeasurement_status",)),
+    ("120", "", "discordant", 12., "observed", "not_applicable", ("valid_hb_nonmeasurement_status",)),
+    ("999", "", "biomarker_missing", None, "missing", "not_applicable", ()),
+    ("", "3", "eligible_nonmeasurement", None, "not_applicable", "not_present", ()),
+    ("", "4", "eligible_nonmeasurement", None, "not_applicable", "refused", ()),
+    ("", "6", "eligible_nonmeasurement", None, "not_applicable", "other", ()),
 ])
 def test_sentinels_and_discordance(release, year, raw, status, state, hb, hb_state, status_name, flags):
     def mutate(tables):
@@ -170,8 +177,10 @@ def test_sentinels_and_discordance(release, year, raw, status, state, hb, hb_sta
     assert sum(dict(audit.counts).values()) == 5
     assert audit.eligible_weight_sum == 10.0
     assert audit.measured_weight_sum == (10.0 if state == "measured" else 9.0)
+    assert sum(dict(audit.eligible_status_counts).values()) == audit.eligible_count == 4
+    assert sum(dict(audit.weighted_eligible_status_sums).values()) == audit.eligible_weight_sum
     if state == "biomarker_missing":
-        assert row.reasons == ("unspecified",)
+        assert row.reasons == (("unspecified",) if status == "9" else ("missing_hb_blank_status",))
     if flags:
         assert (row.original_id, flags) in audit.review_records
         with pytest.raises(ContractError, match="require review"):
@@ -252,7 +261,8 @@ def test_missing_biomarker_record_preserved_for_review(release):
     records, audit = load_endes(*release(mutate=lambda t: t["RECH6"].pop(0)))
     row = first_child(records)
     assert len(records) == 5
-    assert row.state == "eligibility_unknown"
+    assert row.state == "biomarker_record_absent"
+    assert row.eligibility == "eligible"
     assert row.hc53_raw is None and row.hc55_raw is None
     assert row.raw_hb_state == "no_biomarker_record"
     assert row.reasons == ("missing_biomarker_record",)
@@ -468,3 +478,100 @@ def test_psu_identity_cannot_cross_strata(release):
         tables["RECH0"][2]["HV021"] = "101"
     with pytest.raises(ContractError, match="PSU assigned to inconsistent strata"):
         load_endes(*release(mutate=mutate))
+
+
+@pytest.mark.parametrize("year", [2023, 2024])
+def test_missing_hb_blank_status_is_not_not_applicable(release, year):
+    records, audit = load_endes(*release(
+        year, mutate=lambda t: t["RECH6"][0].update(HC53="999", HC55="")))
+    row = first_child(records)
+    assert row.state == "biomarker_missing"
+    assert row.raw_hb_state == "missing" and row.measurement_status == "not_applicable"
+    assert row.reasons == ("missing_hb_blank_status",)
+    assert not row.review_flags and not row.analysis_eligible
+    assert dict(audit.counts) == {"biomarker_missing": 1, "excluded": 1, "measured": 3}
+    assert audit.eligible_weight_sum == 10.0 and audit.measured_weight_sum == 9.0
+    audit.assert_inference_ready()
+
+
+@pytest.mark.parametrize("year", [2023, 2024])
+def test_absent_biomarker_keeps_independently_known_eligibility(release, year):
+    records, audit = load_endes(*release(year, mutate=lambda t: t["RECH6"].pop(0)))
+    row = first_child(records)
+    assert row.eligibility == "eligible"
+    assert row.state == "biomarker_record_absent"
+    assert row.measurement_status == row.raw_hb_state == "no_biomarker_record"
+    assert row.hc53_raw is None and row.hc55_raw is None and row.hb_g_dl is None
+    assert row.age_months is None and dict(row.raw_fields)["RECH1.HV105"] == "2"
+    assert not row.analysis_eligible and row.survey_weight == 1.0
+    assert row.reasons == row.review_flags == ("missing_biomarker_record",)
+    assert audit.eligible_count == 4 and audit.eligible_weight_sum == 10.0
+    assert dict(audit.eligible_status_counts) == {"measured": 3, "no_biomarker_record": 1}
+    assert dict(audit.weighted_eligible_status_sums) == {"measured": 9.0, "no_biomarker_record": 1.0}
+    with pytest.raises(ContractError, match="require review"):
+        audit.assert_inference_ready()
+
+
+@pytest.mark.parametrize("year", [2023, 2024])
+def test_eligible_status_partition_reconciles_absence_and_all_nonmeasurements(release, year):
+    def mutate(tables):
+        for index, pair in enumerate([
+            ("999", "3"), ("999", "4"), ("999", "6"), ("999", "9"),
+            ("999", ""), ("", ""), None,
+        ], start=3):
+            number = f"{index:02}"
+            person = dict(tables["RECH1"][0], HVIDX=number)
+            tables["RECH1"].append(person)
+            if pair is not None:
+                tables["RECH6"].append(dict(tables["RECH6"][0], HC0=number, HC53=pair[0], HC55=pair[1]))
+    args = release(year, mutate=mutate)
+    records, audit = load_endes(*args)
+    expected = {"measured": 4, "not_present": 1, "refused": 1, "other": 1,
+                "missing_unspecified": 1, "not_applicable": 2, "no_biomarker_record": 1}
+    assert dict(audit.eligible_status_counts) == expected
+    assert dict(audit.weighted_eligible_status_sums) == dict(expected, measured=10.0)
+    assert sum(expected.values()) == audit.eligible_count == 11
+    assert sum(dict(audit.weighted_eligible_status_sums).values()) == audit.eligible_weight_sum == 17.0
+    assert dict(audit.counts) == {"measured": 4, "eligible_nonmeasurement": 3,
+        "biomarker_missing": 2, "not_applicable": 1, "biomarker_record_absent": 1, "excluded": 1}
+    assert sum(dict(audit.counts).values()) == len(records) == 12
+    assert audit.measured_weight_sum == 10.0
+    absent = next(r for r in records if r.state == "biomarker_record_absent")
+    assert absent.eligibility == "eligible" and not absent.analysis_eligible
+    assert not any(r.analysis_eligible for r in records if r.state != "measured")
+    assert load_endes(*args) == (records, audit)
+
+
+@pytest.mark.parametrize("year", [2023, 2024])
+@pytest.mark.parametrize("age", ["0", "98", ""])
+def test_absent_record_does_not_invent_age_eligibility(release, year, age):
+    def mutate(tables):
+        tables["RECH1"][0]["HV105"] = age
+        tables["RECH6"].pop(0)
+    records, audit = load_endes(*release(year, mutate=mutate))
+    row = first_child(records)
+    assert row.eligibility == "unknown" and row.age_months is None
+    assert row.state == "biomarker_record_absent" and not row.analysis_eligible
+    assert audit.eligible_count == 3 and audit.eligible_weight_sum == 9.0
+    assert dict(audit.eligible_status_counts) == {"measured": 3}
+    assert dict(audit.counts)["biomarker_record_absent"] == 1
+    with pytest.raises(ContractError, match="require review"):
+        audit.assert_inference_ready()
+
+
+@pytest.mark.parametrize("year", [2023, 2024])
+@pytest.mark.parametrize("age", ["1", "4"])
+@pytest.mark.parametrize("absent", [False, True])
+def test_roster_age_eligibility_does_not_require_outcome_record(release, year, age, absent):
+    def mutate(tables):
+        tables["RECH1"][0]["HV105"] = age
+        if absent:
+            tables["RECH6"].pop(0)
+        else:
+            tables["RECH6"][0]["HC1"] = ""
+    records, audit = load_endes(*release(year, mutate=mutate))
+    row = first_child(records)
+    assert row.eligibility == "eligible" and row.age_months is None
+    assert row.state == ("biomarker_record_absent" if absent else "measured")
+    assert row.analysis_eligible is not absent
+    assert audit.eligible_weight_sum == 10.0

@@ -104,6 +104,11 @@ class EndesAudit(Immutable):
     counts: tuple[tuple[str, int], ...]
     reason_counts: tuple[tuple[str, int], ...]
     weighted_state_sums: tuple[tuple[str, float], ...]
+    # Reported measurement status among independently eligible people only.
+    # A status of "measured" is not itself evidence of valid observed Hb.
+    eligible_count: int
+    eligible_status_counts: tuple[tuple[str, int], ...]
+    weighted_eligible_status_sums: tuple[tuple[str, float], ...]
     eligible_weight_sum: float
     measured_weight_sum: float
     review_records: tuple[tuple[str, tuple[str, ...]], ...]
@@ -341,6 +346,13 @@ def load_endes(bundle: EndesBundle, year: int, mapping: dict,
         hb, hb_state, status, flags = _biomarker(raw_hb, raw_status, mapping)
         months = None if biomarker is None else _integer(biomarker[column("age_months")], "HC1", blank=True)
         require(months is None or 0 <= months <= mapping["maximum_age_months"], "HC1 outside mapped age domain")
+        # HV105 is an independent completed-year age. Use its entire month
+        # interval only when HC1 is absent; never impute an exact month. Age 0
+        # straddles the four-month boundary and cannot resolve eligibility.
+        age_years = _integer(row[column("age_years")], "HV105", blank=True) if months is None else None
+        roster_age_suffices = (age_years is not None
+            and mapping["minimum_measurement_age_months"] <= 12 * age_years
+            and 12 * age_years + 11 <= mapping["maximum_age_months"])
         reasons = []
         interview = _integer(household[column("interview_status")], "HV015")
         selected = _integer(household[column("selected_for_hb")], "HV042")
@@ -359,13 +371,18 @@ def load_endes(bundle: EndesBundle, year: int, mapping: dict,
             reasons.append("below_biomarker_measurement_age")
         if reasons:
             eligibility, state = "excluded", "excluded"
-        elif months is None:
-            eligibility, state = "unknown", "eligibility_unknown"
+        elif months is None and not roster_age_suffices:
+            eligibility = "unknown"
+            state = "biomarker_record_absent" if biomarker is None else "eligibility_unknown"
             reasons.append("missing_biomarker_record" if biomarker is None else "missing_biomarker_age")
             flags += (reasons[-1],)
         else:
             eligibility = "eligible"
-            if flags:
+            if biomarker is None:
+                state = "biomarker_record_absent"
+                reasons.append("missing_biomarker_record")
+                flags += ("missing_biomarker_record",)
+            elif flags:
                 state = "discordant"
                 reasons.extend(flags)
             elif status == "measured":
@@ -376,6 +393,9 @@ def load_endes(bundle: EndesBundle, year: int, mapping: dict,
             elif status == "missing_unspecified":
                 state = "biomarker_missing"
                 reasons.append("unspecified")
+            elif hb_state == "missing":
+                state = "biomarker_missing"
+                reasons.append("missing_hb_blank_status")
             else:
                 state = "not_applicable"
                 reasons.append("blank_not_applicable")
@@ -421,10 +441,15 @@ def load_endes(bundle: EndesBundle, year: int, mapping: dict,
     state_counts = Counter(r.state for r in records)
     reason_counts = Counter(reason for r in records for reason in r.reasons)
     weighted = defaultdict(list)
+    eligible_status_counts = Counter()
+    eligible_status_weights = defaultdict(list)
     measured = defaultdict(set)
     for row in records:
         if row.survey_weight is not None:
             weighted[row.state].append(row.survey_weight)
+        if row.eligibility == "eligible":
+            eligible_status_counts[row.measurement_status] += 1
+            eligible_status_weights[row.measurement_status].append(row.survey_weight)
         if row.analysis_eligible:
             measured[row.stratum_id].add(row.psu_id)
     singleton = tuple(sorted(h for h, psus in sampled.items() if len(psus) == 1))
@@ -449,6 +474,10 @@ def load_endes(bundle: EndesBundle, year: int, mapping: dict,
         module_hashes=tuple(sorted(hashes.items())), module_rows=tuple(sorted(counts.items())),
         counts=tuple(sorted(state_counts.items())), reason_counts=tuple(sorted(reason_counts.items())),
         weighted_state_sums=tuple(sorted((state, math.fsum(values)) for state, values in weighted.items())),
+        eligible_count=sum(eligible_status_counts.values()),
+        eligible_status_counts=tuple(sorted(eligible_status_counts.items())),
+        weighted_eligible_status_sums=tuple(sorted(
+            (status, math.fsum(values)) for status, values in eligible_status_weights.items())),
         eligible_weight_sum=math.fsum(r.survey_weight for r in records if r.eligibility == "eligible"),
         measured_weight_sum=math.fsum(r.survey_weight for r in records if r.analysis_eligible),
         review_records=review, sampled_psus_by_stratum=tuple(sorted((h, tuple(sorted(p))) for h, p in sampled.items())),
