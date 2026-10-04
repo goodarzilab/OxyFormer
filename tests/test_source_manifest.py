@@ -1,6 +1,7 @@
 """Synthetic, offline tests: never download production data in this suite."""
 import copy
 import hashlib
+import http.client
 import io
 import json
 from pathlib import Path
@@ -44,7 +45,7 @@ class Response(io.BytesIO):
 
     def __init__(self, data=b'synthetic bytes', headers=None, url='https://example.test/final'):
         super().__init__(data)
-        self.headers = headers or {}
+        self.headers = {'Content-Length': str(len(data))} if headers is None else headers
         self.url = url
         self.read_sizes = []
 
@@ -163,7 +164,9 @@ def test_missing_required_resource_blocks_ready(manifest):
 def test_failed_download_never_publishes_tar(manifest, tmp_path, monkeypatch, case):
     data, headers = b'synthetic bytes', {}
     if case == 'too_large_header': headers = {'Content-Length': '101'}
-    if case == 'too_large_stream': data = b'x' * 101
+    if case == 'too_large_stream':
+        data = b'x' * 101
+        manifest['resources'][0]['expected_bytes'] = 100
     if case == 'empty': data = b''
     if case == 'hash': manifest['resources'][0]['expected_sha256'] = '0' * 64
     if case == 'html': data = b'<!DOCTYPE html><html>login</html>'
@@ -278,3 +281,78 @@ def test_cli_validate_is_offline_and_blocked_fetch_refused(tmp_path, monkeypatch
     assert sm.main(['fetch', '--source', 'dem', '--output-dir', str(tmp_path / 'dem')]) == 1
     assert 'Blocked manifest' in capsys.readouterr().err
     assert not (tmp_path / 'dem').exists()
+
+
+def test_close_delimited_without_integrity_is_not_complete(manifest, tmp_path, monkeypatch):
+    # EOF alone cannot distinguish a full close-delimited body from a lost suffix.
+    monkeypatch.setattr(sm, '_open_url', lambda *a: Response(b'only a prefix', {}))
+    with pytest.raises(sm.ManifestError, match='framing|expected'):
+        fetch(manifest, tmp_path)
+    assert not (tmp_path / 'result/payload.tar').exists()
+
+
+def test_assigned_symlink_root_can_fetch(manifest, tmp_path, monkeypatch):
+    real = tmp_path / 'real'
+    real.mkdir()
+    alias = tmp_path / 'assigned'
+    alias.symlink_to(real, target_is_directory=True)
+    monkeypatch.setattr(sm, '_open_url', lambda *a: Response())
+    result = sm.fetch_manifest(manifest, alias / 'result', attempt_root=alias)
+    assert result['status'] == 'complete'
+    assert (real / 'result/payload.tar').is_file()
+
+
+@pytest.mark.parametrize('expectation', ['expected_bytes', 'expected_sha256'])
+def test_close_delimited_with_expectation_is_accepted(manifest, tmp_path, monkeypatch, expectation):
+    data = b'complete synthetic response'
+    for resource in manifest['resources']:
+        resource[expectation] = len(data) if expectation == 'expected_bytes' else hashlib.sha256(data).hexdigest()
+    monkeypatch.setattr(sm, '_open_url', lambda *a: Response(data, {}))
+    result = fetch(manifest, tmp_path)
+    assert result['status'] == 'complete'
+    assert all(r['transfer_integrity'] == expectation for r in result['resources'])
+
+
+def chunked_response(body):
+    # Exercise the real stdlib chunk parser over a fake socket, without a network.
+    class FakeSocket:
+        def makefile(self, mode):
+            return io.BytesIO(b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n' + body)
+    response = http.client.HTTPResponse(FakeSocket())
+    response.begin()
+    response.url = 'https://example.test/chunked'
+    return response
+
+
+def test_chunked_response_without_length_or_hash_is_accepted(manifest, tmp_path, monkeypatch):
+    monkeypatch.setattr(sm, '_open_url', lambda *a: chunked_response(b'4\r\ndata\r\n0\r\n\r\n'))
+    result = fetch(manifest, tmp_path)
+    assert all(r['transfer_integrity'] == 'chunked' and r['bytes'] == 4 for r in result['resources'])
+
+
+def test_truncated_chunked_response_cannot_complete(manifest, tmp_path, monkeypatch):
+    # No terminating zero chunk: the HTTP parser must fail even after a full data chunk.
+    monkeypatch.setattr(sm, '_open_url', lambda *a: chunked_response(b'4\r\ndata\r\n'))
+    with pytest.raises(http.client.IncompleteRead):
+        fetch(manifest, tmp_path, attempts=1)
+    assert not (tmp_path / 'result/payload.tar').exists()
+
+
+def test_symlink_below_assigned_alias_cannot_escape(manifest, tmp_path):
+    real = tmp_path / 'real'
+    real.mkdir()
+    alias = tmp_path / 'assigned'
+    alias.symlink_to(real, target_is_directory=True)
+    elsewhere = tmp_path / 'elsewhere'
+    elsewhere.mkdir()
+    (real / 'escape').symlink_to(elsewhere, target_is_directory=True)
+    with pytest.raises(sm.ManifestError):
+        sm.fetch_manifest(manifest, alias / 'escape/result', attempt_root=alias)
+    assert list(elsewhere.iterdir()) == []
+
+
+@pytest.mark.parametrize('expected_bytes', [0, True, -1, 101])
+def test_invalid_expected_bytes_rejected(manifest, expected_bytes):
+    manifest['resources'][0]['expected_bytes'] = expected_bytes
+    with pytest.raises(sm.ManifestError, match='expected_bytes'):
+        sm.validate_manifest(manifest)
