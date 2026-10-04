@@ -43,9 +43,28 @@ owner_decisions:
     - conapo_municipal_population
   exposure_atlas_footprint: nine_census_divisions_contiguous_us_plus_dc   # atlas issues the owner approved
   access_rule: public_data_only           # applications (DHS, SEER Research Plus, UK Biobank, All of Us) are excluded
+  # Approved by the owner on 2026-10-04 ("Let's go with your recommendations") after the source audit reported them missing.
+  exposure:                               # plan section 3.1: elevation -> pressure before population aggregation
+    dem_product: usgs_3dep_one_third_arc_second_seamless   # USGS StagedProducts/Elevation/13 (about 10 m), nine-division footprint
+    pressure_model: international_standard_atmosphere_troposphere
+    # P_B(z) = P0 * (1 - L*z/T0) ** (g0*M/(R*L)), z in metres above mean sea level; exponent about 5.2558
+    sea_level_pressure_mmhg: 760.0        # P0
+    sea_level_temperature_k: 288.15       # T0
+    lapse_rate_k_per_m: 0.0065            # L
+    gravity_m_per_s2: 9.80665             # g0, ISA definitional constant
+    molar_mass_air_kg_per_mol: 0.0289644  # M, ISA definitional constant
+    gas_constant_j_per_mol_k: 8.3144598   # R, ISA definitional constant
+    inspired_o2_fraction: 0.2093
+    water_vapour_pressure_mmhg: 47.0
+    # P_IO2(z) = inspired_o2_fraction * (P_B(z) - water_vapour_pressure_mmhg); P_IO2,ref = P_IO2(0)
+  manual_acquisition:
+    dane_births_2023_2025:
+      reason: "DANE microdata downloads sit behind a CAPTCHA. A person downloads them by hand; automation never bypasses the CAPTCHA."
+      catalogs: [876, 878, 915]           # births 2023, 2024 and 2025 on microdatos.dane.gov.co
+      staging_dir: /mnt/weka/home/hgoodarzi/oxyformer-swarm/staging/dane_births   # one subfolder per year
+      fallback: "If the files are not staged, Colombia is dropped from month 1: the birth anchor proceeds with INEC (Ecuador) alone, and the Peru ENDES hemoglobin anchor is unaffected."
 
 # Not yet approved. A unit that needs one of these must stop and report; the orchestrator brings it to the owner.
 pending_owner_approval:
   - endpoint covariate concepts for the US tract analysis (section 3.2 asks for 30-60 endpoint-approved concepts)
   - any relief, flag or distance sensitivity analyses beyond plan_fixed
-  - exposure constants and DEM product resolution, which the exposure manifest records (section 3.1)
