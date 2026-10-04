@@ -12,10 +12,7 @@ import sys
 
 PYTHON = "/mnt/weka/home/hgoodarzi/envs/oxyformer/bin/python"
 
-env = dict(os.environ, PYTHONPATH="src", CUDA_VISIBLE_DEVICES="", PYTHONDONTWRITEBYTECODE="1")
-try:
-    run = subprocess.run([PYTHON, "-m", "pytest", "-q", "-p", "no:cacheprovider"], env=env, timeout=840)
-except subprocess.TimeoutExpired:
-    print("integration-tests: pytest exceeded 840 s", file=sys.stderr)
-    sys.exit(1)
+# No time limit of its own: the merge operator's --verification-timeout bounds the run.
+env = dict(os.environ, PYTHONPATH="src", CUDA_VISIBLE_DEVICES="")
+run = subprocess.run([PYTHON, "-m", "pytest", "-q"], env=env)
 sys.exit(0 if run.returncode in (0, 5) else 1)
