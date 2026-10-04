@@ -32,3 +32,10 @@ outputs/report/*.toc
 /outputs/phase26/county_foundation_embeddings.csv
 /outputs/phase26/foundation_model_weights.pt
 /outputs/phase26/foundation_model_weights.npz
+
+# Package/build and local verification artifacts
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.coverage

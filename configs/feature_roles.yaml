@@ -1,0 +1,19 @@
+schema_version: 1
+registry_id: usaleep_pending_owner_concept_approval
+# No source field is inferred from a conceptual label. Empty permissions deny all.
+rules: []
+ordinary_predictor_forbidden_roles:
+  - exposure
+  - exposure_proxy
+  - precise_geography
+  - downstream_health
+  - outcome
+  - outcome_metadata
+  - county
+  - identifier
+county_routing:
+  approval_reference: configs/approvals.yaml#plan_fixed.county_membership
+  approved_use: coarse_comparison_stratum
+  source_field: null
+  usable: false
+# A reviewed adapter must bind the county field before routing can be enabled.

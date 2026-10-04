@@ -1,0 +1,21 @@
+schema_version: 1
+# Semantic definitions only: no claim that a source payload has been reviewed.
+endpoints:
+  usaleep_life_expectancy:
+    outcome_scale: years
+    target_description: supported_flag1_tracts_in_eligible_counties
+    target_weighting: equal_tract
+    policy_form: shift_or_stay
+    shift_mmhg: 2.0
+    inference_unit: county
+    uncertainty_model: geographic_stochastic_process
+    source_ids: [usaleep_2010_2015, acs_2006_2010_5yr]
+    usable: false
+    blocked_reason: source_mapping_and_endpoint_covariate_approvals_pending
+    source_mapping: null
+    target_id: null
+    policy_id: null
+    adjustment_schema_hash: null
+# Resolved target/policy IDs belong to the frozen support-design artifacts.
+# Weight schema must distinguish target mass, likelihood exposure and
+# standardization weights; population weighting defines a separate estimand.

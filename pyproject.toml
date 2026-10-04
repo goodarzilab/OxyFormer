@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oxyformer"
+version = "0.1.0"
+description = "OxyFormer scientific artifact contracts"
+requires-python = ">=3.11"
+dependencies = ["PyYAML>=6"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["oxyformer*"]
+namespaces = true
