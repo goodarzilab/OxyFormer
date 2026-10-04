@@ -306,7 +306,10 @@ def _run(view, settings, config, seed, features, preprocessing, identity,
          fitting, stopping, loaded, root, request, started, device):
     random.seed(seed)
     np.random.seed(seed % (2 ** 32))
-    torch.manual_seed(seed)
+    torch.default_generator.manual_seed(seed)
+    if device.type == "cuda":
+        with torch.cuda.device(device):
+            torch.cuda.manual_seed(seed)
     model = MaskedReconstructor(features, settings.dropout).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=settings.learning_rate,
                                  weight_decay=settings.weight_decay)
@@ -342,7 +345,7 @@ def _run(view, settings, config, seed, features, preprocessing, identity,
         progress, best_model, controller = loaded["progress"], loaded["best_model"], loaded["controller"]
         # Restore last, after construction and preprocessing. No stochastic work
         # may occur between this restoration and the next logical training batch.
-        restore_rng(loaded["rng"])
+        restore_rng(loaded["rng"], device)
     completed = bool(config.predecessor and config.predecessor.complete)
     reason = config.predecessor.reason if completed else None
     slice_batches = 0
@@ -403,7 +406,7 @@ def _run(view, settings, config, seed, features, preprocessing, identity,
         slice_batches += 1
     state = {"model": model.state_dict(), "best_model": best_model,
              "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
-             "rng": capture_rng(), "sampler": sampler.state_dict(), "progress": progress,
+             "rng": capture_rng(device), "sampler": sampler.state_dict(), "progress": progress,
              "preprocessing": preprocessing, "fitting_ids": fitting.original_ids,
              "stopping_ids": stopping.original_ids, "controller": controller}
     parents = (view.content_hash, identity.split_hash)
