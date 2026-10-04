@@ -2,6 +2,7 @@
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass
 from hashlib import sha256
+from fractions import Fraction
 import math
 from pathlib import Path
 import numpy as np
@@ -196,13 +197,17 @@ def placement_batches(polygon, scenario, spec, batch_size=4096):
         point = polygon.centroid
         yield np.array([[point.x, point.y]]), np.array([polygon.area])
         return
-    size = spec.grid_size_m
-    ox, oy = spec.grid_origin_m
-    left, bottom, right, top = polygon.bounds
+    # Preserve represented bounds through subtraction/division: floating
+    # cancellation at a translated grid origin can otherwise omit a real strip.
+    size = Fraction(spec.grid_size_m)
+    ox, oy = (Fraction(value) for value in spec.grid_origin_m)
+    left, bottom, right, top = (Fraction(value) for value in polygon.bounds)
     points, areas = [], []
     for iy in range(math.floor((bottom - oy) / size), math.ceil((top - oy) / size)):
         for ix in range(math.floor((left - ox) / size), math.ceil((right - ox) / size)):
-            cell = box(ox + ix * size, oy + iy * size, ox + (ix + 1) * size, oy + (iy + 1) * size)
+            # Round each canonical grid line only once when entering GEOS.
+            cell = box(float(ox + ix * size), float(oy + iy * size),
+                       float(ox + (ix + 1) * size), float(oy + (iy + 1) * size))
             piece = polygon.intersection(cell)
             if piece.area <= 0:
                 continue

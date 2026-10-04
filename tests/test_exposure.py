@@ -701,3 +701,19 @@ def test_collection_rejects_contradictory_manifest_specification(tmp_path, shard
     result = run_stage(req)
     assert result.status == 'fail' and 'inconsistent' in result.message
     assert not (Path(req.output_dir) / 'atlas.parquet').exists()
+
+
+@pytest.mark.parametrize('thin', [False, True])
+def test_translated_grid_does_not_omit_positive_area_strip(tmp_path, thin):
+    tile = write_raster(tmp_path / 'strip.tif', [0, 0] if thin else [0])
+    geography = blocks(pop=(1, 0)).iloc[:1].copy()
+    geography.loc[0, 'geometry'] = box(100 if thin else 0, 0, 100 + 2**-46, 100)
+    spec = AllocationSpec(scenarios=('distributed',), grid_origin_m=(-1000., 0.))
+    result, qc = build_exposure(sources(tile), geography, spec)
+    if thin:
+        assert result.missing_population.iloc[0] == 0
+        assert result.pressure_mmhg.iloc[0] == 760
+    else:
+        assert result.missing_population.iloc[0] > 0
+        assert result.pressure_mmhg.isna().all()
+        assert qc['blocks'][0]['outside_coverage'] > 0
