@@ -503,7 +503,7 @@ def test_parser_truncated_attempt_then_success(manifest, tmp_path, monkeypatch):
     assert {p.name for p in (tmp_path / 'result').iterdir()} == {'payload.tar', 'receipts.json', 'download.log'}
 
 
-@pytest.mark.parametrize('name', ['us', 'dem', 'births', 'mexico'])
+@pytest.mark.parametrize('name', ['us', 'dem', 'mexico'])
 def test_each_production_manifest_blocks_without_outputs(name, tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(sm, '_open_url', lambda *a: calls.append(a))
@@ -516,19 +516,20 @@ def test_each_production_manifest_blocks_without_outputs(name, tmp_path, monkeyp
 def staged_manifest(manifest, tmp_path, monkeypatch):
     root = tmp_path / 'staging'
     (root / '2023').mkdir(parents=True)
-    monkeypatch.setattr(sm, 'DANE_STAGING_DIR', root)
+    monkeypatch.setattr(sm, '_manual_acquisition', lambda: {
+        'dane_births_2023_2025': {'staging_dir': str(root)}})
     for r in manifest['resources']:
         data = ('staged ' + r['id']).encode()
         path = root / '2023' / (r['id'] + '.txt')
         path.write_bytes(data)
         path.chmod(0o400)
-        r.update(transport='local', local_path='2023/' + path.name,
+        r.update(transport='local', staging_key='dane_births_2023_2025', local_path='2023/' + path.name,
                  expected_bytes=len(data), expected_sha256=hashlib.sha256(data).hexdigest())
     return manifest
 
 
 def test_staged_resources_are_read_only_and_hash_audited(staged_manifest, tmp_path):
-    before = {p: (p.read_bytes(), p.stat().st_mode) for p in sm.DANE_STAGING_DIR.rglob('*.txt')}
+    before = {p: (p.read_bytes(), p.stat().st_mode) for p in (tmp_path / 'staging').rglob('*.txt')}
     receipt = fetch(staged_manifest, tmp_path)
     assert receipt['status'] == 'complete'
     with tarfile.open(tmp_path / 'result/payload.tar') as archive:
@@ -542,7 +543,7 @@ def test_staged_resources_are_read_only_and_hash_audited(staged_manifest, tmp_pa
 @pytest.mark.parametrize('corruption', ['same_size', 'size', 'symlink', 'directory'])
 def test_staged_corruption_cannot_publish(staged_manifest, tmp_path, corruption):
     r = staged_manifest['resources'][0]
-    path = sm.DANE_STAGING_DIR / r['local_path']
+    path = sm._local_source(r)
     path.chmod(0o600)
     if corruption == 'same_size': path.write_bytes(b'x' * r['expected_bytes'])
     elif corruption == 'size': path.write_bytes(b'x')
@@ -644,13 +645,14 @@ def test_xml_original_bytes_to_eof(manifest, tmp_path, monkeypatch, data, local)
     root = tmp_path / 'staging'
     if local:
         (root / '2023').mkdir(parents=True)
-        monkeypatch.setattr(sm, 'DANE_STAGING_DIR', root)
+        monkeypatch.setattr(sm, '_manual_acquisition', lambda: {
+        'dane_births_2023_2025': {'staging_dir': str(root)}})
     monkeypatch.setattr(sm, 'CHUNK', 17)  # Splits UTF-16 code units across reads.
     for r in manifest['resources']:
         r.update(format='xml', max_bytes=len(data), expected_bytes=len(data),
                  expected_sha256=hashlib.sha256(data).hexdigest())
         if local:
-            r.update(transport='local', local_path='2023/' + r['id'])
+            r.update(transport='local', staging_key='dane_births_2023_2025', local_path='2023/' + r['id'])
             p = root / r['local_path']; p.write_bytes(data); p.chmod(0o400)
     monkeypatch.setattr(sm, '_open_url', lambda *a: Response(data))
     result = fetch(manifest, tmp_path)
@@ -755,11 +757,189 @@ def test_http_html_requires_html_media_type(manifest, tmp_path, monkeypatch, med
 def test_local_html_without_http_headers(manifest, tmp_path, monkeypatch):
     root = tmp_path / 'staged'
     (root / '2023').mkdir(parents=True)
-    monkeypatch.setattr(sm, 'DANE_STAGING_DIR', root)
+    monkeypatch.setattr(sm, '_manual_acquisition', lambda: {
+        'dane_births_2023_2025': {'staging_dir': str(root)}})
     data = b'<html/>'
     for r in manifest['resources']:
         p = root / '2023' / r['id']
         p.write_bytes(data); p.chmod(0o400)
-        r.update(transport='local', local_path='2023/' + r['id'], format='html',
+        r.update(transport='local', staging_key='dane_births_2023_2025', local_path='2023/' + r['id'], format='html',
                  expected_bytes=len(data), expected_sha256=hashlib.sha256(data).hexdigest())
     assert all(r['checksum_status'] == 'matched' for r in fetch(manifest, tmp_path)['resources'])
+
+
+def test_ready_requirement_cannot_hide_uninspected_resource(manifest):
+    manifest.update(status='blocked', blockers=['A different requirement is missing'])
+    manifest['requirements'].append({'id': 'other', 'status': 'blocked',
+                                     'resource_ids': [], 'reason': 'Not yet inspected'})
+    manifest['resources'][0]['availability'] = 'unverified'
+    with pytest.raises(sm.ManifestError, match='Unverified resource blocks requirement'):
+        sm.validate_manifest(manifest)
+
+
+@pytest.mark.parametrize('root_alias', [False, True])
+def test_usaleep_approved_file_copies_read_only_with_http_peers(manifest, tmp_path, monkeypatch, root_alias):
+    root = tmp_path / 'usaleep'
+    root.mkdir()
+    filename = 'Record_Layout_CensusTract_Life_Expectancy.pdf'
+    path = root / filename
+    data = b'%PDF-1.4 synthetic layout'
+    path.write_bytes(data)
+    path.chmod(0o400)
+    approved_root = tmp_path / 'approved_alias' if root_alias else root
+    if root_alias:
+        approved_root.symlink_to(root, target_is_directory=True)
+    monkeypatch.setattr(sm, '_manual_acquisition', lambda: {
+        'usaleep_record_layout': {'staging_dir': str(approved_root), 'file': filename}})
+    r = manifest['resources'][1]
+    r.update(transport='local', staging_key='usaleep_record_layout', local_path=filename,
+             format='pdf', expected_bytes=len(data), expected_sha256=hashlib.sha256(data).hexdigest())
+    calls = []
+    def network(url, timeout):
+        calls.append(url)
+        return Response(b'HTTP peer')
+    monkeypatch.setattr(sm, '_open_url', network)
+    result = fetch(manifest, tmp_path)
+    assert calls == [manifest['resources'][i]['url'] for i in (0, 2)]
+    assert result['resources'][1]['local_path'] == str(path)
+    assert result['resources'][1]['checksum_status'] == 'matched'
+    with tarfile.open(tmp_path / 'result/payload.tar') as archive:
+        assert archive.extractfile(r['destination']).read() == data
+    assert path.read_bytes() == data and path.stat().st_mode & 0o777 == 0o400
+
+
+@pytest.mark.parametrize('change', [
+    {'staging_key': None}, {'staging_key': 'unapproved'},
+    {'staging_key': 'usaleep_record_layout', 'local_path': 'wrong.pdf'},
+    {'local_path': '/tmp/data'}, {'local_path': '2023/../../outside'},
+])
+def test_local_staging_authority_cannot_be_supplied_by_manifest(staged_manifest, change):
+    staged_manifest['resources'][0].update(change)
+    staged_manifest['resources'][0]['staging_dir'] = '/tmp'
+    with pytest.raises(sm.ManifestError):
+        sm.validate_manifest(staged_manifest)
+
+
+def test_births_records_all_staged_files_and_inspected_pages():
+    m = sm.load_source('births')
+    assert m['status'] == 'ready' and m['blockers'] == []
+    local = [r for r in m['resources'] if r.get('transport') == 'local']
+    expected = {f'{year}/BD-EEVV-{kind}-{year}.zip' for year in (2023, 2024, 2025)
+                for kind in ('Nacimientos', 'Defuncionesnofetales', 'Defuncionesfetales')}
+    assert {r['local_path'] for r in local} == expected
+    assert all(r['staging_key'] == 'dane_births_2023_2025' and
+               r['expected_bytes'] == r['max_bytes'] and len(r['expected_sha256']) == 64 for r in local)
+    assert len(m['resources']) == 15
+    for year in (2023, 2024, 2025):
+        required = next(r for r in m['requirements'] if r['id'] == f'dane_{year}')
+        assert required['status'] == 'ready' and len(required['resource_ids']) == 5
+    assert all(r['availability'] == 'verified' for r in m['resources'])
+
+
+def test_us_only_acs_structure_is_still_blocked():
+    m = sm.load_source('us')
+    assert [r['id'] for r in m['requirements'] if r['status'] == 'blocked'] == ['acs_tracts']
+    layout = next(r for r in m['resources'] if r['id'] == 'usaleep_dictionary')
+    assert layout['staging_key'] == 'usaleep_record_layout'
+    assert layout['expected_bytes'] == 70785
+    assert layout['expected_sha256'] == '7612e16609d73f958ff6618ae70aab51d6502745c093c307a7f217c967e24431'
+    acs = next(r for r in m['resources'] if r['id'] == 'acs_tracts')
+    assert acs['availability'] == 'unverified'
+    assert not acs['range_inspection']['central_directory_verified']
+    assert acs['range_inspection']['object_bytes'] == acs['expected_bytes']
+    assert 'endpoint_covariates' in m['selection_provenance']['covariate_approval_reference']
+
+
+def test_dem_fallbacks_cover_only_inspected_approved_gaps_and_exact_budgets():
+    m = sm.load_source('dem')
+    resources = {r['id']: r for r in m['resources']}
+    fallback = {r['id'] for r in m['resources'] if r['role'] == 'data' and
+                r.get('product') == 'usgs_3dep_one_arc_second_seamless'}
+    assert fallback == {'n46w083', 'n48w086', 'n49w088'}
+    assert fallback | set(m['coverage']['missing_tiles']) == sm.DEM_FALLBACK_CELLS
+    assert not fallback & set(m['coverage']['missing_tiles'])
+    assert len([r for r in m['resources'] if r['format'] == 'tiff']) == 957
+    for tile in sm.DEM_FALLBACK_CELLS:
+        requirement = next(r for r in m['requirements'] if r['id'] == 'fallback_' + tile)
+        assert requirement['status'] == ('ready' if tile in fallback else 'blocked')
+        if tile in fallback:
+            assert requirement['resource_ids'] == [tile, tile + '_metadata']
+            for rid in requirement['resource_ids']:
+                assert resources[rid]['url'].startswith(sm.DEM_FALLBACK_URL + tile + '/USGS_1_')
+                assert resources[rid]['expected_bytes'] == resources[rid]['max_bytes'] > 0
+    atlas = json.loads((sm.REPO_ROOT / 'configs/sources/atlas_shards.json').read_text())
+    sm.validate_shards(atlas)
+    group = next(g for g in atlas['groups'] if g['id'] == 'east_north_central')
+    assert fallback <= set(group['dem_resources']) and group['missing_tiles'] == []
+    assert group['max_bytes'] == 41493417071 + sum(
+        resources[t]['max_bytes'] + resources[t + '_metadata']['max_bytes'] for t in fallback)
+
+
+@pytest.mark.parametrize('change', ['cell', 'product', 'url'])
+def test_unapproved_dem_fallback_is_rejected(change):
+    packed = json.loads((sm.REPO_ROOT / 'configs/sources/dem.json').read_text())
+    r = next(r for r in packed['resources'] if r['id'] == 'n46w083')
+    if change == 'cell':
+        r['id'] = 'n33w119'  # A primary product already covers this cell.
+    elif change == 'product':
+        del r['product']
+    else:
+        r['url'] = r['url'].replace('USGS_1_', 'USGS_13_')
+    with pytest.raises(sm.ManifestError):
+        sm._unpack_manifest(packed)
+
+
+def test_mexico_registration_approvals_and_verified_denominator():
+    m = sm.load_source('mexico')
+    approvals = sm.yaml.safe_load((sm.REPO_ROOT / 'configs/approvals.yaml').read_text())
+    lag = approvals['owner_decisions']['mexico_edr_registration_lag']
+    resources = {r['id']: r for r in m['resources']}
+    releases = m['release_identity']['releases']
+    assert releases['registration_years'] == lag['late_registration_check']['registration_years']
+    assert releases['primary_registration_years'] == lag['primary']['registration_years']
+    assert releases['common_registration_lag_years'] == lag['primary']['lag_years']
+    assert releases['later_period_check'] == lag['late_registration_check']
+    for y in range(2015, 2025):
+        r = resources[f'edr_{y}']
+        assert r['availability'] == 'verified' and r['dictionary_members']
+        assert r['expected_bytes'] == r['max_bytes'] and len(r['expected_sha256']) == 64
+    conapo = resources['conapo_population']
+    assert conapo['expected_bytes'] == 36658654
+    assert conapo['expected_sha256'] == '1a8f07be08de082a0c33404f0fbce9d9292845a8c8290153a6ad2e1889bab31a'
+    assert conapo['license'] == 'CC-BY-4.0'
+    assert {r['id'] for r in m['requirements'] if r['status'] == 'blocked'} == {
+        'conapo_dictionary', 'conapo_geographic_crosswalk'}
+
+
+def test_named_manual_approval_restricts_the_exact_file(manifest, tmp_path, monkeypatch):
+    monkeypatch.setattr(sm, '_manual_acquisition', lambda: {
+        'layout': {'staging_dir': str(tmp_path), 'file': 'approved.pdf'}})
+    r = manifest['resources'][0]
+    r.update(transport='local', staging_key='layout', local_path='different.pdf',
+             expected_bytes=4, expected_sha256=hashlib.sha256(b'data').hexdigest())
+    with pytest.raises(sm.ManifestError, match='Local file differs from owner approval'):
+        sm.validate_manifest(manifest)
+
+
+def test_production_usaleep_template_accepts_pdf_without_format_override(manifest, tmp_path, monkeypatch):
+    resource = copy.deepcopy(next(r for r in sm.load_source('us')['resources']
+                                 if r['id'] == 'usaleep_dictionary'))
+    assert resource['format'] == 'pdf'
+    root = tmp_path / 'approved_layout'
+    root.mkdir()
+    data = b'%PDF-1.4 synthetic production-template check'
+    source = root / resource['local_path']
+    source.write_bytes(data)
+    source.chmod(0o400)
+    resource.update(expected_bytes=len(data), expected_sha256=hashlib.sha256(data).hexdigest())
+    monkeypatch.setattr(sm, '_manual_acquisition', lambda: {
+        resource['staging_key']: {'staging_dir': str(root), 'file': source.name}})
+    manifest['resources'][1] = resource
+    manifest['requirements'][0]['resource_ids'][1] = resource['id']
+    monkeypatch.setattr(sm, '_open_url', lambda *args: Response(b'synthetic HTTP peer'))
+    result = fetch(manifest, tmp_path)
+    assert result['resources'][1]['checksum_status'] == 'matched'
+    assert result['resources'][1]['transfer_integrity'] == 'staged_size_and_sha256'
+    with tarfile.open(tmp_path / 'result/payload.tar') as archive:
+        assert archive.extractfile(resource['destination']).read() == data
+    assert source.read_bytes() == data and source.stat().st_mode & 0o777 == 0o400
