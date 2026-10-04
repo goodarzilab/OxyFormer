@@ -348,3 +348,16 @@ def test_unused_geography_name_bytes_do_not_break_ids(tmp_path, mapping):
     bundle[0] = SourceFile(geo.path, replace(geo.manifest, payload_hash=sha256(payload).hexdigest()))
     frame, _ = load_acs(bundle, mapping)
     assert frame.original_id.tolist() == IDS
+
+
+def test_source_state_and_tract_fips_must_agree(tmp_path, mapping):
+    bundle = acs_bundle(tmp_path, mapping, ids=["48001000100"], state="al")
+    with pytest.raises(ValueError, match="state FIPS"):
+        load_acs(bundle, mapping)
+
+
+@pytest.mark.parametrize("token", ["-1", "-500", "-666666666"])
+def test_negative_median_income_refused(tmp_path, mapping, token):
+    bundle = acs_bundle(tmp_path, mapping, lambda raw: cell_edit(raw, "B19013", 1, token))
+    with pytest.raises(ValueError, match="median"):
+        load_acs(bundle, mapping)

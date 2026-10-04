@@ -115,6 +115,8 @@ def _value(raw, table, kind):
     if table["unit"] == "persons" or table["unit"] == "households":
         _require(value >= 0, "unresolved negative estimate in approved ACS table")
         _require(value.is_integer(), "noninteger ACS count")
+    if table.get("median_jam_values"):
+        _require(value >= 0, "invalid negative median-income estimate")
     if table.get("median_jam_values") and raw in table["median_jam_values"]:
         return None, table["median_jam_values"][raw]
     return value, ""
@@ -158,6 +160,8 @@ def load_acs(bundle, mapping):
             if row["SUMLEVEL"] != "140" or row["COMPONENT"] != "00":
                 excluded.append((state, row["LOGRECNO"], row["SUMLEVEL"], row["COMPONENT"]))
                 continue
+            _require(row["STATE"] == section["state_fips"].get(state),
+                     "tract state FIPS disagrees with source-file postal state")
             geoid = row["GEOID"]
             _require(re.fullmatch(r"14000US[0-9]{11}", geoid), "invalid 2010 tract GEOID")
             original_id = geoid[7:]
