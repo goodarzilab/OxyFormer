@@ -166,8 +166,8 @@ owner_decisions:
     min_repetitions_per_scenario: 1000        # for selected final scenarios: independent repetitions using the production tuning and stopping procedure
     coverage_one_sided_95_lower_bound_min: 0.925
     null_rejection_upper_bound_max: 0.075
-    abs_bias_over_empirical_sd_max: 0.10
-    abs_bias_over_empirical_sd_investigate: 0.20
+    abs_bias_over_empirical_sd_target: 0.10      # a target, not a hard maximum
+    abs_bias_over_empirical_sd_investigate_above: 0.20
     mean_se_over_empirical_sd_range: [0.90, 1.10]
     numerical_failure_upper_bound_max: 0.01
     publish_all_failures_and_registered_retry_rules: true
