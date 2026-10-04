@@ -77,10 +77,15 @@ def normalized_poisson_loss(log_rate: Tensor, deaths: Tensor, population: Tensor
     require(population.shape == deaths.shape and bool(torch.isfinite(population).all())
             and bool((population > 0).all()), "population must be aligned, finite and positive")
     require(bool((deaths >= 0).all()), "negative death counts")
-    # Integer unary log/lgamma otherwise default to float32 even for a FP64
-    # predictor. Promote before these operations; preserve wider float inputs.
-    deaths = deaths.to(dtype=torch.promote_types(deaths.dtype, log_rate.dtype))
-    population = population.to(dtype=torch.promote_types(population.dtype, log_rate.dtype))
+    # Promote all operands together before count arithmetic or branching the
+    # predictor graph. Its derivative must accumulate in this common dtype
+    # before autograd casts back to the predictor; keep weights for reduction.
+    computation_dtype = log_rate.dtype
+    for operand in (deaths, population, weights):
+        computation_dtype = torch.promote_types(computation_dtype, operand.dtype)
+    log_rate = log_rate.to(dtype=computation_dtype)
+    deaths = deaths.to(dtype=computation_dtype)
+    population = population.to(dtype=computation_dtype)
     # A zero-mass row must never reach exp/lgamma with extreme values: masking
     # the resulting infinity afterward would still leave NaN backward products.
     excluded = weights == 0
