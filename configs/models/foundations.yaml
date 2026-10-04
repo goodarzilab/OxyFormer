@@ -1,0 +1,49 @@
+# Official metadata inspected 2026-10-04; local bytes must match before inference.
+offline_only: true
+device: cpu
+outcome_families:
+- identity
+- bernoulli
+weight_semantics: unit_only
+query_batch_rows: 1
+checkpoints:
+  tabicl_classifier:
+    package: tabicl
+    package_version: 2.2.0
+    repository: jingang/TabICL
+    revision: 4dcd344ece2c00be9e831fdd35bed57b5ad83e19
+    filename: tabicl-classifier-v2-20260212.ckpt
+    sha256: bdc7dbd5e4ff21f8f0456fcf90c6b7cdf72dbea960f2d05b19bec19f9b3d4ed0
+    size_bytes: 110368038
+    max_context_rows: 30000
+    max_features_including_treatment: 500
+  tabicl_regressor:
+    package: tabicl
+    package_version: 2.2.0
+    repository: jingang/TabICL
+    revision: 4dcd344ece2c00be9e831fdd35bed57b5ad83e19
+    filename: tabicl-regressor-v2-20260212.ckpt
+    sha256: 0db9cb538f114e79026bf08f45f41ad8dd7ad2de2aaca9a5ca8cd3bd9748ae7a
+    size_bytes: 114324594
+    max_context_rows: 30000
+    max_features_including_treatment: 500
+  tabpfn_classifier:
+    package: tabpfn
+    package_version: 9.1.0
+    repository: Prior-Labs/TabPFN-v2-clf
+    revision: f851f2a3c941544733b712d8c0f96dfae9b28862
+    filename: tabpfn-v2-classifier-finetuned-zk73skhh.ckpt
+    sha256: cf8c519c01eaf1613ee91239006d57b1c806ff5f23ac1aeb1315ba1015210e49
+    size_bytes: 29009539
+    max_context_rows: 1000
+    max_features_including_treatment: 500
+  tabpfn_regressor:
+    package: tabpfn
+    package_version: 9.1.0
+    repository: Prior-Labs/TabPFN-v2-reg
+    revision: 4972a65a1b30806315c6f92499959ffbfc69a673
+    filename: tabpfn-v2-regressor.ckpt
+    sha256: 2ab5a07d5c41dfe6db9aa7ae106fc6de898326c2765be66505a07e2868c10736
+    size_bytes: 44390977
+    max_context_rows: 1000
+    max_features_including_treatment: 500

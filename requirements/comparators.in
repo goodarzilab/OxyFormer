@@ -1,0 +1,4 @@
+# Optional local inference only; provision separately, never in primary installs.
+# See configs/models/foundations.yaml and docs/FOUNDATION_MODELS.md.
+tabicl==2.2.0
+tabpfn==9.1.0
