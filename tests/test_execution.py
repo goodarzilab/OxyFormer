@@ -666,7 +666,7 @@ def test_build_tasks_cli_publishes_into_new_or_existing_directory(tmp_path, spec
     spec_file = tmp_path / 'spec.json'
     approvals_file = tmp_path / 'approvals.yaml'
     spec_file.write_text(json.dumps(spec))
-    approvals_file.write_text('schema_version: 1\napproved_by: fixture\n')
+    approvals_file.write_bytes((root / 'configs/approvals.yaml').read_bytes())
     out = tmp_path / 'plans' / 'campaign'
     if existing:
         out.mkdir(parents=True)
@@ -682,3 +682,37 @@ def test_build_tasks_cli_publishes_into_new_or_existing_directory(tmp_path, spec
     repeated = subprocess.run(command, cwd=tmp_path, env=env, text=True, capture_output=True)
     assert repeated.returncode != 0
     assert {str(p): file_hash(p) for p in out.iterdir()} == before
+
+
+@pytest.mark.parametrize('kind', ['final-coverage', 'anchor', 'refit-audit'])
+def test_builder_rejects_unanchored_owner_allocation(tmp_path, spec, kind):
+    root = Path(__file__).parents[1]
+    spec['kind'] = kind
+    spec['id'] = 'synthetic-unapproved'
+    approvals = {'schema_version': 1, 'approved_by': 'fixture', 'owner_decisions': {
+        'campaign_allocations': {spec['id']: {'kind': kind, 'gpu_hours': 9}}}}
+    spec_file = tmp_path / 'spec.json'
+    spec_file.write_text(json.dumps(spec))
+    alternate = tmp_path / 'alternate.yaml'
+    alternate.write_text(yaml.safe_dump(approvals))
+    out = tmp_path / 'plan'
+    process = subprocess.run([sys.executable, str(root / 'scripts/build_tasks.py'),
+        '--spec', str(spec_file), '--approvals', str(alternate), '--out', str(out)],
+        env=dict(os.environ, PYTHONPATH=str(root / 'src'), CUDA_VISIBLE_DEVICES=''),
+        text=True, capture_output=True)
+    assert process.returncode != 0, 'Builder accepted an allocation outside its owner record'
+    assert 'authoritative owner approvals' in process.stderr
+    assert not out.exists()
+
+
+@pytest.mark.parametrize('exception', [RuntimeError(), AssertionError(), FileNotFoundError('stage output')])
+def test_executed_stage_exception_always_publishes_failure(runtime, monkeypatch, exception):
+    repo, out = runtime
+    def failing(request):
+        raise exception
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=failing))
+    result = run('dummy', out, repo, task_file=task_file(out))
+    assert result.status == 'fail'
+    assert result.message
+    receipt = StageResult.from_json((out / '_execution/result.json').read_text())
+    assert receipt == result
