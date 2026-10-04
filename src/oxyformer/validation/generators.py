@@ -57,7 +57,7 @@ class TruthArtifact(Immutable):
     frame_hash: str
     observation_hash: str
     target: str
-    status: Literal["integrated", "analytic", "design_rejected"]
+    status: Literal["integrated", "analytic", "design_rejected", "empty_target"]
     reason: str = ""
 
 
@@ -182,7 +182,6 @@ def _groups(frame, config, policy):
             key = adjustment_key(frame, row, state, config)
             law = AssignmentLaw(frame, row, state, config, support[frame.support_keys[row]])
             groups.setdefault(key, []).append(_Term(row, state, frame.weights[row]*probability, law))
-    require(bool(groups), "selected population has zero target mass")
     return groups
 
 
@@ -248,6 +247,17 @@ _CAUSAL_TARGET = (
 )
 
 
+def _unavailable_truth(observations, common, status, reason):
+    """Keep observations when a population target is undefined; never report zero."""
+    observed = TruthArtifact(kind="observed_law", value=None, status=status, reason=reason,
+                             target=_OBSERVED_TARGET, **common)
+    causal = TruthArtifact(kind="structural_causal", value=None, status=status, reason=reason,
+                           target=_CAUSAL_TARGET, **common)
+    uncertainty = IntegrationUncertainty(method="not integrated: " + reason, observed_absolute_difference=None,
+                                        causal_absolute_difference=None, order=0, converged=False)
+    return GeneratedSample(observations, observed, causal, uncertainty)
+
+
 def generate_suite_a(frame: CovariateFrame, config: SCMConfig, policy: ShiftOrStayPolicy, *,
                      seed: int = 0, tolerance: float = 1e-8, max_order: int = 256) -> GeneratedSample:
     """Generate observations and *population*, not realized-sample, truths.
@@ -268,14 +278,10 @@ def generate_suite_a(frame: CovariateFrame, config: SCMConfig, policy: ShiftOrSt
             reason = str(exc)
         else:
             raise ContractError("policy interface unexpectedly accepted atoms without a measure derivation")
-        observed = TruthArtifact(kind="observed_law", value=None, status="design_rejected", reason=reason,
-                                 target=_OBSERVED_TARGET, **common)
-        causal = TruthArtifact(kind="structural_causal", value=None, status="design_rejected", reason=reason,
-                               target=_CAUSAL_TARGET, **common)
-        uncertainty = IntegrationUncertainty(method="not integrated: unsupported atomic design", observed_absolute_difference=None,
-                                            causal_absolute_difference=None, order=0, converged=False)
-        return GeneratedSample(observations, observed, causal, uncertainty)
+        return _unavailable_truth(observations, common, "design_rejected", reason)
     groups = _groups(frame, config, policy)
+    if not groups:
+        return _unavailable_truth(observations, common, "empty_target", "selected population has zero target mass")
     order = 16
     previous = _integrate(frame, config, policy, groups, order)
     while order*2 <= max_order:
