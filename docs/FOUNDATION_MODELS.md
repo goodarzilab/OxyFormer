@@ -85,7 +85,10 @@ archived text controls; this paragraph is an operational digest, not a replaceme
 `probability(...)` method for the origin classifier. As in the merged heads,
 outputs have shape `[B,R]` for queries `[B,R,1]`. In these adapters `x_tokens`
 is a nuisance `CovariateView`, and `raw_x` is its complete numeric matrix in
-column order. The merged `Immutable._coerce` / `CovariateView` contract accepts
+column order. Equivalent real floating, integer and boolean raw-X tensors are
+accepted; fractional values must not be truncated to integer inputs. Nonnegative
+integer-like seeds (including NumPy integer scalars) are normalized to Python
+integers before registration checks and context hashing. The merged `Immutable._coerce` / `CovariateView` contract accepts
 only built-in scalar cells (str/int/float/bool/None), with finite numbers; NumPy
 scalar cells and NaN already fail during view construction. Data producers must
 convert NumPy scalars to Python scalars and missingness to None before creating
