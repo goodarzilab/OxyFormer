@@ -222,7 +222,7 @@ class TabICLComparator:
         require(isinstance(a_query, torch.Tensor) and a_query.ndim == 3 and
                 a_query.shape[0] == len(raw) and a_query.shape[2] == 1 and
                 a_query.is_floating_point() and bool(torch.isfinite(a_query).all()), "invalid query shape/values")
-        doses = a_query.detach().cpu().numpy()[..., 0]
+        doses = a_query.detach().cpu().to(torch.float64).numpy()[..., 0]
         output = np.empty(doses.shape, dtype=float)
         # A single query prevents other queried rows from entering preprocessing
         # or transductive inference. The fitted training context is unchanged.
