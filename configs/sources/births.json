@@ -1,0 +1,252 @@
+{
+  "schema_version": 1,
+  "kind": "acquisition",
+  "id": "births",
+  "status": "blocked",
+  "blockers": [
+    "DANE 2023 catalog exposes a CAPTCHA download flow; unattended public access and year-specific archive/dictionary contents not verified. Do not bypass CAPTCHA.",
+    "DANE 2024 catalog exposes a CAPTCHA download flow; unattended public access and year-specific archive/dictionary contents not verified. Do not bypass CAPTCHA.",
+    "DANE 2025 catalog exposes a CAPTCHA download flow; unattended public access and year-specific archive/dictionary contents not verified. Do not bypass CAPTCHA.",
+    "Required INEC 2015 variable dictionary was not located/inspected; the 2015 form is not a substitute for a release dictionary.",
+    "INEC 2024/2015 archive contents, weight units and residence joins remain unverified; preserve release distinctions and provisional/late-registration semantics."
+  ],
+  "release_identity": {
+    "releases": {
+      "dane": {
+        "2023": "catalog 876",
+        "2024": "catalog 878",
+        "2025": "catalog 915, created 2026-09-29"
+      },
+      "inec": [
+        2024,
+        2015
+      ]
+    },
+    "payload_completeness": "not_verified"
+  },
+  "access_terms": {
+    "rule": "public_data_only",
+    "notes": [
+      "DANE attribution required; do not redistribute payload.tar to multiple users without DANE written permission. No such permission is asserted.",
+      "INEC catalog footers link CC-BY 4.0; retain release pages and recheck archive-specific conditions."
+    ]
+  },
+  "selection_provenance": {
+    "inspected_on": "2026-10-04",
+    "catalogs": [
+      "https://microdatos.dane.gov.co/index.php/catalog/876/get-microdata",
+      "https://microdatos.dane.gov.co/index.php/catalog/878/get-microdata",
+      "https://microdatos.dane.gov.co/index.php/catalog/915/get-microdata",
+      "https://www.ecuadorencifras.gob.ec/nacidos-vivos-y-defunciones-fetales-2024/",
+      "https://www.ecuadorencifras.gob.ec/estadisticas-de-nacimientos-y-defunciones-2015/"
+    ],
+    "method": "Audit each birth release separately. DANE 2025 archive is catalog-listed, not assumed unavailable. DANE weight bands must not be relabeled grams; INEC continuous weight and maternal residence require year-specific dictionary validation. No claim of complete occurrence-year ascertainment.",
+    "approval_file": "configs/approvals.yaml",
+    "byte_ceilings": "Hard transfer limits, not measured file sizes or compute allocations."
+  },
+  "resources": [
+    {
+      "id": "dane_2023",
+      "release": "dane_2023",
+      "role": "data",
+      "url": "https://microdatos.dane.gov.co/index.php/catalog/876/download/24250",
+      "destination": "births/dane_2023.zip",
+      "max_bytes": 134217728,
+      "format": "zip",
+      "availability": "unverified",
+      "inspection": "Exact archive download URL observed in catalog HTML onclick, behind CAPTCHA modal. Automated access has not been verified. HEAD inspection: 200."
+    },
+    {
+      "id": "dane_dictionary_2023",
+      "release": "dane_2023",
+      "role": "dictionary",
+      "url": "https://microdatos.dane.gov.co/index.php/catalog/876/data-dictionary",
+      "destination": "births/dane_dictionary_2023.html",
+      "max_bytes": 8388608,
+      "format": "html",
+      "availability": "unverified",
+      "inspection": "Official year-specific dictionary tab linked by catalog; 2024 file dictionary inspected. Other year contents still require validation. HEAD inspection: 200."
+    },
+    {
+      "id": "dane_terms_2023",
+      "release": "dane_2023",
+      "role": "terms",
+      "url": "https://microdatos.dane.gov.co/index.php/catalog/876",
+      "destination": "births/dane_terms_2023.html",
+      "max_bytes": 8388608,
+      "format": "html",
+      "availability": "unverified",
+      "inspection": "2025 catalog terms inspected: public anonymized data free; source attribution; multi-user redistribution requires prior written permission. Other release terms require reinspection. HEAD inspection: 200."
+    },
+    {
+      "id": "dane_2024",
+      "release": "dane_2024",
+      "role": "data",
+      "url": "https://microdatos.dane.gov.co/index.php/catalog/878/download/24461",
+      "destination": "births/dane_2024.zip",
+      "max_bytes": 134217728,
+      "format": "zip",
+      "availability": "unverified",
+      "inspection": "Exact archive download URL observed in catalog HTML onclick, behind CAPTCHA modal. Automated access has not been verified. HEAD inspection: 200."
+    },
+    {
+      "id": "dane_dictionary_2024",
+      "release": "dane_2024",
+      "role": "dictionary",
+      "url": "https://microdatos.dane.gov.co/index.php/catalog/878/data-dictionary",
+      "destination": "births/dane_dictionary_2024.html",
+      "max_bytes": 8388608,
+      "format": "html",
+      "availability": "unverified",
+      "inspection": "Official year-specific dictionary tab linked by catalog; 2024 file dictionary inspected. Other year contents still require validation. HEAD inspection: 200."
+    },
+    {
+      "id": "dane_terms_2024",
+      "release": "dane_2024",
+      "role": "terms",
+      "url": "https://microdatos.dane.gov.co/index.php/catalog/878",
+      "destination": "births/dane_terms_2024.html",
+      "max_bytes": 8388608,
+      "format": "html",
+      "availability": "unverified",
+      "inspection": "2025 catalog terms inspected: public anonymized data free; source attribution; multi-user redistribution requires prior written permission. Other release terms require reinspection. HEAD inspection: 200."
+    },
+    {
+      "id": "dane_2025",
+      "release": "dane_2025",
+      "role": "data",
+      "url": "https://microdatos.dane.gov.co/index.php/catalog/915/download/24798",
+      "destination": "births/dane_2025.zip",
+      "max_bytes": 134217728,
+      "format": "zip",
+      "availability": "unverified",
+      "inspection": "Exact archive download URL observed in catalog HTML onclick, behind CAPTCHA modal. Automated access has not been verified. HEAD inspection: 200."
+    },
+    {
+      "id": "dane_dictionary_2025",
+      "release": "dane_2025",
+      "role": "dictionary",
+      "url": "https://microdatos.dane.gov.co/index.php/catalog/915/data-dictionary",
+      "destination": "births/dane_dictionary_2025.html",
+      "max_bytes": 8388608,
+      "format": "html",
+      "availability": "unverified",
+      "inspection": "Official year-specific dictionary tab linked by catalog; 2024 file dictionary inspected. Other year contents still require validation. HEAD inspection: 200."
+    },
+    {
+      "id": "dane_terms_2025",
+      "release": "dane_2025",
+      "role": "terms",
+      "url": "https://microdatos.dane.gov.co/index.php/catalog/915",
+      "destination": "births/dane_terms_2025.html",
+      "max_bytes": 8388608,
+      "format": "html",
+      "availability": "unverified",
+      "inspection": "2025 catalog terms inspected: public anonymized data free; source attribution; multi-user redistribution requires prior written permission. Other release terms require reinspection. HEAD inspection: 200."
+    },
+    {
+      "id": "inec_2024",
+      "release": "inec_2024",
+      "role": "data",
+      "url": "https://www.ecuadorencifras.gob.ec/documentos/web-inec/Poblacion_y_Demografia/Nacimientos_Defunciones/2024/Datos_abiertos_EDF_ENV_2024_vf.zip",
+      "destination": "births/inec_2024.zip",
+      "max_bytes": 268435456,
+      "format": "zip",
+      "availability": "unverified",
+      "inspection": "Exact public CSV bundle link inspected in official INEC release page; includes live births and fetal deaths, which must be separated. HEAD inspection: 200."
+    },
+    {
+      "id": "inec_dictionary_2024",
+      "release": "inec_2024",
+      "role": "dictionary",
+      "url": "https://www.ecuadorencifras.gob.ec/documentos/web-inec/Poblacion_y_Demografia/Nacimientos_Defunciones/2024/Diccionario_de_variables_ENV_EDF_2024.zip",
+      "destination": "births/inec_dictionary_2024.zip",
+      "max_bytes": 33554432,
+      "format": "zip",
+      "availability": "verified",
+      "inspection": "Exact dictionary archive link inspected in official INEC release page. HEAD inspection: 200. Dictionary ZIP fetched outside repository; members inspected; SHA-256 recorded from these exact documentation bytes.",
+      "expected_sha256": "49a2a37aefdc85ce65909c79771eb0a56616aca12a48403f4cdb99c4969f841e"
+    },
+    {
+      "id": "inec_terms_2024",
+      "release": "inec_2024",
+      "role": "terms",
+      "url": "https://www.ecuadorencifras.gob.ec/nacidos-vivos-y-defunciones-fetales-2024/",
+      "destination": "births/inec_terms_2024.html",
+      "max_bytes": 8388608,
+      "format": "html",
+      "availability": "unverified",
+      "inspection": "Official release page inspected; footer links Creative Commons Attribution 4.0. Archive-specific contents still need verification. HEAD inspection: 200."
+    },
+    {
+      "id": "inec_2015",
+      "release": "inec_2015",
+      "role": "data",
+      "url": "https://www.ecuadorencifras.gob.ec//documentos/datos/Poblacion_y_Demografia/nacimientos_defunciones/nacimientos/spss/dbd_nacidos_vivos_spss_2015.zip",
+      "destination": "births/inec_2015.zip",
+      "max_bytes": 268435456,
+      "format": "zip",
+      "availability": "unverified",
+      "inspection": "Exact live-birth SPSS archive link inspected in official INEC 2015 page. HEAD inspection: 200."
+    },
+    {
+      "id": "inec_terms_2015",
+      "release": "inec_2015",
+      "role": "terms",
+      "url": "https://www.ecuadorencifras.gob.ec/estadisticas-de-nacimientos-y-defunciones-2015/",
+      "destination": "births/inec_terms_2015.html",
+      "max_bytes": 8388608,
+      "format": "html",
+      "availability": "unverified",
+      "inspection": "Official release page inspected; footer links Creative Commons Attribution 4.0. Archive-specific contents still need verification. HEAD inspection: 200."
+    }
+  ],
+  "requirements": [
+    {
+      "id": "dane_2023_access",
+      "status": "blocked",
+      "resource_ids": [
+        "dane_2023",
+        "dane_dictionary_2023",
+        "dane_terms_2023"
+      ],
+      "reason": "DANE 2023 catalog exposes a CAPTCHA download flow; unattended public access and year-specific archive/dictionary contents not verified. Do not bypass CAPTCHA."
+    },
+    {
+      "id": "dane_2024_access",
+      "status": "blocked",
+      "resource_ids": [
+        "dane_2024",
+        "dane_dictionary_2024",
+        "dane_terms_2024"
+      ],
+      "reason": "DANE 2024 catalog exposes a CAPTCHA download flow; unattended public access and year-specific archive/dictionary contents not verified. Do not bypass CAPTCHA."
+    },
+    {
+      "id": "dane_2025_access",
+      "status": "blocked",
+      "resource_ids": [
+        "dane_2025",
+        "dane_dictionary_2025",
+        "dane_terms_2025"
+      ],
+      "reason": "DANE 2025 catalog exposes a CAPTCHA download flow; unattended public access and year-specific archive/dictionary contents not verified. Do not bypass CAPTCHA."
+    },
+    {
+      "id": "inec_2015_dictionary",
+      "status": "blocked",
+      "resource_ids": [],
+      "reason": "Required INEC 2015 variable dictionary was not located/inspected; the 2015 form is not a substitute for a release dictionary."
+    },
+    {
+      "id": "inec_payloads",
+      "status": "blocked",
+      "resource_ids": [
+        "inec_2024",
+        "inec_dictionary_2024",
+        "inec_2015"
+      ],
+      "reason": "INEC 2024/2015 archive contents, weight units and residence joins remain unverified; preserve release distinctions and provisional/late-registration semantics."
+    }
+  ]
+}

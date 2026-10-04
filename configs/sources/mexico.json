@@ -1,0 +1,150 @@
+{
+  "schema_version": 1,
+  "kind": "acquisition",
+  "id": "mexico",
+  "status": "blocked",
+  "blockers": [
+    "INEGI EDR registration 2015: exact downloadable archive and corresponding dictionary/catalogs not verified. A registration release alone does not establish occurrence-year completeness.",
+    "INEGI EDR registration 2016: exact downloadable archive and corresponding dictionary/catalogs not verified. A registration release alone does not establish occurrence-year completeness.",
+    "INEGI EDR registration 2017: exact downloadable archive and corresponding dictionary/catalogs not verified. A registration release alone does not establish occurrence-year completeness.",
+    "INEGI EDR registration 2018: exact downloadable archive and corresponding dictionary/catalogs not verified. A registration release alone does not establish occurrence-year completeness.",
+    "INEGI EDR registration 2019: exact downloadable archive and corresponding dictionary/catalogs not verified. A registration release alone does not establish occurrence-year completeness.",
+    "Common registration lag is unspecified; releases after 2019 needed for late registrations cannot be enumerated without that policy. Later-period check years also unresolved.",
+    "Municipal age-sex-year denominator archive, dictionary, source-specific terms and historical-to-2022 geography compatibility/crosswalk are unverified. No compatible denominator claimed."
+  ],
+  "release_identity": {
+    "releases": {
+      "edr_occurrence_years": [
+        2015,
+        2016,
+        2017,
+        2018,
+        2019
+      ],
+      "registration_years": null,
+      "common_registration_lag_years": null,
+      "later_period_check": null,
+      "conapo_candidate": "1990-2040 municipal reconstruction/projections, released 2024; 2022 geographic frame"
+    },
+    "payload_completeness": "not_verified"
+  },
+  "access_terms": {
+    "rule": "public_data_only",
+    "notes": [
+      "INEGI free-use terms inspected; source-specific catalog and dictionaries must accompany every registration release.",
+      "CONAPO public catalog does not verify a compatible denominator file or its terms. No application-based access permitted."
+    ]
+  },
+  "selection_provenance": {
+    "inspected_on": "2026-10-04",
+    "catalogs": [
+      "https://www.inegi.org.mx/programas/edr/",
+      "https://www.inegi.org.mx/rnm/index.php/catalog/617/data-dictionary",
+      "https://www.gob.mx/conapo/documentos/reconstruccion-y-proyecciones-de-la-poblacion-de-los-municipios-de-mexico-1990-2040"
+    ],
+    "method": "Occurrence years are not registration releases. For a common integer lag L, inventory registration releases 2015 through 2019+L, then restrict each occurrence year y to registration <= y+L. L is unresolved, so no complete release list is invented. Harmonize residence municipality, age, sex and year to compatible CONAPO geography before rates; a 2022 municipality frame is not presumed compatible with 2015-2019 EDR.",
+    "approval_file": "configs/approvals.yaml",
+    "byte_ceilings": "Hard transfer limits, not measured file sizes or compute allocations."
+  },
+  "resources": [
+    {
+      "id": "edr_catalog",
+      "release": "edr",
+      "role": "metadata",
+      "url": "https://www.inegi.org.mx/programas/edr/",
+      "destination": "mexico/edr_catalog.html",
+      "max_bytes": 8388608,
+      "format": "html",
+      "availability": "unverified",
+      "inspection": "Official EDR program page inspected; year-specific bulk download list is dynamically loaded. HEAD inspection: 200."
+    },
+    {
+      "id": "edr_dictionary_2019",
+      "release": "edr_registration_2019",
+      "role": "dictionary",
+      "url": "https://www.inegi.org.mx/rnm/index.php/catalog/617/data-dictionary/F1?file_name=DEFUN19",
+      "destination": "mexico/edr_dictionary_2019.html",
+      "max_bytes": 8388608,
+      "format": "html",
+      "availability": "unverified",
+      "inspection": "DEFUN19 file dictionary link inspected in official 2019 dictionary index; contents require inspection. HEAD inspection: 200."
+    },
+    {
+      "id": "edr_terms",
+      "release": "edr",
+      "role": "terms",
+      "url": "https://www.inegi.org.mx/inegi/terminos.html",
+      "destination": "mexico/edr_terms.html",
+      "max_bytes": 4194304,
+      "format": "html",
+      "availability": "unverified",
+      "inspection": "Official terms page inspected in browser and worker; retain exact text for attribution and permitted use. HEAD inspection: 200."
+    },
+    {
+      "id": "conapo_catalog",
+      "release": "conapo_1990_2040",
+      "role": "metadata",
+      "url": "https://www.gob.mx/conapo/documentos/reconstruccion-y-proyecciones-de-la-poblacion-de-los-municipios-de-mexico-1990-2040",
+      "destination": "mexico/conapo_catalog.html",
+      "max_bytes": 8388608,
+      "format": "html",
+      "availability": "unavailable",
+      "inspection": "Official catalog inspected in browser; worker returned a challenge page, not usable metadata. HEAD inspection: 200."
+    },
+    {
+      "id": "conapo_terms",
+      "release": "conapo_1990_2040",
+      "role": "terms",
+      "url": "https://www.gob.mx/conapo/documentos/reconstruccion-y-proyecciones-de-la-poblacion-de-los-municipios-de-mexico-1990-2040",
+      "destination": "mexico/conapo_terms.html",
+      "max_bytes": 8388608,
+      "format": "html",
+      "availability": "unavailable",
+      "inspection": "Source-specific permissions not verified due to challenge response; no redistribution permission assumed. HEAD inspection: 200."
+    }
+  ],
+  "requirements": [
+    {
+      "id": "edr_registration_2015",
+      "status": "blocked",
+      "resource_ids": [],
+      "reason": "INEGI EDR registration 2015: exact downloadable archive and corresponding dictionary/catalogs not verified. A registration release alone does not establish occurrence-year completeness."
+    },
+    {
+      "id": "edr_registration_2016",
+      "status": "blocked",
+      "resource_ids": [],
+      "reason": "INEGI EDR registration 2016: exact downloadable archive and corresponding dictionary/catalogs not verified. A registration release alone does not establish occurrence-year completeness."
+    },
+    {
+      "id": "edr_registration_2017",
+      "status": "blocked",
+      "resource_ids": [],
+      "reason": "INEGI EDR registration 2017: exact downloadable archive and corresponding dictionary/catalogs not verified. A registration release alone does not establish occurrence-year completeness."
+    },
+    {
+      "id": "edr_registration_2018",
+      "status": "blocked",
+      "resource_ids": [],
+      "reason": "INEGI EDR registration 2018: exact downloadable archive and corresponding dictionary/catalogs not verified. A registration release alone does not establish occurrence-year completeness."
+    },
+    {
+      "id": "edr_registration_2019",
+      "status": "blocked",
+      "resource_ids": [],
+      "reason": "INEGI EDR registration 2019: exact downloadable archive and corresponding dictionary/catalogs not verified. A registration release alone does not establish occurrence-year completeness."
+    },
+    {
+      "id": "edr_later_registrations",
+      "status": "blocked",
+      "resource_ids": [],
+      "reason": "Common registration lag is unspecified; releases after 2019 needed for late registrations cannot be enumerated without that policy. Later-period check years also unresolved."
+    },
+    {
+      "id": "conapo_compatible_denominators",
+      "status": "blocked",
+      "resource_ids": [],
+      "reason": "Municipal age-sex-year denominator archive, dictionary, source-specific terms and historical-to-2022 geography compatibility/crosswalk are unverified. No compatible denominator claimed."
+    }
+  ]
+}

@@ -1,0 +1,195 @@
+{
+  "schema_version": 1,
+  "kind": "acquisition",
+  "id": "us",
+  "status": "blocked",
+  "blockers": [
+    "Required CDC/Census terms resources are inaccessible to the worker; bulk payload transfers and release contents remain unverified. Reinspect before marking ready."
+  ],
+  "release_identity": {
+    "releases": {
+      "usaleep": "2010-2015, CDC 2018 national File A",
+      "acs": "2006-2010 five-year summary file; all tract/block-group sequences",
+      "elevcan": {
+        "repository": "dhimmel/elevcan",
+        "commit": "7aed9f29d2371eb4918f337a138608e6b6d9e311"
+      }
+    },
+    "payload_completeness": "not_verified"
+  },
+  "access_terms": {
+    "rule": "public_data_only",
+    "notes": [
+      "CDC page declares public domain, citation appreciated; terms resource inaccessible from worker.",
+      "Census terms endpoint inaccessible; do not infer permissions from a successful directory listing.",
+      "elevcan code/data CC0 1.0; figures/writing CC-BY 4.0 with attribution. Retain pinned LICENSE.md."
+    ]
+  },
+  "selection_provenance": {
+    "inspected_on": "2026-10-04",
+    "catalogs": [
+      "https://www.cdc.gov/nchs/nvss/usaleep/usaleep.html",
+      "https://www2.census.gov/acs2010_5yr/summaryfile/",
+      "https://www2.census.gov/acs2010_5yr/summaryfile/2006-2010_ACSSF_All_In_2_Giant_Files(Experienced-Users-Only)/",
+      "https://github.com/dhimmel/elevcan"
+    ],
+    "method": "Select complete USALEEP File A, raw ACS tract/block-group frame and geographic files, and commit-pinned legacy source. No covariate concepts selected; those still require endpoint approval. Raw acquisition does not authorize flag-2/3 training.",
+    "approval_file": "configs/approvals.yaml",
+    "byte_ceilings": "Hard transfer limits, not measured file sizes or compute allocations."
+  },
+  "resources": [
+    {
+      "id": "usaleep_data",
+      "release": "usaleep",
+      "role": "data",
+      "url": "https://ftp.cdc.gov/pub/Health_Statistics/NCHS/Datasets/NVSS/USALEEP/CSV/US_A.CSV",
+      "destination": "us/usaleep_data.csv",
+      "max_bytes": 8388608,
+      "format": "csv",
+      "availability": "unverified",
+      "inspection": "Listed in official CDC national CSV directory; payload not downloaded. HEAD inspection: 200."
+    },
+    {
+      "id": "usaleep_dictionary",
+      "release": "usaleep",
+      "role": "dictionary",
+      "url": "https://www.cdc.gov/nchs/data/nvss/usaleep/Record_Layout_CensusTract_Life_Expectancy.pdf",
+      "destination": "us/usaleep_dictionary.pdf",
+      "max_bytes": 2097152,
+      "format": "pdf",
+      "availability": "unverified",
+      "inspection": "Browser inspected record layout: File A tract identifiers, life expectancy, SE and abridged life table flags. HEAD inspection: 200."
+    },
+    {
+      "id": "usaleep_terms",
+      "release": "usaleep",
+      "role": "terms",
+      "url": "https://www.cdc.gov/nchs/nvss/usaleep/usaleep.html",
+      "destination": "us/usaleep_terms.html",
+      "max_bytes": 4194304,
+      "format": "html",
+      "availability": "unavailable",
+      "inspection": "Browser inspected public-domain statement; worker GET returned HTTP 403. HEAD inspection: 200."
+    },
+    {
+      "id": "acs_tracts",
+      "release": "acs",
+      "role": "data",
+      "url": "https://www2.census.gov/acs2010_5yr/summaryfile/2006-2010_ACSSF_All_In_2_Giant_Files(Experienced-Users-Only)/Tracts_Block_Groups_Only.zip",
+      "destination": "us/acs_tracts.zip",
+      "max_bytes": 17179869184,
+      "format": "zip",
+      "availability": "unverified",
+      "inspection": "Exact resource link inspected in Census giant-file catalog. HEAD inspection: 200."
+    },
+    {
+      "id": "acs_geography",
+      "release": "acs",
+      "role": "data",
+      "url": "https://www2.census.gov/acs2010_5yr/summaryfile/2006-2010_ACSSF_All_In_2_Giant_Files(Experienced-Users-Only)/2010_ACS_Geography_Files.zip",
+      "destination": "us/acs_geography.zip",
+      "max_bytes": 1073741824,
+      "format": "zip",
+      "availability": "unverified",
+      "inspection": "Exact resource link inspected in Census giant-file catalog. HEAD inspection: 200."
+    },
+    {
+      "id": "acs_giant_instructions",
+      "release": "acs",
+      "role": "metadata",
+      "url": "https://www2.census.gov/acs2010_5yr/summaryfile/2006-2010_ACSSF_All_In_2_Giant_Files(Experienced-Users-Only)/Supplemental_Instructions_for_Using_2_Giant_Files.pdf",
+      "destination": "us/acs_giant_instructions.pdf",
+      "max_bytes": 4194304,
+      "format": "pdf",
+      "availability": "unverified",
+      "inspection": "Exact resource link inspected in Census giant-file catalog. HEAD inspection: 200."
+    },
+    {
+      "id": "acs_dictionary",
+      "release": "acs",
+      "role": "dictionary",
+      "url": "https://www2.census.gov/acs2010_5yr/summaryfile/Sequence_Number_and_Table_Number_Lookup.txt",
+      "destination": "us/acs_dictionary.txt",
+      "max_bytes": 16777216,
+      "format": "text",
+      "availability": "unverified",
+      "inspection": "Exact link inspected in the official summary-file catalog; dictionary maps sequence/table positions. HEAD inspection: 200."
+    },
+    {
+      "id": "acs_technical",
+      "release": "acs",
+      "role": "metadata",
+      "url": "https://www2.census.gov/acs2010_5yr/summaryfile/ACS_2006-2010_SF_Tech_Doc.pdf",
+      "destination": "us/acs_technical.pdf",
+      "max_bytes": 33554432,
+      "format": "pdf",
+      "availability": "unverified",
+      "inspection": "Official 2006-2010 summary-file technical documentation inspected in browser. HEAD inspection: 200."
+    },
+    {
+      "id": "acs_terms",
+      "release": "acs",
+      "role": "terms",
+      "url": "https://www.census.gov/about/policies/quality/copyright.html",
+      "destination": "us/acs_terms.html",
+      "max_bytes": 4194304,
+      "format": "html",
+      "availability": "unavailable",
+      "inspection": "Worker inspection returned HTTP 403; terms content not verified. HEAD inspection: HTTP Error 403: Forbidden."
+    },
+    {
+      "id": "elevcan_source",
+      "release": "elevcan",
+      "role": "code",
+      "url": "https://codeload.github.com/dhimmel/elevcan/tar.gz/7aed9f29d2371eb4918f337a138608e6b6d9e311",
+      "destination": "us/elevcan_source.tar.gz",
+      "max_bytes": 536870912,
+      "format": "tar_gz",
+      "availability": "unverified",
+      "inspection": "Commit resolved through GitHub commits API; archive endpoint requires transfer verification. HEAD inspection: 200."
+    },
+    {
+      "id": "elevcan_readme",
+      "release": "elevcan",
+      "role": "dictionary",
+      "url": "https://raw.githubusercontent.com/dhimmel/elevcan/7aed9f29d2371eb4918f337a138608e6b6d9e311/README.md",
+      "destination": "us/elevcan_readme.txt",
+      "max_bytes": 1048576,
+      "format": "text",
+      "availability": "unverified",
+      "inspection": "Repository README inspected: documents directory organization and code/run.R entry point. HEAD inspection: 200."
+    },
+    {
+      "id": "elevcan_terms",
+      "release": "elevcan",
+      "role": "terms",
+      "url": "https://raw.githubusercontent.com/dhimmel/elevcan/7aed9f29d2371eb4918f337a138608e6b6d9e311/LICENSE.md",
+      "destination": "us/elevcan_terms.txt",
+      "max_bytes": 1048576,
+      "format": "text",
+      "availability": "verified",
+      "inspection": "Pinned license inspected by HTTPS GET: CC0 for code/data, CC-BY 4.0 for remaining content. HEAD inspection: 200."
+    }
+  ],
+  "requirements": [
+    {
+      "id": "complete_us_bundle",
+      "status": "blocked",
+      "resource_ids": [
+        "usaleep_data",
+        "usaleep_dictionary",
+        "usaleep_terms",
+        "acs_tracts",
+        "acs_geography",
+        "acs_giant_instructions",
+        "acs_dictionary",
+        "acs_technical",
+        "acs_terms",
+        "elevcan_source",
+        "elevcan_readme",
+        "elevcan_terms"
+      ],
+      "reason": "Required CDC/Census terms resources are inaccessible to the worker; bulk payload transfers and release contents remain unverified. Reinspect before marking ready."
+    }
+  ]
+}
