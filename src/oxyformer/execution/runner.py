@@ -1,0 +1,184 @@
+"""Trusted stage dispatch, with immutable inputs and attempt-owned writes.
+
+This is an execution contract, not a sandbox for hostile Python modules. Stage
+implementations must use output_dir for all writes and treat dependency_paths as
+read-only. The runner never modifies upstream files or their permissions; input
+hashes are rechecked before publishing success. Archives are extracted only via
+execution.paths.safe_extract into the consuming attempt.
+"""
+import importlib
+import json
+import os
+from pathlib import Path
+import re
+
+import yaml
+
+from oxyformer.contracts import StageRequest, StageResult
+from oxyformer.provenance import ContractError, file_hash, relative_artifact_path, require
+from .identity import code_identity, environment_record, scientific_fingerprint, verify_recipe
+from .paths import atomic_json, atomic_write, isolated_caches, output_path
+
+
+def dependency_variable(unit_id):
+    require(isinstance(unit_id, str) and bool(unit_id), 'empty dependency ID')
+    return 'SWARM_DEP_' + re.sub('[^A-Z0-9]', '_', unit_id.upper())
+
+
+def resolve_dependencies(ids, environ=None):
+    environ = os.environ if environ is None else environ
+    variables = [dependency_variable(i) for i in ids]
+    require(len(set(variables)) == len(variables), 'dependency normalization collision')
+    result = {}
+    for unit, name in zip(ids, variables):
+        require(name in environ, f'missing dependency variable {name}')
+        path = Path(environ[name])
+        require(path.is_absolute(), f'dependency must be absolute: {name}')
+        result[unit] = path.resolve(strict=True)
+        require(result[unit].is_dir(), f'dependency must be an attempt directory: {name}')
+    return result
+
+
+def read_mapping(path):
+    value = yaml.safe_load(Path(path).read_text())
+    require(isinstance(value, dict), f'expected mapping: {path}')
+    return value
+
+
+def dependency_file(root, relative):
+    relative_artifact_path(relative)
+    path = (root / relative).resolve(strict=True)
+    require(path.is_relative_to(root) and path.is_file(), 'dependency file escapes attempt')
+    return path
+
+
+def verify_continuation(task, deps):
+    chain = task.get('continuation')
+    if chain is None:
+        return
+    require(set(chain) == {'owner', 'step', 'predecessor'}, 'invalid continuation fields')
+    require(isinstance(chain['owner'], str) and bool(chain['owner']), 'continuation owner missing')
+    require(type(chain['step']) is int and chain['step'] >= 0, 'invalid continuation step')
+    predecessor = chain['predecessor']
+    if chain['step'] == 0:
+        require(predecessor is None, 'initial continuation has predecessor')
+        return
+    require(predecessor in deps, 'continuation predecessor must be an explicit dependency')
+    previous = read_mapping(dependency_file(deps[predecessor], '_execution/task.json'))
+    prev_chain = previous.get('continuation', {})
+    require(previous.get('id') == predecessor, 'continuation predecessor identity mismatch')
+    require(prev_chain.get('owner') == chain['owner'], 'continuation ownership mismatch')
+    require(prev_chain.get('step') == chain['step'] - 1, 'continuation step is not consecutive')
+    require(previous.get('recipe_lock') == task.get('recipe_lock'), 'continuation recipe mismatch')
+    # Result.verify rehashes the entire predecessor request and every artifact.
+    old_request = StageRequest.from_json(dependency_file(deps[predecessor], '_execution/request.json').read_text())
+    old_result = StageResult.from_json(dependency_file(deps[predecessor], '_execution/result.json').read_text())
+    require(Path(old_request.output_dir).resolve() == deps[predecessor], 'continuation attempt owner mismatch')
+    require(old_result.status == 'pass', 'continuation predecessor did not pass')
+    old_result.verify(old_request)
+
+
+def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, approvals=None):
+    out = Path(out).absolute()
+    require(out.is_dir() and not out.is_symlink(), 'output must be an existing attempt directory')
+    out = out.resolve(strict=True)
+    if 'SWARM_UNIT_DIR' in os.environ:
+        require(out == Path(os.environ['SWARM_UNIT_DIR']).resolve(strict=True),
+                '--out must equal SWARM_UNIT_DIR')
+    repo = Path(repo).resolve(strict=True)
+    require(not out.is_relative_to(repo), 'output may not be inside repository')
+    head = code_identity(repo, out)
+    registry_file = repo / 'configs/execution/stages.yaml'
+    registry = read_mapping(registry_file)
+    require(registry.get('schema_version') == 1, 'unsupported registry version')
+    require(stage in registry['stages'], f'unknown stage: {stage}')
+    settings = registry['stages'][stage]
+    approvals_file = Path(approvals) if approvals else repo / 'configs/approvals.yaml'
+    approvals_value = read_mapping(approvals_file)
+    require(approvals_value.get('schema_version') == 1 and approvals_value.get('approved_by'),
+            'owner approvals are missing')
+    sources = {str(registry_file): file_hash(registry_file),
+               str(approvals_file.resolve()): file_hash(approvals_file)}
+    if task_file is not None:
+        task_file = Path(task_file).resolve(strict=True)
+        document = read_mapping(task_file)
+        sources[str(task_file)] = file_hash(task_file)
+        if 'tasks' in document:
+            tasks = document['tasks']
+            ids = [t['id'] for t in tasks]
+            require(len(set(ids)) == len(ids), 'duplicate task IDs')
+            require(task_id in ids, 'task-id required and must select a concrete task')
+            task = dict(tasks[ids.index(task_id)])
+        else:
+            task = dict(document)
+            require(task_id is None or task.get('id') == task_id, 'task-id mismatch')
+    else:
+        require(task_id is None, '--task-id requires --task')
+        task = {'id': stage, 'stage': stage, 'needs': settings.get('needs', {}),
+                'outputs': settings.get('outputs', [])}
+    require(task.get('stage') == stage, 'task stage mismatch')
+    needs = task.get('needs', {})
+    require(isinstance(needs, dict), 'task needs must map IDs to relative files')
+    require(deps_env or not needs, 'dependencies require --deps-env')
+    deps = resolve_dependencies(needs) if needs else {}
+    files = []
+    for unit, root in deps.items():
+        require(not out.is_relative_to(root) and not root.is_relative_to(out),
+                'output overlaps an upstream attempt')
+        require(isinstance(needs[unit], list) and needs[unit], 'dependency requires explicit files')
+        for relative in needs[unit]:
+            files.append(dependency_file(root, relative))
+    require(len(set(files)) == len(files), 'duplicate dependency files')
+    for relative in task.get('outputs', []):
+        require(not relative.startswith('_execution/'), 'reserved execution output')
+        path = output_path(out, relative)
+        require(not path.exists(), f'output already exists: {relative}')
+    # Execution directory is a once-only reservation; no in-place attempt resume.
+    output_path(out, '_execution').mkdir()
+    verify_continuation(task, deps)
+    lock_ref = task.get('recipe_lock')
+    if lock_ref:
+        require(set(lock_ref) == {'dependency', 'path', 'sha256'}, 'invalid recipe reference')
+        require(lock_ref['dependency'] in deps, 'recipe lock dependency missing')
+        lock_file = dependency_file(deps[lock_ref['dependency']], lock_ref['path'])
+        require(lock_file in files, 'recipe lock must be a declared input')
+        require(file_hash(lock_file) == lock_ref['sha256'], 'recipe lock hash mismatch')
+        lock = read_mapping(lock_file)
+        verify_recipe(repo, lock)
+    config = {'stage': stage, 'settings': settings, 'approvals': approvals_value,
+              'input_sources': sources, 'dependencies': {k: str(v) for k, v in deps.items()}}
+    config_path = atomic_json(out, '_execution/config.json', config)
+    task_path = atomic_json(out, '_execution/task.json', task)
+    request = StageRequest(stage=stage, config_path=str(config_path), config_hash=file_hash(config_path),
+                           task_path=str(task_path), task_hash=file_hash(task_path),
+                           dependency_paths=tuple(map(str, files)),
+                           dependency_hashes=tuple(map(file_hash, files)),
+                           output_dir=str(out), code_identity=head)
+    atomic_write(out, '_execution/request.json', request.to_json())
+    environment = environment_record()
+    atomic_json(out, '_execution/environment.json', environment)
+    atomic_json(out, '_execution/identity.json', {'head': head, 'scientific_fingerprint': scientific_fingerprint(repo)})
+    try:
+        request.verify_inputs()
+        module_name = settings.get('module')
+        require(isinstance(module_name, str) and module_name.startswith('oxyformer.'),
+                'stage module not registered')
+        with isolated_caches(out):
+            module = importlib.import_module(module_name)
+            require(callable(getattr(module, 'run_stage', None)), 'stage has no run_stage(StageRequest)')
+            result = module.run_stage(request)
+        require(isinstance(result, StageResult), 'stage did not return StageResult')
+        result.verify(request)
+        require(all(not a.path.startswith('_execution/') for a in result.artifacts), 'reserved execution artifact')
+        declared = set(task.get('outputs', []))
+        if result.status == 'pass':
+            require(declared <= {a.path for a in result.artifacts}, 'stage omitted declared outputs')
+        for path, digest in sources.items():
+            require(file_hash(path) == digest, f'input source changed: {path}')
+        code_identity(repo, out)
+    except (ImportError, FileNotFoundError) as exc:
+        result = StageResult(request_hash=request.content_hash, status='blocked', artifacts=(), message=str(exc))
+    except Exception as exc:
+        result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(), message=str(exc))
+    atomic_write(out, '_execution/result.json', result.to_json())
+    return result
