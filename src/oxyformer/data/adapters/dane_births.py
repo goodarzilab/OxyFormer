@@ -45,7 +45,23 @@ def profile_hash(key: str) -> str:
 
 
 def _owner_approvals() -> dict:
-    return yaml.safe_load((_ROOT / 'configs/approvals.yaml').read_text())
+    # An unavailable approval grants nothing; ingestion can still report its audit.
+    try:
+        value = yaml.safe_load((_ROOT / 'configs/approvals.yaml').read_text())
+    except (OSError, yaml.YAMLError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    decisions = value.get('owner_decisions')
+    if not isinstance(decisions, dict):
+        return {}
+    exposures = decisions.get('birth_exposure', {})
+    if not isinstance(exposures, dict) or any(not isinstance(v, dict) for v in exposures.values()):
+        return {}
+    exclusions = decisions.get('birth_population_exclusions', [])
+    if not isinstance(exclusions, list):
+        return {}
+    return value
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

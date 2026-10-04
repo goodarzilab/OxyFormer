@@ -350,3 +350,30 @@ def test_ecuador_parishes_share_canton_link_even_with_missing_parish(make, monke
     assert [r.exposure_mmhg for r in records] == [10, 12, None]
     assert records[2].maternal_residence is None
     assert not records[2].observation_eligible
+
+
+@pytest.mark.parametrize('contents', (None, '', 'null', '[]', 'owner_decisions: null',
+                                      'owner_decisions: {birth_exposure: null}',
+                                      'owner_decisions: {birth_exposure: {COL: null}}'))
+def test_unavailable_owner_approvals_return_blocked_audit(make, monkeypatch, tmp_path, contents):
+    real_reader = dane._owner_approvals
+    case = make()
+    profile = dane._profile('dane_2023')
+    (tmp_path / 'configs').mkdir()
+    if contents is not None:
+        (tmp_path / 'configs/approvals.yaml').write_text(contents)
+    monkeypatch.setattr(dane, '_ROOT', tmp_path)
+    monkeypatch.setattr(dane, '_profile', lambda key: profile)
+    monkeypatch.setattr(dane, '_owner_approvals', real_reader)
+    records, audit = load(case)
+    assert records[0].exposure_mmhg is None
+    assert audit.input_count == audit.excluded_count == 1
+    with pytest.raises(ContractError, match='owner approval'):
+        audit.assert_anchor_ready()
+
+
+@pytest.mark.parametrize('value', (float('inf'), float('-inf'), float('nan')))
+def test_shared_immutable_contract_rejects_nonfinite_exposure(value):
+    with pytest.raises(ContractError, match='nonfinite number'):
+        dane.ResidenceAssignment(residence=('01', '001'), exposure_mmhg=value,
+                                 lineage_namespace='synthetic', lineage_id='one')
