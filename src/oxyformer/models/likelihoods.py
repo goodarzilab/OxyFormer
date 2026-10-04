@@ -2,6 +2,7 @@
 
 Weights are target masses. Population is a distinct likelihood exposure. Losses
 sum by default; ``mean`` divides by total target mass, never by population.
+All-zero-mass minibatches contribute zero loss and gradient for every reduction.
 """
 from __future__ import annotations
 
@@ -21,7 +22,7 @@ def _aligned(prediction: Tensor, target: Tensor, weights: Tensor) -> None:
             "prediction, target and target weights must have identical nonempty shapes")
     require(all(bool(torch.isfinite(x).all()) for x in (prediction, target, weights)),
             "nonfinite likelihood inputs")
-    require(bool((weights >= 0).all()) and bool(weights.sum() > 0), "invalid target weights")
+    require(bool((weights >= 0).all()), "invalid target weights")
 
 
 def weighted_reduce(values: Tensor, weights: Tensor, reduction: str = "sum") -> Tensor:
@@ -30,12 +31,18 @@ def weighted_reduce(values: Tensor, weights: Tensor, reduction: str = "sum") -> 
     weighted = values * weights
     if reduction == "none":
         return weighted
-    return weighted.sum() if reduction == "sum" else weighted.sum() / weights.sum()
+    if reduction == "sum":
+        return weighted.sum()
+    mass = weights.sum()
+    # Preserve every positive mass, including masses below one. Avoid 0/0 for
+    # an empty contribution while retaining the predictor autograd connection.
+    return weighted.sum() / torch.where(mass > 0, mass, torch.ones_like(mass))
 
 
 def squared_loss(mean: Tensor, target: Tensor, weights: Tensor, *, reduction="sum") -> Tensor:
     _aligned(mean, target, weights)
-    return weighted_reduce((mean - target).square(), weights, reduction)
+    residual = (mean - target).masked_fill(weights == 0, 0)
+    return weighted_reduce(residual.square(), weights, reduction)
 
 
 def bernoulli_loss(logits: Tensor, target: Tensor, weights: Tensor, *, reduction="sum") -> Tensor:
@@ -61,9 +68,17 @@ def normalized_poisson_loss(log_rate: Tensor, deaths: Tensor, population: Tensor
     # predictor. Promote before these operations; preserve wider float inputs.
     deaths = deaths.to(dtype=torch.promote_types(deaths.dtype, log_rate.dtype))
     population = population.to(dtype=torch.promote_types(population.dtype, log_rate.dtype))
+    # A zero-mass row must never reach exp/lgamma with extreme values: masking
+    # the resulting infinity afterward would still leave NaN backward products.
+    excluded = weights == 0
+    log_rate = log_rate.masked_fill(excluded, 0)
+    deaths = deaths.masked_fill(excluded, 0)
+    population = population.masked_fill(excluded, 1)
     log_count_mean = population.log() + log_rate
-    nll = log_count_mean.exp() - deaths * log_count_mean + torch.lgamma(deaths + 1)
-    return weighted_reduce(nll / population, weights, reduction)
+    # Algebraically NLL(D, N*exp(f))/N, without first forming N*exp(f).
+    normalized_nll = (log_rate.exp() - (deaths / population) * log_count_mean
+                      + torch.lgamma(deaths + 1) / population)
+    return weighted_reduce(normalized_nll, weights, reduction)
 
 
 def inverse_link(linear_predictor: Tensor, family: str) -> Tensor:

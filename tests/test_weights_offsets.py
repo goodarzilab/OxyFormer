@@ -263,3 +263,72 @@ def test_bernoulli_rejects_nonbinary_labels_before_cast(invalid):
     target = torch.tensor([0., invalid], dtype=torch.float64)
     with pytest.raises(ContractError, match="Bernoulli|nonfinite"):
         bernoulli_loss(torch.zeros(2, dtype=torch.float32), target, torch.ones(2))
+
+
+@pytest.mark.parametrize("family", ["identity", "bernoulli", "poisson"])
+@pytest.mark.parametrize("reduction", ["none", "sum", "mean"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_zero_mass_minibatches_have_zero_loss_and_gradient(family, reduction, dtype):
+    prediction = torch.tensor([0., 1., 1000., -1000.], dtype=dtype, requires_grad=True)
+    target = torch.tensor([0, 1, 0, 1])
+    weights = torch.zeros(4, dtype=dtype)
+    population = torch.tensor([100, 200, 1000000, 10]) if family == "poisson" else None
+    loss = endpoint_loss(prediction, target, weights, family=family,
+                         population=population, reduction=reduction)
+    expected = torch.zeros_like(prediction) if reduction == "none" else prediction.new_zeros(())
+    torch.testing.assert_close(loss, expected, rtol=0, atol=0)
+    gradient, = torch.autograd.grad(loss.sum(), prediction)
+    torch.testing.assert_close(gradient, torch.zeros_like(prediction), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("reduction", ["none", "sum", "mean"])
+@pytest.mark.parametrize("excluded_log_rate", [80., 1000.])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_poisson_zero_weight_rows_cannot_overflow_loss_or_gradient(reduction, excluded_log_rate, dtype):
+    log_rate = torch.tensor([0., excluded_log_rate], dtype=dtype, requires_grad=True)
+    loss = normalized_poisson_loss(log_rate, torch.tensor([0, 0]), torch.tensor([1, 1000000]),
+                                   torch.tensor([1., 0.], dtype=dtype), reduction=reduction)
+    expected = log_rate.new_tensor([1., 0.]) if reduction == "none" else log_rate.new_tensor(1.)
+    torch.testing.assert_close(loss, expected, rtol=0, atol=0)
+    gradient, = torch.autograd.grad(loss.sum(), log_rate)
+    torch.testing.assert_close(gradient, log_rate.new_tensor([1., 0.]), rtol=0, atol=0)
+
+
+def test_poisson_normalization_avoids_count_mean_overflow_for_active_rows():
+    log_rate = torch.tensor([80.], requires_grad=True)
+    loss = normalized_poisson_loss(log_rate, torch.tensor([0]), torch.tensor([1000000]), torch.tensor([2.]))
+    expected = 2 * log_rate.exp().sum()
+    assert torch.isfinite(loss)
+    torch.testing.assert_close(loss, expected)
+    gradient, = torch.autograd.grad(loss, log_rate)
+    torch.testing.assert_close(gradient, 2 * log_rate.exp())
+
+
+@pytest.mark.parametrize("active_weight", [0., 1.])
+def test_zero_weight_polynomial_losses_keep_finite_gradients(active_weight):
+    from oxyformer.models.riesz import riesz_loss
+    weights = torch.tensor([active_weight, 0.])
+    a = torch.tensor([1., 1e30], requires_grad=True)
+    d = torch.tensor([2., -1e30], requires_grad=True)
+    square = squared_loss(a, torch.zeros(2), weights, reduction="mean")
+    torch.testing.assert_close(square, torch.tensor(active_weight))
+    gradient, = torch.autograd.grad(square, a)
+    torch.testing.assert_close(gradient, torch.tensor([2 * active_weight, 0.]))
+    riesz = riesz_loss(a, d, weights)
+    torch.testing.assert_close(riesz, torch.tensor(-active_weight))
+    ga, gd = torch.autograd.grad(riesz, (a, d))
+    torch.testing.assert_close(ga, torch.tensor([4 * active_weight, 0.]))
+    torch.testing.assert_close(gd, torch.tensor([-2 * active_weight, 0.]))
+
+
+@pytest.mark.parametrize("family", ["identity", "bernoulli", "poisson"])
+def test_positive_fractional_mass_keeps_mean_normalization(family):
+    prediction = vec([-.3, .5])
+    target = vec([0., 1.])
+    weights = vec([.02, .03])
+    population = vec([10., 20.]) if family == "poisson" else None
+    first = endpoint_loss(prediction, target, weights, family=family, population=population, reduction="mean")
+    rescaled = endpoint_loss(prediction, target, weights*100, family=family, population=population, reduction="mean")
+    torch.testing.assert_close(first, rescaled)
+    with pytest.raises(ContractError, match="invalid target weights"):
+        endpoint_loss(prediction, target, vec([-1., 1.]), family=family, population=population)
