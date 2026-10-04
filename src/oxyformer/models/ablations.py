@@ -144,6 +144,10 @@ def build_variant(variant_id, encoder, *, treatment_design, raw_x_dim, family="i
     require(variant_id in VARIANTS, "unknown registered variant")
     variant = VARIANTS[variant_id]
     require(variant.status == "production_comparison", "variant is not a production nuisance configuration")
+    needs_transformer = (variant.outcome in ("query", "early", "varying") or
+                         variant.correction in ("origin", "early", "varying", "signed_riesz"))
+    if variant.pma and needs_transformer:
+        require(county_context is not None, "registered PMA variant requires county context; use A2 for no-PMA")
     if not variant.ssl:
         encoder = FeatureEncoder(encoder.tokenizer.features, dropout=dropout)
         if county_context is not None:

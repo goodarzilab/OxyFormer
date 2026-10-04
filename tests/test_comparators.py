@@ -355,7 +355,8 @@ def test_no_ssl_reinitializes_and_no_pma_retains_offsets(architecture, fold):
 def test_signed_riesz_and_varying_coefficient_can_have_either_sign(architecture, fold):
     encoder, context, design = architecture
     for variant in ('A4', 'A5'):
-        model = build_variant(variant, encoder, treatment_design=design, raw_x_dim=2, dropout=0.).correction.eval()
+        model = build_variant(variant, encoder, treatment_design=design, raw_x_dim=2,
+                              county_context=context, dropout=0.).correction.eval()
         batch = model.encoder.tokenizer.prepare(fold[0])
         args = (torch.ones(4, 2, 1), batch, torch.tensor(fold[0].values), torch.zeros(4, 4, 64))
         with torch.no_grad():
@@ -410,3 +411,24 @@ def test_checkpoint_task_and_package_pins(backend):
         replace(model.checkpoint, package_version="latest")
     with pytest.raises(ContractError, match="task/family"):
         type(model)(model.checkpoint, task="origin", family="bernoulli", seed=11)
+
+
+def test_training_queries_cannot_be_emitted_as_oof(backend, fold):
+    model = fitted(backend, fold)
+    train = fold[0]
+    with pytest.raises(ContractError, match='held-out'):
+        query(model, train, torch.ones(4, 1, 1))
+
+
+@pytest.mark.parametrize('name', ['A0', 'A1', 'A3', 'A4', 'A5'])
+def test_pma_variant_cannot_silently_be_no_pma(architecture, name):
+    with pytest.raises(ContractError, match='requires county context'):
+        build_variant(name, architecture[0], treatment_design=architecture[2], raw_x_dim=2)
+
+
+@pytest.mark.parametrize('cell', [np.float64(1.), np.int64(1), np.bool_(True), float('nan')])
+def test_merged_view_requires_python_scalar_cells(fold, cell):
+    # The merged contract fails before _matrix sees a NumPy scalar or NaN.
+    # Convert scalars to builtins and missing values to None in the data adapter.
+    with pytest.raises(ContractError, match='value does not match'):
+        replace(fold[0], values=((cell, 1.), (2., 3.), (4., 5.), (6., 7.)))
