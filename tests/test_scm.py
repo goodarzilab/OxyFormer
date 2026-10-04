@@ -302,3 +302,49 @@ def test_every_declared_scenario_runs_with_matching_frozen_support(scenario):
     result = generate_suite_a(f, scenario, p)
     assert result.observed_law_truth.status == ("design_rejected" if scenario.assignment == "atoms" else "integrated")
     assert SCMConfig.from_json(result.observed_law_truth.generator_configuration) == scenario
+
+
+def test_count_validation_handles_error_shift_across_components():
+    # true dose 9.5, error -7 => recorded 2.5 => recorded shift 4.5
+    # => intervened true dose 11.5, with invalid Poisson rate 50 - 4.9*11.5.
+    # The validator already subtracts the error to obtain the true-dose preimage.
+    with pytest.raises(ContractError, match="negative event rate on"):
+        generate_suite_a(frame(2), config(beta=-4.9, exposure_error=7.,
+                         registration_probability=.5, support_gaps=True),
+                         policy(((0.,5.), (7.,10.))))
+
+
+@pytest.mark.parametrize("missing", ["outcomes", "biomarkers", "positive_weight_rows"])
+def test_empty_selected_population_preserves_observations_without_inventing_truth(missing, tmp_path):
+    f = frame(2)
+    if missing == "outcomes":
+        f = replace(f, outcome_available=(False, False))
+    elif missing == "biomarkers":
+        f = replace(f, biomarker_available=(False, False))
+    else:
+        f = replace(f, weights=(0., 1.), outcome_available=(True, False))
+    result = generate_suite_a(f, config(), policy())
+    assert result.observations.frame == f
+    assert len(result.observations.a) == 2
+    if missing != "positive_weight_rows":
+        assert result.observations.y == (None, None)
+    for truth in (result.observed_law_truth, result.structural_causal_truth):
+        assert truth.status == "empty_target"
+        assert truth.value is None
+        assert truth.reason == "selected population has zero target mass"
+    assert not result.integration_uncertainty.converged
+    assert result.integration_uncertainty.observed_absolute_difference is None
+    write_sample(result, observations_dir=tmp_path/"observed", truth_dir=tmp_path/"private")
+
+
+def test_dependence_clusters_can_cross_exposure_geographies():
+    from oxyformer.validation.generators import _sample_observations
+    f = replace(frame(4), cluster_ids=("household0", "household1", "household0", "household1"))
+    draws = np.array([_sample_observations(f, config("null"), policy(), seed).y for seed in range(500)])
+    covariance = np.cov(draws, rowvar=False)
+    assert covariance[0, 2] > .2  # shared household, distinct exposure geography
+    assert abs(covariance[0, 3]) < .15
+    sample = generate_suite_a(f, config(), policy())
+    assert sample.observations.frame.cluster_ids == f.cluster_ids
+    assert sample.observations.a[0] == sample.observations.a[1]
+    assert sample.observations.a[2] == sample.observations.a[3]
