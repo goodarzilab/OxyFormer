@@ -313,6 +313,7 @@ def load_endes(bundle: EndesBundle, year: int, mapping: dict,
     require(bool(roster), "empty ENDES roster")
     require(all((hh,) in households for hh, person in roster), "orphan roster household join")
     require(set(biomarkers) <= set(roster), "orphan biomarker person join")
+    roster_household_ids = {hh for hh, person in roster}
     sampled = defaultdict(set)
     cluster_design = {}
     psu_strata = {}
@@ -454,7 +455,7 @@ def load_endes(bundle: EndesBundle, year: int, mapping: dict,
         measured_psus_by_stratum=tuple(sorted((h, tuple(sorted(p))) for h, p in measured.items())),
         singleton_strata=singleton, finite_population_status="not_documented; HV033 preserved, not interpreted as FPC",
         replicate_weight_status="not_documented", household_without_roster_ids=tuple(sorted(
-            hh for (hh,) in households if hh not in {key[0] for key in roster})),
+            hh for (hh,) in households if hh not in roster_household_ids)),
         fixed_effects=tuple(bundle.fixed_effects), policy_actions=tuple(sorted(bundle.policy_actions)),
         inference_blockers=tuple(blockers),
     )
