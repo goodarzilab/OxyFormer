@@ -1,0 +1,725 @@
+# Inspected historical layouts; no study records. Approval file is read-only.
+schema_version: 1
+usaleep:
+  mapping_status: reviewed
+  release: 2010-2015 CDC national File A
+  geography_vintage: 2010
+  encoding: utf-8-sig
+  dictionary_url: https://www.cdc.gov/nchs/data/nvss/usaleep/Record_Layout_CensusTract_Life_Expectancy.pdf
+  dictionary_sha256: 7612e16609d73f958ff6618ae70aab51d6502745c093c307a7f217c967e24431
+  inspection: '2026-10-04: CDC layout page 2 and pinned US_A.CSV header inspected; no missing tokens in the release.
+    No alternative sentinels inferred.'
+  units: years
+  flags:
+    '1': observed
+    '2': predicted
+    '3': mixed
+  primary_flags:
+  - '1'
+  approval_id: configs/approvals.yaml#plan_fixed.primary_outcome_flags
+  field_mapping:
+    Tract ID: original_id
+    STATE2KX: state_fips
+    CNTY2KX: county_fips
+    TRACT2KX: tract_code
+    e(0): life_expectancy_years
+    se(e(0)): standard_error_years
+    Abridged life table flag: mortality_input_flag
+acs:
+  mapping_status: reviewed
+  release: 2006-2010 ACS 5-year Summary File
+  geography_vintage: 2010
+  encoding: latin-1
+  dictionary_url: https://www2.census.gov/acs2010_5yr/summaryfile/Sequence_Number_and_Table_Number_Lookup.txt
+  dictionary_sha256: a458000b01db2b32d9eb7e615b4b5397b1cdcbf9cda69905326d409983ef9f00
+  technical_url: https://www2.census.gov/acs2010_5yr/summaryfile/ACS_2006-2010_SF_Tech_Doc.pdf
+  technical_sha256: 24eb045f35c4703addc5b8c266aef67445e05d23079db25b2a7dd2d67a29a0b1
+  inspection: '2026-10-04: all seven table definitions and every approved numerator/denominator inspected. Fixed-width
+    geography and sequence metadata: sections 2.3-2.6; special values: appendix C.3. No API sentinel substitutions.'
+  acquisition_note: The complete archive remains blocked in configs/sources/us.json; this adapter consumes reviewed
+    local raw files and does not authorize acquisition.
+  field_mapping:
+    GEOID: original_id
+    LOGRECNO: logical_record_number
+    estimates: raw_estimates
+    margins_of_error: raw_margins_of_error
+  geography_layout:
+    FILEID:
+    - 1
+    - 6
+    STUSAB:
+    - 7
+    - 2
+    SUMLEVEL:
+    - 9
+    - 3
+    COMPONENT:
+    - 12
+    - 2
+    LOGRECNO:
+    - 14
+    - 7
+    STATE:
+    - 26
+    - 2
+    COUNTY:
+    - 28
+    - 3
+    TRACT:
+    - 41
+    - 6
+    GEOID:
+    - 179
+    - 40
+  sequence_widths:
+    '0010': 179
+    '0013': 61
+    '0040': 223
+    '0046': 226
+    '0053': 204
+    0059: 191
+  tables:
+    B01001:
+      sequence: '0010'
+      start_position: 7
+      cells: 49
+      title: SEX BY AGE
+      lines:
+        '1': 'Total:'
+        '2': 'Male:'
+        '3': Under 5 years
+        '4': 5 to 9 years
+        '5': 10 to 14 years
+        '6': 15 to 17 years
+        '7': 18 and 19 years
+        '8': 20 years
+        '9': 21 years
+        '10': 22 to 24 years
+        '11': 25 to 29 years
+        '12': 30 to 34 years
+        '13': 35 to 39 years
+        '14': 40 to 44 years
+        '15': 45 to 49 years
+        '16': 50 to 54 years
+        '17': 55 to 59 years
+        '18': 60 and 61 years
+        '19': 62 to 64 years
+        '20': 65 and 66 years
+        '21': 67 to 69 years
+        '22': 70 to 74 years
+        '23': 75 to 79 years
+        '24': 80 to 84 years
+        '25': 85 years and over
+        '26': 'Female:'
+        '27': Under 5 years
+        '28': 5 to 9 years
+        '29': 10 to 14 years
+        '30': 15 to 17 years
+        '31': 18 and 19 years
+        '32': 20 years
+        '33': 21 years
+        '34': 22 to 24 years
+        '35': 25 to 29 years
+        '36': 30 to 34 years
+        '37': 35 to 39 years
+        '38': 40 to 44 years
+        '39': 45 to 49 years
+        '40': 50 to 54 years
+        '41': 55 to 59 years
+        '42': 60 and 61 years
+        '43': 62 to 64 years
+        '44': 65 and 66 years
+        '45': 67 to 69 years
+        '46': 70 to 74 years
+        '47': 75 to 79 years
+        '48': 80 to 84 years
+        '49': 85 years and over
+      universe: Total population
+      unit: persons
+    B03002:
+      sequence: '0013'
+      start_position: 38
+      cells: 21
+      title: HISPANIC OR LATINO ORIGIN BY RACE
+      lines:
+        '1': 'Total:'
+        '2': 'Not Hispanic or Latino:'
+        '3': White alone
+        '4': Black or African American alone
+        '5': American Indian and Alaska Native alone
+        '6': Asian alone
+        '7': Native Hawaiian and Other Pacific Islander alone
+        '8': Some other race alone
+        '9': 'Two or more races:'
+        '10': Two races including Some other race
+        '11': Two races excluding Some other race, and three or more races
+        '12': 'Hispanic or Latino:'
+        '13': White alone
+        '14': Black or African American alone
+        '15': American Indian and Alaska Native alone
+        '16': Asian alone
+        '17': Native Hawaiian and Other Pacific Islander alone
+        '18': Some other race alone
+        '19': 'Two or more races:'
+        '20': Two races including Some other race
+        '21': Two races excluding Some other race, and three or more races
+      universe: Total population
+      unit: persons
+    B15002:
+      sequence: '0040'
+      start_position: 90
+      cells: 35
+      title: SEX BY EDUCATIONAL ATTAINMENT FOR THE POPULATION 25 YEARS AND OVER
+      lines:
+        '1': 'Total:'
+        '2': 'Male:'
+        '3': No schooling completed
+        '4': Nursery to 4th grade
+        '5': 5th and 6th grade
+        '6': 7th and 8th grade
+        '7': 9th grade
+        '8': 10th grade
+        '9': 11th grade
+        '10': 12th grade, no diploma
+        '11': High school graduate, GED, or alternative
+        '12': Some college, less than 1 year
+        '13': Some college, 1 or more years, no degree
+        '14': Associate's degree
+        '15': Bachelor's degree
+        '16': Master's degree
+        '17': Professional school degree
+        '18': Doctorate degree
+        '19': 'Female:'
+        '20': No schooling completed
+        '21': Nursery to 4th grade
+        '22': 5th and 6th grade
+        '23': 7th and 8th grade
+        '24': 9th grade
+        '25': 10th grade
+        '26': 11th grade
+        '27': 12th grade, no diploma
+        '28': High school graduate, GED, or alternative
+        '29': Some college, less than 1 year
+        '30': Some college, 1 or more years, no degree
+        '31': Associate's degree
+        '32': Bachelor's degree
+        '33': Master's degree
+        '34': Professional school degree
+        '35': Doctorate degree
+      universe: Population 25 years and over
+      unit: persons
+    C17002:
+      sequence: '0046'
+      start_position: 219
+      cells: 8
+      title: RATIO OF INCOME TO POVERTY LEVEL IN THE PAST 12 MONTHS
+      lines:
+        '1': 'Total:'
+        '2': Under .50
+        '3': .50 to .99
+        '4': 1.00 to 1.24
+        '5': 1.25 to 1.49
+        '6': 1.50 to 1.84
+        '7': 1.85 to 1.99
+        '8': 2.00 and over
+      universe: Population for whom poverty status is determined
+      unit: persons
+    B19001:
+      sequence: '0053'
+      start_position: 7
+      cells: 17
+      title: HOUSEHOLD INCOME IN THE PAST 12 MONTHS (IN 2010 INFLATION-ADJUSTED DOLLARS)
+      lines:
+        '1': 'Total:'
+        '2': Less than $10,000
+        '3': $10,000 to $14,999
+        '4': $15,000 to $19,999
+        '5': $20,000 to $24,999
+        '6': $25,000 to $29,999
+        '7': $30,000 to $34,999
+        '8': $35,000 to $39,999
+        '9': $40,000 to $44,999
+        '10': $45,000 to $49,999
+        '11': $50,000 to $59,999
+        '12': $60,000 to $74,999
+        '13': $75,000 to $99,999
+        '14': $100,000 to $124,999
+        '15': $125,000 to $149,999
+        '16': $150,000 to $199,999
+        '17': $200,000 or more
+      universe: Households
+      unit: households
+    B19013:
+      sequence: '0053'
+      start_position: 177
+      cells: 1
+      title: MEDIAN HOUSEHOLD INCOME IN THE PAST 12 MONTHS (IN 2010 INFLATION-ADJUSTED DOLLARS)
+      lines:
+        '1': Median household income in the past 12 months (in 2010 inflation-adjusted dollars)
+      universe: Households
+      unit: 2010_inflation_adjusted_USD
+      median_jam_values:
+        '2499': income_2500_or_less
+        '250001': income_250000_or_more
+    B19301:
+      sequence: 0059
+      start_position: 172
+      cells: 1
+      title: PER CAPITA INCOME IN THE PAST 12 MONTHS (IN 2010 INFLATION-ADJUSTED DOLLARS)
+      lines:
+        '1': Per capita income in the past 12 months (in 2010 inflation-adjusted dollars)
+      universe: Total population
+      unit: 2010_inflation_adjusted_USD
+  concepts:
+    female_share:
+      family: sex_composition
+      table: B01001
+      num:
+      - 26
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    age_under_18_share:
+      family: age_structure
+      table: B01001
+      num:
+      - 3
+      - 4
+      - 5
+      - 6
+      - 27
+      - 28
+      - 29
+      - 30
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    age_18_34_share:
+      family: age_structure
+      table: B01001
+      num:
+      - 7
+      - 8
+      - 9
+      - 10
+      - 11
+      - 12
+      - 31
+      - 32
+      - 33
+      - 34
+      - 35
+      - 36
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    age_35_44_share:
+      family: age_structure
+      table: B01001
+      num:
+      - 13
+      - 14
+      - 37
+      - 38
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    age_45_54_share:
+      family: age_structure
+      table: B01001
+      num:
+      - 15
+      - 16
+      - 39
+      - 40
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    age_55_64_share:
+      family: age_structure
+      table: B01001
+      num:
+      - 17
+      - 18
+      - 19
+      - 41
+      - 42
+      - 43
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    age_65_plus_share:
+      family: age_structure
+      table: B01001
+      num:
+      - 20
+      - 21
+      - 22
+      - 23
+      - 24
+      - 25
+      - 44
+      - 45
+      - 46
+      - 47
+      - 48
+      - 49
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    nh_white_share:
+      family: race_ethnicity
+      table: B03002
+      num:
+      - 3
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    nh_black_share:
+      family: race_ethnicity
+      table: B03002
+      num:
+      - 4
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    nh_aian_share:
+      family: race_ethnicity
+      table: B03002
+      num:
+      - 5
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    nh_asian_share:
+      family: race_ethnicity
+      table: B03002
+      num:
+      - 6
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    nh_nhpi_share:
+      family: race_ethnicity
+      table: B03002
+      num:
+      - 7
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    nh_other_race_share:
+      family: race_ethnicity
+      table: B03002
+      num:
+      - 8
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    nh_multiracial_share:
+      family: race_ethnicity
+      table: B03002
+      num:
+      - 9
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    hispanic_share:
+      family: race_ethnicity
+      table: B03002
+      num:
+      - 12
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    education_less_hs_share:
+      family: education
+      table: B15002
+      num:
+      - 3
+      - 4
+      - 5
+      - 6
+      - 7
+      - 8
+      - 9
+      - 10
+      - 20
+      - 21
+      - 22
+      - 23
+      - 24
+      - 25
+      - 26
+      - 27
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    education_hs_only_share:
+      family: education
+      table: B15002
+      num:
+      - 11
+      - 28
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    education_some_college_share:
+      family: education
+      table: B15002
+      num:
+      - 12
+      - 13
+      - 29
+      - 30
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    education_associate_share:
+      family: education
+      table: B15002
+      num:
+      - 14
+      - 31
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    education_bachelors_plus_share:
+      family: education
+      table: B15002
+      num:
+      - 15
+      - 16
+      - 17
+      - 18
+      - 32
+      - 33
+      - 34
+      - 35
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    median_household_income:
+      family: material_resources
+      table: B19013
+      num:
+      - 1
+      transform: income
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    per_capita_income:
+      family: material_resources
+      table: B19301
+      num:
+      - 1
+      transform: income
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    household_income_lt_25k_share:
+      family: material_resources
+      table: B19001
+      num:
+      - 2
+      - 3
+      - 4
+      - 5
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    household_income_25k_50k_share:
+      family: material_resources
+      table: B19001
+      num:
+      - 6
+      - 7
+      - 8
+      - 9
+      - 10
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    household_income_50k_100k_share:
+      family: material_resources
+      table: B19001
+      num:
+      - 11
+      - 12
+      - 13
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    household_income_100k_plus_share:
+      family: material_resources
+      table: B19001
+      num:
+      - 14
+      - 15
+      - 16
+      - 17
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    poverty_ratio_lt_050_share:
+      family: material_resources
+      table: C17002
+      num:
+      - 2
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    poverty_ratio_050_099_share:
+      family: material_resources
+      table: C17002
+      num:
+      - 3
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    poverty_ratio_100_199_share:
+      family: material_resources
+      table: C17002
+      num:
+      - 4
+      - 5
+      - 6
+      - 7
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+    poverty_ratio_200_plus_share:
+      family: material_resources
+      table: C17002
+      num:
+      - 8
+      den: 1
+      transform: share
+      role: predictor
+      approval_id: configs/approvals.yaml#owner_decisions.endpoint_covariates.usaleep_life_expectancy
+  masking_families:
+    sex_composition:
+    - female_share
+    age_structure:
+    - age_under_18_share
+    - age_18_34_share
+    - age_35_44_share
+    - age_45_54_share
+    - age_55_64_share
+    - age_65_plus_share
+    race_ethnicity:
+    - nh_white_share
+    - nh_black_share
+    - nh_aian_share
+    - nh_asian_share
+    - nh_nhpi_share
+    - nh_other_race_share
+    - nh_multiracial_share
+    - hispanic_share
+    education:
+    - education_less_hs_share
+    - education_hs_only_share
+    - education_some_college_share
+    - education_associate_share
+    - education_bachelors_plus_share
+    material_resources:
+    - median_household_income
+    - per_capita_income
+    - household_income_lt_25k_share
+    - household_income_25k_50k_share
+    - household_income_50k_100k_share
+    - household_income_100k_plus_share
+    - poverty_ratio_lt_050_share
+    - poverty_ratio_050_099_share
+    - poverty_ratio_100_199_share
+    - poverty_ratio_200_plus_share
+  subject_definitions_url: https://www2.census.gov/programs-surveys/acs/tech_docs/subject_definitions/2010_ACSSubjectDefinitions.pdf
+  subject_definitions_evidence: 'Pages 146-149: the median household income standard distribution ends at $250,000
+    or more; use 2499 and 250001 for B19013, not the older 200001 boundary. Page 82 defines per capita income as
+    the mean over the population, allowing signed income.'
+  encoding_evidence: 'Published geography archive inspected 2026-10-04: Colorado names include single byte 0xf1.
+    Decode one byte per character so fixed-width ID offsets are unchanged; names are not predictors or mapped columns.'
+  state_dictionary_url: https://www2.census.gov/geo/docs/reference/state.txt
+  state_dictionary_sha256: bea4e03f71a1fa0045ae732aabad11fa541e5932b071c2369bb0d325e8cba5a0
+  state_fips:
+    al: '01'
+    ak: '02'
+    az: '04'
+    ar: '05'
+    ca: '06'
+    co: 08
+    ct: 09
+    de: '10'
+    dc: '11'
+    fl: '12'
+    ga: '13'
+    hi: '15'
+    id: '16'
+    il: '17'
+    in: '18'
+    ia: '19'
+    ks: '20'
+    ky: '21'
+    la: '22'
+    me: '23'
+    md: '24'
+    ma: '25'
+    mi: '26'
+    mn: '27'
+    ms: '28'
+    mo: '29'
+    mt: '30'
+    ne: '31'
+    nv: '32'
+    nh: '33'
+    nj: '34'
+    nm: '35'
+    ny: '36'
+    nc: '37'
+    nd: '38'
+    oh: '39'
+    ok: '40'
+    or: '41'
+    pa: '42'
+    ri: '44'
+    sc: '45'
+    sd: '46'
+    tn: '47'
+    tx: '48'
+    ut: '49'
+    vt: '50'
+    va: '51'
+    wa: '53'
+    wv: '54'
+    wi: '55'
+    wy: '56'
+    as: '60'
+    gu: '66'
+    mp: '69'
+    pr: '72'
+    um: '74'
+    vi: '78'
