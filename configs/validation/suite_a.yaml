@@ -1,3 +1,112 @@
+# Fixed numeric input domain; no clipping, rescaling, or computation outside it.
+# Start with the smallest per-quantity box for the 14 registered recipes plus
+# the exact-location pair and shared reference inputs. Widen every magnitude
+# bound by AT LEAST 100x. Zero remains valid for signed quantities and disabled
+# mechanisms, zero weights and identity shifts. Probability constraints still
+# apply. Wider axes retain the inherited successful numerical stress tests:
+# tiny near scales/weights use scaled/log arithmetic; paired interventions use
+# exact rational arithmetic. These extensions do not widen nonlinear-response
+# coefficients or the positive shift floor. This is not all-float64 support.
+# Shared reference inputs: X in [-1,1], coordinates in [0,10], unit weights;
+# supports have endpoints in [0,10], delta=2; near centers lie within supports.
+# Coefficient box covers beta and local/regional strengths. Paired c and tau
+# have separate bounds because they use a different response implementation.
+# Gaussian innovations and computed responses are outputs, not bounded inputs.
+numeric_domain:
+  id: suite-a-100x-v1
+  margin: 100.0
+  registered_box:
+    dose:
+    - 0.0
+    - 10.0
+    delta:
+    - 2.0
+    - 2.0
+    near_scale:
+    - 0.05
+    - 0.05
+    coefficient:
+    - -2.0
+    - 2.0
+    noise_sd:
+    - 1.0
+    - 1.0
+    exposure_error:
+    - 0.4
+    - 0.4
+    migration:
+    - 2.0
+    - 2.0
+    registration_probability:
+    - 0.65
+    - 1.0
+    denominator_error:
+    - 0.2
+    - 0.2
+    coordinate:
+    - 0.0
+    - 10.0
+    covariate:
+    - -1.0
+    - 1.0
+    weight:
+    - 1.0
+    - 1.0
+    paired_c:
+    - -1.5
+    - 1.5
+    paired_tau:
+    - -2.0
+    - 2.0
+    intervention_dose:
+    - 0.0
+    - 10.0
+  supported_box:
+    dose:
+    - -10010.0
+    - 10010.0
+    delta:
+    - 0.02
+    - 200.0
+    near_scale:
+    - 5.0e-324
+    - 1000.0
+    coefficient:
+    - -200.0
+    - 200.0
+    noise_sd:
+    - 0.01
+    - 100.0
+    exposure_error:
+    - 0.004
+    - 40.0
+    migration:
+    - 0.02
+    - 200.0
+    registration_probability:
+    - 0.006500000000000001
+    - 100.0
+    denominator_error:
+    - 0.002
+    - 20.0
+    coordinate:
+    - -1000.0
+    - 1000.0
+    covariate:
+    - -100.0
+    - 100.0
+    weight:
+    - 5.0e-324
+    - 1.7e+308
+    paired_c:
+    - -1.0e+307
+    - 1.0e+307
+    paired_tau:
+    - -1.0e+300
+    - 1.0e+300
+    intervention_dose:
+    - -1.0e+308
+    - 1.0e+308
 suite: A
 scenario_expansion: explicit_only
 # Synthetic recipe. A caller supplies approved fixed covariates and frozen
