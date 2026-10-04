@@ -7,13 +7,19 @@ request's `dependency_paths`, with their corresponding `dependency_hashes`.
 Config is `configs/reporting.yaml`. Approvals must resolve to the repository's
 read-only `configs/approvals.yaml`. Results are created once in `output_dir`:
 `report.json`, self-contained `report.html`, and `estimators.svg`. Existing
-outputs are never overwritten. No reporting path loads outcomes into a model.
+outputs are never overwritten. Identical reruns reverify inputs and existing
+bytes and return the same result; matching partial publications are completed.
+Conflicting files or an output directory that contains inputs, or overlaps
+repository src/, configs/, outputs/ or report/, return a failed StageResult with
+no stale artifact references. No reporting path loads outcomes into a model.
 
 Use canonical `ReportBundle`, `ExpectedTasks`, and `TaskReceipts` artifacts from
 `records.py`. The merged `Estimate` contract contains final scores and normalized
 influence contributions averaged across seeds by original ID. Reporting aligns
 IDs, checks all estimand dimensions and seed/split identities, and uses the
-merged covariance functions. It does not average nuisance predictions or treat
+merged covariance functions. Primary confirmation shares its initial frozen OOF models and split under plan
+section 4.4. A different registered split belongs in `sensitivities`, where it
+remains visible with its own provenance. It does not average nuisance predictions or treat
 seeds as independent observations. A bundle's ratios are seed by original ID;
 functional balance arrays are original ID by frozen function. Attrition contains
 sequential remaining counts ending at the frozen target count. Changed-target
