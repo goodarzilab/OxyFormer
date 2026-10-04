@@ -1,0 +1,35 @@
+# Frozen starting architecture: plan sections 2 and 3.4–3.6.
+backbone_config: configs/models/backbone.yaml
+nuisance_parameter_cap: 1000000
+independent_nuisance_parameters: true
+treatment_query:
+  standardized_scalar: true
+  spline_basis: truncated_cubic
+  spline_values: 6
+  knots: frozen_design_artifact
+  width: 64
+  heads: 4
+  cross_attention_blocks: 1
+  query_query_attention: false
+  feedforward_width: 128
+  dropout: 0.10
+  readout_hidden_widths: [64, 32]
+  complete_raw_x_bypass: true
+  monotonic_constraint: false
+outcome:
+  families: [identity, bernoulli, poisson]
+  poisson_output: rate
+  poisson_loss: sum_target_weight_over_population_times_count_nll
+county_offsets:
+  labels: permitted_training_only
+  identity: profile_weighted_residual_mean
+  other_links: joint_optimization
+  exact_exposure_unit: forbidden
+origin:
+  shifted_class: 1
+  pair_weights: retain_origin_target_mass
+  calibration: inner_oof_affine_logit
+  ratio_prior_correction: explicit
+riesz:
+  output: signed
+  loss: target_expectation_v_a_squared_minus_2_times_v_d_minus_v_a
