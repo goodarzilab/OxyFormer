@@ -66,13 +66,29 @@ def multiplicity(p_values, mortality_family):
     return reports
 
 
+
+def require_container(value, container_type, name):
+    """Syntax and hashes do not establish an input's application-level shape."""
+    require(isinstance(value, container_type), f"{name} must be a {container_type.__name__}")
+    return value
+
+
+def approval_owner(approvals):
+    root = require_container(approvals, dict, "owner approvals")
+    owner = require_container(root.get("owner_decisions", {}), dict, "owner_decisions")
+    records = require_container(owner.get("reporting_approvals", []), list, "reporting_approvals")
+    for index, record in enumerate(records):
+        require_container(record, dict, f"reporting_approvals[{index}]")
+    return owner
+
+
 def external_approval(approvals, gate, scope):
     """Approvals live in the owner registry, never in producer result payloads.
 
     reporting_approvals entries bind bundle/manifest/receipts/config hashes, a
     gate and a stage. A stale, rejected or unexplained approval cannot release.
     """
-    records = approvals.get("owner_decisions", {}).get("reporting_approvals", [])
+    records = approval_owner(approvals).get("reporting_approvals", [])
     matches = [record for record in records if record.get("gate") == gate and
                all(record.get(k) == v for k, v in scope.items())]
     require(len(matches) <= 1, "contradictory or duplicate external approval")
@@ -131,6 +147,7 @@ def evaluate(bundle, manifest, receipts, approvals, config_hash):
     gates = report["gates"]
     scope = {k: report[k] for k in ("stage", "bundle_hash", "manifest_hash", "receipts_hash", "config_hash")}
     try:
+        owner = approval_owner(approvals)
         report["diagnostics"] = summarize(bundle, manifest)
         report["multiplicity"] = multiplicity(bundle.p_values, manifest.mortality_family)
         methods = [e.method for e in bundle.estimates]
@@ -156,7 +173,6 @@ def evaluate(bundle, manifest, receipts, approvals, config_hash):
             except FileNotFoundError:
                 status, reason = "missing", "upstream input or artifact file absent"
             gates.append({"gate": task.gate, "task_id": task.task_id, "status": status, "reason": reason})
-        owner = approvals.get("owner_decisions", {})
         coverage, warnings, investigate = coverage_decisions(bundle, manifest, owner.get("release_gates"))
         gates.extend(coverage)
         report["warnings"].extend(warnings)

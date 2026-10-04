@@ -15,7 +15,7 @@ import yaml
 
 from oxyformer.contracts import StageRequest, StageResult
 from oxyformer.provenance import ArtifactLineage, ArtifactRecord, ContractError, canonical_json, file_hash, read_artifact, require
-from oxyformer.reporting.evidence_matrix import LIMITATIONS, evaluate
+from oxyformer.reporting.evidence_matrix import LIMITATIONS, evaluate, require_container
 from oxyformer.reporting.records import ExpectedTasks, ReportBundle, STAGE_GATES, TaskReceipts
 from oxyformer.reporting.render import render_forest, render_html
 
@@ -46,10 +46,10 @@ def run_stage(request: StageRequest) -> StageResult:
     bundle = None
     try:
         request.verify_inputs()
-        config = yaml.safe_load(Path(request.config_path).read_text())
+        config = require_container(yaml.safe_load(Path(request.config_path).read_text()), dict, "reporting config")
         require(config.get("schema_version") == 1, "unsupported reporting config")
         require(request.stage in STAGE_GATES, "unknown reporting stage")
-        task = json.loads(Path(request.task_path).read_text())
+        task = require_container(json.loads(Path(request.task_path).read_text()), dict, "reporting task")
         require(set(task) == {"bundle", "manifest", "receipts", "approvals"}, "invalid reporting task fields")
         dependencies = dict(zip(request.dependency_paths, request.dependency_hashes))
         require(set(task.values()) == set(dependencies), "report task/dependency paths mismatch")
@@ -59,7 +59,7 @@ def run_stage(request: StageRequest) -> StageResult:
         manifest = read_artifact(task["manifest"], ExpectedTasks, dependencies[task["manifest"]])
         receipts = read_artifact(task["receipts"], TaskReceipts, dependencies[task["receipts"]])
         require(manifest.stage == request.stage, "reporting stage mismatch")
-        approvals = yaml.safe_load(Path(task["approvals"]).read_text())
+        approvals = require_container(yaml.safe_load(Path(task["approvals"]).read_text()), dict, "owner approvals")
         report = evaluate(bundle, manifest, receipts, approvals, request.config_hash)
         # Recheck immutable dependencies after collection, before publication.
         request.verify_inputs()
