@@ -47,13 +47,15 @@ owner_decisions:
   exposure:                               # plan section 3.1: elevation -> pressure before population aggregation
     dem_product: usgs_3dep_one_third_arc_second_seamless   # USGS StagedProducts/Elevation/13 (about 10 m), nine-division footprint
     pressure_model: international_standard_atmosphere_troposphere
-    # P_B(z) = P0 * (1 - L*z/T0) ** (g0*M/(R*L)), z in metres above mean sea level; exponent about 5.2558
+    # P_B(z) = P0 * (1 - L*z/T0) ** (g0*M/(R*L)), z in metres above mean sea level; exponent about 5.2559
     sea_level_pressure_mmhg: 760.0        # P0
     sea_level_temperature_k: 288.15       # T0
     lapse_rate_k_per_m: 0.0065            # L
-    gravity_m_per_s2: 9.80665             # g0, ISA definitional constant
-    molar_mass_air_kg_per_mol: 0.0289644  # M, ISA definitional constant
-    gas_constant_j_per_mol_k: 8.3144598   # R, ISA definitional constant
+    # g0, M and R are the definitional constants of the approved standard-atmosphere formula (US Standard Atmosphere
+    # 1976 values). The owner approved the formula and the three values above; the orchestrator recorded these three.
+    gravity_m_per_s2: 9.80665             # g0
+    molar_mass_air_kg_per_mol: 0.0289644  # M
+    gas_constant_j_per_mol_k: 8.31432     # R* as defined by the 1976 standard, not the CODATA value
     inspired_o2_fraction: 0.2093
     water_vapour_pressure_mmhg: 47.0
     # P_IO2(z) = inspired_o2_fraction * (P_B(z) - water_vapour_pressure_mmhg); P_IO2,ref = P_IO2(0)
@@ -61,8 +63,8 @@ owner_decisions:
     dane_births_2023_2025:
       reason: "DANE microdata downloads sit behind a CAPTCHA. A person downloads them by hand; automation never bypasses the CAPTCHA."
       catalogs: [876, 878, 915]           # births 2023, 2024 and 2025 on microdatos.dane.gov.co
-      staging_dir: /mnt/weka/home/hgoodarzi/oxyformer-swarm/staging/dane_births   # one subfolder per year
-      fallback: "If the files are not staged, Colombia is dropped from month 1: the birth anchor proceeds with INEC (Ecuador) alone, and the Peru ENDES hemoglobin anchor is unaffected."
+      staging_dir: /mnt/weka/home/hgoodarzi/oxyformer-swarm/staging/dane_births   # one subfolder per year; shared filesystem read by login and compute nodes
+      fallback: "Colombia is dropped from month 1 only after the orchestrator has confirmed with the owner that no DANE files will be staged; a unit that finds the folder empty stops and reports instead. After a drop, the birth anchor proceeds with INEC (Ecuador) alone, and the Peru ENDES hemoglobin anchor is unaffected."
 
 # Not yet approved. A unit that needs one of these must stop and report; the orchestrator brings it to the owner.
 pending_owner_approval:
