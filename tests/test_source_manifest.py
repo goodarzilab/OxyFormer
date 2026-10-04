@@ -356,3 +356,141 @@ def test_invalid_expected_bytes_rejected(manifest, expected_bytes):
     manifest['resources'][0]['expected_bytes'] = expected_bytes
     with pytest.raises(sm.ManifestError, match='expected_bytes'):
         sm.validate_manifest(manifest)
+
+
+def raw_response(headers, body):
+    class FakeSocket:
+        def makefile(self, mode):
+            return io.BytesIO(b'HTTP/1.1 200 OK\r\n' + headers + b'\r\n' + body)
+    response = http.client.HTTPResponse(FakeSocket())
+    response.begin()
+    response.url = 'https://example.test/parser'
+    return response
+
+
+def framed_response(mode, data=b'data'):
+    if mode == 'chunked':
+        body = (f'{len(data):x}\r\n'.encode() + data + b'\r\n0\r\n\r\n') if data else b'0\r\n\r\n'
+        # Conflicting CL deliberately exercises all prechecks as well as EOF.
+        return raw_response(b'Transfer-Encoding: chunked\r\nContent-Length: 100\r\n', body)
+    if mode == 'content_length':
+        return raw_response(f'Content-Length: {len(data)}\r\n'.encode(), data)
+    return raw_response(b'Connection: close\r\n', data)
+
+
+def assert_failed_artifacts(tmp_path):
+    out = tmp_path / 'result'
+    assert {p.name for p in out.iterdir()} == {'receipts.json', 'download.log'}
+    assert json.loads((out / 'receipts.json').read_text())['status'] == 'failed'
+
+
+@pytest.mark.parametrize('length', [None, '4', '100', '101', '0', 'invalid'])
+def test_chunked_ignores_all_raw_content_lengths(manifest, tmp_path, monkeypatch, length):
+    headers = b'Transfer-Encoding: chunked\r\n'
+    if length is not None:
+        headers += f'Content-Length: {length}\r\n'.encode()
+    for resource in manifest['resources']:
+        resource['expected_bytes'] = 4
+    monkeypatch.setattr(sm, '_open_url', lambda *a: raw_response(headers, b'4\r\ndata\r\n0\r\n\r\n'))
+    result = fetch(manifest, tmp_path)
+    assert all(r['bytes'] == 4 and r['transfer_integrity'] == 'chunked' for r in result['resources'])
+
+
+@pytest.mark.parametrize('mode', ['chunked', 'content_length', 'close'])
+@pytest.mark.parametrize('size,hash_state', [
+    (None, None), (4, None), (3, None), (None, 'match'), (None, 'wrong'),
+    (4, 'match'), (3, 'match'), (4, 'wrong'),
+])
+def test_parser_expectation_matrix(manifest, tmp_path, monkeypatch, mode, size, hash_state):
+    digest = hashlib.sha256(b'data').hexdigest()
+    for resource in manifest['resources']:
+        if size is not None: resource['expected_bytes'] = size
+        if hash_state: resource['expected_sha256'] = digest if hash_state == 'match' else '0' * 64
+    monkeypatch.setattr(sm, '_open_url', lambda *a: framed_response(mode))
+    fail = size == 3 or hash_state == 'wrong' or mode == 'close' and size is None and hash_state is None
+    if fail:
+        with pytest.raises(sm.ManifestError): fetch(manifest, tmp_path, attempts=1)
+        assert_failed_artifacts(tmp_path)
+    else:
+        result = fetch(manifest, tmp_path)
+        expected_mode = mode if mode != 'close' else 'expected_bytes' if size else 'expected_sha256'
+        assert all(r['bytes'] == 4 and r['sha256'] == digest and r['transfer_integrity'] == expected_mode
+                   for r in result['resources'])
+
+
+@pytest.mark.parametrize('body', [b'4\r\nda', b'4\r\ndata\r\n'])
+def test_parser_incomplete_chunk_cannot_be_rescued_by_expectations(manifest, tmp_path, monkeypatch, body):
+    for resource in manifest['resources']:
+        resource['expected_bytes'] = 4
+        resource['expected_sha256'] = hashlib.sha256(b'data').hexdigest()
+    monkeypatch.setattr(sm, '_open_url', lambda *a: raw_response(b'Transfer-Encoding: chunked\r\n', body))
+    with pytest.raises(http.client.IncompleteRead): fetch(manifest, tmp_path, attempts=1)
+    assert_failed_artifacts(tmp_path)
+
+
+@pytest.mark.parametrize('length', ['invalid', '0', '101'])
+def test_nonchunked_length_validation(manifest, tmp_path, monkeypatch, length):
+    for resource in manifest['resources']:
+        resource['expected_sha256'] = hashlib.sha256(b'data').hexdigest()
+    monkeypatch.setattr(sm, '_open_url', lambda *a: raw_response(f'Content-Length: {length}\r\n'.encode(), b'data'))
+    with pytest.raises(sm.ManifestError): fetch(manifest, tmp_path, attempts=1)
+    assert_failed_artifacts(tmp_path)
+
+
+@pytest.mark.parametrize('expectation', [None, 'expected_bytes', 'expected_sha256'])
+def test_nonchunked_parser_boundary(manifest, tmp_path, monkeypatch, expectation):
+    # The parser exposes four bytes; trailing wire bytes are not part of this body.
+    data = b'data plus extra wire bytes'
+    if expectation:
+        for resource in manifest['resources']:
+            resource[expectation] = len(data) if expectation == 'expected_bytes' else hashlib.sha256(data).hexdigest()
+    monkeypatch.setattr(sm, '_open_url', lambda *a: raw_response(b'Content-Length: 4\r\n', data))
+    if expectation:
+        with pytest.raises(sm.ManifestError): fetch(manifest, tmp_path)
+        assert_failed_artifacts(tmp_path)
+    else:
+        result = fetch(manifest, tmp_path)
+        assert all(r['bytes'] == 4 and r['sha256'] == hashlib.sha256(b'data').hexdigest()
+                   for r in result['resources'])
+
+
+@pytest.mark.parametrize('mode', ['chunked', 'content_length', 'close'])
+@pytest.mark.parametrize('data', [b'', b'data', b'data!'])
+def test_parser_byte_boundaries(manifest, tmp_path, monkeypatch, mode, data):
+    for resource in manifest['resources']:
+        resource['max_bytes'] = 4
+        resource['expected_sha256'] = hashlib.sha256(data).hexdigest()
+    monkeypatch.setattr(sm, '_open_url', lambda *a: framed_response(mode, data))
+    if len(data) != 4:
+        with pytest.raises(sm.ManifestError): fetch(manifest, tmp_path, attempts=1)
+        assert_failed_artifacts(tmp_path)
+    else:
+        result = fetch(manifest, tmp_path)
+        assert all(r['bytes'] == 4 for r in result['resources'])
+
+
+def test_parser_truncated_attempt_then_success(manifest, tmp_path, monkeypatch):
+    calls = []
+    def network(*args):
+        calls.append(args)
+        if len(calls) == 1:
+            return raw_response(b'Content-Length: 8\r\n', b'part')
+        return raw_response(b'Content-Length: 4\r\n', b'data')
+    monkeypatch.setattr(sm, '_open_url', network)
+    monkeypatch.setattr(sm.time, 'sleep', lambda n: None)
+    result = fetch(manifest, tmp_path, attempts=2)
+    assert len(calls) == 4 and result['resources'][0]['attempts'] == 2
+    assert all(r['bytes'] == 4 and r['sha256'] == hashlib.sha256(b'data').hexdigest()
+               for r in result['resources'])
+    with tarfile.open(tmp_path / 'result/payload.tar') as archive:
+        assert all(archive.extractfile(member).read() == b'data' for member in archive.getmembers())
+    assert {p.name for p in (tmp_path / 'result').iterdir()} == {'payload.tar', 'receipts.json', 'download.log'}
+
+
+@pytest.mark.parametrize('name', ['us', 'census', 'dem', 'endes', 'births', 'mexico'])
+def test_each_production_manifest_blocks_without_outputs(name, tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(sm, '_open_url', lambda *a: calls.append(a))
+    with pytest.raises(sm.ManifestError, match='Blocked manifest'):
+        fetch(sm.load_source(name), tmp_path)
+    assert not calls and list(tmp_path.iterdir()) == []
