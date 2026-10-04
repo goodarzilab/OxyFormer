@@ -275,14 +275,15 @@ def _download(resource, path, *, attempts, timeout, log):
                 final_url = response.geturl()
                 _https(final_url)
                 encoding = response.headers.get('Content-Encoding', 'identity')
-                _require(encoding.lower() == 'identity', 'Unexpected transfer content encoding')
+                _require(encoding.strip(' \t').lower() == 'identity', 'Unexpected transfer content encoding')
                 # Select one framing authority before any length-related check.
                 # HTTPResponse has already selected/validated chunked decoding;
                 # in that mode raw Content-Length is not a body constraint.
                 chunked = getattr(response, 'chunked', False) is True
                 length = None if chunked else response.headers.get('Content-Length')
                 if length is not None:
-                    _require(length.isdigit(), 'Invalid Content-Length')
+                    length = length.strip(' \t')
+                    _require(length.isascii() and length.isdigit(), 'Invalid Content-Length')
                     length = int(length)
                     _require(0 < length <= resource['max_bytes'], 'Content-Length exceeds byte ceiling or is empty')
                 expected_bytes = resource.get('expected_bytes')

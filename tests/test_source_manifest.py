@@ -469,6 +469,28 @@ def test_parser_byte_boundaries(manifest, tmp_path, monkeypatch, mode, data):
         assert all(r['bytes'] == 4 for r in result['resources'])
 
 
+@pytest.mark.parametrize('ows', [' ', '\t', ' \t'])
+def test_http_field_optional_whitespace(manifest, tmp_path, monkeypatch, ows):
+    data = b'<html>CC-BY 4.0</html>'
+    for resource in manifest['resources']:
+        resource.update(format='html', expected_bytes=len(data))
+    headers = f'Content-Length: {ows}{len(data)}{ows}\r\nContent-Encoding: {ows}identity{ows}\r\n'.encode()
+    monkeypatch.setattr(sm, '_open_url', lambda *a: raw_response(headers, data))
+    result = fetch(manifest, tmp_path)
+    assert all(r['bytes'] == len(data) for r in result['resources'])
+
+
+def test_short_framed_body_rejected_despite_matching_hash(manifest, tmp_path, monkeypatch):
+    data = b'x' * 100
+    for resource in manifest['resources']:
+        resource.update(max_bytes=300, expected_bytes=100,
+                        expected_sha256=hashlib.sha256(data).hexdigest())
+    monkeypatch.setattr(sm, '_open_url', lambda *a: raw_response(b'Content-Length: 200\r\n', data))
+    with pytest.raises(sm.ManifestError, match='Content-Length disagrees'):
+        fetch(manifest, tmp_path, attempts=1)
+    assert_failed_artifacts(tmp_path)
+
+
 def test_parser_truncated_attempt_then_success(manifest, tmp_path, monkeypatch):
     calls = []
     def network(*args):

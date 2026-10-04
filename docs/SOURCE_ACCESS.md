@@ -1,9 +1,8 @@
 # Source acquisition contracts
 
-Inspected 2026-10-04 against frozen plan sections 7–9, section 3.1, the mandate
-and read-only approvals. Ready means every acquisition resource was inspected;
-future transfer success and scientific ingestion validity remain separate.
-No real data or generated reports enter Git.
+Inspected 2026-10-04 against plan sections 3.1 and 7–9, the mandate and read-only
+approvals. Ready means every acquisition resource was inspected. Future transfer
+success and scientific validity remain separate.
 
 | Source | Status and remaining limits |
 | --- | --- |
@@ -15,41 +14,36 @@ No real data or generated reports enter Git.
 | `inec` | Ready independently of DANE: Ecuador 2024/2015 archives, dictionaries and terms inspected. ENV and fetal deaths remain separate. |
 | `mexico` | Blocked: EDR registration 2015–2019 archives and dictionaries inspected, but common lag L/later-period years are unset. CONAPO returns an HTTP-200 challenge; denominators, terms and geographic compatibility remain unverified. |
 
-Only committed source IDs are accepted. Shared defaults and compact DEM rows
-expand before validation and hashing. Each observed tile records TIFF/XML byte
-ceilings and XML publication date (including year-only precision); the fixed
-HTTPS template reproduces inspected bucket keys. No runtime source discovery.
+Committed source IDs, shared defaults and compact DEM rows expand before
+validation/hashing. Tile rows record TIFF/XML byte ceilings and XML dates at
+observed precision. Fixed HTTPS templates reproduce inspected bucket keys.
 
 ## Source constraints
 
-Source terms and dictionary observations are in each manifest; science approvals stay fixed.
+Terms and dictionary observations are recorded in each manifest. Ready status
+covers acquisition; units, joins, weights and population reconciliation remain
+ingestion checks. No scientific approvals were changed.
 
-DEM selection intersects full-resolution TIGER2010 state geometry without
-outcomes, flags or eligibility filters. Nine disjoint jurisdiction groups cover
-the 48 contiguous states plus DC once. Border tiles can serve multiple groups;
-each group caps its TIFF plus XML bytes. Eight missing cells cannot be dismissed
-as water without inhabited-block reconciliation; all shards remain blocked.
-AK/HI/territories are excluded. Every selected XML reports NAD83, NAVD88 and
-meters. Preserve its exact overlapped footprint and use constraints. Current
-USGS URLs can change; dates and observed sizes do not make them immutable.
+DEM selection uses full-resolution TIGER2010 state geometry without outcomes,
+flags or eligibility filters. The 48 contiguous states and DC each occur once;
+border tiles may serve multiple groups. TIFF/XML sums bound group transfers.
+Eight missing cells need inhabited-block reconciliation, so all shards remain
+blocked. AK/HI/territories are excluded. Selected XMLs report NAD83, NAVD88 and
+meters; preserve their exact footprints and use constraints. Current USGS URLs
+are mutable despite recorded dates and sizes.
 
-ENDES raw/adjusted Hb and altitude definitions are recorded in endes.json.
-Survey scaling, missing values and joins remain ingestion checks. Preserve ODbL
-conditions; no application-based DHS source is substituted.
+DANE local resources use `transport: "local"`, a `local_path` under the approved
+2023–2025 staging folders, and mandatory `expected_bytes`/`expected_sha256`.
+The HTTPS URL is catalog provenance. The reader rejects symlinks, traversal and
+nonregular files, then copies and hashes without changing staged bytes or modes.
+Staging alone does not establish terms/dictionary completeness. Colombia awaits
+the orchestrator's fallback determination; INEC works independently.
 
-DANE catalogs 876/878/915 require human CAPTCHA acquisition. Local resources use
-`transport: "local"`, `local_path` under an approved staging year (2023–2025),
-and mandatory `expected_bytes` and `expected_sha256`. Their HTTPS URL is catalog
-provenance only. The reader rejects symlinks/traversal and nonregular files and
-copies verified bytes into its private attempt; staged permissions/bytes remain
-unchanged. Staging alone does not establish terms or dictionary completeness.
-No files are staged and Colombia has not been declared dropped.
-
-INEC permits scientific/statistical use with attribution and aggregate reporting.
-Retain the stricter 2015 no-redistribution/no-reidentification conditions despite
-the general CC-BY footer. Units and residence joins remain ingestion gates.
-Mexico occurrence years need registration releases through 2019+L with equal
-cutoffs; no lag or CONAPO compatibility is assumed. Preserve INEGI attribution.
+Preserve ENDES ODbL conditions and locked 2024 replication. INEC permits scientific
+and statistical use with attribution and aggregate reporting; retain stricter
+2015 no-redistribution/no-reidentification conditions despite the CC-BY footer.
+Mexico requires registration years through 2019+L with equal occurrence cutoffs;
+no lag or CONAPO compatibility is assumed. Preserve INEGI attribution.
 
 ## CLI and integrity
 
