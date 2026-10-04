@@ -237,8 +237,7 @@ def load_source(name):
 
 class HTTPSRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        _https(newurl)
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        raise ManifestError('Redirect requires source re-inspection; no target request permitted')
 
 
 def _framing(headers):
@@ -315,8 +314,11 @@ def _check_content(resource, prefix, content_type):
     fmt = resource['format']
     lower = prefix.lstrip().lower()
     media = Message()
-    media['Content-Type'] = content_type
-    if fmt != 'html':
+    media['Content-Type'] = content_type or ''
+    if fmt == 'html':
+        _require(content_type is None or media.get_content_type() in ('text/html', 'application/xhtml+xml'),
+                 'Expected HTML media type')  # None is only used for local staging.
+    else:
         _require(media.get_content_type() != 'text/html' and (fmt == 'xml' or not lower.startswith(
             (b'<!doctype html', b'<html'))), 'Unexpected HTML/login/challenge response')
     if fmt == 'zip':
@@ -443,7 +445,7 @@ def _copy_local(resource, path, *, log):
     _require(count == resource['expected_bytes'], 'Local recorded size mismatch')
     _require(digest.hexdigest() == resource['expected_sha256'], 'Local SHA-256 mismatch')
     _xml_feed(xml, b'', True)
-    _check_content(resource, prefix, '')
+    _check_content(resource, prefix, None)
     log.write(f"read-only staged resource={resource['id']}\n")
     return {'id': resource['id'], 'url': resource['url'], 'local_path': str(source),
             'destination': resource['destination'], 'bytes': count, 'sha256': digest.hexdigest(),

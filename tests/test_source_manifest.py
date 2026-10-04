@@ -315,14 +315,7 @@ def test_close_delimited_with_expectation_is_accepted(manifest, tmp_path, monkey
 
 
 def chunked_response(body):
-    # Exercise the real stdlib chunk parser over a fake socket, without a network.
-    class FakeSocket:
-        def makefile(self, mode):
-            return io.BytesIO(b'HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n' + body)
-    response = sm.AcquisitionResponse(FakeSocket())
-    response.begin()
-    response.url = 'https://example.test/chunked'
-    return response
+    return raw_response(b'Transfer-Encoding: chunked\r\n', body)
 
 
 def test_chunked_response_without_length_or_hash_is_accepted(manifest, tmp_path, monkeypatch):
@@ -475,7 +468,7 @@ def test_http_field_optional_whitespace(manifest, tmp_path, monkeypatch, ows):
     data = b'<html>CC-BY 4.0</html>'
     for resource in manifest['resources']:
         resource.update(format='html', expected_bytes=len(data))
-    headers = f'Content-Length: {ows}{len(data)}{ows}\r\nContent-Encoding: {ows}identity{ows}\r\n'.encode()
+    headers = f'Content-Length: {ows}{len(data)}{ows}\r\nContent-Encoding: {ows}identity{ows}\r\nContent-Type: text/html\r\n'.encode()
     monkeypatch.setattr(sm, '_open_url', lambda *a: raw_response(headers, data))
     result = fetch(manifest, tmp_path)
     assert all(r['bytes'] == len(data) for r in result['resources'])
@@ -705,28 +698,31 @@ def test_xml_retry_resets_parser(manifest, tmp_path, monkeypatch):
     assert all(r['sha256'] == hashlib.sha256(b'<root/>').hexdigest() for r in result['resources'])
 
 
-@pytest.mark.parametrize('status', [302, 404, 503])
-def test_ignored_http_bodies_are_not_drained(manifest, tmp_path, monkeypatch, status):
-    wires = iter([f'HTTP/1.1 {status} Response\r\nLocation: https://example.test/final\r\nContent-Length: 101\r\n\r\n'.encode() + b'x' * 101,
-                  b'HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndata'])
-    reads = []
+@pytest.mark.parametrize('status', [301, 302, 303, 307, 308, 404, 503])
+@pytest.mark.parametrize('target', ['/final', 'https://example.test/final', 'https://unreviewed.test/final'])
+def test_ignored_http_bodies_are_not_drained(manifest, tmp_path, monkeypatch, status, target):
+    for r in manifest['resources']: r['format'] = 'html'
+    final = b'HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 7\r\n\r\n<html/>'
+    wires = iter([f'HTTP/1.1 {status} Response\r\nLocation: {target}\r\nContent-Length: 101\r\n\r\n'.encode() + b'x' * 101, final])
+    reads, connections = [], []
     class Socket:
-        def makefile(self, mode):
-            return io.BytesIO(next(wires, b'HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndata'))
+        def makefile(self, mode): return io.BytesIO(next(wires, final))
         def sendall(self, data): pass
         def close(self): pass
+    def connect(connection):
+        connections.append(connection.host)
+        connection.sock = Socket()
     original = sm.AcquisitionResponse.read
     def read(response, amount=None):
         data = original(response, amount)
         reads.append((response.status, len(data)))
         return data
-    monkeypatch.setattr(http.client.HTTPSConnection, 'connect', lambda self: setattr(self, 'sock', Socket()))
+    monkeypatch.setattr(http.client.HTTPSConnection, 'connect', connect)
     monkeypatch.setattr(sm.AcquisitionResponse, 'read', read)
-    if status == 302:
-        assert fetch(manifest, tmp_path)['status'] == 'complete'
-    else:
-        with pytest.raises(urllib.error.HTTPError): fetch(manifest, tmp_path, attempts=1)
-        assert_failed_artifacts(tmp_path)
+    with pytest.raises(urllib.error.HTTPError if status >= 400 else sm.ManifestError):
+        fetch(manifest, tmp_path, attempts=1)
+    assert_failed_artifacts(tmp_path)
+    assert connections == ['example.test']
     assert all(size == 0 for code, size in reads if code != 200)
 
 
@@ -740,3 +736,30 @@ def test_xml_media_type_parameters_do_not_change_type(manifest, tmp_path, monkey
     assert all(r['sha256'] == hashlib.sha256(data).hexdigest() for r in result['resources'])
     with pytest.raises(sm.ManifestError):
         sm._check_content({'format': 'xml'}, data, 'Text/HTML; charset=UTF-8')
+
+
+@pytest.mark.parametrize('media,valid', [('text/html', True), ('Text/HTML; charset=UTF-8', True),
+    ('Application/XHTML+XML; profile="text/html"', True), ('application/json', False), ('', False)])
+def test_http_html_requires_html_media_type(manifest, tmp_path, monkeypatch, media, valid):
+    data = b'<html/>' if valid else b'{"error":"terms unavailable"}'
+    for r in manifest['resources']: r['format'] = 'html'
+    headers = {'Content-Length': str(len(data))}
+    if media: headers['Content-Type'] = media
+    monkeypatch.setattr(sm, '_open_url', lambda *a: Response(data, headers))
+    if valid: assert fetch(manifest, tmp_path)['status'] == 'complete'
+    else:
+        with pytest.raises(sm.ManifestError, match='HTML media type'): fetch(manifest, tmp_path)
+        assert_failed_artifacts(tmp_path)
+
+
+def test_local_html_without_http_headers(manifest, tmp_path, monkeypatch):
+    root = tmp_path / 'staged'
+    (root / '2023').mkdir(parents=True)
+    monkeypatch.setattr(sm, 'DANE_STAGING_DIR', root)
+    data = b'<html/>'
+    for r in manifest['resources']:
+        p = root / '2023' / r['id']
+        p.write_bytes(data); p.chmod(0o400)
+        r.update(transport='local', local_path='2023/' + r['id'], format='html',
+                 expected_bytes=len(data), expected_sha256=hashlib.sha256(data).hexdigest())
+    assert all(r['checksum_status'] == 'matched' for r in fetch(manifest, tmp_path)['resources'])

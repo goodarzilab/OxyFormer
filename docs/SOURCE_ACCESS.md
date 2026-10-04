@@ -22,7 +22,8 @@ attempt descendant. Success writes payload.tar, receipts.json and download.log;
 failures remove partial payloads. Hashes, ceilings and 1–5 retries bound transfer.
 No extraction/shared writes. Tests are offline; evidence stays in SWARM_UNIT_DIR.
 
-The adapter closes redirect/error bodies unread and normalizes payload framing. Identity content only; chunked,
+Redirects fail before a target request; redirect/error bodies stay unread.
+HTTP HTML needs an HTML media type. The adapter normalizes payload framing: chunked,
 consistent length, or close-with-expectation. Trailers require terminal CRLF and
 ≤64KiB/100 lines. Tree-free XML parsing reaches EOF without external retrieval;
 HTML roots fail; media-type parameters do not change the type. Expectations never excuse framing failure.
