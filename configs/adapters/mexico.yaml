@@ -24,6 +24,7 @@ edr:
   cause: "CAUSA_DEF, detailed CIE-10 coding, retained verbatim; no cause classifier"
   sex: {1: male, 2: female, 9: unknown}
   unknown_age_code: 4998
+  unknown_occurrence_year_code: 9999
   infant_age_codes: "1001..1023,1097,1098,2001..2029,2098,3001..3011,3098 -> 00-04"
   completed_year_age_codes: "4001..4120; aggregate exactly into CONAPO bins, including 85+"
   coverage: "Each RegistrationRelease requires a reviewed municipality universe covering every published age/sex/cause/occurrence-year record. Missing coverage always blocks build_cells."
@@ -44,7 +45,7 @@ conapo:
 join:
   geographic_policy: "Same codes alone do not establish compatible vintages. Require same reviewed vintage or an explicit ReviewedCrosswalk of complete, stable municipal unions; no fractional splitting."
   unmatched_policy: "Report all unmatched included residence codes, including unknown/foreign codes; refuse analysis. Never substitute registration/occurrence geography."
-  unknown_policy: "Retain all event rows. Account for unknown age/sex separately. Deaths are classified counts; a zero with unallocated deaths is not certified genuine_zero."
+  unknown_policy: "Retain all event rows. Account for unknown age/sex/time separately. Unknown time precludes a genuine zero only in years compatible with the known registration year and lag; no year assignment is invented. Per-cell possible unknown counts are not additive."
   denominator_policy: "Explicit expected municipalities, years, both sexes and all 18 age bins. Require positive selected denominators and age counts summing to POB_TOTAL."
 weights:
   target_mass: "Explicit caller-supplied cell mass or null; no default population weighting"

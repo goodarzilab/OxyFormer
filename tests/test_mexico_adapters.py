@@ -129,6 +129,7 @@ def test_occurrence_and_registration_stay_distinct_and_filter_reproducibly(tmp_p
     events = load_events(source, occurrence_years=(2015,))
     repeat = load_events(reversed(source), occurrence_years=(2015,))
     assert events.events == repeat.events
+    assert events.audit == repeat.audit
     assert events.audit["selection_counts"] == {
         "included": 3, "outside_occurrence_years": 1, "unknown_occurrence_year": 1,
         "late_registration": 4}
@@ -381,3 +382,60 @@ def test_manifest_and_config_match_owner_decisions():
     assert config["registration_windows"]["primary"]["lag"] == 2
     assert config["registration_windows"]["late_registration_check"]["lag"] == 5
     assert tuple(c.upper() for c in config["conapo"]["age_columns"]) == AGE_COLUMNS
+
+
+def test_irrelevant_late_release_vintage_does_not_block_primary(tmp_path):
+    source = releases(tmp_path, [event(), event(registration=2018)], through=2018)
+    source[-1] = replace(source[-1], geography_vintage="later-vintage")
+    table = build_cells(load_events(source, occurrence_years=(2015,)), denominators(tmp_path))
+    assert sum(c.deaths for c in table.cells) == 1
+
+
+def test_coverage_codes_are_normalized(tmp_path):
+    table = build_cells(loaded(tmp_path, coverage=("1001", "1002")), denominators(tmp_path))
+    assert sum(c.deaths for c in table.cells) == 1
+
+
+def test_crosswalk_source_codes_are_normalized(tmp_path):
+    crosswalk = replace(union_crosswalk(), rows=tuple((v, str(int(s)), t)
+                                                     for v, s, t in union_crosswalk().rows))
+    table = build_cells(loaded(tmp_path, vintage="old", coverage=("01001",)),
+                        denominators(tmp_path, vintage="new"), crosswalk=crosswalk)
+    assert sum(c.deaths for c in table.cells) == 1
+
+
+def test_unknown_occurrence_year_prevents_false_zero(tmp_path):
+    rows = [event(), event(year=9999, registration=2016, municipality="01002")]
+    table = build_cells(loaded(tmp_path, rows), denominators(tmp_path))
+    assert all(not c.genuine_zero and c.unallocated_deaths == 1
+               for c in table.cells if c.municipality == "01002")
+    assert len(table.unallocated_events) == 1
+    assert table.unallocated_events[0].occurrence_year is None
+
+
+def test_unknown_occurrence_year_only_affects_compatible_lag_windows(tmp_path):
+    rows = [event(year=9999, registration=2018), event(year=9999, registration=2019)]
+    source = releases(tmp_path, rows, through=2019)
+    events = load_events(source, occurrence_years=(2015, 2016))
+    table = build_cells(events, denominators(tmp_path, years=(2015, 2016)))
+    assert all(c.genuine_zero for c in table.cells if c.year == 2015)
+    assert all(not c.genuine_zero and c.unallocated_deaths == 1
+               for c in table.cells if c.year == 2016 and c.municipality == "01001")
+    assert table.audit["unknown_occurrence_year_events"] == 1
+    assert table.audit["allocated_deaths"] + table.audit["unallocated_deaths"] == (
+        table.audit["included_events"] + table.audit["unknown_occurrence_year_events"])
+    assert len(table.unallocated_events) == 1
+
+
+def test_unknown_time_geography_must_match_and_have_coverage(tmp_path):
+    events = loaded(tmp_path, [event(year=9999, municipality="01003")])
+    with pytest.raises(AdapterError, match="unmatched municipality"):
+        build_cells(events, denominators(tmp_path))
+
+
+def test_normalization_cannot_hide_duplicate_crosswalk_or_coverage_codes(tmp_path):
+    with pytest.raises(AdapterError, match="duplicate normalized coverage"):
+        loaded(tmp_path, coverage=("01001", "1001"))
+    crosswalk = replace(union_crosswalk(), rows=(*union_crosswalk().rows, ("old", "1001", "another")))
+    with pytest.raises(AdapterError, match="duplicate or splitting crosswalk"):
+        crosswalk.mapping()

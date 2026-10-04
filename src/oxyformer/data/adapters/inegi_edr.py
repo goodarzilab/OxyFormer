@@ -1,14 +1,14 @@
 """EDR observation validation, registration-lag filtering and population cells.
 
 This module produces all-cause counts, never a population cohort or a cause
-classifier/risk model. Unknown age/sex records remain unallocated. Source files
+classifier/risk model. Unknown age/sex/time records remain unallocated. Source files
 are already deduplicated by INEGI: identical public rows can be distinct deaths.
 We reject repeated registration releases rather than invent a person/event key.
 """
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 import math
 
@@ -102,14 +102,16 @@ all public rows within the selected revision retain their multiplicity.
     _check(required <= set(supplied), "missing required registration releases",
            missing_registration_years=sorted(required - set(supplied)))
     events = []
+    normalized_releases = []
     counts = Counter()
     unknowns = Counter()
     for release in sorted(releases, key=lambda x: x.registration_year):
         _check(bool(release.geography_vintage.strip()) and bool(release.coverage_reference.strip()),
                "reviewed coverage and geographic vintage are required")
         covered = tuple(_code(m, 5) for m in release.covered_municipalities)
-        _check(tuple(release.covered_municipalities) == covered and len(set(covered)) == len(covered),
-               "coverage codes must be unique five-character municipality codes")
+        _check(len(set(covered)) == len(covered), "duplicate normalized coverage codes")
+        release = replace(release, covered_municipalities=covered)
+        normalized_releases.append(release)
         for number, row, raw in _read_rows(release.path, release.manifest, EDR_MAPPING,
                                           release.encoding):
             registration = _integer(row["ANIO_REGIS"], "registration year")
@@ -139,6 +141,7 @@ all public rows within the selected revision retain their multiplicity.
                 f"{registration}:{release.manifest.payload_hash}:{number}", registration,
                 release.geography_vintage, municipality, occurrence, registration,
                 age, sex, row["CAUSA_DEF"], selection, raw))
+    releases = tuple(normalized_releases)
     audit = dict(input_events=len(events), selection_counts=dict(counts),
                  unknown_categories=dict(unknowns), lag=lag, occurrence_years=years,
                  required_registration_years=sorted(required),
@@ -172,8 +175,8 @@ across vintages. The adapter validates structure, not spatial truth.
                "crosswalk requires an explicit review and target vintage")
         mapping = {}
         for vintage, source, target in self.rows:
-            _check(bool(vintage.strip()) and source == _code(source, 5)
-                   and bool(target.strip()), "invalid crosswalk row")
+            source = _code(source, 5)
+            _check(bool(vintage.strip()) and bool(target.strip()), "invalid crosswalk row")
             _check((vintage, source) not in mapping,
                    "duplicate or splitting crosswalk source", source=(vintage, source))
             mapping[vintage, source] = target
@@ -189,8 +192,8 @@ class MortalityCell:
     sex: str
     deaths: int  # fully age/sex classified records only
     population: int
-    unallocated_deaths: int  # unknown age/sex in this municipality-year
-    genuine_zero: bool  # no classified deaths AND no unallocated deaths
+    unallocated_deaths: int  # possible unknown age/sex/time; not additive across cells
+    genuine_zero: bool  # no classified deaths AND no possibly relevant unknowns
     target_mass: float | None
     age_standardization_weight: float | None
     poisson_log_offset: float
@@ -216,14 +219,15 @@ not a chosen estimand. Poisson exposure is N, log offset is log(N), and the
 plan's normalized likelihood multiplier, if mass is supplied, is w/N.
 
 All unmatched residence codes (even on unknown-age/sex records) fail closed.
-Unknown age/sex records with matched geography remain in unallocated_events;
+Unknown age/sex/time records with matched geography remain in unallocated_events;
 they are never redistributed. Thus deaths=0 with unallocated records is NOT a
 certified zero. This endpoint never exports a decedent classifier as risk.
 """
     _check(isinstance(events, EventTable) and isinstance(denominators, DenominatorTable),
            "event and population denominator tables are both required")
     _check(events.years == denominators.years, "occurrence and denominator years differ")
-    vintages = {r.geography_vintage for r in events.releases}
+    required = {r for t in events.years for r in range(t, t + events.lag + 1)}
+    vintages = {r.geography_vintage for r in events.releases if r.registration_year in required}
     denominator_vintage = denominators.geography_vintage
     if crosswalk is None:
         _check(vintages == {denominator_vintage}, "incompatible geographic vintages require reviewed crosswalk",
@@ -234,7 +238,13 @@ certified zero. This endpoint never exports a decedent classifier as risk.
         mapping = crosswalk.mapping()
         target_vintage = crosswalk.target_vintage
     included = [e for e in events.events if e.selection == "included"]
-    unmatched = Counter((e.geography_vintage, e.source_municipality) for e in included
+    # An unknown occurrence year is not assigned to an analysis year. It can
+    # still preclude a certified zero in each year compatible with its known
+    # registration year and lag. Releases outside all windows are irrelevant.
+    unknown_time = [e for e in events.events if e.selection == "unknown_occurrence_year"
+                    and e.registration_year in required]
+    relevant = included + unknown_time
+    unmatched = Counter((e.geography_vintage, e.source_municipality) for e in relevant
                         if (e.geography_vintage, e.source_municipality) not in mapping)
     missing_denominator_mapping = sorted(m for m in denominators.municipalities
                                         if (denominator_vintage, m) not in mapping)
@@ -262,10 +272,15 @@ certified zero. This endpoint never exports a decedent classifier as risk.
     unallocated = []
     unmatched_targets = Counter()
     ambiguous = Counter()
-    for event in included:
+    for event in relevant:
         target = mapping[event.geography_vintage, event.source_municipality]
         if target not in targets:
             unmatched_targets[target] += 1
+        elif event.occurrence_year is None:
+            unallocated.append(event)
+            for year in events.years:
+                if year <= event.registration_year <= year + events.lag:
+                    ambiguous[target, year] += 1
         elif event.age_group is None or event.sex is None:
             unallocated.append(event)
             ambiguous[target, event.occurrence_year] += 1
@@ -286,11 +301,11 @@ certified zero. This endpoint never exports a decedent classifier as risk.
            missing_coverage=missing_coverage)
     # Also refuse deaths lying outside a release's declared coverage, even when
     # other source municipalities provide enough rows to form the union.
-    uncovered_events = [e.source_record_id for e in included
+    uncovered_events = [e.source_record_id for e in relevant
                         if e.source_municipality not in release_by_year[e.release_year].covered_municipalities]
     _check(not uncovered_events, "events outside declared coverage", records=uncovered_events)
     _check(all(n > 0 for n in populations.values()), "denominators must be positive")
-    _check(sum(counts.values()) + len(unallocated) == len(included), "death count conservation failed")
+    _check(sum(counts.values()) + len(unallocated) == len(relevant), "death count conservation failed")
     if target_mass is not None:
         _check(set(target_mass) == set(populations), "target mass must cover exactly the completed cells")
         _check(all(type(w) in (int, float) and math.isfinite(w) and w >= 0 for w in target_mass.values())
@@ -312,12 +327,14 @@ certified zero. This endpoint never exports a decedent classifier as risk.
                                    math.log(n), None if mass is None else mass / n))
     audit = dict(input_event_audit=events.audit, denominator_audit=denominators.audit,
                  included_events=len(included), allocated_deaths=sum(counts.values()),
+                 unknown_occurrence_year_events=len(unknown_time),
                  unallocated_deaths=len(unallocated), population_sum=sum(populations.values()),
                  genuine_zero_cells=sum(c.genuine_zero for c in cells), missing_coverage=[],
                  unmatched_events=[], target_vintage=target_vintage,
                  crosswalk_review=None if crosswalk is None else crosswalk.review_id,
                  crosswalk_hash=None if crosswalk is None else sha256(canonical_json(
-                     [crosswalk.target_vintage, crosswalk.review_id, sorted(crosswalk.rows)]).encode()).hexdigest(),
+                     [crosswalk.target_vintage, crosswalk.review_id,
+                      [(v, s, t) for (v, s), t in sorted(mapping.items())]]).encode()).hexdigest(),
                  observation_model="all-cause age-sex municipal counts with midyear population exposure",
-                 death_semantics="classified records; unknown age/sex retained separately, never redistributed")
+                 death_semantics="classified records; unknown age/sex/time retained separately, never redistributed")
     return CellTable(tuple(cells), tuple(unallocated), audit)
