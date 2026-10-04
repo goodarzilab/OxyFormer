@@ -50,6 +50,9 @@ def outputs_valid(outputs):
 def resources(gpus, seconds):
     require(type(gpus) is int and 0 <= gpus <= 8, 'invalid GPU count')
     require(type(seconds) is int and seconds > 0, 'positive integer wall_seconds required')
+    # Slurm rounds requested time up to whole minutes (sbatch --time).
+    # Bind admission, the emitted limit and accounting to the same allocation.
+    seconds = ((seconds + 59) // 60) * 60
     gpu_hours = gpus * seconds / 3600
     require(math.isfinite(gpu_hours) and gpu_hours <= 4, 'GPU leaf exceeds four GPU-hours')
     hours, remainder = divmod(seconds, 3600)
@@ -242,6 +245,8 @@ UNIT_SCHEMA = {
     'slice_required': ['gpus', 'wall_seconds'],
     'limits': {'leaves': 40, 'gpu_hours_per_leaf': 4, 'id_length': 32, 'arrays': False},
     'dependency_environment': 'SWARM_DEP_' + '<uppercase ID; nonalphanumeric replaced by underscore>',
+    'stage_receipts': 'Stage inputs require a verified passing StageResult; only registry acquisition_receipts may name a source receipt format.',
+    'slurm_accounting': 'GPU-hours use wall_seconds rounded up to whole minutes, matching the emitted time limit.',
     'merge_barrier': 'code prerequisite needs are satisfied only by coordinator merged receipts',
     'fingerprint': 'tracked-science-v1: all tracked paths except non-plan docs/** and *.md',
     'validation': 'oxyformer.execution.campaign.validate_plan(expansion, owner_approvals)',
