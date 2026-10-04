@@ -132,6 +132,34 @@ owner_decisions:
       additions: "any addition needs a documented causal-role amendment"
       exclusions: "every variable not listed above is excluded"
 
+  # Approved by the owner on 2026-10-04 ("Approved on both"): the conditional-support recipe in PR #15 (design-splits).
+  # Plan section 4.1 asks for conservative conditional intervals frozen from the outcome-blind design set; these are its settings.
+  design_support_recipe:
+    bin_width_mmhg: 1.0                 # exposure bins; replicated interior bins only, the two outermost bins are discarded
+    min_bin_tracts: 2                   # distinct design-set tracts required in every bin along the shift path
+    raw_x_radius_iqr: 1.0               # comparison neighbors: same county, within 25 km, within 1 IQR on every approved covariate
+    revisit_rule: "The outcome-blind tract gate will show the supported tract count before any outcome is used. If support is too thin, these values can still be widened then."
+  # Approved by the owner on 2026-10-04 ("Approved on both") from the sign-off page https://claude.ai/artifact/1FxDYK6hp2C2A2j5wd2rYz.
+  birth_anchor_recipe:
+    exposure:
+      elevation: NASADEM_HGT.001 merged 1 arc-second DEM, metres relative to EGM96   # public domain (CC0)
+      population_weights: "GHS-POP R2023A 100 m counts: epoch 2020 for Colombia 2023-2025 and Ecuador 2024; epoch 2015 for Ecuador 2015; European Commission reuse notice with attribution"
+      boundaries:
+        COL: DANE MGN 2024 municipality polygons (DIVIPOLA code mpio_cdpmp), CC BY 4.0, with a reviewed concordance per birth year
+        ECU: held until an openly licensed INEC parish polygon file is verified (canton as fallback)
+      placement: maternal_residence_population_weighted   # municipality (COL); parish, else canton (ECU); no points, seats or hospitals
+      residence_fields: {COL: [CODPTORE, CODMUNRE], ECU: [prov_res, cant_res, parr_res]}
+      computation: "elevation -> pressure -> P_IO2 deficit at each fine location with owner_decisions.exposure constants, before population averaging"
+      unmatched_codes: unmatched or ambiguous area codes stop the run; boundary changes need a reviewed crosswalk
+    covariates:
+      primary: {COL: [EDAD_MADRE, NIV_EDUM], ECU: [edad_mad, niv_inst, etnia]}
+      sensitivity: {COL: [EST_CIVM], ECU: [est_civil]}
+      excluded: [gestational age, prenatal visits, delivery type, APGAR, newborn length, hospital or occurrence or registration geography, reproductive-history counts, COL IDPERTET as maternal ethnicity]
+      area_level_sensitivity: {COL: municipal unmet basic needs (NBI) 2018, ECU: deferred}
+      coding: "subject to year-specific coding checks and reviewed geographic concordances; COL EDAD_MADRE (age at delivery) kept as categories; COL NIV_EDUM nominal, not years of schooling; ECU 2015 runs only after its codes and historical geography are verified"
+    data_terms: "DANE birth microdata are free and public but may not be redistributed without written permission; the run keeps payloads in attempt folders and never commits or shares them"
+    interpretation: "consistency of a residence-pressure association with birth outcomes, not oxygen-specific identification"
+
 # Not yet approved. A unit that needs one of these must stop and report; the orchestrator brings it to the owner.
 pending_owner_approval:
   - any relief, flag or distance sensitivity analyses beyond plan_fixed
