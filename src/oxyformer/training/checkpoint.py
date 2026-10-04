@@ -168,6 +168,19 @@ def _decode(node, archive, used: set):
     return torch.from_numpy(array.copy())
 
 
+def model_state_hash(state: dict) -> str:
+    """Bind names, dtypes, shapes and exact tensor bytes to model lineage."""
+    require(isinstance(state, dict) and bool(state), "missing checkpoint model state")
+    require(all(type(name) is str and isinstance(value, torch.Tensor)
+                for name, value in state.items()), "invalid checkpoint model state")
+    digest = sha256()
+    for name, tensor in sorted(state.items()):
+        array = tensor.detach().cpu().contiguous().numpy()
+        digest.update(canonical_json([name, str(array.dtype), list(array.shape)]).encode())
+        digest.update(array.tobytes())
+    return digest.hexdigest()
+
+
 def _publish(path: Path, data: bytes) -> None:
     """Durable create-once publication on the attempt's own filesystem."""
     fd, temporary = tempfile.mkstemp(prefix=".checkpoint-", dir=path.parent)
@@ -196,6 +209,7 @@ def save_checkpoint(output_dir: Path, *, identity: CheckpointIdentity,
     committed in the same archive. A crash before descriptor publication leaves
     an unreferenced archive, never a partially accepted checkpoint.
     """
+    require(model_state_hash(state["model"]) == lineage.model_hash, "checkpoint model hash mismatch")
     arrays = []
     progress = state["progress"]
     metadata = {"format": "oxyformer-checkpoint", "version": 1,
@@ -248,6 +262,8 @@ def load_checkpoint(artifact: CheckpointArtifact, expected_identity: CheckpointI
         state = _decode(metadata["state"], archive, used)
         require(set(names) == used, "unexpected checkpoint members")
     require(type(state) is dict and "progress" in state, "missing checkpoint progress")
+    require(model_state_hash(state["model"]) == artifact.lineage.model_hash,
+            "checkpoint model hash mismatch")
     require(state["progress"]["epoch"] == artifact.epoch and state["progress"]["step"] == artifact.step,
             "checkpoint progress mismatch")
     return state

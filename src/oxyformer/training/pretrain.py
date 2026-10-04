@@ -37,7 +37,7 @@ from oxyformer.models.tokens import FeatureBatch, FeatureSpec
 from oxyformer.provenance import ArtifactLineage, Immutable, canonical_json, require, unique
 from oxyformer.training.checkpoint import (
     CheckpointArtifact, CheckpointIdentity, CheckpointRequest,
-    capture_rng, load_checkpoint, restore_rng, save_checkpoint,
+    capture_rng, load_checkpoint, model_state_hash, restore_rng, save_checkpoint,
 )
 
 
@@ -241,15 +241,6 @@ def environment_identity(device: torch.device) -> tuple[tuple[str, str], ...]:
     return tuple(sorted(values.items()))
 
 
-def _model_hash(state: dict) -> str:
-    digest = sha256()
-    for name, tensor in sorted(state.items()):
-        array = tensor.detach().cpu().contiguous().numpy()
-        digest.update(canonical_json([name, str(array.dtype), list(array.shape)]).encode())
-        digest.update(array.tobytes())
-    return digest.hexdigest()
-
-
 def _controller_state(value: dict | None) -> dict:
     # JSON roundtrip rejects custom objects/tensors and copies caller-owned state.
     require(value is None or type(value) is dict, "controller state must be a JSON object")
@@ -420,7 +411,7 @@ def _run(view, settings, config, seed, features, preprocessing, identity,
         parents += (config.predecessor.content_hash,)
     lineage = ArtifactLineage(source_hashes=view.lineage.source_hashes, unit_ids=view.original_ids,
         parent_hashes=parents, split_hash=identity.split_hash, config_hash=identity.config_hash,
-        model_hash=_model_hash(model.state_dict()), environment=identity.environment, seed=seed,
+        model_hash=model_state_hash(model.state_dict()), environment=identity.environment, seed=seed,
         parameter_count=sum(p.numel() for p in model.parameters()))
     return save_checkpoint(root, identity=identity, lineage=lineage, state=state,
                            complete=completed, reason=reason, predecessor=config.predecessor)
