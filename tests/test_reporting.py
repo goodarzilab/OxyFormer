@@ -624,3 +624,74 @@ def test_review_malformed_yaml_returns_structured_failure(case, tmp_path, monkey
         request = replace(request, dependency_hashes=tuple(file_hash(p) for p in request.dependency_paths))
     result = run_stage(request)
     assert result.status in ('fail', 'blocked')
+
+
+def assert_structured_input_failure(request, name):
+    result = run_stage(request)
+    assert result.status == 'fail'
+    result.verify(request)
+    report = json.loads((Path(request.output_dir)/'report.json').read_text())
+    assert report['state'] == 'failed'
+    assert report['evidence_label'] == 'diagnostic-only'
+    assert not report['releasable']
+    assert any(name in gate['reason'] for gate in report['gates'])
+
+
+@pytest.mark.parametrize('role,payload', [('config','null\n'), ('config','42\n'), ('approvals','null\n'), ('approvals','42\n')])
+def test_recovery_null_scalar_yaml_roots_are_structured_failures(case, tmp_path, monkeypatch, role, payload):
+    request = make_request(tmp_path, case, monkeypatch)
+    if role == 'config':
+        path = tmp_path/'invalid-config.yaml'
+        path.write_text(payload)
+        request = replace(request, config_path=str(path), config_hash=file_hash(path))
+    else:
+        path = Path(request.dependency_paths[-1])
+        path.write_text(payload)
+        request = replace(request, dependency_hashes=tuple(file_hash(p) for p in request.dependency_paths))
+    assert_structured_input_failure(request, 'config' if role == 'config' else 'approvals')
+
+
+@pytest.mark.parametrize('field,value', [
+    ('owner_decisions', None), ('owner_decisions', []), ('owner_decisions', 7),
+    ('reporting_approvals', None), ('reporting_approvals', {}), ('reporting_approvals', 7),
+    ('approval_record', None), ('approval_record', []), ('approval_record', 'invalid'),
+])
+def test_recovery_approval_container_shapes(case, tmp_path, monkeypatch, field, value):
+    approvals = approve(*case)
+    if field == 'owner_decisions':
+        approvals[field] = value
+    elif field == 'reporting_approvals':
+        approvals['owner_decisions'][field] = value
+    else:
+        approvals['owner_decisions']['reporting_approvals'] = [value]
+    request = make_request(tmp_path, case, monkeypatch, approvals)
+    assert_structured_input_failure(request, 'owner_decisions' if field == 'owner_decisions' else 'reporting_approvals')
+    # Independently callable consumers use the same controlled shape boundary.
+    from oxyformer.reporting.evidence_matrix import external_approval
+    assert evaluate_case(case, approvals)['state'] == 'failed'
+    with pytest.raises(ContractError):
+        external_approval(approvals, 'coverage', {})
+
+
+@pytest.mark.parametrize('value', [None, [], 'invalid', 4])
+def test_recovery_direct_approval_consumers_reject_nonmappings(case, value):
+    from oxyformer.reporting.evidence_matrix import external_approval
+    # evaluate_case's None means its default fixture, so call evaluate directly.
+    b, m, r = case
+    assert evaluate(b, m, r, value, file_hash(CONFIG))['state'] == 'failed'
+    with pytest.raises(ContractError):
+        external_approval(value, 'coverage', {})
+
+
+@pytest.mark.parametrize('payload', ['null', '[]', '42', '["bundle", "manifest", "receipts", "approvals"]'])
+def test_recovery_task_json_requires_object(case, tmp_path, monkeypatch, payload):
+    request = make_request(tmp_path, case, monkeypatch)
+    path = Path(request.task_path)
+    path.write_text(payload)
+    request = replace(request, task_hash=file_hash(path))
+    assert_structured_input_failure(request, 'reporting task')
+
+
+@pytest.mark.parametrize('approvals', [{}, {'owner_decisions': {}}])
+def test_recovery_absent_optional_approval_containers_remain_blocked(case, approvals):
+    assert evaluate_case(case, approvals)['state'] == 'blocked'
