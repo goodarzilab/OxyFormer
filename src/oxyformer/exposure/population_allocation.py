@@ -49,7 +49,7 @@ class AllocationSpec:
             require(self.grid_size_m is None, 'centroid scenario does not use a grid')
 
 
-def validate_blocks(blocks):
+def validate_blocks(blocks, *, check_topology=True):
     require(isinstance(blocks, gpd.GeoDataFrame), 'geography must contain a GeoDataFrame')
     require(set(blocks.columns) == {'block_id', 'tract_id', 'population', 'geometry'},
             'exposure boundary permits only block_id, tract_id, population and geometry')
@@ -67,15 +67,20 @@ def validate_blocks(blocks):
         require(geom is not None and not geom.is_empty and geom.is_valid
                 and geom.geom_type in ('Polygon', 'MultiPolygon'), 'invalid block geometry')
 
-    # Shared edges are allowed; positive-area interior intersections are not.
-    # Index candidates instead of constructing an O(n^2) pairwise overlay.
-    geometries = blocks.geometry.to_numpy()
+    if check_topology:
+        validate_disjoint(blocks.geometry.to_numpy(), names=blocks.block_id.tolist())
+
+
+def validate_disjoint(geometries, *, names=None, label='block'):
+    """Reject positive-area interiors; shared boundaries are permitted."""
+    names = list(range(len(geometries))) if names is None else names
     tree = STRtree(geometries)
     for i, geometry in enumerate(geometries):
         for j in tree.query(geometry):
             if j > i:
-                require(geometry.intersection(geometries[j]).area == 0,
-                        'overlapping block polygon interiors')
+                overlap_area = geometry.intersection(geometries[j]).area
+                require(overlap_area == 0,
+                        f'overlapping {label} polygon interiors: {names[i]} / {names[j]}, area={overlap_area}')
 
 
 def placements(geometry, spec):

@@ -185,11 +185,13 @@ def test_physical_configuration_matches_owner_approval():
 
 
 def fixture_task(tmp_path, *, archive=False, outcome=0, values=(0, 4000)):
-    rs = raster(tmp_path / 'dem.tif', values)
+    rs = raster(tmp_path / 'dem.tif', tuple(values) * 2)
     inputs = {'dem': Path(rs.path)}
     for state in ('01', '04'):
         table = blocks(state=state).rename(columns={'block_id': 'raw_id', 'tract_id': 'raw_tract',
                                                     'population': 'raw_population'})
+        if state == '04':
+            table.geometry = table.geometry.translate(xoff=2)
         table['outcome_that_must_not_enter_service'] = outcome
         path = tmp_path / f'blocks-{state}.parquet'
         table.to_parquet(path, index=False)
@@ -215,6 +217,8 @@ def fixture_task(tmp_path, *, archive=False, outcome=0, values=(0, 4000)):
             'atlas_id': 'synthetic-two-shards', 'geography_vintage': 2010,
             'allocation': asdict(DISTRIBUTED), 'sources': manifests,
             'shards': [{'id': 'one', 'state_fips': ['01']}, {'id': 'two', 'state_fips': ['04']}],
+            'state_controls': {state: {'expected_block_count': 1, 'expected_population': 100}
+                               for state in ('01', '04')},
             'blocks': [{'source_id': 'census-' + s, 'state_fips': s, 'resource': bindings['census-' + s],
                         'format': 'geoparquet', 'crs': CRS, 'expected_block_count': 1, 'expected_population': 100}
                        for s in ('01', '04')],
@@ -234,10 +238,10 @@ def request(tmp_path, task, dependencies, *, stage='exposure-atlas', name='run')
                         output_dir=str(tmp_path / name), code_identity='a' * 40)
 
 
-def make_shards(tmp_path, *, archive=False):
-    task, dependencies = fixture_task(tmp_path, archive=archive)
+def make_shards(tmp_path, *, archive=False, prepared=None):
+    task, dependencies = fixture_task(tmp_path, archive=archive) if prepared is None else prepared
     refs, outputs = {}, []
-    for sid in ('one', 'two'):
+    for sid in sorted(s['id'] for s in task['shards']):
         req = request(tmp_path, dict(task, shard_id=sid), dependencies, name=sid)
         result = run_stage(req)
         assert result.status == 'pass', result.message
@@ -372,6 +376,7 @@ def test_missing_review_is_blocked(tmp_path):
 def test_expected_population_and_count_are_enforced(tmp_path):
     task, dependencies = fixture_task(tmp_path)
     task['blocks'][0]['expected_population'] += 1
+    task['state_controls']['01']['expected_population'] += 1
     result = run_stage(request(tmp_path, dict(task, shard_id='one'), dependencies))
     assert result.status == 'fail' and 'changed population total' in result.message
 
@@ -445,3 +450,332 @@ def test_zipped_shapefile_with_reviewed_geoid_prefix(tmp_path):
     assert result.status == 'pass', result.message
     frame = pd.read_parquet(Path(req.output_dir) / 'exposure.parquet')
     assert frame.tract_id.tolist() == ['01001000100']
+
+
+def rebind(task, dependencies, sid, path):
+    """Update synthetic reviewed identities after deliberately changing a fixture."""
+    digest = file_hash(path)
+    for manifest in task['sources']:
+        if manifest['payload']['source_id'] == sid:
+            manifest['payload']['payload_hash'] = digest
+    for binding in task['blocks'] + task['rasters']:
+        if binding['source_id'] == sid:
+            binding['resource'].update(dependency_path=str(path), sha256=digest)
+
+
+def edit_shard(task, sid, *, quality=None, frame=None, manifest_change=None):
+    """Rebind artifact hashes so negative cases reach semantic collection checks."""
+    refs = task['shard_artifacts'][sid]
+    manifest = json.loads(Path(refs['manifest']).read_text())
+    if quality is not None:
+        Path(refs['quality']).write_text(canonical_json(quality))
+        manifest['artifacts']['quality.json'] = file_hash(refs['quality'])
+    if frame is not None:
+        frame.to_parquet(refs['exposure'], index=False)
+        manifest['artifacts']['exposure.parquet'] = file_hash(refs['exposure'])
+    if manifest_change:
+        manifest_change(manifest)
+    Path(refs['manifest']).write_text(canonical_json(manifest))
+
+
+def collect(tmp_path, task, dependencies, *, name='collect', code_identity=None):
+    req = request(tmp_path, task, dependencies, stage='atlas-collect', name=name)
+    if code_identity is not None:
+        req = replace(req, code_identity=code_identity)
+    return run_stage(req), Path(req.output_dir)
+
+
+@pytest.mark.parametrize('left', [0.0, 1.0, 2.0 - 2**-30])
+def test_cross_shard_positive_overlap_rejected(tmp_path, left):
+    task, deps = fixture_task(tmp_path)
+    path = Path(task['blocks'][1]['resource']['dependency_path'])
+    table = gpd.read_parquet(path)
+    table.geometry = [box(left, 0, left + 2, 1)]
+    table.to_parquet(path, index=False)
+    rebind(task, deps, 'census-04', path)
+    task, deps = make_shards(tmp_path, prepared=(task, deps))
+    result, _ = collect(tmp_path, task, deps)
+    assert result.status == 'fail' and 'overlapping shard polygon interiors' in result.message
+
+
+def test_zero_population_shard_still_participates_in_overlap_check(tmp_path):
+    task, deps = fixture_task(tmp_path)
+    path = Path(task['blocks'][1]['resource']['dependency_path'])
+    table = gpd.read_parquet(path)
+    table.geometry = [box(0, 0, 2, 1)]
+    table.raw_population = 0
+    table.to_parquet(path, index=False)
+    rebind(task, deps, 'census-04', path)
+    task['blocks'][1]['expected_population'] = 0
+    task['state_controls']['04']['expected_population'] = 0
+    task, deps = make_shards(tmp_path, prepared=(task, deps))
+    result, _ = collect(tmp_path, task, deps)
+    assert result.status == 'fail' and 'overlapping shard' in result.message
+
+
+def test_envelope_overlap_with_disjoint_interiors_passes(tmp_path):
+    task, deps = fixture_task(tmp_path)
+    geometries = [box(0, 0, 3, 3).difference(box(1, 1, 2, 2)), box(1, 1, 2, 2)]
+    for binding, geometry in zip(task['blocks'], geometries):
+        path = Path(binding['resource']['dependency_path'])
+        table = gpd.read_parquet(path)
+        table.geometry = [geometry]
+        table.to_parquet(path, index=False)
+        rebind(task, deps, binding['source_id'], path)
+    path = tmp_path / 'dem.tif'
+    with rasterio.open(path, 'w', driver='GTiff', height=3, width=3, count=1, dtype='float32',
+                       crs=CRS, transform=from_origin(0, 3, 1, 1), nodata=-9999) as ds:
+        ds.write(np.zeros((3, 3), dtype='float32'), 1)
+    rebind(task, deps, 'dem', path)
+    task, deps = make_shards(tmp_path, prepared=(task, deps))
+    result, _ = collect(tmp_path, task, deps)
+    assert result.status == 'pass', result.message
+
+
+def test_differently_noded_shared_edges_pass(tmp_path):
+    from shapely.geometry import Polygon
+    table = blocks(split=True)
+    table.loc[1, 'geometry'] = Polygon([(1, 0), (2, 0), (2, 1), (1, 1), (1, 0.5), (1, 0)])
+    rs = raster(tmp_path / 'dem.tif')
+    _, qc = build_exposure((source('census'), source('dem')), Geography(table, ('census',), (rs,)), DISTRIBUTED)
+    footprint = build._read_footprint(qc, CRS)
+    assert footprint.equals(box(0, 0, 2, 1))
+
+
+def test_footprint_includes_zero_population_and_uncovered_blocks(tmp_path):
+    table = blocks(split=True)
+    table.population = [0, 100]
+    rs = raster(tmp_path / 'dem.tif', values=(0,))
+    _, qc = build_exposure((source('census'), source('dem')), Geography(table, ('census',), (rs,)), DISTRIBUTED)
+    assert qc['missing_population'] == 100
+    assert build._read_footprint(qc, CRS).equals(box(0, 0, 2, 1))
+
+
+@pytest.mark.parametrize('problem', ['missing', 'crs', 'digest', 'invalid_wkb'])
+def test_bad_footprint_refused(tmp_path, problem):
+    task, deps = make_shards(tmp_path)
+    qc = json.loads(Path(task['shard_artifacts']['one']['quality']).read_text())
+    if problem == 'missing':
+        del qc['footprint']
+    elif problem == 'crs':
+        qc['footprint']['crs'] = 'EPSG:4326'
+    elif problem == 'digest':
+        qc['footprint']['sha256'] = '0' * 64
+    else:
+        qc['footprint']['wkb_hex'] = '00'
+        qc['footprint']['sha256'] = sha256(b'\x00').hexdigest()
+    edit_shard(task, 'one', quality=qc)
+    result, _ = collect(tmp_path, task, deps)
+    assert result.status == 'fail', result.message
+
+
+def test_mixed_producer_commits_refused(tmp_path):
+    task, deps = make_shards(tmp_path)
+    edit_shard(task, 'two', manifest_change=lambda m: m.update(code_identity='b' * 40))
+    result, _ = collect(tmp_path, task, deps)
+    assert result.status == 'fail' and 'mixed producer code identities' in result.message
+
+
+def test_missing_producer_commit_refused(tmp_path):
+    task, deps = make_shards(tmp_path)
+    edit_shard(task, 'two', manifest_change=lambda m: m.pop('code_identity'))
+    result, _ = collect(tmp_path, task, deps)
+    assert result.status == 'fail' and 'producer code identity' in result.message
+
+
+def test_distinct_collector_commit_allowed_and_recorded(tmp_path):
+    task, deps = make_shards(tmp_path)
+    result, root = collect(tmp_path, task, deps, code_identity='b' * 40)
+    assert result.status == 'pass', result.message
+    qc = json.loads((root / 'quality.json').read_text())
+    manifest = json.loads((root / 'artifact_manifest.json').read_text())
+    assert qc['producer_code_identity'] == manifest['producer_code_identity'] == 'a' * 40
+    assert manifest['code_identity'] == 'b' * 40
+
+
+def multi_binding_task(tmp_path, *, shared_archive=False, overlap=False, wrong_state=False):
+    task, deps = fixture_task(tmp_path)
+    task['shards'] = [{'id': 'one', 'state_fips': ['01']}]
+    task['state_controls'] = {'01': {'expected_block_count': 2, 'expected_population': 100}}
+    task['rasters'][0]['shard_ids'] = ['one']
+    task['blocks'] = []
+    table = blocks(split=True).rename(columns={'block_id': 'raw_id', 'tract_id': 'raw_tract',
+                                               'population': 'raw_population'})
+    if overlap:
+        table.loc[1, 'geometry'] = box(1 - 2**-30, 0, 2 - 2**-30, 1)
+    if wrong_state:
+        table.loc[1, 'raw_id'] = '040010001000002'
+        table.loc[1, 'raw_tract'] = '04001000100'
+    county_files = []
+    for i in (0, 1):
+        path = tmp_path / f'county-{i}.parquet'
+        table.iloc[[i]].to_parquet(path, index=False)
+        county_files.append(path)
+    archive = tmp_path / 'counties.tar'
+    if shared_archive:
+        with tarfile.open(archive, 'w') as packed:
+            for path in county_files:
+                packed.add(path, arcname=path.name)
+        deps.append(archive)
+        task['sources'].append(source('counties', file_hash(archive)).to_dict())
+    for i, path in enumerate(county_files):
+        if shared_archive:
+            sid = 'counties'
+            resource = {'dependency_path': str(archive), 'member': path.name, 'sha256': file_hash(path)}
+        else:
+            sid = f'county-{i}'
+            resource = {'dependency_path': str(path), 'sha256': file_hash(path)}
+            deps.append(path)
+            task['sources'].append(source(sid, file_hash(path)).to_dict())
+        task['blocks'].append({'source_id': sid, 'state_fips': '01', 'resource': resource,
+                               'format': 'geoparquet', 'crs': CRS,
+                               'expected_block_count': 1, 'expected_population': 50})
+    return task, deps
+
+
+@pytest.mark.parametrize('shared_archive', [False, True])
+def test_multiple_bindings_same_state_pass_and_repeat(tmp_path, shared_archive):
+    task, deps = multi_binding_task(tmp_path, shared_archive=shared_archive)
+    req = request(tmp_path, dict(task, shard_id='one'), deps, name='first')
+    result = run_stage(req)
+    assert result.status == 'pass', result.message
+    frame = pd.read_parquet(Path(req.output_dir) / 'exposure.parquet')
+    rs = RasterSpec('tile', 'dem', str(tmp_path / 'dem.tif'), CRS, 'm', 'NAVD88', -9999)
+    expected, _ = build_exposure((source('census'), source('dem')),
+                                 Geography(blocks(), ('census',), (rs,)), DISTRIBUTED)
+    pd.testing.assert_frame_equal(frame, expected)
+    qc1 = json.loads((Path(req.output_dir) / 'quality.json').read_text())
+    reordered = dict(task, blocks=task['blocks'][::-1], shard_id='one')
+    req2 = request(tmp_path, reordered, deps[::-1], name='second')
+    assert run_stage(req2).status == 'pass'
+    qc2 = json.loads((Path(req2.output_dir) / 'quality.json').read_text())
+    assert qc1['footprint'] == qc2['footprint']
+    collection_task, outputs = make_shards(tmp_path, prepared=(task, deps))
+    result, _ = collect(tmp_path, collection_task, outputs)
+    assert result.status == 'pass', result.message
+
+
+def test_dropped_binding_refused_before_adaptation(tmp_path, monkeypatch):
+    task, deps = multi_binding_task(tmp_path)
+    task['blocks'].pop()
+    def should_not_read(*args, **kwargs):
+        raise AssertionError('raw adaptation reached despite incomplete declared inventory')
+    monkeypatch.setattr(build, '_resource', should_not_read)
+    result = run_stage(request(tmp_path, dict(task, shard_id='one'), deps))
+    assert result.status == 'fail' and 'independent state controls' in result.message
+
+
+def test_duplicate_resource_refused(tmp_path):
+    task, deps = multi_binding_task(tmp_path)
+    task['blocks'][1] = deepcopy(task['blocks'][0])
+    result = run_stage(request(tmp_path, dict(task, shard_id='one'), deps))
+    assert result.status == 'fail' and 'duplicate selected block resource' in result.message
+
+
+def test_offsetting_per_binding_errors_refused(tmp_path):
+    task, deps = multi_binding_task(tmp_path)
+    task['blocks'][0]['expected_population'] = 40
+    task['blocks'][1]['expected_population'] = 60
+    result = run_stage(request(tmp_path, dict(task, shard_id='one'), deps))
+    assert result.status == 'fail' and 'changed population total' in result.message
+
+
+def test_overlap_across_bindings_refused(tmp_path):
+    task, deps = multi_binding_task(tmp_path, overlap=True)
+    result = run_stage(request(tmp_path, dict(task, shard_id='one'), deps))
+    assert result.status == 'fail' and 'overlapping block polygon interiors' in result.message
+
+
+def test_wrong_state_in_binding_refused(tmp_path):
+    task, deps = multi_binding_task(tmp_path, wrong_state=True)
+    result = run_stage(request(tmp_path, dict(task, shard_id='one'), deps))
+    assert result.status == 'fail' and 'state membership mismatch' in result.message
+
+
+def test_collection_state_controls_not_only_shard_total(tmp_path):
+    task, deps = fixture_task(tmp_path)
+    task['shards'] = [{'id': 'one', 'state_fips': ['01', '04']}]
+    task['rasters'][0]['shard_ids'] = ['one']
+    task, deps = make_shards(tmp_path, prepared=(task, deps))
+    ref = task['shard_artifacts']['one']
+    frame = pd.read_parquet(ref['exposure'])
+    qc = json.loads(Path(ref['quality']).read_text())
+    for i, population in enumerate((90, 110)):
+        qc['blocks'][i]['population'] = population
+        qc['blocks'][i]['covered_population'] = float(population)
+        frame.loc[i, 'population'] = population
+        frame.loc[i, 'covered_population'] = float(population)
+    edit_shard(task, 'one', quality=qc, frame=frame)
+    result, _ = collect(tmp_path, task, deps)
+    assert result.status == 'fail' and 'per-state controls mismatch' in result.message
+
+
+@pytest.mark.parametrize('location', ['allocation', 'blocks', 'rasters'])
+def test_malformed_crs_returns_failed_stage(tmp_path, location):
+    task, deps = fixture_task(tmp_path)
+    if location == 'allocation':
+        task['allocation']['area_crs'] = 'EPSG:bogus'
+    else:
+        task[location][0]['crs'] = 'EPSG:bogus'
+    result = run_stage(request(tmp_path, dict(task, shard_id='one'), deps))
+    assert result.status == 'fail' and 'CRSError' in result.message
+
+
+def test_unexpected_implementation_error_is_not_swallowed(tmp_path, monkeypatch):
+    task, deps = fixture_task(tmp_path)
+    def bug(*args, **kwargs):
+        raise RuntimeError('unexpected bug')
+    monkeypatch.setattr(build, '_task', bug)
+    with pytest.raises(RuntimeError, match='unexpected bug'):
+        run_stage(request(tmp_path, dict(task, shard_id='one'), deps))
+
+
+def test_differently_noded_shared_shard_edges_pass(tmp_path):
+    from shapely.geometry import Polygon
+    task, deps = fixture_task(tmp_path)
+    binding = task['blocks'][1]
+    path = Path(binding['resource']['dependency_path'])
+    table = gpd.read_parquet(path)
+    table.geometry = [Polygon([(2, 0), (4, 0), (4, 1), (2, 1), (2, 0.5), (2, 0)])]
+    table.to_parquet(path, index=False)
+    rebind(task, deps, binding['source_id'], path)
+    task, deps = make_shards(tmp_path, prepared=(task, deps))
+    result, _ = collect(tmp_path, task, deps)
+    assert result.status == 'pass', result.message
+
+
+def test_duplicate_ids_across_bindings_refused(tmp_path):
+    task, deps = multi_binding_task(tmp_path)
+    binding = task['blocks'][1]
+    path = Path(binding['resource']['dependency_path'])
+    table = gpd.read_parquet(path)
+    table.raw_id = '010010001000001'
+    table.to_parquet(path, index=False)
+    rebind(task, deps, binding['source_id'], path)
+    result = run_stage(request(tmp_path, dict(task, shard_id='one'), deps))
+    assert result.status == 'fail' and 'duplicate 2010 block IDs' in result.message
+
+
+def test_overlapping_dem_tiles_have_stable_priority_and_nodata_fallback(tmp_path):
+    first = replace(raster(tmp_path / 'first.tif', values=(0, -9999)), tile_id='a')
+    second = replace(raster(tmp_path / 'second.tif', values=(1000, 2000)), tile_id='b')
+    geo = Geography(blocks(), ('census',), (first, second))
+    sources = (source('census'), source('dem'))
+    frame, qc = build_exposure(sources, geo, DISTRIBUTED)
+    expected_pressure = (float(pressure_mmhg(0)) + float(pressure_mmhg(2000))) / 2
+    assert frame.iloc[0].pressure_mmhg == pytest.approx(expected_pressure)
+    assert qc['missing_population'] == 0
+    reversed_frame, reversed_qc = build_exposure(sources, replace(geo, rasters=(second, first)), DISTRIBUTED)
+    pd.testing.assert_frame_equal(frame, reversed_frame)
+    assert qc == reversed_qc
+
+
+def test_multipolygon_placement_and_footprint(tmp_path):
+    from shapely.geometry import MultiPolygon
+    table = blocks()
+    table.geometry = [MultiPolygon([box(0, 0, 1, 1), box(3, 0, 4, 1)])]
+    rs = raster(tmp_path / 'dem.tif', values=(0, -9999, -9999, 4000))
+    frame, qc = build_exposure((source('census'), source('dem')), Geography(table, ('census',), (rs,)), DISTRIBUTED)
+    assert qc['coverage_pass'] and qc['population'] == 100
+    assert frame.iloc[0].mean_elevation_m == 2000
+    assert build._read_footprint(qc, CRS).equals(table.geometry.iloc[0])

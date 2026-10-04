@@ -5,6 +5,7 @@ Reviewed task JSON schema v1 (this module owns the stage-specific format):
   geography_vintage=2010, allocation=AllocationSpec fields,
   sources=[SourceManifest.to_dict(), ...],
   shards=[{id, state_fips: [two-digit strings, ...]}],
+  state_controls={state: {expected_block_count, expected_population}},
   blocks=[{source_id, state_fips, resource, format, crs,
            expected_block_count, expected_population}],
   rasters=[{source_id, tile_id, shard_ids, resource, crs, vertical_unit,
@@ -26,7 +27,15 @@ names are guessed. All other raw attributes are excluded before the core service
 All shards share the complete reviewed inventory. Only shard_id/shard_artifacts
 are excluded from its digest. Raw resources are read only for the selected shard.
 Collection needs all three files of every shard as separately hashed dependencies.
-A blocked acquisition inventory is not a reviewed exposure task.
+A blocked acquisition inventory is not a reviewed exposure task. State controls
+must have an independent reviewed Census basis, not be derived from bindings.
+
+The producer attests that QC footprints equal its verified source geometry.
+Collection verifies canonical footprint bytes, CRS, digest and disjoint interiors;
+it does not reopen raw sources to reconstruct them. Footprints include all blocks,
+including zero-population and uncovered blocks. There is no topology tolerance or
+repair and no claim of bitwise reproducibility across GEOS environments. Older
+shards without footprint evidence must be rebuilt.
 """
 from collections import OrderedDict
 from dataclasses import asdict, dataclass
@@ -35,14 +44,20 @@ import json
 import math
 from pathlib import Path, PurePosixPath
 import platform
+import re
 import shutil
 import tarfile
 
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import pyproj
 from pyproj import CRS, Transformer
+from pyproj.exceptions import CRSError
 import rasterio
+from rasterio.errors import RasterioError
+import shapely
+from shapely.errors import GEOSException
 from rasterio.warp import transform_bounds
 from rasterio.windows import Window
 from shapely.geometry import Point, box
@@ -54,7 +69,7 @@ from oxyformer.provenance import (
     ArtifactLineage, ArtifactRecord, ContractError, canonical_json, file_hash, require,
 )
 from oxyformer.exposure.physics import PHYSICS, PhysicalSpec, pressure_mmhg, deficit_mmhg
-from oxyformer.exposure.population_allocation import AllocationSpec, placements, validate_blocks
+from oxyformer.exposure.population_allocation import AllocationSpec, placements, validate_blocks, validate_disjoint
 from oxyformer.exposure.quality import QUANTILE_LABEL, check_conservation, weighted_quantiles
 
 
@@ -154,11 +169,13 @@ def build_exposure(source_manifests, geography, allocation_spec):
     require(type(geography) is Geography and geography.vintage == 2010, '2010 geography required')
     require(type(allocation_spec) is AllocationSpec, 'explicit AllocationSpec required')
     allocation_spec.validate()
-    validate_blocks(geography.blocks)
+    validate_blocks(geography.blocks, check_topology=False)
     require(bool(geography.census_source_ids) and
             set(geography.census_source_ids) <= set(identities), 'Census source identity missing')
     require(all(s.source_id in identities for s in geography.rasters), 'DEM source identity missing')
     blocks = geography.blocks.sort_values('block_id').to_crs(allocation_spec.area_crs)
+    validate_blocks(blocks)
+    footprint = _make_footprint(blocks.geometry.to_numpy(), allocation_spec.area_crs)
     sampler = RasterSampler(geography.rasters, allocation_spec.area_crs)
     tracts, ledger = {}, []
     try:
@@ -214,6 +231,7 @@ def build_exposure(source_manifests, geography, allocation_spec):
         rows.append(row)
     qc = {'schema_version': 1, 'source_identities': identities, 'physical': asdict(PHYSICS),
           'allocation': asdict(allocation_spec), 'quantile_interpretation': QUANTILE_LABEL,
+          'footprint': footprint,
           'blocks': ledger, 'population': sum(r['population'] for r in ledger),
           'covered_population': math.fsum(r['covered_population'] for r in ledger),
           'missing_population': math.fsum(r['missing_population'] for r in ledger),
@@ -221,6 +239,50 @@ def build_exposure(source_manifests, geography, allocation_spec):
           'zero_population_tracts': [r['tract_id'] for r in rows if r['status'] == 'zero_population']}
     qc['coverage_pass'] = qc['missing_population'] == 0
     return pd.DataFrame(rows), qc
+
+
+def _polygon(geometry):
+    require(geometry is not None and not geometry.is_empty and geometry.is_valid
+            and geometry.geom_type in ('Polygon', 'MultiPolygon')
+            and math.isfinite(geometry.area) and geometry.area > 0, 'invalid polygonal footprint')
+
+
+def _footprint_bytes(geometry):
+    return shapely.to_wkb(shapely.normalize(geometry), byte_order=1, output_dimension=2)
+
+
+def _make_footprint(geometries, crs):
+    # General union supports differently noded coincident edges; no coverage-union
+    # assumption, precision grid, simplification, tolerance or geometry repair.
+    geometry = shapely.union_all(geometries)
+    _polygon(geometry)
+    raw = _footprint_bytes(geometry)
+    return {'crs': crs, 'wkb_hex': raw.hex(), 'sha256': sha256(raw).hexdigest()}
+
+
+def _read_footprint(qc, crs):
+    require('footprint' in qc, 'required footprint missing; rebuild shard')
+    spec = qc['footprint']
+    require(CRS(spec['crs']) == CRS(crs), 'footprint CRS mismatch')
+    raw = bytes.fromhex(spec['wkb_hex'])
+    require(sha256(raw).hexdigest() == spec['sha256'], 'footprint digest mismatch')
+    geometry = shapely.from_wkb(raw)
+    _polygon(geometry)
+    require(_footprint_bytes(geometry) == raw, 'noncanonical footprint WKB')
+    return geometry
+
+
+def _state_totals(records, controls, states):
+    totals = {state: [0, 0] for state in states}
+    for record in records:
+        state = record['block_id'][:2]
+        require(state in totals, 'unknown state in block ledger')
+        totals[state][0] += 1
+        totals[state][1] += int(record['population'])
+    for state, (count, population) in totals.items():
+        control = controls[state]
+        require(count == control['expected_block_count'] and population == control['expected_population'],
+                f'per-state controls mismatch: {state}')
 
 
 def _digest(value):
@@ -291,12 +353,26 @@ def _task(request):
     if any(s.mapping_status != 'reviewed' for s in sources):
         raise MissingPrerequisite('reviewed source mappings required')
     _identities(sources)
-    require(set(b['state_fips'] for b in task['blocks']) == set(states)
-            and len(task['blocks']) == len(states), 'block inventory omissions or overlaps')
+    require(set(b['state_fips'] for b in task['blocks']) == set(states), 'block inventory omissions or overlaps')
+    require(set(task['state_controls']) == set(states), 'independent state controls missing or unexpected')
     for b in task['blocks']:
         require(type(b['expected_block_count']) is int and b['expected_block_count'] > 0
                 and type(b['expected_population']) is int and b['expected_population'] >= 0,
                 'reviewed block counts and population totals required')
+    for state in states:
+        control = task['state_controls'][state]
+        require(type(control['expected_block_count']) is int and control['expected_block_count'] > 0
+                and type(control['expected_population']) is int and control['expected_population'] >= 0,
+                'invalid independent state controls')
+        selected = [b for b in task['blocks'] if b['state_fips'] == state]
+        declared = (sum(b['expected_block_count'] for b in selected),
+                    sum(b['expected_population'] for b in selected))
+        require(declared == (control['expected_block_count'], control['expected_population']),
+                f'declared bindings differ from independent state controls: {state}')
+    source_by_id = {source.source_id: source for source in sources}
+    resource_keys = [(source_by_id[b['source_id']].payload_hash, b['resource'].get('member'))
+                     for b in task['blocks']]
+    require(len(resource_keys) == len(set(resource_keys)), 'duplicate selected block resource')
     known_shards = {s['id'] for s in shards}
     require(len({r['tile_id'] for r in task['rasters']}) == len(task['rasters']), 'duplicate raster inventory')
     require(all(r['shard_ids'] and set(r['shard_ids']) <= known_shards for r in task['rasters']),
@@ -350,6 +426,7 @@ def _build_shard(request, task, sources, scratch):
     geography = Geography(blocks=gpd.GeoDataFrame(pd.concat(tables, ignore_index=True), geometry='geometry',
                                                  crs=task['allocation']['area_crs']),
                           census_source_ids=tuple(sorted(set(used_sources))), rasters=tuple(rasters))
+    _state_totals(geography.blocks.to_dict('records'), task['state_controls'], states)
     return build_exposure(tuple(sources.values()), geography, AllocationSpec(**task['allocation']))
 
 
@@ -389,12 +466,16 @@ def _validate_ledger(frame, qc, states, expected_count, expected_population):
 def _collect(request, task, sources, spec_hash, config):
     refs = task.get('shard_artifacts', {})
     require(set(refs) == {s['id'] for s in task['shards']}, 'missing or unexpected shard')
-    frames, ledgers = [], []
+    frames, ledgers, footprints, producer_codes = [], [], [], set()
     for shard in sorted(task['shards'], key=lambda s: s['id']):
         ref = refs[shard['id']]
         manifest_path, exposure_path, quality_path = [_dependency(request, ref[k])
                                                      for k in ('manifest', 'exposure', 'quality')]
         manifest, qc = _json(manifest_path), _json(quality_path)
+        producer_code = manifest.get('code_identity')
+        require(isinstance(producer_code, str) and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', producer_code)
+                is not None, 'invalid or missing producer code identity')
+        producer_codes.add(producer_code)
         require(manifest['status'] == 'pass' and manifest['stage'] == 'exposure-atlas', 'nonpassing shard')
         require(manifest['shard_id'] == shard['id'] and manifest['atlas_spec_hash'] == spec_hash,
                 'shard identity/specification mismatch')
@@ -406,14 +487,18 @@ def _collect(request, task, sources, spec_hash, config):
                 'inconsistent placement specification')
         require(manifest['artifacts'] == {'exposure.parquet': file_hash(exposure_path),
                                           'quality.json': file_hash(quality_path)}, 'shard artifact hash mismatch')
+        footprints.append(_read_footprint(qc, task['allocation']['area_crs']))
         frame = pd.read_parquet(exposure_path)
         require(frame.scenario.eq(task['allocation']['scenario']).all(), 'row scenario mismatch')
         require(frame.quantile_interpretation.eq(QUANTILE_LABEL).all(), 'quantile labeling mismatch')
         selected = [b for b in task['blocks'] if b['state_fips'] in shard['state_fips']]
         _validate_ledger(frame, qc, shard['state_fips'], sum(b['expected_block_count'] for b in selected),
                          sum(b['expected_population'] for b in selected))
+        _state_totals(qc['blocks'], task['state_controls'], shard['state_fips'])
         frames.append(frame)
         ledgers.extend(qc['blocks'])
+    validate_disjoint(footprints, names=sorted(refs), label='shard')
+    require(len(producer_codes) == 1, 'mixed producer code identities')
     require(len({b['block_id'] for b in ledgers}) == len(ledgers), 'overlapping shard blocks')
     frame = pd.concat(frames, ignore_index=True).sort_values('tract_id').reset_index(drop=True)
     require(not frame.tract_id.duplicated().any(), 'overlapping shard tracts')
@@ -425,7 +510,8 @@ def _collect(request, task, sources, spec_hash, config):
           'missing_population': math.fsum(b['missing_population'] for b in ledgers),
           'coverage_pass': True, 'incomplete_tracts': [],
           'zero_population_tracts': frame.loc[frame.status == 'zero_population', 'tract_id'].tolist(),
-          'collected_shards': sorted(refs)}
+          'collected_shards': sorted(refs), 'producer_code_identity': next(iter(producer_codes)),
+          'footprint': _make_footprint(footprints, task['allocation']['area_crs'])}
     return frame, qc
 
 
@@ -467,13 +553,16 @@ def run_stage(request: StageRequest) -> StageResult:
                     'physical': config['physical'], 'allocation': qc['allocation'],
                     'request_hash': request.content_hash, 'config_hash': request.config_hash,
                     'code_identity': request.code_identity,
+                    'producer_code_identity': qc.get('producer_code_identity', request.code_identity),
                     'artifacts': {filename: file_hash(root / filename), 'quality.json': file_hash(root / 'quality.json')}}
         _write_json(root / 'artifact_manifest.json', manifest)
         lineage = ArtifactLineage(source_hashes=tuple(sorted(s.payload_hash for s in sources.values())),
                                   unit_ids=tuple(frame.tract_id), parent_hashes=request.dependency_hashes,
                                   split_hash=None, config_hash=request.config_hash, model_hash=None,
                                   environment=(('python', platform.python_version()), ('numpy', np.__version__),
-                                               ('rasterio', rasterio.__version__), ('geopandas', gpd.__version__)),
+                                               ('rasterio', rasterio.__version__), ('geopandas', gpd.__version__),
+                                               ('shapely', shapely.__version__), ('geos', shapely.geos_version_string),
+                                               ('pyproj', pyproj.__version__)),
                                   seed=None, parameter_count=None)
         artifacts = tuple(ArtifactRecord(path=name, sha256=file_hash(root / name), lineage=lineage,
                                           kind='exposure' if name.endswith('.parquet') else 'exposure_metadata')
@@ -485,7 +574,8 @@ def run_stage(request: StageRequest) -> StageResult:
         return result
     except MissingPrerequisite as exc:
         return StageResult(request_hash=request.content_hash, status='blocked', artifacts=(), message=str(exc))
-    except (ContractError, OSError, ValueError, KeyError, TypeError, tarfile.TarError) as exc:
+    except (ContractError, OSError, ValueError, KeyError, TypeError, tarfile.TarError,
+            CRSError, RasterioError, GEOSException) as exc:
         return StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
                            message=f'{type(exc).__name__}: {exc}')
     finally:
