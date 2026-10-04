@@ -22,12 +22,9 @@ HTTPS template reproduces inspected bucket keys. No runtime source discovery.
 
 ## Source constraints
 
-[CDC FTP](https://ftp.cdc.gov/pub/Health_Statistics/NCHS/Datasets/NVSS/USALEEP/)
-File A includes the mortality flag. Public-government-work metadata does not
-replace its required flag dictionary. Only flag-1 primary training is approved;
-ACS concepts are not selected here. Pinned elevcan code/data are CC0, other
-content CC-BY 4.0. Census legal/citation conditions and the actual bulk SF1 layout
-were inspected; preserve attribution and the 2010 geographic vintage.
+Source-specific terms and dictionary observations are recorded in each manifest.
+Keep flag-1-only primary training, unselected ACS concepts, pinned elevcan
+licenses, Census attribution and 2010 geographic vintage intact.
 
 DEM selection intersects full-resolution TIGER2010 state geometry without
 outcomes, flags or eligibility filters. Nine disjoint jurisdiction groups cover
