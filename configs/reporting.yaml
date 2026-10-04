@@ -1,0 +1,11 @@
+schema_version: 1
+# This file documents reporting behavior; scientific thresholds are read only
+# from configs/approvals.yaml, never overridden by this config or task payload.
+stages: [anchor_review, audit_collection, tract_release]
+primary_estimators: [mtp_one_step, cv_tmle]
+spatial_bandwidths_km: [50, 100, 200]
+ratio_p99_warning: 10
+ess_fraction_warning: 0.25
+warnings_are_universal_cutoffs: false
+expected_anchor_sign_is_acceptance_criterion: false
+approval_registry: configs/approvals.yaml
