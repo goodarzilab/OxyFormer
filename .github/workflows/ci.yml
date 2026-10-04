@@ -22,8 +22,9 @@ jobs:
         env:
           CUDA_VISIBLE_DEVICES: ""
         run: |
-          if [ -d tests ] && ls tests/test_*.py >/dev/null 2>&1; then
-            PYTHONPATH=src python -m pytest -q
-          else
-            echo "no tests yet"
-          fi
+          # pytest discovers tests at any depth; exit code 5 means no tests were collected yet.
+          set +e
+          PYTHONPATH=src python -m pytest -q
+          rc=$?
+          if [ "$rc" -eq 5 ]; then echo "no tests collected yet"; exit 0; fi
+          exit "$rc"
