@@ -52,6 +52,15 @@ def dependency_file(root, relative):
     return path
 
 
+def verify_dependency_result(root):
+    result_file = dependency_file(root, '_execution/result.json')
+    request = StageRequest.from_json(dependency_file(root, '_execution/request.json').read_text())
+    result = StageResult.from_json(result_file.read_text())
+    require(Path(request.output_dir).resolve() == root, 'dependency attempt owner mismatch')
+    require(result.status == 'pass', 'dependency stage did not pass')
+    result.verify(request)
+
+
 def verify_continuation(task, deps):
     chain = task.get('continuation')
     if chain is None:
@@ -70,12 +79,9 @@ def verify_continuation(task, deps):
     require(prev_chain.get('owner') == chain['owner'], 'continuation ownership mismatch')
     require(prev_chain.get('step') == chain['step'] - 1, 'continuation step is not consecutive')
     require(previous.get('recipe_lock') == task.get('recipe_lock'), 'continuation recipe mismatch')
-    # Result.verify rehashes the entire predecessor request and every artifact.
-    old_request = StageRequest.from_json(dependency_file(deps[predecessor], '_execution/request.json').read_text())
-    old_result = StageResult.from_json(dependency_file(deps[predecessor], '_execution/result.json').read_text())
-    require(Path(old_request.output_dir).resolve() == deps[predecessor], 'continuation attempt owner mismatch')
-    require(old_result.status == 'pass', 'continuation predecessor did not pass')
-    old_result.verify(old_request)
+    for field in ('stage', 'campaign', 'parameters'):
+        require(previous.get(field) == task.get(field), f'continuation {field} mismatch')
+    verify_dependency_result(deps[predecessor])
 
 
 def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, approvals=None):
@@ -117,6 +123,14 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         task = {'id': stage, 'stage': stage, 'needs': settings.get('needs', {}),
                 'outputs': settings.get('outputs', [])}
     require(task.get('stage') == stage, 'task stage mismatch')
+    # Stage-required inputs cannot be removed by a selected shard/task.
+    task.setdefault('needs', settings.get('needs', {}))
+    task.setdefault('outputs', settings.get('outputs', []))
+    for unit, paths in settings.get('needs', {}).items():
+        require(unit in task['needs'] and set(paths) <= set(task['needs'][unit]),
+                'task omitted stage-required dependency')
+    require(set(settings.get('outputs', [])) <= set(task['outputs']),
+            'task omitted stage-required output')
     needs = task.get('needs', {})
     require(isinstance(needs, dict), 'task needs must map IDs to relative files')
     require(deps_env or not needs, 'dependencies require --deps-env')
@@ -128,10 +142,13 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         require(isinstance(needs[unit], list) and needs[unit], 'dependency requires explicit files')
         for relative in needs[unit]:
             files.append(dependency_file(root, relative))
+        if (root / '_execution/result.json').exists():
+            verify_dependency_result(root)
     require(len(set(files)) == len(files), 'duplicate dependency files')
     for relative in task.get('outputs', []):
         require(not relative.startswith('_execution/'), 'reserved execution output')
         path = output_path(out, relative)
+        require(not path.is_relative_to(repo), 'output overlaps cloned repository')
         require(not path.exists(), f'output already exists: {relative}')
     # Execution directory is a once-only reservation; no in-place attempt resume.
     output_path(out, '_execution').mkdir()
@@ -145,6 +162,8 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         require(file_hash(lock_file) == lock_ref['sha256'], 'recipe lock hash mismatch')
         lock = read_mapping(lock_file)
         verify_recipe(repo, lock)
+        require(file_hash(approvals_file) == file_hash(repo / 'configs/approvals.yaml'),
+                'locked approvals differ from fingerprinted repository config')
     config = {'stage': stage, 'settings': settings, 'approvals': approvals_value,
               'input_sources': sources, 'dependencies': {k: str(v) for k, v in deps.items()}}
     config_path = atomic_json(out, '_execution/config.json', config)
@@ -169,6 +188,8 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
             result = module.run_stage(request)
         require(isinstance(result, StageResult), 'stage did not return StageResult')
         result.verify(request)
+        require(all(not (out / a.path).resolve().is_relative_to(repo) for a in result.artifacts),
+                'artifact overlaps cloned repository')
         require(all(not a.path.startswith('_execution/') for a in result.artifacts), 'reserved execution artifact')
         declared = set(task.get('outputs', []))
         if result.status == 'pass':
