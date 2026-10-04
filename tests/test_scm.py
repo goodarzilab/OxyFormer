@@ -348,3 +348,14 @@ def test_dependence_clusters_can_cross_exposure_geographies():
     assert sample.observations.frame.cluster_ids == f.cluster_ids
     assert sample.observations.a[0] == sample.observations.a[1]
     assert sample.observations.a[2] == sample.observations.a[3]
+
+
+def test_unknown_effect_is_rejected_by_inherited_contract_validation(tmp_path):
+    # Immutable.__post_init__ validates Literal types before comparing switches.
+    with pytest.raises(ContractError, match="invalid enum value"):
+        SCMConfig(name="unsupported", effect="quadratic", active_mechanisms=("quadratic",))
+    recipe = tmp_path/"unsupported.yaml"
+    recipe.write_text('suite: A\nscenario_expansion: explicit_only\nscenarios:\n'
+                      '  - name: unsupported\n    effect: quadratic\n    active_mechanisms: [quadratic]\n')
+    with pytest.raises(ContractError, match="invalid enum value"):
+        load_suite_a(recipe)
