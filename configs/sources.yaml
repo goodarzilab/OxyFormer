@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "sources": {
+    "us": "configs/sources/us.json",
+    "census": "configs/sources/census.json",
+    "dem": "configs/sources/dem.json",
+    "endes": "configs/sources/endes.json",
+    "births": "configs/sources/births.json",
+    "mexico": "configs/sources/mexico.json",
+    "inec": "configs/sources/inec.json"
+  },
+  "atlas_shards": "configs/sources/atlas_shards.json"
+}
