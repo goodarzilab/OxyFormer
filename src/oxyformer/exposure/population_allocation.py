@@ -33,6 +33,10 @@ class AllocationSpec:
         require(math.isfinite(self.grid_size_m) and self.grid_size_m > 0 and
                 len(self.grid_origin_m) == 2 and all(math.isfinite(x) for x in self.grid_origin_m),
                 'invalid placement grid')
+        # Canonical identity for accepted equivalent CRS and numeric spellings.
+        object.__setattr__(self, 'placement_crs', 'EPSG:5070')
+        object.__setattr__(self, 'grid_size_m', float(self.grid_size_m))
+        object.__setattr__(self, 'grid_origin_m', tuple(float(x) for x in self.grid_origin_m))
 
     @property
     def content_hash(self):
@@ -52,8 +56,12 @@ class DemTile:
     fallback_reason: str | None = None
     archive_member: str | None = None
 
-    def identity(self):
-        return {k: v for k, v in asdict(self).items() if k != 'path'}
+    def identity(self, verified_crs):
+        identity = {k: v for k, v in asdict(self).items() if k != 'path'}
+        # The raster bytes anchor identity, independently of the task's accepted
+        # equivalent CRS spelling. The original declaration stays in task_hash.
+        identity['crs'] = CRS(verified_crs).to_wkt()
+        return identity
 
 
 class RasterSampler:
@@ -68,6 +76,7 @@ class RasterSampler:
         self.placement_crs = placement_crs
         self.stack = ExitStack()
         self.datasets = []
+        self.identities = []
 
     def __enter__(self):
         try:
@@ -105,6 +114,7 @@ class RasterSampler:
                         ds.offsets == (0.0,), 'DEM vertical units/scale mismatch')
                 transform = Transformer.from_crs(self.placement_crs, ds.crs, always_xy=True)
                 self.datasets.append((ds, transform))
+                self.identities.append(tile.identity(ds.crs))
             return self
         except Exception:
             self.stack.close()

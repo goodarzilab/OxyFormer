@@ -8,15 +8,30 @@ REASONS = ('nodata', 'outside_coverage', 'outside_physical_domain')
 
 
 def weighted_quantiles(values, weights):
-    """Inverse weighted empirical CDF, restricted to positive placement mass."""
+    """Left inverse CDF of the represented positive placement masses.
+
+    Binary floating-point weights are exact dyadic rationals. Compare their
+    integer numerators at a common denominator, so cumulative rounding cannot
+    change a boundary and no tolerance can erase a genuine near-boundary mass.
+    """
     positive = weights > 0
     values, weights = values[positive], weights[positive]
     if not len(values):
         return [None, None, None]
     order = np.argsort(values, kind='stable')
-    cumulative = np.cumsum(weights[order])
-    indices = np.searchsorted(cumulative, np.array([0.1, 0.5, 0.9]) * cumulative[-1], side='left')
-    return values[order][indices].tolist()
+    ratios = [float(w).as_integer_ratio() for w in weights[order]]
+    denominator = max(d for _, d in ratios)  # all denominators are powers of two
+    masses = [n * (denominator // d) for n, d in ratios]
+    total = sum(masses)
+    result, cumulative = [], 0
+    numerators = (1, 5, 9)  # exact p10, p50, p90 thresholds, denominator ten
+    for index, mass in zip(order, masses):
+        cumulative += mass
+        while len(result) < 3 and 10 * cumulative >= numerators[len(result)] * total:
+            result.append(float(values[index]))
+        if len(result) == 3:
+            break
+    return result
 
 
 def validate_accounting(exposure, quality):

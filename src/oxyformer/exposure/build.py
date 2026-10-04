@@ -70,11 +70,11 @@ def build_exposure(source_manifests, geography, allocation_spec):
                'physical_hash': PHYSICS.content_hash, 'allocation': asdict(allocation_spec),
                'allocation_hash': allocation_spec.content_hash,
                'source_identities': source_manifests.identity_map(),
-               'dem_tiles': [t.identity() for t in sorted(source_manifests.dem_tiles, key=lambda t: t.resource_id)],
                'quantile_interpretation': QUANTILE_INTERPRETATION,
                'block_count': len(blocks), 'population': sum(int(value) for value in blocks.population), 'blocks': []}
     rows = []
     with RasterSampler(source_manifests.dem_tiles, allocation_spec.placement_crs) as sampler:
+        quality['dem_tiles'] = sampler.identities
         for tract_id, tract in blocks.groupby('tract_id', sort=True):
             for scenario in allocation_spec.scenarios:
                 pressures, deficits, elevations, masses = [], [], [], []

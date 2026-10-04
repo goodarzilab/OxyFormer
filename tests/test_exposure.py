@@ -1,5 +1,6 @@
 """Offline synthetic tests: no downloaded population, raster, or health data."""
 from dataclasses import asdict, replace
+from fractions import Fraction
 from hashlib import sha256
 import io
 import json
@@ -10,6 +11,7 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pytest
+from pyproj import CRS
 import rasterio
 from rasterio.transform import from_origin
 from shapely.geometry import box
@@ -20,6 +22,7 @@ from oxyformer.exposure.build import ExposureSources, build_exposure, run_stage
 from oxyformer.exposure.census_blocks import read_census_blocks, read_sf1_population
 from oxyformer.exposure.physics import PHYSICS, pressure_mmhg, inspired_oxygen_mmhg, oxygen_deficit_mmhg
 from oxyformer.exposure.population_allocation import AllocationSpec, DemTile, PRIMARY, FALLBACK
+from oxyformer.exposure.quality import weighted_quantiles
 from oxyformer.provenance import ContractError, canonical_json, file_hash
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -386,3 +389,65 @@ def test_integral_float32_population_totals_remain_exact(tmp_path):
     compact = blocks(pop=np.array([16777216, 1], dtype=np.float32))
     result, qc = build_exposure(sources(tile), compact, replace(SPEC, scenarios=('centroid',)))
     assert qc['population'] == result.population.iloc[0] == expected
+
+
+def test_distributed_quantile_exact_boundary(tmp_path):
+    tile = write_raster(tmp_path / 'quantile.tif', [0] * 20 + [3000] * 20)
+    whole = blocks(pop=(4, 0)).iloc[:1].copy()
+    whole.loc[0, 'geometry'] = box(0, 0, 4000, 100)
+    result, _ = build_exposure(sources(tile), whole, replace(SPEC, scenarios=('distributed',)))
+    assert result.elevation_p50_m.iloc[0] == 0
+
+
+@pytest.mark.parametrize('weights', [
+    [0.1] * 40, [2, 2 + 2**-40], [2 + 2**-40, 2],
+    [1, 9], [9, 1], [2**-100, 1, 2**50, 2**50, 1, 2**-100],
+])
+def test_quantile_matches_exact_left_cdf(weights):
+    weights = np.asarray(weights, dtype=float)
+    values = np.repeat([0., 3000.], len(weights) // 2)
+    exact = [Fraction(float(w)) for w in weights]
+    total = sum(exact)
+    expected = []
+    for q in (Fraction(1, 10), Fraction(1, 2), Fraction(9, 10)):
+        cumulative = 0
+        for z, weight in zip(values, exact):
+            cumulative += weight
+            if cumulative >= q * total:
+                expected.append(z)
+                break
+    # Exact binary scaling and splitting retain the represented mass. A near
+    # tie must not be treated as an exact tie by an arbitrary numeric tolerance.
+    for scale in (0.5, 1., 2.):
+        assert weighted_quantiles(values, weights * scale) == expected
+        assert weighted_quantiles(values[::-1], weights[::-1] * scale) == expected
+        assert weighted_quantiles(np.repeat(values, 2), np.repeat(weights * scale / 2, 2)) == expected
+
+
+@pytest.mark.parametrize('crs_format', ['wkt', 'projjson'])
+def test_equivalent_crs_shards_collect_reproducibly(tmp_path, shard_fixture, crs_format):
+    inventory, original_paths = shard_fixture
+    task = json.loads((tmp_path / 'shard-AZ/task.json').read_text())
+    crs = CRS('EPSG:5070')
+    declaration = crs.to_wkt() if crs_format == 'wkt' else crs.to_json()
+    task['raster_metadata']['synthetic']['crs'] = declaration
+    deps = [inventory, tmp_path / 'census-receipt.json', tmp_path / 'census.tar',
+            tmp_path / 'dem-receipt.json', tmp_path / 'dem.tar']
+    req = request(tmp_path / 'equivalent-AZ', 'exposure-atlas', task, deps)
+    result = run_stage(req)
+    assert result.status == 'pass', result.message
+    out = Path(req.output_dir)
+    paths = original_paths[:3] + [out / name for name in ('artifact_manifest.json', 'exposure.parquet', 'quality.json')]
+    collections = [collect_request(tmp_path / 'original', inventory, original_paths),
+                   collect_request(tmp_path / 'equivalent', inventory, paths),
+                   collect_request(tmp_path / 'reversed', inventory, paths, reverse=True)]
+    for collection in collections:
+        result = run_stage(collection)
+        assert result.status == 'pass', result.message
+        result.verify(collection)
+    for name in ('atlas.parquet', 'quality.json'):
+        assert len({file_hash(Path(c.output_dir) / name) for c in collections}) == 1
+
+
+def test_equivalent_placement_crs_has_same_identity():
+    assert AllocationSpec(placement_crs=CRS('EPSG:5070').to_wkt()).content_hash == SPEC.content_hash
