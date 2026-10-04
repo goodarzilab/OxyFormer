@@ -199,3 +199,20 @@ def test_identity_profile_repeated_rows_use_supplied_multiplicity_weights(split)
     torch.testing.assert_close(offsets.values, expected)
     loss = offsets.training_loss(ids*2, base.repeat(2), y.repeat(2), (weights/2).repeat(2))
     torch.testing.assert_close(loss, offsets.training_loss(ids, base, y, weights))
+
+
+@pytest.mark.parametrize("death_dtype,population_dtype", [
+    (torch.int64, torch.float64), (torch.float64, torch.int64), (torch.int64, torch.int64),
+])
+def test_natural_integer_count_inputs_preserve_predictor_precision(death_dtype, population_dtype):
+    log_rate = vec([-.4, -2., .3], True)
+    deaths = torch.tensor([0, 3, 80], dtype=death_dtype)
+    population = torch.tensor([2, 100, 1000], dtype=population_dtype)
+    weights = vec([7., 1., 4.])
+    loss = endpoint_loss(log_rate, deaths, weights, family="poisson", population=population)
+    reference = normalized_poisson_loss(log_rate, deaths.double(), population.double(), weights)
+    assert torch.isfinite(loss)
+    torch.testing.assert_close(loss, reference, rtol=1e-12, atol=1e-12)
+    gradient, = torch.autograd.grad(loss, log_rate)
+    torch.testing.assert_close(gradient, weights * (log_rate.exp() - deaths.double()/population.double()),
+                               rtol=1e-12, atol=1e-12)

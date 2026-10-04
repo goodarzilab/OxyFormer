@@ -56,6 +56,10 @@ def normalized_poisson_loss(log_rate: Tensor, deaths: Tensor, population: Tensor
     require(population.shape == deaths.shape and bool(torch.isfinite(population).all())
             and bool((population > 0).all()), "population must be aligned, finite and positive")
     require(bool((deaths >= 0).all()), "negative death counts")
+    # Integer unary log/lgamma otherwise default to float32 even for a FP64
+    # predictor. Promote before these operations; preserve wider float inputs.
+    deaths = deaths.to(dtype=torch.promote_types(deaths.dtype, log_rate.dtype))
+    population = population.to(dtype=torch.promote_types(population.dtype, log_rate.dtype))
     log_count_mean = population.log() + log_rate
     nll = log_count_mean.exp() - deaths * log_count_mean + torch.lgamma(deaths + 1)
     return weighted_reduce(nll / population, weights, reduction)
