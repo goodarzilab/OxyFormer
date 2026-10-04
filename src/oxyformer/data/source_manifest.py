@@ -206,14 +206,16 @@ def _download(resource, path, *, attempts, timeout, log):
                 _https(final_url)
                 encoding = response.headers.get('Content-Encoding', 'identity')
                 _require(encoding.lower() == 'identity', 'Unexpected transfer content encoding')
-                length = response.headers.get('Content-Length')
+                # Select one framing authority before any length-related check.
+                # HTTPResponse has already selected/validated chunked decoding;
+                # in that mode raw Content-Length is not a body constraint.
+                chunked = getattr(response, 'chunked', False) is True
+                length = None if chunked else response.headers.get('Content-Length')
                 if length is not None:
                     _require(length.isdigit(), 'Invalid Content-Length')
                     length = int(length)
                     _require(0 < length <= resource['max_bytes'], 'Content-Length exceeds byte ceiling or is empty')
                 expected_bytes = resource.get('expected_bytes')
-                # HTTPResponse validates chunk framing and raises on premature EOF.
-                chunked = getattr(response, 'chunked', False) is True
                 _require(length is not None or chunked or expected_bytes is not None
                          or resource.get('expected_sha256') is not None,
                          'Missing transfer framing: declare expected_bytes or expected_sha256')

@@ -152,6 +152,12 @@ HTTP is rejected, including redirect downgrades. Empty, oversized, detectably tr
 HTML-disguised binary responses, unexpected encodings and checksum mismatches
 cannot produce a successful receipt. HTTP Content-Length or validated chunked
 framing is required unless the manifest declares an expected length or hash.
+When the stdlib parser selects chunked decoding, raw Content-Length is ignored
+for every framing check, including conflicting or invalid values. This is an
+explicit receiver interoperability policy; sending both headers violates the
+HTTP sender rules. Nonchunked responses still require the declared length.
+Bytes beyond a nonchunked declared length are outside the body exposed by the
+parser; only independent expectations can identify a wrongly shortened artifact.
 Close-delimited EOF alone cannot establish completeness, so such responses
 without an independent expectation fail with an explicit integrity error.
 Correct framing establishes receipt of the declared HTTP body, not the scientific
