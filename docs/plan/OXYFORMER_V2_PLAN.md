@@ -841,7 +841,7 @@ Use a minimal native PyTorch loop, native scaled-dot-product attention, validate
 
 **TabICLv2 comparator:** pin package `2.2.0` and the explicitly named v2 classifier/regressor checkpoints. Core code and the model card declare BSD-3-Clause; archive exact licence bytes and file hashes before use. Do not assume its ordinary interface supports survey-weighted training. ([github.com](https://github.com/soda-inria/tabicl/releases/tag/v2.2.0))
 
-**TabPFN:** admitted in all versions alongside TabICLv2, by owner decision on October 4, 2026 (Arc is a nonprofit; research use). Pin package `9.1.0` and the explicitly named checkpoints, archive exact licence bytes and file hashes before use, and honour each checkpoint's attribution terms. Never accept floating default checkpoints. ([huggingface.co](https://huggingface.co/Prior-Labs/TabPFN-v2-reg/blob/main/LICENSE.txt))
+**TabPFN:** all versions are admitted by owner decision on October 4, 2026 (Arc is a nonprofit; research use), subject to each checkpoint's licence terms; the package pin is the one in `configs/approvals.yaml`. Never accept floating default checkpoints. ([huggingface.co](https://huggingface.co/Prior-Labs/TabPFN-v2-reg/blob/main/LICENSE.txt))
 
 ### 8.5 First three pull requests
 
