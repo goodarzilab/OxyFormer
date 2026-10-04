@@ -40,7 +40,8 @@ def squared_loss(mean: Tensor, target: Tensor, weights: Tensor, *, reduction="su
 
 def bernoulli_loss(logits: Tensor, target: Tensor, weights: Tensor, *, reduction="sum") -> Tensor:
     _aligned(logits, target, weights)
-    require(bool(((target >= 0) & (target <= 1)).all()), "Bernoulli target outside [0,1]")
+    require(bool(((target == 0) | (target == 1)).all()), "Bernoulli targets must be 0 or 1")
+    target = target.to(dtype=logits.dtype)
     return weighted_reduce(F.binary_cross_entropy_with_logits(logits, target, reduction="none"),
                            weights, reduction)
 

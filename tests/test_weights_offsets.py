@@ -66,7 +66,8 @@ def test_rate_replication_changes_neither_gradient_nor_optimum():
 
 @pytest.mark.parametrize("family", ["identity", "bernoulli"])
 def test_endpoint_weighted_gradients(family):
-    prediction, target, weights = vec([-.3, .5, 1.2], True), vec([0., 1., .2]), vec([1., 0., 7.])
+    prediction, weights = vec([-.3, .5, 1.2], True), vec([1., 0., 7.])
+    target = vec([0., 1., 1. if family == "bernoulli" else .2])
     function = squared_loss if family == "identity" else bernoulli_loss
     loss = function(prediction, target, weights)
     gradient, = torch.autograd.grad(loss, prediction)
@@ -216,3 +217,49 @@ def test_natural_integer_count_inputs_preserve_predictor_precision(death_dtype, 
     gradient, = torch.autograd.grad(loss, log_rate)
     torch.testing.assert_close(gradient, weights * (log_rate.exp() - deaths.double()/population.double()),
                                rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("entrypoint", ["direct", "endpoint", "offset"])
+@pytest.mark.parametrize("reduction", ["none", "sum", "mean"])
+def test_bernoulli_integer_labels_values_and_gradients(dtype, entrypoint, reduction, split):
+    logits = torch.tensor([-.3, .5, 1.2, -1.5], dtype=dtype, requires_grad=True)
+    target = torch.tensor([0, 1, 1, 0], dtype=torch.int64)
+    weights = torch.tensor([1., 3., 0., 7.], dtype=dtype)
+    if entrypoint == "direct":
+        loss = bernoulli_loss(logits, target, weights, reduction=reduction)
+    elif entrypoint == "endpoint":
+        loss = endpoint_loss(logits, target, weights, family="bernoulli", reduction=reduction)
+    else:
+        offsets = CountyOffsets(split, 0, ("c",)*4, family="bernoulli",
+                                exposure_assignment_level="tract").to(dtype=dtype)
+        loss = offsets.training_loss(split.training_ids(0), logits, target, weights, reduction=reduction)
+    floating_target = target.to(dtype)
+    rows = weights * (torch.nn.functional.softplus(logits) - floating_target * logits)
+    expected = rows if reduction == "none" else rows.sum()
+    if reduction == "mean":
+        expected = expected / weights.sum()
+    torch.testing.assert_close(loss, expected)
+    gradient, = torch.autograd.grad(loss.sum(), logits)
+    expected_gradient = weights * (logits.sigmoid() - floating_target)
+    if reduction == "mean":
+        expected_gradient = expected_gradient / weights.sum()
+    torch.testing.assert_close(gradient, expected_gradient)
+
+
+@pytest.mark.parametrize("target_dtype", [torch.bool, torch.int32, torch.float32, torch.float64])
+def test_bernoulli_accepts_binary_label_representations(target_dtype):
+    logits = vec([-.3, .5], True)
+    target = torch.tensor([0, 1], dtype=target_dtype)
+    weights = vec([1., 3.])
+    loss = bernoulli_loss(logits, target, weights)
+    gradient, = torch.autograd.grad(loss, logits)
+    torch.testing.assert_close(gradient, weights * (logits.sigmoid() - vec([0., 1.])))
+
+
+@pytest.mark.parametrize("invalid", [.25, -1., 2., 1. + 1e-8, 1e-50, float("nan"), float("inf")])
+def test_bernoulli_rejects_nonbinary_labels_before_cast(invalid):
+    # These near-endpoint float64 values would round to 0/1 if cast too early.
+    target = torch.tensor([0., invalid], dtype=torch.float64)
+    with pytest.raises(ContractError, match="Bernoulli|nonfinite"):
+        bernoulli_loss(torch.zeros(2, dtype=torch.float32), target, torch.ones(2))
