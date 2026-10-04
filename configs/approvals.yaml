@@ -1,0 +1,50 @@
+# Owner approvals for the OxyFormer v2 run. Owner-originated: only the owner (or a PR the owner approves) may change this
+# file. Units read it and never write it. Every entry restates a parameter fixed by docs/plan/OXYFORMER_V2_PLAN.md.
+schema_version: 1
+approved_by: Hani Goodarzi
+approved_on: 2026-10-04     # owner confirmation in the orchestrating session
+plan: docs/plan/OXYFORMER_V2_PLAN.md
+
+policy:
+  tract_shift_mmhg: 2.0      # section 4.1; other endpoints need a separate support assessment before 5 mmHg
+  form: shift_or_stay        # no clipping, no jitter, no bridging of support gaps
+  support_design_fraction: 0.20   # outcome-sealed geographic sub-blocks used to freeze support (section 4.1)
+
+tract_eligibility:           # section 4.1 and the WS2 eligibility rules
+  outcome_flags_primary: [1]
+  outcome_flags_sensitivity: [3]
+  outcome_flags_excluded: [2]
+  min_flag1_tracts_per_county: 4
+  min_outer_training_tracts_per_county: 8
+  min_inhabited_relief_m: 300          # population-weighted P90-P10 of tract mean elevation
+  relief_sensitivities_m: [150, 500]
+  max_local_comparison_km: 25
+
+exposure:
+  footprint: contiguous_us_plus_dc     # outcome-blind DEM acquisition footprint
+  dem: usgs_3dep_1_3_arc_second
+  population: census_2010_sf1_blocks
+  placement_sensitivity: ghs_pop_r2023a
+  transform_before_aggregate: true
+  fio2: 0.2093
+  water_vapor_mmhg: 47
+
+sources:                                 # open (O) or free-registration (R) sources named in the plan
+  approved: [usaleep_2010_2015, acs_2006_2010_5yr, census_2010_tiger_blocks, census_2010_sf1, usgs_3dep, ghs_pop_r2023a,
+             nasadem, wonder_mortality, uscs_state_cancer_profiles, nci_sae_smoking, endes_2023, endes_2024,
+             dane_eevv_births_2023_2025, inec_births_2015_2024, inegi_edr, conapo_municipal_population, elevcan_repository,
+             vuckovic_2020_gwas, finngen_r12, hif_phi_public_reports]
+  excluded_need_application: [dhs_recodes, dhs_gps, seer_research_plus, uk_biobank, all_of_us]
+
+covariates:
+  ws2_tract_families: [age_sex_structure, race_ethnicity, income, education, poverty, housing, density, residential_stability]
+  prohibited_as_adjustment: [elevation_or_pressure_transforms, coordinates, terrain_descriptors, satellite_or_location_embeddings,
+                             downstream_health_prevalence, post_outcome_places_measures, outcome_availability_flags]
+  county_routing: approved_as_coarse_comparison_stratum
+
+foundation_models:
+  tabicl: {package: "2.2.0", licence: BSD-3-Clause, status: approved}
+  tabpfn: {package: "9.1.0", versions: [v2, "2.5", "2.6", "3", "3.5"], status: approved,
+           note: "Arc is a nonprofit; research use; outputs not offered as a hosted service or used to train a competing model"}
+
+seeds: [1103, 2207, 3301]
