@@ -1,0 +1,207 @@
+schema_version: 1
+# SOURCE notes: these are ingestion mappings, not an approved adjustment registry,
+# support policy, or a claim that biomarker nonresponse is ignorable.
+source_notes:
+  sentinel_convention: >-
+    The 2023/2024 dictionaries omit the missing sentinels. Continuing HC53=999
+    (missing information) and HC55=9 (missing/unspecified measurement status)
+    into these releases is an inference from DHS and earlier INEI documentation,
+    explicitly authorized by the orchestrator's continuation instruction under
+    mandate item 2. BLANK/not applicable remains distinct. No other release's
+    field mapping or adjustment is imported.
+  sentinel_references:
+    - 'DHS-7 Standard Recode Manual, 10 Sep 2018, Coding Standards p. 4: https://www.dhsprogram.com/pubs/pdf/DHSG4/Recode7_DHS_10Sep2018_DHSG4.pdf'
+    - 'DHS-7 Recode Map, 31 Aug 2018, RECH6 p. 32: https://www.dhsprogram.com/pubs/pdf/DHSG4/Recode7_Map_31Aug2018_DHSG4.pdf'
+    - 'INEI ENDES 2017 household dictionary, PDF p. 26: https://proyectos.inei.gob.pe/iinei/srienaho/Descarga/DocumentosMetodologicos/2017-5/DiccionarioHogar.pdf'
+  measured_hb: >-
+    INEI 2023 indicator notes, printed p. 153, specify HC55=0 and HC53/10.
+    The indicator's anemia adjustment is never applied or reversed here.
+  measured_hb_reference: https://proyectos.inei.gob.pe/endes/2023/ppr/PPR_2023_I_Fichas_Tecnicas.pdf
+  population: >-
+    The supported weight domain is the household child biomarker population.
+    The full roster is retained. Adults, including women, are excluded from this
+    domain; HV005 must not be used to claim a women's biomarker population.
+    Both annual Ficha Tecnica documents, section 5.2, PDF page 9, explicitly
+    describe HEMOGLOBIN collection beginning at four months, separately from
+    anthropometry. This is not the six-month cutoff of anemia indicators.
+    RECH6 covers children under five. Downstream frozen target/support
+    restrictions remain the responsibility of the analysis design.
+  attrition: >-
+    HC53=999 with blank HC55 is biomarker missing with an unspecified blank
+    status, not a blank/not-applicable Hb value; it adds no discordance flag.
+    An absent RECH6 record is distinct from every HC55 code and blank fields.
+    The year-specific household dictionaries define RECH1.HV105 as age and
+    HV120 as eligibility for under-five measurements. When HC1 is unavailable,
+    completed ages 1-4 establish the documented 4-59-month age domain without
+    imputing an exact month. Age 0 or unknown age cannot establish this domain.
+    Other selection/residence requirements still apply. For eligible people or
+    people whose eligibility is unresolved, absent records remain flagged for
+    review and never enter the measured-Hb set. A sole absence flag
+    on a known-eligible absent record is informational; unresolved eligibility,
+    discordance and any additional or unrecognized flag still block readiness.
+    Absence is not equated with refusal or unspecified HC55 status. Eligible status
+    counts and weight sums partition only the independently eligible population;
+    reported measured status still needs valid raw Hb for analysis eligibility.
+    Excluded roster members are retained with their exclusion reasons, counts,
+    lineage and raw biomarker-presence states, outside eligible denominators.
+    A missing child biomarker record for an excluded person (for example an
+    adult with HV120=0) does not itself create a review flag. The review lists
+    contain flagged issues, not the complete roster or the exclusion audit.
+  eligibility_references:
+    - https://proyectos.inei.gob.pe/endes/2023/DOCUMENTOS/FICHA_TECNICA_ENDES_2023.pdf
+    - https://proyectos.inei.gob.pe/iinei/srienaho/Descarga/FichaTecnica/968-Ficha.pdf
+    - https://proyectos.inei.gob.pe/iinei/srienaho/Descarga/DocumentosMetodologicos/2023-5/ManualAntropometrista.pdf
+    - https://proyectos.inei.gob.pe/iinei/srienaho/Descarga/DocumentosMetodologicos/2024-5/ManualAntropometrista.pdf
+  inference: >-
+    HV005/1000000 is documented for under-five anemia, with HV001 clusters and
+    HV022 strata. HV021 is also preserved. These normalized weight sums are not
+    population counts. Unmeasured eligible children remain in the audit; complete
+    cases do not establish identification for the full eligible population.
+    Ingestion readiness does not establish ignorability or variance validity.
+    The audit preserves all flagged records and separately lists the blocking
+    subset, including unknown-eligibility absences even with the same absence flag.
+    No singleton correction, finite-population fraction or replicate-weight
+    procedure is invented. HV033 is preserved without interpreting it as an FPC.
+  exposure: >-
+    HV040 is documented cluster altitude in metres. The household dictionaries
+    explicitly give its range as -24:5100 (2023 PDF page 2; 2024 PDF page 3,
+    RECH0 row 32). Their SHA-256 hashes and URLs are pinned in each year mapping.
+    Quantified altitude
+    uncertainty is not supplied by these dictionaries: altitude_uncertainty_m
+    is null (unknown), never zero. This does not authorize a null altitude_m:
+    a numeric HV040 value is a required exposure prerequisite. Missing HV040
+    must block ingestion, since there is no approved alternative assignment.
+    Exposure conversion/support assessment belongs downstream.
+    No alternative exposure assignment is approved by this mapping.
+  lineage: >-
+    The 2024 technical sheet explicitly identifies shared HV001 numbers in
+    2023/2024 as panels. Retain a common 2021-2024 panel namespace across years;
+    household and person observations remain year-specific. Retain UBIGEO and
+    frame-cluster identifiers. 2024 CSV headers use NCONGLOME1, although its
+    dictionary calls the field NCONGLOME; the actual header is mapped explicitly.
+modules:
+  - RECH0
+  - RECH1
+  - RECH4
+  - RECHM
+  - RECH23
+  - REC0111
+  - REC91
+  - RE223132
+  - REC21
+  - REC41
+  - REC94
+  - DIT
+  - REC42
+  - REC43
+  - REC95
+  - RE516171
+  - RE758081
+  - REC82
+  - REC83
+  - REC84DV
+  - REC44
+  - RECH5
+  - RECH6
+  - REC93DVDISCIPLINA
+  - CSALUD01
+  - CSALUD08
+  - PROGRAMAS SOCIALES X HOGAR
+  - PS_BECA18
+  - PS_COMEDOR
+  - PS_PENSION65
+  - PS_QALIWARMA
+  - PS_TRABAJA
+  - PS_VL
+  - PS_WAWAWASI
+years:
+  2023:
+    year: 2023
+    role: development
+    domain: household_child_biomarker_under5
+    endpoint: endes_raw_hb
+    outcome_scale: g/dL
+    inference_unit: survey_psu
+    weight_id: endes_2023_child_biomarker_HV005_div_1000000
+    dictionary_sha256: 4731d5f0fcae2cfc0f14e11363e28c8e1ce341be599f484d068506736417a02f
+    dictionary: https://www.datosabiertos.gob.pe/sites/default/files/Dicionario_Hogar_2023.pdf
+    design_document: https://proyectos.inei.gob.pe/endes/2023/DOCUMENTOS/FICHA_TECNICA_ENDES_2023.pdf
+    adjusted_hb_fields: [HC56, HA56, V456, HW56]
+    fields:
+      household_id: RECH0.HHID
+      cluster_id: RECH0.HV001
+      psu_id: RECH0.HV021
+      stratum_id: RECH0.HV022
+      region_id: RECH0.HV024
+      municipality_id: RECH0.UBIGEO
+      frame_cluster_id: RECH0.NCONGLOME
+      altitude_m: RECH0.HV040
+      weight: RECH0.HV005
+      interview_status: RECH0.HV015
+      selected_for_hb: RECH0.HV042
+      household_year: RECH0.HV007
+      auxiliary_selection_probability: RECH0.HV033
+      roster_household_id: RECH1.HHID
+      person_number: RECH1.HVIDX
+      usual_resident: RECH1.HV102
+      slept_here: RECH1.HV103
+      age_years: RECH1.HV105
+      child_eligible: RECH1.HV120
+      biomarker_household_id: RECH6.HHID
+      biomarker_person_number: RECH6.HC0
+      age_months: RECH6.HC1
+      raw_hb: RECH6.HC53
+      measurement_status: RECH6.HC55
+    hb_divisor: 10
+    hb_missing: 999
+    status_missing: 9
+    weight_divisor: 1000000
+    minimum_measurement_age_months: 4
+    maximum_age_months: 59
+    finite_population_fields: []
+    replicate_weight_fields: []
+  2024:
+    year: 2024
+    role: locked_replication
+    domain: household_child_biomarker_under5
+    endpoint: endes_raw_hb
+    outcome_scale: g/dL
+    inference_unit: survey_psu
+    weight_id: endes_2024_child_biomarker_HV005_div_1000000
+    dictionary_sha256: 1099fd34204ce1def7dcf84002ff87a6e93c906ef0afec3064024239121e483c
+    dictionary: https://www.datosabiertos.gob.pe/sites/default/files/Dicionario_BD_Hogar_ENDES_2024.pdf
+    design_document: https://proyectos.inei.gob.pe/iinei/srienaho/Descarga/FichaTecnica/968-Ficha.pdf
+    adjusted_hb_fields: [HC56, HC56A, HA56, HA56A, V456, V456A, HW56, HW56A]
+    fields:
+      household_id: RECH0.HHID
+      cluster_id: RECH0.HV001
+      psu_id: RECH0.HV021
+      stratum_id: RECH0.HV022
+      region_id: RECH0.HV024
+      municipality_id: RECH0.UBIGEO
+      frame_cluster_id: RECH0.NCONGLOME1
+      altitude_m: RECH0.HV040
+      weight: RECH0.HV005
+      interview_status: RECH0.HV015
+      selected_for_hb: RECH0.HV042
+      household_year: RECH0.HV007
+      auxiliary_selection_probability: RECH0.HV033
+      roster_household_id: RECH1.HHID
+      person_number: RECH1.HVIDX
+      usual_resident: RECH1.HV102
+      slept_here: RECH1.HV103
+      age_years: RECH1.HV105
+      child_eligible: RECH1.HV120
+      biomarker_household_id: RECH6.HHID
+      biomarker_person_number: RECH6.HC0
+      age_months: RECH6.HC1
+      raw_hb: RECH6.HC53
+      measurement_status: RECH6.HC55
+    hb_divisor: 10
+    hb_missing: 999
+    status_missing: 9
+    weight_divisor: 1000000
+    minimum_measurement_age_months: 4
+    maximum_age_months: 59
+    finite_population_fields: []
+    replicate_weight_fields: []
