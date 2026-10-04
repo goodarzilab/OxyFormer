@@ -55,6 +55,35 @@ def test_interrupted_optimization_is_bit_exact(tmp_path, budget):
     assert full.lineage.model_hash == resumed.lineage.model_hash
 
 
+@pytest.mark.parametrize("seed", [0, 2**63, 2**64 - 1])
+def test_seed_boundaries_resume_bit_exactly(tmp_path, seed):
+    view, split, config = make_case(tmp_path)
+    split = replace(split, seed_ids=(seed,))
+    config = replace(config, settings=replace(config.settings, max_epochs=1))
+    full = pretrain(view, split, config, seed)
+    first = pretrain(view, split, replace(config, output_dir=str(tmp_path / "first"),
+                                        max_batches=1), seed)
+    resumed = pretrain(view, split, replace(config, output_dir=str(tmp_path / "resume"),
+                                          predecessor=first), seed)
+    assert not first.complete and full.complete and resumed.complete
+    assert full.identity.seed == resumed.identity.seed == seed
+    assert full.lineage.seed == resumed.lineage.seed == seed
+    assert_state_equal(load_checkpoint(full, full.identity), load_checkpoint(resumed, resumed.identity))
+
+
+@pytest.mark.parametrize("seed", [-1, 2**64, 2**100, True])
+def test_invalid_seed_is_rejected_before_attempt_or_rng_mutation(tmp_path, seed):
+    view, split, config = make_case(tmp_path)
+    if type(seed) is int and seed >= 0:
+        # The merged manifest's structural contract permits oversized integers.
+        split = replace(split, seed_ids=(seed,))
+    initial_rng = capture_rng()
+    with pytest.raises(ContractError, match=r"SSL seed must be a Python integer in \[0, 2\*\*64 - 1\]"):
+        pretrain(view, split, config, seed)
+    assert not Path(config.output_dir).exists()
+    assert_state_equal(initial_rng, capture_rng())
+
+
 def test_many_tiny_slices_complete_without_restarting_epochs(tmp_path):
     view, split, config = make_case(tmp_path)
     full = pretrain(view, split, config, 1103)
