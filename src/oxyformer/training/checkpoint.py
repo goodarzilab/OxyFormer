@@ -3,7 +3,8 @@
 A caller supplies a trusted CheckpointArtifact (or its expected hash when reading
 its JSON descriptor). Hashes establish identity, not authenticity on their own.
 The archive codec accepts only JSON primitives, containers and numeric tensors;
-it never imports classes or executes checkpoint-provided code.
+it never imports classes or executes checkpoint-provided code. The writer and
+reader require uncompressed ZIP members, so loading cannot expand compressed data.
 """
 from __future__ import annotations
 
@@ -258,6 +259,9 @@ def load_checkpoint(artifact: CheckpointArtifact, expected_identity: CheckpointI
     with zipfile.ZipFile(BytesIO(data)) as archive:
         names = archive.namelist()
         require(len(names) == len(set(names)), "duplicate checkpoint members")
+        require(all(info.compress_type == zipfile.ZIP_STORED and
+                    info.compress_size == info.file_size for info in archive.infolist()),
+                "compressed checkpoint members are unsupported")
         metadata_bytes = archive.read("metadata.json")
         metadata = json.loads(metadata_bytes)
         require(canonical_json(metadata).encode() == metadata_bytes, "noncanonical checkpoint metadata")
