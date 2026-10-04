@@ -450,9 +450,9 @@ def test_narrow_posterior_transition_at_shifted_assignment_peak(scale, measured)
 
 def test_mass_certificate_rejects_false_convergence(monkeypatch):
     original = AssignmentLaw.quadrature
-    def missing_half_the_mass(self, order, breakpoints):
-        a,w = original(self,order,breakpoints)
-        return a,.5*w
+    def missing_half_the_mass(self, order, breakpoints, **kwargs):
+        a,w,moved = original(self,order,breakpoints,**kwargs)
+        return a,.5*w,moved
     monkeypatch.setattr(AssignmentLaw,"quadrature",missing_half_the_mass)
     # Both normalized contrasts and successive orders agree, but mass is wrong.
     with pytest.raises(ContractError,match="did not converge"):
@@ -535,3 +535,16 @@ def test_extreme_ratio_tilt_composes_with_near_deterministic_assignment(scale):
     result = generate_suite_a(f,c,policy())
     assert result.observed_law_truth.value == pytest.approx(expected,abs=1e-9)
     assert result.structural_causal_truth.value == pytest.approx(expected,abs=1e-9)
+
+
+@pytest.mark.parametrize("scale", [1e-12,1e-20,1e-100,1e-320])
+def test_sub_ulp_assignment_mass_is_classified_before_policy_cutoff_rounding(scale):
+    f = replace(frame(2),coordinates=((float(np.log(4)),0.),)*2)
+    c = config(assignment="near_deterministic",near_scale=scale)
+    result = generate_suite_a(f,c,policy())
+    # Center is exactly 8: the continuous symmetric law puts half its mass
+    # below the cutoff, even when all stored draws round to the same float.
+    assert result.observed_law_truth.value == pytest.approx(1.,abs=1e-10)
+    assert result.structural_causal_truth.value == pytest.approx(1.,abs=1e-10)
+    assert result.integration_uncertainty.assignment_mass_error < 1e-10
+    assert result.integration_uncertainty.selected_mass_fraction == pytest.approx(1.,abs=1e-10)
