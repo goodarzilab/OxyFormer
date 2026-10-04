@@ -609,3 +609,18 @@ def test_review_rerun_reverifies_upstream_science(case, tmp_path, monkeypatch):
     result = run_stage(request)
     assert result.status == 'fail'
     assert result.artifacts == ()
+
+
+@pytest.mark.parametrize('role,payload', [('config', ''), ('config', '[]\n'), ('approvals', ''), ('approvals', '[]\n')])
+def test_review_malformed_yaml_returns_structured_failure(case, tmp_path, monkeypatch, role, payload):
+    request = make_request(tmp_path, case, monkeypatch)
+    if role == 'config':
+        config = tmp_path/'incomplete-config.yaml'
+        config.write_text(payload)
+        request = replace(request, config_path=str(config), config_hash=file_hash(config))
+    else:
+        approved = Path(request.dependency_paths[-1])
+        approved.write_text(payload)
+        request = replace(request, dependency_hashes=tuple(file_hash(p) for p in request.dependency_paths))
+    result = run_stage(request)
+    assert result.status in ('fail', 'blocked')
