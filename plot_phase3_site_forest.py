@@ -88,7 +88,7 @@ def build_svg(event_type: str, rows: list[dict]) -> str:
     lines = []
     lines.append(f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}">')
     lines.append('<rect width="100%" height="100%" fill="white"/>')
-    lines.append(f'<text x="{width / 2:.1f}" y="28" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="20" font-weight="bold">{escape(event_type)} site-specific oxygen effect estimates</text>')
+    lines.append(f'<text x="{width / 2:.1f}" y="28" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="20" font-weight="bold">{escape(event_type)} site estimates — EXPLORATORY legacy benchmark</text>')
 
     for label in labels:
         y_center = top_margin + (label_to_index[label] + 0.5) * row_height
@@ -164,4 +164,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    import sys
+    if "--v2-request" in sys.argv:
+        from oxyformer.reporting.stage import request_main
+        raise SystemExit(request_main())
     main()
