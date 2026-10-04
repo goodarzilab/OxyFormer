@@ -689,3 +689,15 @@ def test_stage_requires_current_owner_exposure_approval(tmp_path, shard_fixture,
     assert not (Path(req.output_dir) / 'atlas.parquet').exists()
     with pytest.raises((ContractError, FileNotFoundError)):
         build_exposure(sources(write_raster(tmp_path / 'approval-dem.tif')), blocks(), SPEC)
+
+
+@pytest.mark.parametrize('identity', ['physical_hash', 'allocation_hash'])
+def test_collection_rejects_contradictory_manifest_specification(tmp_path, shard_fixture, identity):
+    inventory, paths = shard_fixture
+    manifest = json.loads(paths[0].read_text())
+    manifest[identity] = 'e' * 64
+    paths[0].write_text(canonical_json(manifest))
+    req = collect_request(tmp_path / 'contradictory-manifest', inventory, paths)
+    result = run_stage(req)
+    assert result.status == 'fail' and 'inconsistent' in result.message
+    assert not (Path(req.output_dir) / 'atlas.parquet').exists()

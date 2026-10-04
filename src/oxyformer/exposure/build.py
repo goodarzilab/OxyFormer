@@ -242,9 +242,9 @@ def _collect(request, task, config, groups):
             require(manifest['files'][name] == request.dependency_hashes[binding[role]], 'shard artifact hash mismatch')
         quality = _json(_dependency(request, binding['quality']))
         frame = pd.read_parquet(_dependency(request, binding['exposure']))
-        require(quality['physical_spec'] == asdict(PHYSICS) and quality['physical_hash'] == PHYSICS.content_hash,
+        require(quality['physical_spec'] == asdict(PHYSICS) and quality['physical_hash'] == PHYSICS.content_hash == manifest['physical_hash'],
                 'inconsistent physical specification')
-        require(quality['allocation_hash'] == spec.content_hash and
+        require(quality['allocation_hash'] == spec.content_hash == manifest['allocation_hash'] and
                 canonical_json(quality['allocation']) == canonical_json(asdict(spec)), 'inconsistent allocation specification')
         expected_states = {config['state_fips'][s] for s in groups[sid]['jurisdictions']}
         require({r['block_id'][:2] for r in quality['blocks']} == expected_states, 'unexpected jurisdiction omissions')
