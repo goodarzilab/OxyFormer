@@ -7,8 +7,9 @@ observed law, including measurement error, without fitting an oracle regression.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import product
+from fractions import Fraction
 from typing import Literal
 
 import numpy as np
@@ -50,7 +51,7 @@ class CovariateFrame(Immutable):
                 self.cluster_ids, self.coordinates, self.x, self.support_keys,
                 self.weights, self.outcome_available, self.biomarker_available)), "frame alignment")
         require(all(len(v) == len(self.columns) for v in self.x), "X width")
-        require(all(w >= 0 for w in self.weights) and sum(self.weights) > 0, "invalid weights")
+        require(all(w >= 0 for w in self.weights) and any(w > 0 for w in self.weights), "invalid weights")
         by_geo = {}
         for geo, region, coord, key in zip(self.geography_ids, self.region_ids,
                 self.coordinates, self.support_keys):
@@ -192,12 +193,58 @@ def observation_probabilities(a_observed, state, config):
     return flag, survey, bio
 
 
+def exact(value):
+    """Exact geometry of a declared float, not a decimal reinterpretation."""
+    return value if isinstance(value, Fraction) else Fraction(float(value))
+
+
+def wide(value):
+    """Extended exponent range AFTER exact cancellation of coarse geometry."""
+    if isinstance(value, Fraction):
+        return np.longdouble(str(value.numerator))/np.longdouble(str(value.denominator))
+    return np.longdouble(value)
+
+
+@dataclass(frozen=True)
+class LocalCoordinates:
+    """anchor + unit*values; offsets are never absorbed into the anchor.
+
+    Exact rational anchors/units carry geometry. Dimensionless quadrature values
+    carry local variation. Only smooth responses, selection and observation
+    serialization materialize exposure values; support, policy and likelihoods
+    operate on these separate parts.
+    """
+    anchor: Fraction
+    unit: Fraction
+    values: np.ndarray
+
+    def rounded(self):
+        return wide(self.anchor)+wide(self.unit)*self.values
+
+    def shifted(self, delta):
+        return replace(self, anchor=self.anchor+exact(delta))
+
+    def subset(self, mask):
+        return replace(self, values=self.values[mask])
+
+    def inside(self, lower, upper):
+        return ((self.values >= wide((exact(lower)-self.anchor)/self.unit))
+                & (self.values <= wide((exact(upper)-self.anchor)/self.unit)))
+
+
+@dataclass(frozen=True)
+class QuadraturePiece:
+    coordinates: LocalCoordinates
+    log_weights: np.ndarray
+
+
 @dataclass(frozen=True)
 class _ExponentialPiece:
-    lower: float
-    upper: float
-    rate: float
-    log_probability: float
+    lower: Fraction
+    upper: Fraction
+    rate: Fraction
+    peak_kernel: Fraction = Fraction(0)
+    log_probability: np.longdouble = np.longdouble(0)
 
     @property
     def peak(self):
@@ -205,11 +252,10 @@ class _ExponentialPiece:
 
     @property
     def log_integral(self):
-        width = self.upper-self.lower
         if self.rate == 0:
-            return np.log(width)
-        k = abs(self.rate)
-        return np.log(-np.expm1(-k*width))-np.log(k)
+            return np.log(wide(self.upper-self.lower))
+        extent = wide(abs(self.rate)*(self.upper-self.lower))
+        return np.log(-np.expm1(-extent))-np.log(wide(abs(self.rate)))
 
 
 def observation_log_probability(a_observed, state, config):
@@ -226,132 +272,125 @@ def observation_log_probability(a_observed, state, config):
 
 
 class AssignmentLaw:
-    """A normalized mixture of truncated exponential pieces.
+    """Normalized exponential pieces with exact coarse log-kernel geometry.
 
-    Splitting Laplace components at the mode makes normalization, sampling and
-    integration use the same stable law. Relative peak heights avoid subtracting
-    huge log normalizers when the mode lies in a support gap. Positive tail
-    densities stay in log form for posterior calculations; support is geometric.
-    Atoms are generated separately and never represented by these densities.
+    Kernel differences are cancelled as rationals before conversion to numeric
+    log weights. This retains ordinary tilt beside an arbitrarily narrow
+    Laplace kernel. No component is removed from truth or posterior evaluation
+    because its ordinary probability underflows. Public draws are floats.
     """
     def __init__(self, frame, row, state, config, components):
         self.components = components
-        self.error = state.error
-        self.scale = np.longdouble(config.near_scale)
+        self.error = exact(state.error)
+        self.scale = exact(config.near_scale)
         self.near = config.assignment == "near_deterministic"
-        self.rate = -4. if config.extreme_ratios else 0.
+        rate = -4. if config.extreme_ratios else 0.
         if not self.near:
-            self.rate += .3*state.local + .2*state.regional - .25*state.illness
-        lo, hi = components[0][0], components[-1][1]
-        self.center = lo+(hi-lo)*float(expit(frame.coordinates[row][0]+.2*state.local+.1*state.regional-.2*state.illness))
-        intervals = []
-        for lower, upper in components:
-            edges = [lower, upper]
-            if self.near and lower < self.center < upper:
-                edges.insert(1, self.center)
-            for left, right in zip(edges[:-1], edges[1:]):
-                rate = self.rate
+            rate += .3*state.local+.2*state.regional-.25*state.illness
+        self.rate = exact(rate)
+        lo,hi = components[0][0],components[-1][1]
+        self.center = exact(lo+(hi-lo)*float(expit(frame.coordinates[row][0]
+                            +.2*state.local+.1*state.regional-.2*state.illness)))
+        pieces = []
+        for lower,upper in components:
+            edges = [exact(lower),exact(upper)]
+            if self.near and edges[0] < self.center < edges[-1]:
+                edges.insert(1,self.center)
+            for left,right in zip(edges[:-1],edges[1:]):
+                slope = self.rate
                 if self.near:
-                    rate += 1/self.scale if right <= self.center else -1/self.scale
-                intervals.append(_ExponentialPiece(left, right, rate, 0.))
-        peaks = np.array([piece.peak for piece in intervals], dtype=np.longdouble)
-        anchor = max(peaks) if self.rate > 0 else min(peaks)
-        relative_heights = self.rate*(peaks-anchor)
-        if self.near:
-            distances = np.abs(peaks-self.center)
-            relative_heights -= (distances-distances.min())/self.scale
-        log_masses = relative_heights+np.array([p.log_integral for p in intervals])
-        # Subtract the largest mass BEFORE computing the normalizer: even the
-        # largest unnormalized mass may be exp(-millions) inside a support gap.
-        log_masses -= log_masses.max()
-        log_probabilities = log_masses-logsumexp(log_masses)
-        self.pieces = tuple(_ExponentialPiece(p.lower,p.upper,p.rate,logp)
-                            for p,logp in zip(intervals,log_probabilities))
-        self.probabilities = np.asarray(np.exp(log_probabilities), dtype=float)
+                    slope += (1 if right <= self.center else -1)/self.scale
+                piece = _ExponentialPiece(left,right,slope)
+                kernel = self.rate*piece.peak
+                if self.near:
+                    kernel -= abs(piece.peak-self.center)/self.scale
+                pieces.append(replace(piece,peak_kernel=kernel))
+        self.kernel_reference = max(p.peak_kernel for p in pieces)
+        log_masses = np.array([wide(p.peak_kernel-self.kernel_reference)+p.log_integral
+                               for p in pieces],dtype=np.longdouble)
+        self.log_normalizer = logsumexp(log_masses)
+        self.pieces = tuple(replace(p,log_probability=logm-self.log_normalizer)
+                            for p,logm in zip(pieces,log_masses))
+        self.probabilities = np.asarray(np.exp(log_masses-self.log_normalizer),dtype=float)
         require(np.isfinite(self.probabilities).all(), "assignment normalization failed")
 
     @property
     def breakpoints(self):
         return [v+self.error for p in self.pieces for v in (p.lower,p.upper)]
 
+    def kernel_at(self, piece, recorded_anchor):
+        return (piece.rate*(recorded_anchor-self.error-piece.peak)
+                +piece.peak_kernel-self.kernel_reference)
+
     def contains(self, a_observed):
-        a = np.asarray(a_observed)-self.error
+        a = np.asarray(a_observed)-float(self.error)
         return np.logical_or.reduce([(a >= lo) & (a <= hi) for lo,hi in self.components])
 
     def log_density(self, a_observed):
-        a = np.asarray(a_observed)-self.error
-        value = np.full(a.shape, -np.inf)
-        for p in self.pieces:
-            inside = (a >= p.lower) & (a <= p.upper)
-            density = p.log_probability+p.rate*(a-p.peak)-p.log_integral
-            # At the mode both pieces give the same density, not double mass.
-            value = np.where(inside,density,value)
-        return value
+        # Convenience for ordinary recorded exposures. Truth posterior evaluation
+        # instead uses kernel_at and LocalCoordinates before relative conversion.
+        a = np.asarray(a_observed)
+        flat = []
+        for value in a.ravel():
+            at = exact(value)
+            piece = next((p for p in self.pieces if p.lower+self.error <= at <= p.upper+self.error),None)
+            flat.append(-np.inf if piece is None else wide(self.kernel_at(piece,at))-self.log_normalizer)
+        return np.asarray(flat,dtype=np.longdouble).reshape(a.shape)
 
     def density(self, a_observed):
         return np.exp(self.log_density(a_observed))
 
-    def sample(self, rng):
-        p = self.pieces[rng.choice(len(self.pieces),p=self.probabilities)]
-        u = rng.random()
+    def quantile_coordinates(self, piece_index, u):
+        """Conditional inverse transform, also used before draw serialization."""
+        p = self.pieces[piece_index]
+        u = np.asarray(u,dtype=np.longdouble)
         if p.rate == 0:
-            value = p.lower+u*(p.upper-p.lower)
-        else:
-            k = abs(p.rate)
-            distance = -np.log1p(-u*(-np.expm1(-k*(p.upper-p.lower))))/k
-            value = p.peak+(-distance if p.rate > 0 else distance)
-        return float(value+self.error)
+            return LocalCoordinates(p.lower+self.error,p.upper-p.lower,u)
+        extent = wide(abs(p.rate)*(p.upper-p.lower))
+        t = -np.log1p(-u*(-np.expm1(-extent)))
+        return LocalCoordinates(p.peak+self.error,1/abs(p.rate),(-t if p.rate > 0 else t))
 
-    def quadrature(self, order, breakpoints, *, shift_intervals=None):
-        """Integrate the assignment measure in its own length scale.
+    def sample(self, rng):
+        index = rng.choice(len(self.pieces),p=self.probabilities)
+        return float(self.quantile_coordinates(index,rng.random()).rounded())
 
-        Every component's full support is included. Panels resolve the decay
-        near its density maximum, irrespective of its width in exposure units.
-        The returned weights must separately pass the unit-mass certificate.
-        Optional recorded-dose shift intervals are evaluated in the scaled
-        coordinate BEFORE forming exposure values. Even extended precision can
-        round a concentrated continuous law onto its policy cutoff.
+    def quadrature(self, order, breakpoints):
+        """Full conditional piece measures, with log masses and local nodes.
+
+        Even tiny pieces remain represented. Panels resolve decay in units of
+        the piece rate, and exact breakpoints retain local crossing offsets.
+        The independent assignment mass certificate checks the returned measure.
         """
-        nodes, weights = leggauss(order)
-        points, masses, moved_masks = [], [], []
-        def record(coordinate, mass, peak, direction, scale):
-            points.append(np.longdouble(peak)+direction*coordinate/scale+self.error)
-            masses.append(mass)
-            if shift_intervals is not None:
-                moved = np.zeros(len(coordinate), dtype=bool)
-                for lower,upper in shift_intervals:
-                    left = scale*direction*(np.longdouble(lower)-self.error-peak)
-                    right = scale*direction*(np.longdouble(upper)-self.error-peak)
-                    moved |= (min(left,right) <= coordinate) & (coordinate <= max(left,right))
-                moved_masks.append(moved)
+        nodes,weights = leggauss(order)
+        rules = []
         for p in self.pieces:
-            probability = np.exp(p.log_probability)
-            if probability == 0:
-                continue  # This component's total mass is below FP64 range.
+            coordinates,log_weights = [],[]
             if p.rate == 0:
-                edges = sorted({p.lower,p.upper} | {v-self.error for v in breakpoints
-                               if p.lower < v-self.error < p.upper})
+                unit = p.upper-p.lower
+                anchor = p.lower+self.error
+                edges = sorted({Fraction(0),Fraction(1)} | {
+                    (exact(v)-anchor)/unit for v in breakpoints if anchor < v < p.upper+self.error})
                 for lo,hi in zip(edges[:-1],edges[1:]):
-                    coordinate = np.longdouble(lo)-p.lower+np.longdouble(hi-lo)/2*(nodes+1)
-                    record(coordinate,probability*(hi-lo)/(p.upper-p.lower)*weights/2,p.lower,1,1)
+                    coordinates.append(wide(lo)+wide(hi-lo)/2*(nodes+1))
+                    log_weights.append(np.log(wide(hi-lo)/2)+np.log(weights)+p.log_probability)
             else:
-                k = abs(p.rate)
+                unit = 1/abs(p.rate)
+                anchor = p.peak+self.error
                 direction = -1 if p.rate > 0 else 1
-                extent = k*(p.upper-p.lower)
-                edges = {0.,extent}
-                edges.update(v for v in (1.,2.,4.,8.,16.,32.,64.) if v < extent)
-                edges.update(k*direction*(v-self.error-p.peak) for v in breakpoints
-                             if p.lower < v-self.error < p.upper)
+                extent = wide((p.upper-p.lower)/unit)
+                edges = {wide(0),extent}
+                edges.update(wide(v) for v in (1,2,4,8,16,32,64) if v < extent)
+                edges.update(wide(direction*(exact(v)-anchor)/unit) for v in breakpoints
+                             if p.lower+self.error < v < p.upper+self.error)
                 edges = sorted(edges)
-                normalizer = -np.expm1(-extent)
+                log_normalizer = np.log(-np.expm1(-extent))
                 for lo,hi in zip(edges[:-1],edges[1:]):
-                    t = (lo+hi)/2+(hi-lo)/2*nodes
-                    mass = probability*(hi-lo)/2*weights*np.exp(-t)/normalizer
-                    keep = mass > 0
-                    if keep.any():
-                        record(t[keep].astype(np.longdouble),mass[keep],p.peak,direction,k)
-        result = np.concatenate(points), np.concatenate(masses)
-        return result if shift_intervals is None else (*result,np.concatenate(moved_masks))
+                    t = lo+(hi-lo)/2*(nodes+1)
+                    coordinates.append(direction*t)
+                    log_weights.append(np.log((hi-lo)/2)+np.log(weights)-t-log_normalizer+p.log_probability)
+            rules.append(QuadraturePiece(LocalCoordinates(anchor,unit,np.concatenate(coordinates)),
+                                         np.concatenate(log_weights)))
+        return tuple(rules)
 
 
 def validate_count_rates(frame, config, policy):
