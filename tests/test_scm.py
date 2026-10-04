@@ -361,11 +361,12 @@ def test_unknown_effect_is_rejected_by_inherited_contract_validation(tmp_path):
         load_suite_a(recipe)
 
 
-@pytest.mark.parametrize("scale", [.05, 1e-3, 1e-6, 1e-8])
+@pytest.mark.parametrize("scale", [.05, 1e-3, 1e-6, 1e-8, 1e-20, 1e-100, 1e-320, float(np.nextafter(0.,1.))])
 def test_concentrated_assignment_retains_mass_and_shifted_conditional_mean(scale):
     sample = generate_suite_a(frame(2), config(assignment="near_deterministic", near_scale=scale), policy())
     from scipy.stats import laplace
-    expected = 2*(laplace.cdf(8,5,scale)-laplace.cdf(0,5,scale))/(laplace.cdf(10,5,scale)-laplace.cdf(0,5,scale))
+    with np.errstate(over="ignore"):  # Infinite standardized tails have exact limiting CDFs.
+        expected = 2*(laplace.cdf(8,5,scale)-laplace.cdf(0,5,scale))/(laplace.cdf(10,5,scale)-laplace.cdf(0,5,scale))
     assert sample.observed_law_truth.value == pytest.approx(expected, abs=1e-10)
     assert sample.structural_causal_truth.value == pytest.approx(expected, abs=1e-10)
 
@@ -450,9 +451,9 @@ def test_narrow_posterior_transition_at_shifted_assignment_peak(scale, measured)
 
 def test_mass_certificate_rejects_false_convergence(monkeypatch):
     original = AssignmentLaw.quadrature
-    def missing_half_the_mass(self, order, breakpoints, **kwargs):
-        a,w,moved = original(self,order,breakpoints,**kwargs)
-        return a,.5*w,moved
+    def missing_half_the_mass(self, order, breakpoints):
+        return tuple(replace(rule,log_weights=rule.log_weights-np.log(2.))
+                     for rule in original(self,order,breakpoints))
     monkeypatch.setattr(AssignmentLaw,"quadrature",missing_half_the_mass)
     # Both normalized contrasts and successive orders agree, but mass is wrong.
     with pytest.raises(ContractError,match="did not converge"):
@@ -537,7 +538,7 @@ def test_extreme_ratio_tilt_composes_with_near_deterministic_assignment(scale):
     assert result.structural_causal_truth.value == pytest.approx(expected,abs=1e-9)
 
 
-@pytest.mark.parametrize("scale", [1e-12,1e-20,1e-100,1e-320])
+@pytest.mark.parametrize("scale", [1e-12,1e-20,1e-100,1e-320,float(np.nextafter(0.,1.))])
 def test_sub_ulp_assignment_mass_is_classified_before_policy_cutoff_rounding(scale):
     f = replace(frame(2),coordinates=((float(np.log(4)),0.),)*2)
     c = config(assignment="near_deterministic",near_scale=scale)
@@ -548,3 +549,139 @@ def test_sub_ulp_assignment_mass_is_classified_before_policy_cutoff_rounding(sca
     assert result.structural_causal_truth.value == pytest.approx(1.,abs=1e-10)
     assert result.integration_uncertainty.assignment_mass_error < 1e-10
     assert result.integration_uncertainty.selected_mass_fraction == pytest.approx(1.,abs=1e-10)
+
+
+@pytest.mark.parametrize("scale", [1e-6,1e-20,1e-100,float(np.nextafter(0.,1.))])
+def test_endpoint_error_posterior_keeps_local_offsets(scale):
+    f = replace(frame(2,cluster_size=1),coordinates=((-800.,0.),(800.,0.)),
+                region_ids=("r0","r0"),columns=("x",),x=((0.,),(0.,)))
+    result = generate_suite_a(f,config(assignment="near_deterministic",near_scale=scale,
+                                      exposure_error=1.),policy(delta=4))
+    # Only the low geography's +1 error component shifts (population mass 1/4).
+    # At its shifted query, P(error=-1 | A)=expit(2t), t~Exp(1).
+    # Integral exp(-t)*expit(2t) dt = pi/4, without production helpers.
+    assert result.observed_law_truth.value == pytest.approx(1+np.pi/8,abs=1e-10)
+    assert result.structural_causal_truth.value == pytest.approx(1.,abs=1e-10)
+
+
+@pytest.mark.parametrize("weight", [float(np.nextafter(0.,1.)),1.,1.7e308])
+def test_origin_mass_is_invariant_to_common_weight_scale(weight):
+    f = replace(frame(2),weights=(weight,weight))
+    result = generate_suite_a(f,config(denominator_error=.2),policy())
+    assert result.observed_law_truth.value == pytest.approx(5/3,abs=1e-10)
+    assert result.structural_causal_truth.value == pytest.approx(5/3,abs=1e-10)
+    assert result.integration_uncertainty.selected_mass_fraction == pytest.approx(1.,abs=1e-10)
+
+
+@pytest.mark.parametrize("scale", [1e-6,1e-100,float(np.nextafter(0.,1.))])
+def test_local_posterior_matches_independent_logistic_odds(scale):
+    from oxyformer.validation.scm import LocalCoordinates, exact
+    from oxyformer.validation.generators import _groups, _posterior_mean
+    f = replace(frame(2,cluster_size=1),coordinates=((-800.,0.),(800.,0.)),region_ids=("r0","r0"))
+    c = config(assignment="near_deterministic",near_scale=scale,exposure_error=1.)
+    terms = next(iter(_groups(f,c,policy(delta=4)).values()))
+    t = np.array([0.,.25,1.,4.,16.])
+    at = LocalCoordinates(exact(5.),exact(scale),t)
+    assert_allclose(_posterior_mean(at,terms,f,c),54+2*expit(2*t)+scale*t,atol=1e-12,rtol=0)
+    assert_allclose(_posterior_mean(at,list(reversed(terms)),f,c),54+2*expit(2*t)+scale*t,atol=1e-12,rtol=0)
+
+
+@pytest.mark.parametrize("scale", [1e-6,1e-100])
+def test_tiny_tilted_assignment_retains_unequal_prior_odds(scale):
+    ratio = 3*np.exp(-32.)  # Offsets the finite tilt in the shifted posterior.
+    f = replace(frame(2,cluster_size=1),coordinates=((-800.,0.),(800.,0.)),
+                region_ids=("r0","r0"),weights=(1.,float(ratio)))
+    c = config(assignment="near_deterministic",near_scale=scale,exposure_error=1.,extreme_ratios=True)
+    result = generate_suite_a(f,c,policy(delta=4))
+    log_odds = np.log(ratio)+32+np.log1p(-4*scale)-np.log1p(4*scale)
+    posterior = quad(lambda t: np.exp(-t)*expit(log_odds+2*t/(1+4*scale)),0,50,epsabs=1e-12)[0]
+    share = 1/(2*(1+ratio))
+    # The omitted t>50 contribution is bounded by 6*exp(-50).
+    assert result.observed_law_truth.value == pytest.approx(share*(4+2*posterior),abs=1e-10)
+    assert result.structural_causal_truth.value == pytest.approx(4*share,abs=1e-10)
+
+
+def test_tiny_posterior_with_factual_survey_selection():
+    f = replace(frame(2,cluster_size=1),coordinates=((-800.,0.),(800.,0.)),region_ids=("r0","r0"))
+    result = generate_suite_a(f,config(assignment="near_deterministic",near_scale=1e-100,
+                                      exposure_error=1.,survey_inclusion=True),policy(delta=4))
+    probabilities = expit(.7-.12*np.array([-1.,1.,9.,11.]))
+    mass = probabilities.mean()
+    share = probabilities[1]/probabilities.sum()
+    assert result.observed_law_truth.value == pytest.approx(share*(4+np.pi/2),abs=1e-10)
+    assert result.structural_causal_truth.value == pytest.approx(4*share,abs=1e-10)
+    assert result.integration_uncertainty.selected_mass_fraction == pytest.approx(mass,abs=1e-10)
+
+
+def test_positive_selected_mass_below_float_range_has_log_diagnostic():
+    result = generate_suite_a(frame(2),config(assignment="near_deterministic",near_scale=1e-100,
+                                             survey_inclusion=True),policy(((10000.,10010.),)))
+    assert result.observed_law_truth.status == "integrated"
+    assert result.observed_law_truth.value == pytest.approx(2.,abs=1e-10)
+    assert result.structural_causal_truth.value == pytest.approx(2.,abs=1e-10)
+    assert result.integration_uncertainty.selected_mass_fraction == 0.  # Display underflow only.
+    assert result.integration_uncertainty.selected_log_mass_fraction == pytest.approx(.7-.12*10005,abs=1e-10)
+
+
+def test_tiny_tilted_gap_normalization_keeps_finite_tilt():
+    result = generate_suite_a(frame(2),config(assignment="near_deterministic",near_scale=1e-100,
+                                             extreme_ratios=True,support_gaps=True),policy(((0.,3.),(7.,10.))))
+    expected = 2*expit(-16.)  # Only the component peaked at 7 moves.
+    assert result.observed_law_truth.value == pytest.approx(expected,abs=1e-12)
+    assert result.structural_causal_truth.value == pytest.approx(expected,abs=1e-12)
+
+
+@pytest.mark.parametrize("weight", [5e-324,1.,5e307])
+def test_unequal_origin_weights_and_row_permutation(weight):
+    f = replace(frame(2,cluster_size=1),weights=(weight,2*weight),support_keys=("s","stay"),
+                region_ids=("r0","r0"))
+    p = replace(policy(),components_by_key=(("s",((0.,10.),)),("stay",((0.,1.),))))
+    c = config(heterogeneous_eligibility=True)
+    result = generate_suite_a(f,c,p)
+    assert result.observed_law_truth.value == pytest.approx(8/15,abs=1e-10)
+    row_names = ("original_ids","geography_ids","region_ids","cluster_ids","coordinates","x",
+                 "support_keys","weights","outcome_available","biomarker_available")
+    permuted = replace(f,**{name:tuple(reversed(getattr(f,name))) for name in row_names})
+    other = generate_suite_a(permuted,c,p)
+    assert other.observed_law_truth.value == pytest.approx(result.observed_law_truth.value,abs=1e-12)
+    split = replace(frame(3,cluster_size=1),weights=(weight,weight,weight),support_keys=("s","stay","stay"),
+                    region_ids=("r0",)*3,coordinates=((0.,1.),)*3)
+    assert generate_suite_a(split,c,p).observed_law_truth.value == pytest.approx(8/15,abs=1e-10)
+
+
+def test_grouped_mass_loss_is_detected_independently(monkeypatch):
+    import oxyformer.validation.generators as generators
+    original = generators._groups
+    def lose_half(*args):
+        groups = original(*args)
+        for terms in groups.values():
+            for term in terms:
+                term.log_weight -= np.log(2.)
+        return groups
+    monkeypatch.setattr(generators,"_groups",lose_half)
+    with pytest.raises(ContractError,match="grouped origin/latent mass"):
+        generate_suite_a(frame(2),config(),policy())
+
+
+def test_local_support_and_inverse_quantiles_survive_rounding():
+    from oxyformer.validation.scm import LocalCoordinates, exact
+    scale = float(np.nextafter(0.,1.))
+    points = LocalCoordinates(exact(1.),exact(scale),np.array([-1.,1.]))
+    assert points.inside(1.,2.).tolist() == [False,True]
+    assert points.shifted(2.).inside(3.,4.).tolist() == [False,True]
+    law = AssignmentLaw(replace(frame(2),coordinates=((-800.,0.),)*2),0,LatentState(),
+                        config(assignment="near_deterministic",near_scale=scale),((0.,10.),))
+    u = np.array([.25,.5,.75])
+    local = law.quantile_coordinates(0,u)
+    assert_allclose(local.values,-np.log1p(-u),atol=1e-14)
+    assert (local.values > 0).all()
+
+
+def test_nearly_flat_laplace_law_against_independent_quad():
+    scale = 1e3
+    normalizer = quad(lambda a: np.exp(-abs(a-5)/scale),0,10,points=[5],epsabs=1e-12)[0]
+    expected = quad(lambda a: np.exp(-abs(a-5)/scale)*(np.sin((a+2)/2)-np.sin(a/2))/normalizer,
+                    0,8,points=[5],epsabs=1e-12)[0]
+    result = generate_suite_a(frame(2),config("nonlinear",assignment="near_deterministic",near_scale=scale),policy())
+    assert result.observed_law_truth.value == pytest.approx(expected,abs=1e-10)
+    assert result.structural_causal_truth.value == pytest.approx(expected,abs=1e-10)

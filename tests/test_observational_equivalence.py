@@ -53,3 +53,17 @@ def test_pair_preserves_cluster_assignment_and_reproducibility():
     assert len(first.m0.observations.a) == 28
     assert all(len(set(first.m0.observations.a[i:i+4])) == 1 for i in range(0,28,4))
     assert len(set(first.m0.observations.a)) == 7
+
+
+def test_location_only_diagnostic_is_not_an_identification_certificate():
+    pair = observational_equivalence_pair(seed=41)
+    def diagnostic(records):
+        # Deliberate section-6.3 red-team callback, not an approved nuisance
+        # builder: it bypasses frame.x and uses diagnostic location instead.
+        location = np.asarray(records.frame.coordinates)[:,0]
+        fit = np.linalg.lstsq(np.column_stack([np.ones(len(location)),location]),
+                              np.asarray(records.y),rcond=None)[0]
+        fixed_location_prediction = fit[0]+fit[1]*location
+        return float(np.mean(fixed_location_prediction-fixed_location_prediction))
+    assert run_estimator(diagnostic,pair.m0.observations) == run_estimator(diagnostic,pair.mtau.observations) == 0.
+    assert pair.m0.structural_causal_truth.value != pair.mtau.structural_causal_truth.value
