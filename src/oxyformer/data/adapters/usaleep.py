@@ -81,11 +81,12 @@ def join_outcomes(covariates, outcomes):
     _require(not (set(covariates) & (set(outcomes) - {"original_id"})),
              "outcome already present in covariates")
     joined = covariates.merge(outcomes, on="original_id", how="inner", validate="one_to_one", sort=False)
+    covariate_ids, outcome_ids = set(covariates.original_id), set(outcomes.original_id)
     return joined, {
         "acs_without_primary_outcome": tuple(x for x in covariates.original_id
-                                              if x not in set(outcomes.original_id)),
+                                              if x not in outcome_ids),
         "primary_outcome_without_acs": tuple(x for x in outcomes.original_id
-                                             if x not in set(covariates.original_id)),
+                                             if x not in covariate_ids),
         "join_cardinality": "one_to_one",
     }
 

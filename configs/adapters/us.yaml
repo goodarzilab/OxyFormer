@@ -29,7 +29,7 @@ acs:
   mapping_status: reviewed
   release: 2006-2010 ACS 5-year Summary File
   geography_vintage: 2010
-  encoding: ascii
+  encoding: latin-1
   dictionary_url: https://www2.census.gov/acs2010_5yr/summaryfile/Sequence_Number_and_Table_Number_Lookup.txt
   dictionary_sha256: a458000b01db2b32d9eb7e615b4b5397b1cdcbf9cda69905326d409983ef9f00
   technical_url: https://www2.census.gov/acs2010_5yr/summaryfile/ACS_2006-2010_SF_Tech_Doc.pdf
@@ -661,3 +661,5 @@ acs:
   subject_definitions_evidence: 'Pages 146-149: the median household income standard distribution ends at $250,000
     or more; use 2499 and 250001 for B19013, not the older 200001 boundary. Page 82 defines per capita income as
     the mean over the population, allowing signed income.'
+  encoding_evidence: 'Published geography archive inspected 2026-10-04: Colorado names include single byte 0xf1.
+    Decode one byte per character so fixed-width ID offsets are unchanged; names are not predictors or mapped columns.'

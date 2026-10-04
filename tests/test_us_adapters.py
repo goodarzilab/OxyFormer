@@ -336,3 +336,15 @@ def test_old_income_boundary_is_not_a_2010_sentinel(tmp_path, mapping):
     frame, audit = load_acs(bundle, mapping)
     assert frame.median_household_income.iloc[0] == math.asinh(200001 / 10000)
     assert not audit["cells"].estimate_annotation.str.startswith("income_").any()
+
+
+def test_unused_geography_name_bytes_do_not_break_ids(tmp_path, mapping):
+    from dataclasses import replace
+    bundle = acs_bundle(tmp_path, mapping)
+    geo = bundle[0]
+    payload = bytearray(geo.path.read_bytes())
+    payload[220] = 0xf1  # A source-like single-byte accented name outside ID fields.
+    geo.path.write_bytes(payload)
+    bundle[0] = SourceFile(geo.path, replace(geo.manifest, payload_hash=sha256(payload).hexdigest()))
+    frame, _ = load_acs(bundle, mapping)
+    assert frame.original_id.tolist() == IDS
