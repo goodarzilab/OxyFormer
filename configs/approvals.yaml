@@ -44,14 +44,14 @@ owner_decisions:
   exposure_atlas_footprint: nine_census_divisions_contiguous_us_plus_dc   # atlas issues the owner approved
   # Approved by the owner on 2026-10-04 ("1-3 is done"). Occurrence year t keeps only deaths registered in years t through t+L.
   mexico_edr_registration_lag:
-    primary: {lag_years: 2, registration_years: [2015, 2021]}        # occurrence years 2015-2019
-    late_registration_check: {lag_years: 5, registration_years: [2015, 2024]}
+    primary: {lag_years: 2, registration_years: [2015, 2016, 2017, 2018, 2019, 2020, 2021]}   # occurrence years 2015-2019
+    late_registration_check: {lag_years: 5, registration_years: [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024]}
   access_rule: public_data_only           # applications (DHS, SEER Research Plus, UK Biobank, All of Us) are excluded
   # Approved by the owner on 2026-10-04 ("Let's go with your recommendations") after the source audit reported them missing.
   exposure:                               # plan section 3.1: elevation -> pressure before population aggregation
     dem_product: usgs_3dep_one_third_arc_second_seamless   # USGS StagedProducts/Elevation/13 (about 10 m), nine-division footprint
     # Approved by the owner on 2026-10-04 ("1-3 is done"), after the source audit found eight footprint cells with no current tile.
-    dem_fallback: "USGS 3DEP 1 arc-second seamless DEM (StagedProducts/Elevation/1) only for footprint cells that have no current 1/3 arc-second tile, recorded per tile in the DEM manifest"
+    dem_fallback: "USGS 3DEP 1 arc-second seamless DEM (StagedProducts/Elevation/1) for only the eight cells with no 1/3 arc-second tile, recorded per tile"
     pressure_model: international_standard_atmosphere_troposphere
     # P_B(z) = P0 * (1 - L*z/T0) ** (g0*M/(R*L)), z in metres above mean sea level; exponent about 5.2559
     sea_level_pressure_mmhg: 760.0        # P0
