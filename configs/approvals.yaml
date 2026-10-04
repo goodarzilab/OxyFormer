@@ -170,7 +170,7 @@ owner_decisions:
     abs_bias_over_empirical_sd_investigate: 0.20
     mean_se_over_empirical_sd_range: [0.90, 1.10]
     numerical_failure_upper_bound_max: 0.01
-    publish_all_failures_and_retry_rules: true
+    publish_all_failures_and_registered_retry_rules: true
   influence_concentration_gate:
     applies_to: [one_step, cv_tmle]          # each estimator separately, from final seed-aggregated contributions
     definitions: "U_g = sum of u_i over county g (unkernelized); D = sum_g U_g^2; s_g = U_g^2 / D; s_max = max_g s_g; G_eff = 1 / sum_g s_g^2"
