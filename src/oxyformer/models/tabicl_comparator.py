@@ -197,7 +197,8 @@ class TabICLComparator:
         self.spec.assert_compatible(view.spec)
         require(view.columns == self.columns and view.lineage.split_hash == self.split.content_hash,
                 "query schema/split fingerprint mismatch")
-        require(set(view.original_ids) <= set(self.split.original_ids), "query IDs outside registered split")
+        held_out = {oid for oid, fold in zip(self.split.original_ids, self.split.fold_ids) if fold == self.fold}
+        require(set(view.original_ids) <= held_out, "queries must belong to this fitted fold's held-out IDs")
         raw = _matrix(view)
         supplied_tensor = torch.as_tensor(raw_x)
         require(supplied_tensor.is_floating_point(), "raw-X must use floating representation")

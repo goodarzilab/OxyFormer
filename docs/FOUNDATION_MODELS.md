@@ -85,7 +85,11 @@ archived text controls; this paragraph is an operational digest, not a replaceme
 `probability(...)` method for the origin classifier. As in the merged heads,
 outputs have shape `[B,R]` for queries `[B,R,1]`. In these adapters `x_tokens`
 is a nuisance `CovariateView`, and `raw_x` is its complete numeric matrix in
-column order. No feature is replaced with a learned embedding. `None` cells
+column order. The merged `Immutable._coerce` / `CovariateView` contract accepts
+only built-in scalar cells (str/int/float/bool/None), with finite numbers; NumPy
+scalar cells and NaN already fail during view construction. Data producers must
+convert NumPy scalars to Python scalars and missingness to None before creating
+the view. The adapter then excludes string cells. No feature is replaced with a learned embedding. `None` cells
 are NaN; numeric and binary covariates are supported. Categorical strings must
 not be silently encoded by this adapter. County/geography is not a predictor.
 
@@ -101,7 +105,9 @@ not be silently encoded by this adapter. County/geography is not a predictor.
   consumes authoritative `PolicyPairs`: original rows then shifted rows, the same
   origin weights and X on both copies, and matching policy/weight identities.
   No labels from query views are accepted. Each fold needs a new adapter instance;
-  refits are rejected. The context hash binds view, split, fold, training arrays,
+  refits are rejected. Prediction views must contain only this fitted fold's
+  held-out IDs; training-row predictions cannot enter this OOF interface. The
+  context hash binds view, split, fold, training arrays,
   labels, model runtime, task, family and seed. Seeds must be registered.
 - TabICL uses eight ensemble members, training-fitted none/power preprocessing,
   Latin feature permutations, package outlier handling (threshold 4), CPU FP32
@@ -135,7 +141,9 @@ whether a caller falsely labeled population weights as unit weights.
 ## Fixed variants
 
 `build_variant` constructs independent nuisance heads and checks their existing
-one-million-parameter cap. `VARIANTS` and `configs/models/ablations.yaml` use
+one-million-parameter cap. PMA variants require an owned county context at
+construction; omitting it cannot silently turn a labeled full variant into A2.
+`VARIANTS` and `configs/models/ablations.yaml` use
 independent names. A0 is primary. A1 resets encoder/PMA initialization and skips
 SSL in the training schedule. A2 removes PMA while retaining county offsets and
 raw X. A3 injects the frozen treatment basis before the feature encoder's blocks,
