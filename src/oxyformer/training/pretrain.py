@@ -4,6 +4,7 @@ Pass a reviewed SSL CovariateView containing exactly split.training_ids(fold).
 The split producer must already have validated geographic/entity separation (see
 INTERFACES.md). Feature kinds and semantic families are explicit reviewed config,
 never inferred from column names. Runtime limits are separate from SSLSettings.
+Seeds must be registered Python integers in the inclusive range 0..2**64 - 1.
 
 Each invocation claims output_dir/ssl exclusively. Resume into a NEW attempt;
 there is no global cache. CheckpointArtifact.complete distinguishes scientific
@@ -39,6 +40,9 @@ from oxyformer.training.checkpoint import (
     CheckpointArtifact, CheckpointIdentity, CheckpointRequest,
     capture_rng, load_checkpoint, model_state_hash, restore_rng, save_checkpoint,
 )
+
+
+_MAX_SEED = (1 << 64) - 1
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -257,7 +261,9 @@ def pretrain(training_covariate_view: CovariateView, split_manifest: SplitManife
     view, split, settings = training_covariate_view, split_manifest, config.settings
     view.spec.assert_compatible(split.spec)
     require(view.use == "ssl", "SSL view required")
-    require(type(seed) is int and seed in split.seed_ids, "unregistered SSL seed")
+    require(type(seed) is int and 0 <= seed <= _MAX_SEED,
+            "SSL seed must be a Python integer in [0, 2**64 - 1]")
+    require(seed in split.seed_ids, "unregistered SSL seed")
     allowed = split.training_ids(settings.fold)
     require(set(view.original_ids) == set(allowed), "view must contain exactly the permitted training records")
     require(set(view.columns) == {k for k, _ in settings.feature_kinds}, "SSL feature schema mismatch")
@@ -319,8 +325,10 @@ def _run(view, settings, config, seed, features, preprocessing, identity,
     train_batch = model.encoder.tokenizer.prepare(fitting)
     validation_batch = model.encoder.tokenizer.prepare(stopping)
     family_indices = tuple(tuple(view.columns.index(name) for name in family) for family in settings.families)
+    # Wrap the derived stream modulo 2**64; keep the original seed in identity.
+    validation_seed = (seed + 1) & _MAX_SEED
     validation_batch = family_mask(validation_batch, family_indices, settings.mask_rate,
-                                   generator=torch.Generator().manual_seed(seed + 1))
+                                   generator=torch.Generator().manual_seed(validation_seed))
     # Fixed stopping masks must expose at least one observed target per available
     # family, even in tiny folds. This does not alter training mask probabilities.
     for members in family_indices:
