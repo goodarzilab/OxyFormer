@@ -1,6 +1,6 @@
 # OxyFormer v2 causal AI implementation plan
 
-> Frozen science plan for the OxyFormer v2 run. Drafted by gpt-6-astra from 26 research subagent reports and reviewed by Claude; adopted by Hani Goodarzi on 2026-10-04. PI decisions recorded after drafting: the `src/oxyformer/` package is approved, and TabPFN (all versions) is admitted alongside TabICLv2 because Arc is a nonprofit. Owner approvals of fixed parameters live in `configs/approvals.yaml`. Changes to this file require the owner (see `docs/orchestrator-mandate.md`).
+> Frozen science plan for the OxyFormer v2 run. Drafted by gpt-6-astra from 26 research subagent reports and reviewed by Claude; adopted by Hani Goodarzi on 2026-10-04. PI decisions recorded after drafting: the `src/oxyformer/` package is approved, and TabPFN (all versions) is admitted alongside TabICLv2 because Arc is a nonprofit (section 8.4 amended to match). Owner approvals of fixed parameters live in `configs/approvals.yaml`. Changes to this file require the owner (see `docs/orchestrator-mandate.md`).
 
 
 **Decision date: October 4, 2026**
@@ -841,7 +841,7 @@ Use a minimal native PyTorch loop, native scaled-dot-product attention, validate
 
 **TabICLv2 comparator:** pin package `2.2.0` and the explicitly named v2 classifier/regressor checkpoints. Core code and the model card declare BSD-3-Clause; archive exact licence bytes and file hashes before use. Do not assume its ordinary interface supports survey-weighted training. ([github.com](https://github.com/soda-inria/tabicl/releases/tag/v2.2.0))
 
-**TabPFN:** v2 is optional after its attribution licence is reviewed. Later weights are excluded unless Arc legal clears the exact intended uses. Never accept floating default checkpoints. ([huggingface.co](https://huggingface.co/Prior-Labs/TabPFN-v2-reg/blob/main/LICENSE.txt))
+**TabPFN:** admitted in all versions alongside TabICLv2, by owner decision on October 4, 2026 (Arc is a nonprofit; research use). Pin package `9.1.0` and the explicitly named checkpoints, archive exact licence bytes and file hashes before use, and honour each checkpoint's attribution terms. Never accept floating default checkpoints. ([huggingface.co](https://huggingface.co/Prior-Labs/TabPFN-v2-reg/blob/main/LICENSE.txt))
 
 ### 8.5 First three pull requests
 
