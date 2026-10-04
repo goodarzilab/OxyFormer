@@ -432,3 +432,43 @@ def test_merged_view_requires_python_scalar_cells(fold, cell):
     # Convert scalars to builtins and missing values to None in the data adapter.
     with pytest.raises(ContractError, match='value does not match'):
         replace(fold[0], values=((cell, 1.), (2., 3.), (4., 5.), (6., 7.)))
+
+
+def test_integer_raw_x_is_valid_numeric_input(backend, fold):
+    model = fitted(backend, fold)
+    held = replace(fold[1], values=((1, 2), (3, 4)))
+    raw = torch.tensor(held.values)
+    assert raw.dtype == torch.int64
+    integer = model.mean(torch.ones(2, 1, 1), held, raw, None, None)
+    floating = model.mean(torch.ones(2, 1, 1), held, raw.float(), None, None)
+    torch.testing.assert_close(integer, floating)
+
+
+def test_numpy_integer_seed_is_canonicalized(backend, fold):
+    prototype = backend[0]()
+    model = type(prototype)(prototype.checkpoint, task='outcome', family='identity', seed=np.int64(11))
+    model.fit_outcome(fold[0], fold[2], 0, np.arange(4), np.arange(4),
+                      sample_weight=np.ones(4), weight_semantics='unit')
+    assert type(model.seed) is int and model.seed == 11
+
+
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float64, torch.bfloat16, torch.int64, torch.bool])
+def test_equivalent_numeric_representations_preserve_predictions(backend, fold, dtype):
+    model = fitted(backend, fold)
+    held = replace(fold[1], values=((0, 1), (1, 0)))
+    result = model.mean(torch.ones(2, 1, 1), held, torch.tensor(held.values, dtype=dtype), None, None)
+    torch.testing.assert_close(result, query(model, held, torch.ones(2, 1, 1)))
+
+
+def test_integer_raw_x_does_not_truncate_fractional_view_values(backend, fold):
+    model = fitted(backend, fold)
+    held = replace(fold[1], values=((0.1, 0.2), (0.3, 0.4)))
+    with pytest.raises(ContractError, match='raw-X'):
+        model.mean(torch.ones(2, 1, 1), held, torch.zeros(2, 2, dtype=torch.int64), None, None)
+
+
+@pytest.mark.parametrize('seed', [-1, 1.5, True, np.bool_(True)])
+def test_invalid_seed_values_remain_blocked(backend, seed):
+    prototype = backend[0]()
+    with pytest.raises(ContractError, match='integer seed'):
+        type(prototype)(prototype.checkpoint, task='outcome', family='identity', seed=seed)
