@@ -10,7 +10,7 @@ import math
 
 from oxyformer.provenance import ContractError, require
 from oxyformer.reporting.diagnostics import summarize
-from oxyformer.reporting.records import STAGE_GATES
+from oxyformer.reporting.records import CV_TMLE_METHODS, STAGE_GATES
 
 LIMITATIONS = (
     "Altitude bundles environmental and social exposures; predictive fit does not identify an oxygen-specific causal effect.",
@@ -134,7 +134,7 @@ def evaluate(bundle, manifest, receipts, approvals, config_hash):
         report["diagnostics"] = summarize(bundle, manifest)
         report["multiplicity"] = multiplicity(bundle.p_values, manifest.mortality_family)
         methods = [e.method for e in bundle.estimates]
-        paired = "mtp_one_step" in methods and any(m in ("cv_tmle_identity", "cv_tmle_logistic", "cv_tmle_poisson") for m in methods)
+        paired = "mtp_one_step" in methods and any(m in CV_TMLE_METHODS for m in methods)
         gates.append({"gate": "paired_estimators", "status": "pass" if paired else "missing", "reason": "one-step and CV-TMLE both required"})
         received = {t.task_id: t for t in receipts.items}
         expected = {t.task_id: t for t in manifest.tasks}
@@ -167,7 +167,7 @@ def evaluate(bundle, manifest, receipts, approvals, config_hash):
             require(set(concentration["applies_to"]) == {"one_step", "cv_tmle"}, "contradictory estimator concentration approval")
             require(0 < concentration["s_max_max"] <= 1 and concentration["g_eff_min"] >= 1, "invalid concentration approval")
             for method, metric in report["diagnostics"]["information"].items():
-                if method != "mtp_one_step" and not method.startswith("cv_tmle_"):
+                if method != "mtp_one_step" and method not in CV_TMLE_METHODS:
                     continue
                 passed = metric["positive_D"] and metric["s_max"] <= concentration["s_max_max"] and metric["G_eff"] >= concentration["g_eff_min"]
                 gates.append({"gate": f"influence_concentration:{method}", "status": "pass" if passed else "failed",

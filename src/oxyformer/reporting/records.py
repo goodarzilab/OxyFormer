@@ -13,6 +13,11 @@ STAGE_GATES["tract_release"] = tuple(dict.fromkeys(
     STAGE_GATES["anchor_review"] + STAGE_GATES["audit_collection"] + ("overlap",)))
 
 
+# The merged estimator emits likelihood-specific names. The family alias is
+# accepted at reporting boundaries, consistently for pairing and every gate.
+CV_TMLE_METHODS = frozenset(("cv_tmle", "cv_tmle_identity", "cv_tmle_logistic", "cv_tmle_poisson"))
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ExpectedTask(Immutable):
     task_id: str
