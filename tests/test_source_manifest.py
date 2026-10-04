@@ -919,3 +919,27 @@ def test_named_manual_approval_restricts_the_exact_file(manifest, tmp_path, monk
              expected_bytes=4, expected_sha256=hashlib.sha256(b'data').hexdigest())
     with pytest.raises(sm.ManifestError, match='Local file differs from owner approval'):
         sm.validate_manifest(manifest)
+
+
+def test_production_usaleep_template_accepts_pdf_without_format_override(manifest, tmp_path, monkeypatch):
+    resource = copy.deepcopy(next(r for r in sm.load_source('us')['resources']
+                                 if r['id'] == 'usaleep_dictionary'))
+    assert resource['format'] == 'pdf'
+    root = tmp_path / 'approved_layout'
+    root.mkdir()
+    data = b'%PDF-1.4 synthetic production-template check'
+    source = root / resource['local_path']
+    source.write_bytes(data)
+    source.chmod(0o400)
+    resource.update(expected_bytes=len(data), expected_sha256=hashlib.sha256(data).hexdigest())
+    monkeypatch.setattr(sm, '_manual_acquisition', lambda: {
+        resource['staging_key']: {'staging_dir': str(root), 'file': source.name}})
+    manifest['resources'][1] = resource
+    manifest['requirements'][0]['resource_ids'][1] = resource['id']
+    monkeypatch.setattr(sm, '_open_url', lambda *args: Response(b'synthetic HTTP peer'))
+    result = fetch(manifest, tmp_path)
+    assert result['resources'][1]['checksum_status'] == 'matched'
+    assert result['resources'][1]['transfer_integrity'] == 'staged_size_and_sha256'
+    with tarfile.open(tmp_path / 'result/payload.tar') as archive:
+        assert archive.extractfile(resource['destination']).read() == data
+    assert source.read_bytes() == data and source.stat().st_mode & 0o777 == 0o400
