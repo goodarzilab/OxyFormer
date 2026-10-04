@@ -16,6 +16,8 @@ physical:
   reference_elevation_m: 0.0
   elevation_convention: NAVD88_metres_used_directly_as_height
 # A scenario is required in each reviewed task; no implicit placement default.
+# The centroid policy is geometric centroid with a geometry-only interior-point
+# fallback when outside the polygon; it is recorded as centroid_outside_policy.
 # centroid: {scenario: centroid, area_crs: 'EPSG:5070'}
 # distributed: {scenario: distributed, area_crs: 'EPSG:5070', grid_size_m: <reviewed metres>}
 # Missing positive population coverage invalidates the full tract estimate.

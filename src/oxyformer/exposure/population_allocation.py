@@ -5,6 +5,10 @@ in an explicitly selected equal-area CRS. Each clipped cell is represented by
 an interior point. This is an assumption, not observed habitation. Splitting a
 block along grid boundaries preserves its placements and exposure when the
 split populations retain the same area density.
+
+The centroid scenario uses the geometric centroid when covered by the polygon,
+otherwise a geometry-only interior representative point. This policy is explicit
+in AllocationSpec and in every output manifest; it never consults DEM coverage.
 """
 from dataclasses import dataclass
 import math
@@ -14,6 +18,7 @@ import geopandas as gpd
 import numpy as np
 from pyproj import CRS
 from shapely.geometry import box
+from shapely.strtree import STRtree
 
 from oxyformer.provenance import require
 
@@ -24,9 +29,12 @@ class AllocationSpec:
     area_crs: str
     grid_size_m: float | None = None
     version: str = 'fixed-area-placement-v1'
+    centroid_outside_policy: str = 'interior_representative_point'
 
     def validate(self):
         require(self.version == 'fixed-area-placement-v1', 'unknown allocation version')
+        require(self.centroid_outside_policy == 'interior_representative_point',
+                'unknown centroid outside-polygon policy')
         require(self.scenario in ('centroid', 'distributed'), 'unknown placement scenario')
         crs = CRS.from_user_input(self.area_crs)
         require(crs.is_projected and all(a.unit_name == 'metre' for a in crs.axis_info),
@@ -59,11 +67,23 @@ def validate_blocks(blocks):
         require(geom is not None and not geom.is_empty and geom.is_valid
                 and geom.geom_type in ('Polygon', 'MultiPolygon'), 'invalid block geometry')
 
+    # Shared edges are allowed; positive-area interior intersections are not.
+    # Index candidates instead of constructing an O(n^2) pairwise overlay.
+    geometries = blocks.geometry.to_numpy()
+    tree = STRtree(geometries)
+    for i, geometry in enumerate(geometries):
+        for j in tree.query(geometry):
+            if j > i:
+                require(geometry.intersection(geometries[j]).area == 0,
+                        'overlapping block polygon interiors')
+
 
 def placements(geometry, spec):
     """Yield (x, y, population fraction) in spec.area_crs; no DEM-dependent weights."""
     if spec.scenario == 'centroid':
         point = geometry.centroid
+        if not geometry.covers(point):
+            point = geometry.representative_point()
         yield point.x, point.y, 1.0
         return
     size = spec.grid_size_m

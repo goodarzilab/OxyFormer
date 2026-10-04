@@ -7,7 +7,7 @@ The standard uses geopotential height. The owner-approved formula explicitly
 uses DEM metres above mean sea level directly; we retain that approximation,
 not an unapproved geopotential conversion. NAVD88 is the approved CONUS DEM
 vertical reference, not ellipsoidal GPS height. Domain: -500 to 11000 m, a
-conservative subset of the standard's lower-atmosphere tables (-5000 m upward).
+conservative subset of the standard's lower-atmosphere table on printed p. 52 (-1000 m upward).
 
 Inspired (humidified at 37 C) oxygen is FiO2*(PB-47 mmHg), not alveolar oxygen:
 https://pubmed.ncbi.nlm.nih.gov/26735235/ . No Pa/mmHg conversions are implicit;
@@ -47,7 +47,8 @@ PHYSICS = PhysicalSpec()
 
 def _elevations(elevation_m):
     # Do not detach tensors or accept objects whose conversion could hide gradients.
-    require(type(elevation_m) in (int, float, list, tuple, np.ndarray),
+    require(type(elevation_m) in (int, float, list, tuple, np.ndarray) or
+            isinstance(elevation_m, (np.integer, np.floating)),
             'elevation must be plain CPU numbers, not model tensors')
     values = np.asarray(elevation_m)
     require(values.dtype.kind in 'iuf', 'elevation must be numeric')

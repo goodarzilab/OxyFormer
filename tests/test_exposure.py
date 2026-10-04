@@ -383,3 +383,65 @@ def test_existing_outputs_are_never_overwritten(tmp_path):
     before = file_hash(Path(req.output_dir) / 'exposure.parquet')
     assert run_stage(req).status == 'fail'
     assert file_hash(Path(req.output_dir) / 'exposure.parquet') == before
+
+
+@pytest.mark.parametrize('scalar', [np.float64(1000), np.float32(1000), np.int64(1000)])
+def test_numpy_cpu_scalars_are_valid_physical_inputs(scalar):
+    assert pressure_mmhg(scalar) == pytest.approx(pressure_mmhg(1000.0))
+
+
+def test_positive_area_block_overlap_rejected(tmp_path):
+    table = blocks(split=True)
+    table.loc[1, 'geometry'] = box(0.5, 0, 1.5, 1)
+    with pytest.raises(ContractError, match='overlapping block polygon interiors'):
+        build_exposure((source('census'),), Geography(table, ('census',), ()), DISTRIBUTED)
+
+
+def test_centroid_outside_polygon_uses_explicit_geometry_only_policy(tmp_path):
+    table = blocks()
+    table.loc[0, 'geometry'] = box(0, 0, 3, 3).difference(box(1, 1, 2, 2))
+    path = tmp_path / 'ring.tif'
+    with rasterio.open(path, 'w', driver='GTiff', height=3, width=3, count=1, dtype='float32',
+                       crs=CRS, transform=from_origin(0, 3, 1, 1), nodata=-9999) as ds:
+        values = np.zeros((3, 3), dtype='float32')
+        values[1, 1] = -9999
+        ds.write(values, 1)
+    rs = RasterSpec('ring', 'dem', str(path), CRS, 'm', 'NAVD88', -9999)
+    frame, qc = build_exposure((source('census'), source('dem')),
+                               Geography(table, ('census',), (rs,)), CENTROID)
+    assert qc['coverage_pass'] and qc['covered_population'] == 100
+    assert frame.iloc[0].deficit_mmhg == 0
+    assert qc['allocation']['centroid_outside_policy'] == 'interior_representative_point'
+    # Removing coverage at the fixed interior placement must still fail: placement
+    # is determined from geometry, never moved around to search for covered DEM.
+    with rasterio.open(path, 'r+') as ds:
+        ds.write(np.full((3, 3), -9999, dtype='float32'), 1)
+    _, missing = build_exposure((source('census'), source('dem')),
+                                Geography(table, ('census',), (rs,)), CENTROID)
+    assert missing['missing_population'] == 100
+
+
+def test_zipped_shapefile_with_reviewed_geoid_prefix(tmp_path):
+    import zipfile
+    task, dependencies = fixture_task(tmp_path)
+    table = blocks().drop(columns='tract_id').rename(columns={'block_id': 'GEOID10', 'population': 'POP10'})
+    folder = tmp_path / 'shape'
+    folder.mkdir()
+    table.to_file(folder / 'blocks.shp')
+    archive = tmp_path / 'blocks.zip'
+    with zipfile.ZipFile(archive, 'w') as packed:
+        for path in folder.iterdir():
+            packed.write(path, path.name)
+    old_path = task['blocks'][0]['resource']['dependency_path']
+    task['blocks'][0].update(format='shapefile_zip', tract_id_from_block_prefix=True,
+                             resource={'dependency_path': str(archive), 'sha256': file_hash(archive)})
+    for manifest in task['sources']:
+        if manifest['payload']['source_id'] == 'census-01':
+            manifest['payload'].update(payload_hash=file_hash(archive),
+                                       field_mapping=[['GEOID10', 'block_id'], ['POP10', 'population']])
+    dependencies = [p for p in dependencies if str(p) != old_path] + [archive]
+    req = request(tmp_path, dict(task, shard_id='one'), dependencies)
+    result = run_stage(req)
+    assert result.status == 'pass', result.message
+    frame = pd.read_parquet(Path(req.output_dir) / 'exposure.parquet')
+    assert frame.tract_id.tolist() == ['01001000100']
