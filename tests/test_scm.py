@@ -1,0 +1,304 @@
+"""Offline synthetic fixtures and independently integrated population references."""
+from dataclasses import replace
+from pathlib import Path
+
+import numpy as np
+import pytest
+from numpy.testing import assert_allclose
+from scipy.integrate import quad
+from scipy.special import expit
+
+from oxyformer.design.policies import PolicyCovariates, ShiftOrStayPolicy
+from oxyformer.estimation.mtp import pushforward_ratio
+from oxyformer.provenance import ContractError, read_artifact
+from oxyformer.validation.analytic_truth import UniformShiftTruth
+from oxyformer.validation.generators import (
+    ObservedRecords, generate_suite_a, load_suite_a, run_estimator, write_sample,
+)
+from oxyformer.validation.scm import AssignmentLaw, CovariateFrame, LatentState, SCMConfig
+
+
+def frame(n=6, cluster_size=2):
+    return CovariateFrame(original_ids=tuple(f"o{i}" for i in range(n)),
+        geography_ids=tuple(f"g{i//cluster_size}" for i in range(n)),
+        region_ids=tuple(f"r{i//(2*cluster_size)}" for i in range(n)),
+        cluster_ids=tuple(f"g{i//cluster_size}" for i in range(n)),
+        coordinates=tuple((float(i//cluster_size)/10, 1.) for i in range(n)),
+        columns=("x", "z"), x=((0., None),)*n, support_keys=("s",)*n,
+        weights=(1.,)*n, outcome_available=(True,)*n, biomarker_available=(True,)*n)
+
+
+def policy(components=((0., 10.),), delta=2.):
+    return ShiftOrStayPolicy(support_design_hash="a"*64, components_by_key=(("s", components),), delta_mmhg=delta)
+
+
+def config(effect="linear", **kwargs):
+    active = [effect]
+    for scale in ("local", "regional"):
+        if kwargs.get(scale + "_confounding", "none") != "none":
+            active.append(scale + "_" + kwargs[scale + "_confounding"])
+    if kwargs.get("assignment", "continuous") != "continuous":
+        active.append(kwargs["assignment"])
+    for key in ("extreme_ratios", "support_gaps", "heterogeneous_eligibility", "exposure_error", "migration",
+                "selected_outcome", "survey_inclusion", "missing_biomarkers", "denominator_error"):
+        if kwargs.get(key):
+            active.append(key)
+    if kwargs.get("registration_probability", 1.) != 1:
+        active.append("under_registration")
+    return SCMConfig(name="synthetic", effect=effect, active_mechanisms=tuple(active), **kwargs)
+
+
+@pytest.mark.parametrize("effect", ["null", "linear", "nonlinear", "sign_changing"])
+def test_effect_truth_against_independent_quad(effect):
+    c = config(effect, beta=1.7)
+    sample = generate_suite_a(frame(), c, policy())
+    functions = {"null": lambda a: 0., "linear": lambda a: 1.7*a,
+                 "nonlinear": lambda a: 1.7*np.sin(a/2),
+                 "sign_changing": lambda a: 1.7*(a-5)**2/10}
+    f = functions[effect]
+    expected = quad(lambda a: (f(a+2)-f(a))/10, 0, 8, epsabs=1e-12)[0]
+    assert sample.observed_law_truth.value == pytest.approx(expected, abs=1e-11)
+    assert sample.structural_causal_truth.value == pytest.approx(expected, abs=1e-11)
+    assert sample.integration_uncertainty.converged
+    assert sample.integration_uncertainty.observed_absolute_difference < 1e-10
+    if effect == "linear":
+        assert expected == pytest.approx(UniformShiftTruth().linear_contrast(1.7))
+    if effect == "sign_changing":
+        assert f(2)-f(0) < 0 < f(10)-f(8)
+
+
+@pytest.mark.parametrize("delta", [0., 11.])
+def test_identity_truth_is_exactly_zero(delta):
+    sample = generate_suite_a(frame(), config(local_confounding="omitted"), policy(delta=delta))
+    assert sample.observed_law_truth.value == sample.structural_causal_truth.value == 0.
+
+
+def _confounding_reference(measured):
+    # Independent two-state posterior; no generator integration helpers used.
+    def g(a, u):
+        rate = .3*u
+        return np.exp(rate*a)*rate/np.expm1(10*rate)
+    def mu(a):
+        return sum(g(a,u)*(50+a+2*u) for u in (-1,1))/sum(g(a,u) for u in (-1,1))
+    causal = sum(.5*quad(lambda a: 2*g(a,u), 0, 8, epsabs=1e-12)[0] for u in (-1,1))
+    observed = causal if measured else quad(lambda a: .5*(g(a,-1)+g(a,1))*(mu(a+2)-mu(a)), 0, 8, epsabs=1e-12)[0]
+    return observed, causal
+
+
+@pytest.mark.parametrize("kind", ["measured", "omitted"])
+def test_confounding_truth_is_statistical_or_structural_not_interchanged(kind):
+    sample = generate_suite_a(frame(2), config(local_confounding=kind), policy())
+    expected = _confounding_reference(kind == "measured")
+    assert_allclose([sample.observed_law_truth.value, sample.structural_causal_truth.value], expected, atol=1e-11)
+    assert ("local_confounder" in sample.observations.measured_columns) == (kind == "measured")
+    if kind == "omitted":
+        assert abs(expected[0]-expected[1]) > .1
+
+
+def test_geometry_covariates_missingness_clusters_and_origin_weights_preserved():
+    original = replace(frame(), x=((1., None), (2., 3.), (None, None), (2., 3.), (5., None), (0., 1.)),
+                       weights=(1., 2., 3., 4., 5., 6.),
+                       outcome_available=(True, False, True, True, True, True),
+                       biomarker_available=(True, True, False, True, True, True))
+    c = config(local_confounding="measured", regional_confounding="measured")
+    observed = generate_suite_a(original, c, policy()).observations
+    assert observed.frame is original
+    assert observed.frame.to_json() == original.to_json()
+    assert observed.y[1] is observed.y[2] is None
+    for i in range(0, 6, 2):
+        assert observed.a[i] == observed.a[i+1]
+        assert observed.measured_x[i] == observed.measured_x[i+1]
+    assert observed.measured_x[0][1] == observed.measured_x[2][1]
+    p = policy().apply(observed.a, PolicyCovariates(original_ids=original.original_ids,
+        geography_ids=original.geography_ids, support_keys=original.support_keys))
+    assert p.d_mmhg[0] == p.d_mmhg[1]
+
+
+def test_shared_noise_preserves_dependence_not_only_ids():
+    # Repeated synthetic populations identify within-cluster covariance.
+    from oxyformer.validation.generators import _sample_observations
+    f = frame(4)
+    draws = np.array([_sample_observations(f, config("null"), policy(), seed).y for seed in range(500)])
+    covariance = np.cov(draws, rowvar=False)
+    assert covariance[0, 1] > .45
+    assert abs(covariance[0, 2]) < .15
+
+
+def test_support_gaps_and_heterogeneous_eligibility():
+    gaps = ((0., 3.), (7., 10.))
+    sample = generate_suite_a(frame(80), config(support_gaps=True), policy(gaps))
+    assert all(a <= 3 or a >= 7 for a in sample.observations.a)
+    assert sample.structural_causal_truth.value == pytest.approx(2/3)
+    shifted = policy(gaps).shift_mask(sample.observations.a, ("s",)*80)
+    assert all(a+2 <= 3 or 7 <= a+2 <= 10 for a, m in zip(sample.observations.a, shifted) if m)
+    f = replace(frame(4), support_keys=("s", "s", "narrow", "narrow"), weights=(1., 2., 3., 4.))
+    p = replace(policy(), components_by_key=(("s", ((0.,10.),)), ("narrow", ((0.,1.),))))
+    result = generate_suite_a(f, config(heterogeneous_eligibility=True), p)
+    assert result.structural_causal_truth.value == pytest.approx(1.6*3/10)
+
+
+def test_near_deterministic_location_and_extreme_ratio_laws():
+    f = frame(100)
+    near = config(assignment="near_deterministic")
+    # Sample directly here so this checks geometry rather than integrating 50 unique laws.
+    from oxyformer.validation.generators import _sample_observations
+    obs = _sample_observations(f, near, policy(), 32)
+    centers = [10*expit(x[0]) for x in f.coordinates]
+    assert np.mean(np.abs(np.array(obs.a)-centers)) < .08
+    truth = generate_suite_a(frame(2), near, policy())
+    expected = quad(lambda a: 2*np.exp(-abs(a-5)/.05)/(.1*(1-np.exp(-100))), 0, 8, points=[5], epsabs=1e-11)[0]
+    assert truth.structural_causal_truth.value == pytest.approx(expected, abs=1e-9)
+    extreme = config(extreme_ratios=True)
+    law = AssignmentLaw(f, 0, LatentState(), extreme, ((0., 10.),))
+    ratios = pushforward_ratio(policy(), [3., 9.], ("s", "s"), lambda a, k: law.density(a), exposure_law="continuous")
+    assert ratios[0] == pytest.approx(np.exp(8))
+    assert ratios[1] == pytest.approx(np.exp(8)+1)
+    truth = generate_suite_a(frame(2), extreme, policy())
+    assert truth.structural_causal_truth.value == pytest.approx(2*(-np.expm1(-32))/(-np.expm1(-40)), abs=1e-10)
+
+
+def test_atoms_are_exact_and_expected_design_rejection_not_jitter():
+    sample = generate_suite_a(frame(200), config(assignment="atoms"), policy(), seed=7)
+    assert sample.observations.a.count(0.) >= 50
+    assert any(a > 0 for a in sample.observations.a)
+    assert sample.observed_law_truth.value is sample.structural_causal_truth.value is None
+    assert sample.observed_law_truth.status == sample.structural_causal_truth.status == "design_rejected"
+    assert "measure derivation" in sample.observed_law_truth.reason
+    assert sample.integration_uncertainty.order == 0
+
+
+def test_missing_selection_survey_and_biomarkers_have_correct_truth_and_masks():
+    c = config(selected_outcome=True, survey_inclusion=True, missing_biomarkers=True)
+    sample = generate_suite_a(frame(200), c, policy(), seed=40)
+    obs = sample.observations
+    assert 0 < sum(y is not None for y in obs.y) < 100
+    assert not all(obs.flag_available) and not all(obs.survey_included) and not all(obs.biomarker_available)
+    for i in range(0, 200, 2):
+        assert obs.flag_available[i] == obs.flag_available[i+1]
+        assert obs.survey_included[i] == obs.survey_included[i+1]
+    # Illness shifts assignment and all observation mechanisms. Independent
+    # scalar quadrature of the selected posterior tests both targets.
+    def joint(a, illness):
+        g = .1 if illness == 0 else -.25*np.exp(-.25*a)/np.expm1(-2.5)
+        return (.7 if illness == 0 else .3)*g*expit(1-.2*a-1.2*illness)*expit(.7-.12*a)*expit(1-.1*a-.8*illness)
+    def density(a):
+        return sum(joint(a,u) for u in (0,1))
+    def mu(a):
+        return sum(joint(a,u)*(50+a+2*u) for u in (0,1))/density(a)
+    normalizer = quad(density, 0, 10, epsabs=1e-12)[0]
+    statistical = quad(lambda a: density(a)*(mu(a+2)-mu(a)), 0, 8, epsabs=1e-12)[0]/normalizer
+    causal = quad(lambda a: 2*density(a), 0, 8, epsabs=1e-12)[0]/normalizer
+    assert sample.observed_law_truth.value == pytest.approx(statistical, abs=1e-10)
+    assert sample.structural_causal_truth.value == pytest.approx(causal, abs=1e-10)
+
+
+def test_exposure_error_and_illness_migration_against_independent_mixture_quad():
+    c = config("nonlinear", exposure_error=.4, migration=2., selected_outcome=True)
+    sample = generate_suite_a(frame(2), c, policy())
+    states = [(u,e) for u in (0,1) for e in (-.4,.4)]
+    def joint(a,u,e):
+        true = a-e
+        if not 0 <= true <= 10:
+            return 0.
+        g = .1 if u == 0 else -.25*np.exp(-.25*true)/np.expm1(-2.5)
+        return .5*(.7 if u == 0 else .3)*g*expit(1-.2*a-1.2*u)
+    def mean(a,u,e):
+        return 50+np.sin((a-e-2*u)/2)+2*u
+    def density(a):
+        return sum(joint(a,u,e) for u,e in states)
+    def mu(a):
+        return sum(joint(a,u,e)*mean(a,u,e) for u,e in states)/density(a)
+    breaks = [-.4, 0., .4, 8., 9.6, 10., 10.4]
+    norm = sum(quad(density, l,h,epsabs=1e-11)[0] for l,h in zip(breaks[:-1],breaks[1:]))
+    stat = quad(lambda a: density(a)*(mu(a+2)-mu(a)), 0,8,points=[.4,7.6],epsabs=1e-11)[0]/norm
+    causal = quad(lambda a: sum(joint(a,u,e)*(mean(a+2,u,e)-mean(a,u,e)) for u,e in states), 0,8,points=[.4],epsabs=1e-11)[0]/norm
+    assert sample.observed_law_truth.value == pytest.approx(stat, abs=1e-9)
+    assert sample.structural_causal_truth.value == pytest.approx(causal, abs=1e-9)
+    assert "held fixed" in sample.structural_causal_truth.target
+
+
+def test_under_registration_noisy_denominator_uses_same_endpoint_scale():
+    c = config(registration_probability=.65, denominator_error=.2)
+    sample = generate_suite_a(frame(100), c, policy(), seed=4)
+    expected = 1.6*.65*(1/.8+1/1.2)/2
+    assert sample.observed_law_truth.value == pytest.approx(expected)
+    assert sample.structural_causal_truth.value == pytest.approx(expected)
+    obs = sample.observations
+    assert set(obs.observed_denominator) == {80., 120.}
+    for y, count, denominator in zip(obs.y, obs.registered_events, obs.observed_denominator):
+        assert y == count/denominator
+    assert np.mean(obs.y) < 45  # mean true rate is about 55
+
+
+def test_truth_is_separate_serializable_and_inaccessible_to_estimator(tmp_path):
+    sample = generate_suite_a(frame(), config(local_confounding="omitted"), policy())
+    obsdir, private = tmp_path/"estimator", tmp_path/"evaluator"
+    write_sample(sample, observations_dir=obsdir, truth_dir=private)
+    assert {p.name for p in obsdir.iterdir()} == {"observations.json"}
+    assert {p.name for p in private.iterdir()} == {"observed_law.json", "structural_causal.json", "integration_uncertainty.json"}
+    observed = read_artifact(obsdir/"observations.json", ObservedRecords, sample.observations.content_hash)
+    assert observed == sample.observations
+    def estimator(records):
+        assert type(records) is ObservedRecords
+        assert not hasattr(records, "structural_causal_truth")
+        assert not hasattr(records, "config")
+        assert "LatentState" not in records.to_json()
+        return np.mean(records.y)
+    assert run_estimator(estimator, observed) == pytest.approx(np.mean(observed.y))
+    with pytest.raises(ContractError, match="ObservedRecords only"):
+        run_estimator(estimator, sample)
+    with pytest.raises(ContractError, match="separate"):
+        write_sample(sample, observations_dir=obsdir, truth_dir=obsdir/"truth")
+    with pytest.raises(FileExistsError):
+        write_sample(sample, observations_dir=obsdir, truth_dir=private)
+
+
+def test_explicit_bounded_recipe_and_reproducibility():
+    configs = load_suite_a(Path(__file__).parents[1]/"configs/validation/suite_a.yaml")
+    assert len(configs) == 14
+    assert set().union(*(set(c.active_mechanisms) for c in configs)) >= {
+        "null", "linear", "nonlinear", "sign_changing", "local_measured", "regional_measured",
+        "local_omitted", "regional_omitted", "near_deterministic", "support_gaps", "atoms", "extreme_ratios",
+        "heterogeneous_eligibility", "exposure_error", "migration", "selected_outcome", "survey_inclusion",
+        "missing_biomarkers", "under_registration", "denominator_error"}
+    first = generate_suite_a(frame(), configs[1], policy(), seed=1)
+    again = generate_suite_a(frame(), configs[1], policy(), seed=1)
+    other = generate_suite_a(frame(), configs[1], policy(), seed=2)
+    assert first == again
+    assert first.observations != other.observations
+    assert first.observed_law_truth.value == other.observed_law_truth.value
+    with pytest.raises(ContractError, match="exactly"):
+        SCMConfig(name="silent_mechanism", active_mechanisms=("linear",), exposure_error=1.)
+    with pytest.raises(ContractError, match="support_gaps"):
+        generate_suite_a(frame(), config(), policy(((0.,3.), (7.,10.))))
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_invalid_count_law_rejected_even_if_realized_dose_would_be_valid(seed):
+    with pytest.raises(ContractError, match="negative event rate on"):
+        generate_suite_a(frame(2), config(beta=-10., registration_probability=.5), policy(), seed=seed)
+
+
+def test_nonlinear_near_deterministic_truth_at_policy_threshold():
+    f = replace(frame(2), coordinates=((float(np.log(4)), 0.),)*2)
+    c = config("nonlinear", assignment="near_deterministic")
+    result = generate_suite_a(f, c, policy())
+    from scipy.stats import laplace
+    normalization = laplace.cdf(10, 8, .05)-laplace.cdf(0, 8, .05)
+    expected = quad(lambda a: (np.sin((a+2)/2)-np.sin(a/2))*laplace.pdf(a,8,.05)/normalization,
+                    0,8,epsabs=1e-12,points=[7.5,7.9])[0]
+    assert result.observed_law_truth.value == pytest.approx(expected, abs=1e-10)
+    assert result.structural_causal_truth.value == pytest.approx(expected, abs=1e-10)
+
+
+@pytest.mark.parametrize("scenario", load_suite_a(Path(__file__).parents[1]/"configs/validation/suite_a.yaml"), ids=lambda c: c.name)
+def test_every_declared_scenario_runs_with_matching_frozen_support(scenario):
+    f, p = frame(4), policy()
+    if scenario.support_gaps:
+        p = policy(((0.,3.), (7.,10.)))
+    if scenario.heterogeneous_eligibility:
+        f = replace(f, support_keys=("s", "s", "n", "n"))
+        p = replace(p, components_by_key=(("s", ((0.,10.),)), ("n", ((0.,1.),))))
+    result = generate_suite_a(f, scenario, p)
+    assert result.observed_law_truth.status == ("design_rejected" if scenario.assignment == "atoms" else "integrated")
+    assert SCMConfig.from_json(result.observed_law_truth.generator_configuration) == scenario
