@@ -176,7 +176,8 @@ def test_spline_is_continuous_frozen_and_checkpointed(design):
 @pytest.mark.parametrize("family,expected", [("identity", -2.), ("bernoulli", torch.sigmoid(torch.tensor(-2.)).item()),
                                               ("poisson", torch.exp(torch.tensor(-2.)).item())])
 def test_outcome_endpoint_links(family, expected, design, backbone):
-    model = OutcomeTransformer(backbone[0], treatment_design=design, raw_x_dim=3, family=family).eval()
+    model = OutcomeTransformer(backbone[0], treatment_design=design, raw_x_dim=3,
+                               county_context=backbone[1], family=family).eval()
     with torch.no_grad():
         model.readout[-1].weight.zero_()
         model.readout[-1].bias.fill_(-3.)
@@ -285,3 +286,32 @@ def test_origin_query_matrix_loss_preserves_policy_pair_order(design, backbone):
     weights = logits.new_tensor([1., 2., 3., 4.])[:, None]
     labels = logits.new_tensor([0., 1.])[None, :]
     torch.testing.assert_close(gradient, weights / (2*weights.sum()) * (logits.sigmoid() - labels))
+
+
+@pytest.mark.parametrize("kind", [OutcomeTransformer, OriginTransformer, RieszTransformer])
+@pytest.mark.parametrize("detached", [False, True])
+def test_unowned_learned_context_cannot_bypass_parameter_cap(kind, detached, design, backbone):
+    encoder, source, split, counties = backbone
+    model = kind(encoder, treatment_design=design, raw_x_dim=3, dropout=0.)
+    external = CountyContext(model.encoder, source.references, split, 0, counties,
+                             county_field="county", checkpoint_hash=digest("external"), dropout=0.)
+    batch = model.encoder.tokenizer.prepare(source.references)
+    context = external(source.references.original_ids, counties)
+    if detached:
+        context = context.detach()
+    args = (torch.ones(4, 1, 1), batch, torch.tensor(source.references.values), context)
+    with pytest.raises(ContractError, match="owned county context"):
+        if kind is RieszTransformer:
+            model(*args)
+        else:
+            model(*args, torch.zeros(4))
+
+
+@pytest.mark.parametrize("kind", [OutcomeTransformer, OriginTransformer, RieszTransformer])
+def test_no_context_ablation_accepts_only_constant_zeros(kind, design, backbone):
+    model = kind(backbone[0], treatment_design=design, raw_x_dim=3, dropout=0.).eval()
+    a, states, raw, _ = inputs()
+    zeros = torch.zeros(2, 4, 64)
+    assert torch.isfinite(predict(model, (a, states, raw, zeros))).all()
+    with pytest.raises(ContractError, match="owned county context"):
+        predict(model, (a, states, raw, zeros.requires_grad_()))

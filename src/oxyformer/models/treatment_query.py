@@ -74,7 +74,10 @@ class TreatmentQueryNetwork(nn.Module):
 
     Copies supplied initialization; parameters are never shared across nuisance
     instances. With context, pass the same encoder owned by CountyContext;
-    the copy preserves that *within-nuisance* alias. Owned offsets, if supplied,
+    the copy preserves that *within-nuisance* alias. Omitting county_context
+    selects the no-PMA ablation: only constant zero context tokens are accepted.
+    Learned context must be owned so its parameters enter the nuisance cap.
+    Owned offsets, if supplied,
     are copied and included in the full-network parameter cap.
 
     x_tokens is unpadded [B,P+1,64] with CLS first, an EncodedFeatures bundle
@@ -138,6 +141,9 @@ class TreatmentQueryNetwork(nn.Module):
                 and x_tokens.shape[2] == 64, "X states must be [B,P+1,64] with CLS first")
         require(raw_x.shape == (batch, self.raw_x_dim), "complete approved raw-X bypass required")
         require(context.shape == (batch, 4, 64), "county context must be [B,4,64]")
+        if self.county_context is None:
+            require(not context.requires_grad and bool((context == 0).all()),
+                    "nonzero or trainable tokens require an owned county context")
         memory = self.memory_norm(torch.cat((x_tokens, context), dim=1))
         memory_padding = None
         if padding is not None:

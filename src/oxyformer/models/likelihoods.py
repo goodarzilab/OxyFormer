@@ -52,6 +52,7 @@ def weighted_reduce(values: Tensor, weights: Tensor, reduction: str = "sum") -> 
 
 def squared_loss(mean: Tensor, target: Tensor, weights: Tensor, *, reduction="sum") -> Tensor:
     _aligned(mean, target, weights)
+    target = target.to(dtype=torch.promote_types(target.dtype, mean.dtype))
     excluded = weights == 0
     residual = mean.masked_fill(excluded, 0) - target.masked_fill(excluded, 0)
     return weighted_reduce(residual.square(), weights, reduction)
@@ -170,6 +171,7 @@ class CountyOffsets(nn.Module):
         routes = self._training_routes(original_ids, complete=True)
         _aligned(base_mean, target, weights)
         require(target.shape == (len(routes),), "training label alignment mismatch")
+        target = target.to(dtype=torch.promote_types(target.dtype, base_mean.dtype))
         excluded = weights == 0
         residual = target.masked_fill(excluded, 0) - base_mean.masked_fill(excluded, 0)
         for county, index in self._indices.items():
