@@ -64,7 +64,7 @@ owner_decisions:
       reason: "DANE microdata downloads sit behind a CAPTCHA. A person downloads them by hand; automation never bypasses the CAPTCHA."
       catalogs: [876, 878, 915]           # births 2023, 2024 and 2025 on microdatos.dane.gov.co
       staging_dir: /mnt/weka/home/hgoodarzi/oxyformer-swarm/staging/dane_births   # one subfolder per year; shared filesystem read by login and compute nodes
-      fallback: "Colombia is dropped from month 1 only after the orchestrator has confirmed with the owner that no DANE files will be staged; a unit that finds the folder empty stops and reports instead. After a drop, the birth anchor proceeds with INEC (Ecuador) alone, and the Peru ENDES hemoglobin anchor is unaffected."
+      fallback: "Colombia is dropped from month 1 if nobody can hand-download the DANE 2023-2025 birth files. The orchestrator records that determination here, and no further owner approval is needed. Files being absent from the staging folder do not by themselves meet this condition: a unit that finds them absent stops and reports to the orchestrator. After a drop, the birth anchor proceeds with INEC (Ecuador) alone, and the Peru ENDES hemoglobin anchor is unaffected."
 
 # Not yet approved. A unit that needs one of these must stop and report; the orchestrator brings it to the owner.
 pending_owner_approval:
