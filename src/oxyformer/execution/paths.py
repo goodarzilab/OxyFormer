@@ -63,10 +63,15 @@ def safe_extract(archive, root, relative, *, members=None, max_bytes=10 * 1024**
         total = 0
         for item in handle.infolist() if is_zip else handle.getmembers():
             name = (item.filename if is_zip else item.name).rstrip('/')
-            relative_artifact_path(name)
+            # tar -C directory -cf payload.tar . emits a root '.' directory
+            # and './file' names. Strip only leading './', never '..' or '/'.
+            while name.startswith('./'):
+                name = name[2:]
+            directory = item.is_dir() if is_zip else item.isdir()
+            if name != '.':
+                relative_artifact_path(name)
             require(name not in seen, 'duplicate archive member')
             seen.add(name)
-            directory = item.is_dir() if is_zip else item.isdir()
             if is_zip:
                 mode = item.external_attr >> 16
                 require((mode & 0o170000) in (0, 0o100000, 0o040000), 'archive special file')
@@ -74,6 +79,9 @@ def safe_extract(archive, root, relative, *, members=None, max_bytes=10 * 1024**
             else:
                 require(item.isfile() or directory, 'archive special file or link')
                 size = item.size
+            if name == '.':
+                require(directory, 'archive root entry must be a directory')
+                continue
             if selected is None or name in selected:
                 total += size
                 require(total <= max_bytes, 'archive exceeds extraction byte limit')
