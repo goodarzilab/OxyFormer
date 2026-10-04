@@ -138,12 +138,12 @@ owner_decisions:
     bin_width_mmhg: 1.0                 # exposure bins; replicated interior bins only, the two outermost bins are discarded
     min_bin_tracts: 2                   # distinct design-set tracts required in every bin along the shift path
     raw_x_radius_iqr: 1.0               # comparison neighbors: same county, within 25 km, within 1 IQR on every approved covariate
-    revisit_rule: "The outcome-blind tract gate reports the supported tract count before any outcome is unsealed; if support is too thin, the owner may widen these values then."
+    revisit_rule: "The outcome-blind tract gate will show the supported tract count before any outcome is used. If support is too thin, these values can still be widened then."
   # Approved by the owner on 2026-10-04 ("Approved on both") from the sign-off page https://claude.ai/artifact/1FxDYK6hp2C2A2j5wd2rYz.
   birth_anchor_recipe:
     exposure:
       elevation: NASADEM_HGT.001 merged 1 arc-second DEM, metres relative to EGM96   # public domain (CC0)
-      population_weights: "GHS-POP R2023A 100 m counts: epoch 2020 for Colombia 2023-2025 and Ecuador 2024; epoch 2015 for Ecuador 2015"
+      population_weights: "GHS-POP R2023A 100 m counts: epoch 2020 for Colombia 2023-2025 and Ecuador 2024; epoch 2015 for Ecuador 2015; European Commission reuse notice with attribution"
       boundaries:
         COL: DANE MGN 2024 municipality polygons (DIVIPOLA code mpio_cdpmp), CC BY 4.0, with a reviewed concordance per birth year
         ECU: held until an openly licensed INEC parish polygon file is verified (canton as fallback)
@@ -156,7 +156,7 @@ owner_decisions:
       sensitivity: {COL: [EST_CIVM], ECU: [est_civil]}
       excluded: [gestational age, prenatal visits, delivery type, APGAR, newborn length, hospital or occurrence or registration geography, reproductive-history counts, COL IDPERTET as maternal ethnicity]
       area_level_sensitivity: {COL: municipal unmet basic needs (NBI) 2018, ECU: deferred}
-      coding: "age at delivery kept as categories; education is nominal, not years of schooling; ECU 2015 runs only after its codes and historical geography are verified"
+      coding: "subject to year-specific coding checks and reviewed geographic concordances; COL EDAD_MADRE (age at delivery) kept as categories; COL NIV_EDUM nominal, not years of schooling; ECU 2015 runs only after its codes and historical geography are verified"
     data_terms: "DANE birth microdata are free and public but may not be redistributed without written permission; the run keeps payloads in attempt folders and never commits or shares them"
     interpretation: "consistency of a residence-pressure association with birth outcomes, not oxygen-specific identification"
 
