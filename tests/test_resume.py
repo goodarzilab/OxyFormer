@@ -1,0 +1,211 @@
+"""Bit-exact interrupted optimization and strict permissible-data cache identity."""
+from dataclasses import replace
+from hashlib import sha256
+from pathlib import Path
+import pickle
+import random
+import signal
+
+import numpy as np
+import pytest
+import torch
+
+from test_pretrain import cpu_only, make_case
+from oxyformer.provenance import ContractError, read_artifact
+from oxyformer.training.checkpoint import (
+    CheckpointArtifact, CheckpointRequest, capture_rng, load_checkpoint, restore_rng, save_checkpoint,
+)
+from oxyformer.training.pretrain import StatefulSampler, pretrain
+
+
+def assert_state_equal(left, right):
+    assert type(left) is type(right)
+    if isinstance(left, torch.Tensor):
+        torch.testing.assert_close(left, right, rtol=0, atol=0)
+    elif isinstance(left, dict):
+        assert left.keys() == right.keys()
+        for key in left:
+            assert_state_equal(left[key], right[key])
+    elif isinstance(left, (list, tuple)):
+        assert len(left) == len(right)
+        for x, y in zip(left, right):
+            assert_state_equal(x, y)
+    else:
+        assert left == right
+
+
+@pytest.mark.parametrize("budget", [1, 4, 5, 7])
+def test_interrupted_optimization_is_bit_exact(tmp_path, budget):
+    view, split, config = make_case(tmp_path)
+    controller = {"outer_fold": 0, "inner": {"candidate": 2, "completed": [0, 1]}, "shards": []}
+    config = replace(config, controller_state=controller)
+    full = pretrain(view, split, config, 1103)
+    first = pretrain(view, split, replace(config, output_dir=str(tmp_path / "first"), max_batches=budget), 1103)
+    assert not first.complete and first.reason == "batch_limit"
+    original_bytes = Path(first.path).read_bytes()
+    random.seed(999)
+    np.random.seed(999)
+    torch.manual_seed(999)
+    torch.rand(13)
+    resumed = pretrain(view, split, replace(config, output_dir=str(tmp_path / "resume"), predecessor=first), 1103)
+    assert resumed.complete and resumed.predecessor_hash == first.content_hash
+    assert Path(first.path).read_bytes() == original_bytes
+    assert Path(resumed.path).parent != Path(first.path).parent
+    assert_state_equal(load_checkpoint(full, full.identity), load_checkpoint(resumed, resumed.identity))
+    assert full.lineage.model_hash == resumed.lineage.model_hash
+
+
+def test_many_tiny_slices_complete_without_restarting_epochs(tmp_path):
+    view, split, config = make_case(tmp_path)
+    full = pretrain(view, split, config, 1103)
+    predecessor = None
+    for attempt in range(16):
+        predecessor = pretrain(view, split, replace(config, output_dir=str(tmp_path / f"slice-{attempt}"),
+                              predecessor=predecessor, max_batches=1), 1103)
+        if predecessor.complete:
+            break
+    assert attempt == 14 and predecessor.complete
+    assert_state_equal(load_checkpoint(full, full.identity), load_checkpoint(predecessor, predecessor.identity))
+
+
+def test_sampler_restores_current_order_cursor_and_future_permutations():
+    uninterrupted = StatefulSampler(11, 1103)
+    uninterrupted.indices(3)
+    uninterrupted.cursor += 3
+    interrupted = StatefulSampler(11, 999)
+    interrupted.load_state_dict(uninterrupted.state_dict())
+    for _ in range(3):
+        assert uninterrupted.indices(3) == interrupted.indices(3)
+        n = len(uninterrupted.indices(3))
+        uninterrupted.cursor += n
+        interrupted.cursor += n
+    uninterrupted.finish_epoch()
+    interrupted.finish_epoch()
+    assert uninterrupted.indices(11) == interrupted.indices(11)
+
+
+def test_rng_roundtrip_restores_python_numpy_and_torch():
+    random.seed(10)
+    np.random.seed(11)
+    torch.manual_seed(12)
+    state = capture_rng()
+    expected = (random.random(), np.random.rand(), torch.rand(3))
+    restore_rng(state)
+    actual = (random.random(), np.random.rand(), torch.rand(3))
+    assert_state_equal(expected, actual)
+
+
+@pytest.mark.parametrize("change", ["values", "ids", "order", "split", "config", "seed", "code", "environment", "preprocessing"])
+def test_reuse_requires_identical_scientific_identity(tmp_path, monkeypatch, change):
+    import oxyformer.training.pretrain as module
+    view, split, config = make_case(tmp_path)
+    first = pretrain(view, split, replace(config, max_batches=1), 1103)
+    resumed_config = replace(config, predecessor=first, output_dir=str(tmp_path / "resume"))
+    seed = 1103
+    if change == "values":
+        view = replace(view, values=((99., 1., "rent"),) + view.values[1:])
+    elif change == "ids":
+        ids = ("new-id",) + view.original_ids[1:]
+        view = replace(view, original_ids=ids, lineage=replace(view.lineage, unit_ids=ids))
+    elif change == "order":
+        view = replace(view, original_ids=view.original_ids[::-1], values=view.values[::-1])
+    elif change == "split":
+        split = replace(split, level="outer")
+    elif change == "config":
+        resumed_config = replace(resumed_config, settings=replace(config.settings, learning_rate=1e-3))
+    elif change == "seed":
+        seed = 2207
+    elif change == "code":
+        monkeypatch.setattr(module, "scientific_code_fingerprint", lambda: "b" * 64)
+    elif change == "environment":
+        monkeypatch.setattr(module, "environment_identity", lambda device: (("changed", "environment"),))
+    elif change == "preprocessing":
+        original = module.fit_preprocessing
+        monkeypatch.setattr(module, "fit_preprocessing", lambda *a: (replace(original(*a)[0], mean=99),) + original(*a)[1:])
+    with pytest.raises(ContractError, match="identity|permitted training"):
+        pretrain(view, split, resumed_config, seed)
+    assert not Path(resumed_config.output_dir).exists()
+
+
+def test_stale_preprocessing_inside_valid_archive_is_rejected(tmp_path):
+    view, split, config = make_case(tmp_path)
+    first = pretrain(view, split, replace(config, max_batches=1), 1103)
+    state = load_checkpoint(first, first.identity)
+    state["preprocessing"] = ("stale",) + state["preprocessing"][1:]
+    root = tmp_path / "stale"
+    root.mkdir()
+    stale = save_checkpoint(root, identity=first.identity, lineage=first.lineage, state=state,
+                            complete=False, reason="batch_limit")
+    with pytest.raises(ContractError, match="stale preprocessing"):
+        pretrain(view, split, replace(config, predecessor=stale, output_dir=str(tmp_path / "resume")), 1103)
+
+
+def test_changed_controller_and_shared_writable_directory_are_refused(tmp_path):
+    view, split, config = make_case(tmp_path)
+    first = pretrain(view, split, replace(config, max_batches=1, controller_state={"fold": 1}), 1103)
+    with pytest.raises(ContractError, match="controller"):
+        pretrain(view, split, replace(config, predecessor=first, controller_state={"fold": 2}), 1103)
+    with pytest.raises(FileExistsError):
+        pretrain(view, split, replace(config, predecessor=first), 1103)
+
+
+def test_completed_reuse_is_validated_and_copied_to_own_attempt(tmp_path):
+    view, split, config = make_case(tmp_path)
+    first = pretrain(view, split, config, 1103)
+    descriptor = read_artifact(Path(first.path).with_suffix(".json"), CheckpointArtifact, first.content_hash)
+    copy = pretrain(view, split, replace(config, predecessor=descriptor, output_dir=str(tmp_path / "copy")), 1103)
+    assert copy.complete and copy.step == first.step
+    assert_state_equal(load_checkpoint(first, first.identity), load_checkpoint(copy, copy.identity))
+
+
+def test_signal_handler_requests_checkpoint_without_io_and_restores_handler(tmp_path):
+    view, split, config = make_case(tmp_path)
+    request = CheckpointRequest()
+    old_handler = signal.getsignal(signal.SIGUSR1)
+    with request.signals():
+        signal.raise_signal(signal.SIGUSR1)
+        assert request.requested and not Path(config.output_dir).exists()
+    assert signal.getsignal(signal.SIGUSR1) == old_handler
+    first = pretrain(view, split, replace(config, stop_request=request), 1103)
+    assert not first.complete and first.reason == "requested" and first.step == 0
+    full = pretrain(view, split, replace(config, output_dir=str(tmp_path / "full")), 1103)
+    resumed = pretrain(view, split, replace(config, predecessor=first, output_dir=str(tmp_path / "resume")), 1103)
+    assert_state_equal(load_checkpoint(full, full.identity), load_checkpoint(resumed, resumed.identity))
+
+
+def test_execution_deadline_does_not_claim_scientific_completion(tmp_path, monkeypatch):
+    import oxyformer.training.pretrain as module
+    view, split, config = make_case(tmp_path)
+    ticks = iter([0., 14300.])
+    monkeypatch.setattr(module.time, "monotonic", lambda: next(ticks))
+    first = pretrain(view, split, config, 1103)
+    assert not first.complete and first.reason == "slice_limit" and first.epoch == 0
+
+
+def test_corrupted_archive_and_pickle_are_rejected_without_execution(tmp_path):
+    view, split, config = make_case(tmp_path)
+    first = pretrain(view, split, replace(config, max_batches=1), 1103)
+    damaged = tmp_path / "damaged.ofc"
+    damaged.write_bytes(Path(first.path).read_bytes()[:-8])
+    with pytest.raises(ContractError, match="hash mismatch"):
+        load_checkpoint(replace(first, path=str(damaged)), first.identity)
+    marker = tmp_path / "unsafe-executed"
+    class Unsafe:
+        def __reduce__(self):
+            return eval, (f"__import__('pathlib').Path({str(marker)!r}).touch()",)
+    payload = pickle.dumps(Unsafe())
+    damaged.write_bytes(payload)
+    with pytest.raises(ContractError, match="untrusted checkpoint serialization"):
+        load_checkpoint(replace(first, path=str(damaged), sha256=sha256(payload).hexdigest()), first.identity)
+    assert not marker.exists()
+
+
+def test_atomic_archive_publication_failure_has_no_descriptor(tmp_path, monkeypatch):
+    import oxyformer.training.checkpoint as module
+    view, split, config = make_case(tmp_path)
+    def fail_link(*args):
+        raise OSError("synthetic publication interruption")
+    monkeypatch.setattr(module.os, "link", fail_link)
+    with pytest.raises(OSError, match="publication interruption"):
+        pretrain(view, split, replace(config, max_batches=1), 1103)
+    assert list((Path(config.output_dir) / "ssl").iterdir()) == []

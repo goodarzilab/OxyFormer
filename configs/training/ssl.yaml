@@ -1,0 +1,15 @@
+# SSLSettings defaults. Supply fold, approved feature_kinds and semantic families
+# from the reviewed endpoint schema. No production fields are invented here.
+mask_rate: 0.30
+learning_rate: 0.0003
+weight_decay: 0.0001
+dropout: 0.10
+batch_size: 256
+max_epochs: 30
+patience: 5
+validation_fraction: 0.10
+stopping_ids: []
+# PretrainConfig runtime defaults (not scientific cache identity):
+# slice_seconds: 14400
+# checkpoint_margin_seconds: 120
+# output_dir: an exclusive attempt directory; never a shared cache
