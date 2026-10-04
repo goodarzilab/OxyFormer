@@ -185,3 +185,17 @@ def test_origin_offset_training_accepts_both_copies_of_permitted_ids(split):
     loss = offsets.training_loss(ids, vec([0.]*8), vec([0.]*4 + [1.]*4), vec([1., 2., 3., 4.]*2))
     gradient, = torch.autograd.grad(loss, offsets.values)
     torch.testing.assert_close(gradient, vec([0.]))
+
+
+def test_identity_profile_repeated_rows_use_supplied_multiplicity_weights(split):
+    offsets = CountyOffsets(split, 0, ("c", "c", "d", "d"), family="identity",
+                            exposure_assignment_level="tract").double()
+    ids = split.training_ids(0)
+    y, base, weights = vec([4., 10., 2., 8.]), vec([1., 2., 3., 4.]), vec([1., 3., 2., 2.])
+    offsets.update_identity(ids, y, base, weights)
+    expected = offsets.values.detach().clone()
+    # Splitting each original target mass over repeated rows preserves profiling.
+    offsets.update_identity(ids*2, y.repeat(2), base.repeat(2), (weights/2).repeat(2))
+    torch.testing.assert_close(offsets.values, expected)
+    loss = offsets.training_loss(ids*2, base.repeat(2), y.repeat(2), (weights/2).repeat(2))
+    torch.testing.assert_close(loss, offsets.training_loss(ids, base, y, weights))

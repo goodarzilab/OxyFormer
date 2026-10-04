@@ -11,7 +11,7 @@ from oxyformer.data.feature_roles import FeatureRegistry, FeatureRule
 from oxyformer.models.county_context import CountyContext
 from oxyformer.models.encoder import FeatureEncoder
 from oxyformer.models.likelihoods import CountyOffsets
-from oxyformer.models.origin import OriginTransformer
+from oxyformer.models.origin import OriginTransformer, paired_origin_loss
 from oxyformer.models.outcome import OutcomeTransformer
 from oxyformer.models.riesz import RieszTransformer, riesz_loss
 from oxyformer.models.tokens import FeatureSpec
@@ -237,3 +237,51 @@ def test_identity_head_offsets_cancel_but_change_residual_predictions(design, ba
     torch.testing.assert_close(with_offset - zero, gamma[:, None].expand(-1, 3))
     torch.testing.assert_close(with_offset[:, 1] - with_offset[:, 0], zero[:, 1] - zero[:, 0], atol=1e-6, rtol=1e-5)
     torch.testing.assert_close(model.mean(*args, gamma + 3) - with_offset, torch.full((2, 3), 3.))
+
+
+@pytest.mark.parametrize("kind", [OutcomeTransformer, OriginTransformer, RieszTransformer])
+def test_precomputed_states_preserve_padding_and_gradients(kind, design, backbone):
+    model = make_model(kind, design, backbone)
+    batch = model.encoder.tokenizer.prepare(model.county_context.references)
+    padding = batch.padding.clone()
+    padding[0, 1:] = True
+    padding[1, 2] = True
+    batch = replace(batch, padding=padding)
+    a, raw, context = torch.ones(4, 2, 1), torch.randn(4, 3), torch.randn(4, 4, 64)
+    def run(x):
+        if kind is RieszTransformer:
+            return model(a, x, raw, context)
+        return model(a, x, raw, context, torch.zeros(4))
+    direct = run(batch)
+    encoded = model.encode(batch)
+    cached = run(encoded)
+    torch.testing.assert_close(cached, direct, rtol=0, atol=0)
+    parameter = model.encoder.tokenizer.numeric_weight
+    g_direct, = torch.autograd.grad(direct.sum(), parameter)
+    g_cached, = torch.autograd.grad(cached.sum(), parameter)
+    torch.testing.assert_close(g_direct, g_cached, rtol=0, atol=0)
+    # Changing the caller's mask after encoding cannot change saved states/mask.
+    saved = encoded.padding.clone()
+    batch.padding.zero_()
+    torch.testing.assert_close(encoded.padding, saved)
+
+
+def test_origin_query_matrix_loss_preserves_policy_pair_order(design, backbone):
+    from oxyformer.design.policies import PolicyCovariates, ShiftOrStayPolicy, paired_records
+    model = make_model(OriginTransformer, design, backbone)
+    policy = ShiftOrStayPolicy(support_design_hash=design.design_hash, components_by_key=(("s", ((0., 10.),)),))
+    ids = ("t0", "t1", "t2", "t3")
+    cov = PolicyCovariates(original_ids=ids, geography_ids=ids, support_keys=("s",)*4)
+    result = policy.apply([1., 2., 8., 9.], cov)
+    pairs = paired_records(result, [1., 2., 3., 4.], weight_id="synthetic")
+    queries = torch.tensor(list(zip(result.a_mmhg, result.d_mmhg))).unsqueeze(-1)
+    batch = model.encoder.tokenizer.prepare(model.county_context.references)
+    logits = model.logits(queries, batch, torch.randn(4, 3), torch.randn(4, 4, 64), torch.zeros(4))
+    loss = paired_origin_loss(logits, pairs)
+    column_order = torch.cat((logits[:, 0], logits[:, 1]))
+    torch.testing.assert_close(loss, paired_origin_loss(column_order, pairs))
+    torch.testing.assert_close(loss, paired_origin_loss(column_order[:, None], pairs))
+    gradient, = torch.autograd.grad(loss, logits)
+    weights = logits.new_tensor([1., 2., 3., 4.])[:, None]
+    labels = logits.new_tensor([0., 1.])[None, :]
+    torch.testing.assert_close(gradient, weights / (2*weights.sum()) * (logits.sigmoid() - labels))
