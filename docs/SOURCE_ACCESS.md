@@ -96,7 +96,7 @@ municipality crosswalk was verified. Do not join on geographic codes alone.
 
 Every resource records its release, role, exact HTTPS URL, relative destination,
 format, positive transfer ceiling, observed availability and inspection evidence.
-A SHA-256 expectation is optional. An observed hash without a predeclared
+A SHA-256 expectation is optional. An optional positive `expected_bytes` records a separately inspected exact length, distinct from the maximum transfer ceiling. An observed hash without a predeclared
 expectation audits retrieved bytes; it does not authenticate a publisher's
 release. Live agency URLs can change. Preserve receipts and use their hashes
 as downstream input identities; never claim byte reproducibility from a URL alone.
@@ -133,8 +133,9 @@ PYTHONPATH=src /mnt/weka/home/hgoodarzi/envs/oxyformer/bin/python \
 ```
 
 The environment supplies an exclusively owned `SWARM_UNIT_DIR`. Output must be
-a fresh strict descendant, with an existing parent; symlink components, existing
-output directories and repository destinations are refused. No shared caches or
+a fresh strict descendant, with an existing parent. The trusted assigned root may be a symlink alias and is
+resolved once; symlinks below that root, existing output directories and
+repository destinations are refused. No shared caches or
 promotion are supported. The root assignment is trusted; this is not a defense
 against a hostile process replacing files concurrently or a caller lying about
 its exclusive root. The Python API accepts a mapping for synthetic tests; the
@@ -147,9 +148,14 @@ streamed for every resource and the final tar; receipts include requested/final
 URLs, lengths, attempts, timestamp and the canonical manifest hash. Schema and
 content semantics still require downstream ingestion checks.
 
-HTTP is rejected, including redirect downgrades. Empty, oversized, truncated,
+HTTP is rejected, including redirect downgrades. Empty, oversized, detectably truncated,
 HTML-disguised binary responses, unexpected encodings and checksum mismatches
-cannot produce a successful receipt. Retries are limited to 1–5 attempts with
+cannot produce a successful receipt. HTTP Content-Length or validated chunked
+framing is required unless the manifest declares an expected length or hash.
+Close-delimited EOF alone cannot establish completeness, so such responses
+without an independent expectation fail with an explicit integrity error.
+Correct framing establishes receipt of the declared HTTP body, not the scientific
+completeness of a publisher release; that remains an ingestion check. Retries are limited to 1–5 attempts with
 capped backoff; 403/404 and content/hash failures are not retried. `--timeout` is
 a per-socket-operation timeout, not a total transfer deadline. The caller may
 wrap a fetch in its own execution deadline. Failure retains the log and a

@@ -105,6 +105,9 @@ def validate_manifest(manifest):
                  'Missing resource availability')
         for key in ('release', 'inspection'):
             _require(isinstance(resource.get(key), str) and resource[key], f'Missing resource {key}')
+        expected_bytes = resource.get('expected_bytes')
+        _require(expected_bytes is None or _positive(expected_bytes)
+                 and expected_bytes <= resource['max_bytes'], 'Invalid expected_bytes')
         digest = resource.get('expected_sha256')
         _require(digest is None or isinstance(digest, str) and re.fullmatch('[0-9a-f]{64}', digest),
                  'Invalid expected SHA-256')
@@ -208,6 +211,14 @@ def _download(resource, path, *, attempts, timeout, log):
                     _require(length.isdigit(), 'Invalid Content-Length')
                     length = int(length)
                     _require(0 < length <= resource['max_bytes'], 'Content-Length exceeds byte ceiling or is empty')
+                expected_bytes = resource.get('expected_bytes')
+                # HTTPResponse validates chunk framing and raises on premature EOF.
+                chunked = getattr(response, 'chunked', False) is True
+                _require(length is not None or chunked or expected_bytes is not None
+                         or resource.get('expected_sha256') is not None,
+                         'Missing transfer framing: declare expected_bytes or expected_sha256')
+                if expected_bytes is not None and length is not None:
+                    _require(length == expected_bytes, 'Content-Length disagrees with expected_bytes')
                 while True:
                     block = response.read(min(CHUNK, resource['max_bytes'] - count + 1))
                     if not block:
@@ -221,6 +232,8 @@ def _download(resource, path, *, attempts, timeout, log):
                 _require(count > 0, 'Empty resource')
                 if length is not None and length != count:
                     raise http.client.IncompleteRead(b'', length - count)
+                if expected_bytes is not None:
+                    _require(count == expected_bytes, 'Resource length disagrees with expected_bytes')
                 _check_content(resource, prefix, response.headers.get('Content-Type', ''))
                 hexdigest = digest.hexdigest()
                 expected = resource.get('expected_sha256')
@@ -228,6 +241,10 @@ def _download(resource, path, *, attempts, timeout, log):
                 return {'id': resource['id'], 'url': resource['url'], 'final_url': final_url,
                         'destination': resource['destination'], 'bytes': count, 'sha256': hexdigest,
                         'expected_sha256': expected, 'checksum_status': 'matched' if expected else 'recorded',
+                        'expected_bytes': expected_bytes,
+                        'transfer_integrity': ('chunked' if chunked else 'content_length'
+                            if length is not None else 'expected_bytes' if expected_bytes is not None
+                            else 'expected_sha256'),
                         'attempts': attempt, 'retrieved_at': datetime.now(timezone.utc).isoformat()}
         except urllib.error.HTTPError as exc:
             exc.close()
@@ -251,9 +268,14 @@ def _hash_file(path):
 
 
 def _new_output(output_dir, attempt_root):
-    root = Path(attempt_root).absolute()
+    assigned_root = Path(attempt_root).absolute()
+    root = assigned_root.resolve(strict=True)
+    _require(root.is_dir(), 'Attempt root must be a directory')
     output = Path(output_dir).absolute()
-    _require(root.is_dir() and root.resolve() == root, 'Attempt root must exist without symlink components')
+    # The coordinator's root assignment is trusted, including its symlink alias.
+    # Symlinks inside that root remain forbidden for output destinations.
+    if output.is_relative_to(assigned_root):
+        output = root / output.relative_to(assigned_root)
     _require(output.resolve() == output and output.is_relative_to(root) and output != root,
              'Output must be a new strict descendant of the attempt root without symlinks')
     _require(not output.is_relative_to(REPO_ROOT), 'Data outputs cannot enter the repository')
