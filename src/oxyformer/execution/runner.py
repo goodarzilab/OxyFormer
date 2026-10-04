@@ -236,9 +236,14 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         require(isinstance(module_name, str) and module_name.startswith('oxyformer.'),
                 'stage module not registered')
         with isolated_caches(out):
-            module = importlib.import_module(module_name)
-            require(callable(getattr(module, 'run_stage', None)), 'stage has no run_stage(StageRequest)')
-            result = module.run_stage(request)
+            try:
+                module = importlib.import_module(module_name)
+            except (ImportError, FileNotFoundError) as exc:
+                result = StageResult(request_hash=request.content_hash, status='blocked', artifacts=(),
+                                     message=str(exc).strip() or type(exc).__name__)
+            else:
+                require(callable(getattr(module, 'run_stage', None)), 'stage has no run_stage(StageRequest)')
+                result = module.run_stage(request)
         require(isinstance(result, StageResult), 'stage did not return StageResult')
         result.verify(request)
         require(all(not (out / a.path).resolve().is_relative_to(repo) for a in result.artifacts),
@@ -250,9 +255,8 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         for path, digest in sources.items():
             require(file_hash(path) == digest, f'input source changed: {path}')
         code_identity(repo, out)
-    except (ImportError, FileNotFoundError) as exc:
-        result = StageResult(request_hash=request.content_hash, status='blocked', artifacts=(), message=str(exc))
     except Exception as exc:
-        result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(), message=str(exc))
+        result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
+                             message=str(exc).strip() or type(exc).__name__)
     atomic_write(out, '_execution/result.json', result.to_json())
     return result
