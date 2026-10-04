@@ -1,0 +1,15 @@
+# Frozen plan 4.1-4.3. This is a recipe, not a resolved support artifact.
+policy: ShiftOrStayPolicy
+delta_mmhg: 2.0
+exposure_units: mmHg
+exposure_law: continuous
+support_design_fraction: 0.20
+support_design_hash: null  # Required from the sealed, outcome-blind design stage.
+components_by_key: null   # Required frozen components at exposure-assignment geography.
+policy_id: null           # SHA-256 of the resolved ShiftOrStayPolicy artifact.
+assignment_unit: exposure_assignment_geography
+target_weighting: equal_tract
+transformed_weights: origin
+boundary_action: stay
+bridge_support_gaps: false
+refit_support_in_outcome_folds: false
