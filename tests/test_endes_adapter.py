@@ -425,3 +425,46 @@ def test_policy_actions_cannot_depend_on_person_within_same_geography(release):
         load_endes(replace(bundle, policy_actions=inconsistent), year, mapping, spec)
     with pytest.raises(ContractError, match="cover full roster"):
         load_endes(replace(bundle, policy_actions=actions[:-1]), year, mapping, spec)
+
+
+def test_distinct_cluster_and_psu_identifiers_preserved(release):
+    # These are separately mapped identities; their labels need not be equal.
+    records, audit = load_endes(*release(mutate=lambda t: t["RECH0"][0].update(HV021="101")))
+    row = first_child(records)
+    assert row.cluster_id == "001" and row.psu_id == "101"
+    assert dict(audit.sampled_psus_by_stratum)["01"] == ("002", "101")
+    assert any(link.relation == "psu" and link.entity_id == "101" for link in audit.entity_graph.links)
+
+
+def test_absent_altitude_is_an_unresolved_exposure_prerequisite(release):
+    # Unknown altitude precision is allowed; an absent altitude value cannot be
+    # silently assigned an exposure, nor is an alternative assignment approved.
+    with pytest.raises(ContractError, match="invalid integer encoding: HV040"):
+        load_endes(*release(mutate=lambda t: t["RECH0"][0].update(HV040="")))
+
+
+@pytest.mark.parametrize("year", [2023, 2024])
+@pytest.mark.parametrize("months", [4, 5])
+@pytest.mark.parametrize("raw,status", [("120", "0"), ("999", "9"), ("", "")])
+def test_documented_four_month_hb_eligibility(release, year, months, raw, status):
+    # Each year's Ficha Tecnica, section 5.2, PDF page 9, explicitly starts
+    # hemoglobin measurement at four months. The six-month anemia-indicator
+    # population is not the entire raw-Hb measurement population.
+    def mutate(tables):
+        tables["RECH1"][0]["HV105"] = "0"
+        tables["RECH6"][0].update(HC1=str(months), HC53=raw, HC55=status)
+    records, audit = load_endes(*release(year, mutate=mutate))
+    row = first_child(records)
+    assert row.eligibility == "eligible" and row.survey_weight == 1.0
+    assert audit.eligible_weight_sum == 10.0
+    assert row.analysis_eligible == (status == "0")
+    assert row.raw_hb_state == {"120": "observed", "999": "missing", "": "not_applicable"}[raw]
+    audit.assert_inference_ready()
+
+
+def test_psu_identity_cannot_cross_strata(release):
+    def mutate(tables):
+        tables["RECH0"][0]["HV021"] = "101"
+        tables["RECH0"][2]["HV021"] = "101"
+    with pytest.raises(ContractError, match="PSU assigned to inconsistent strata"):
+        load_endes(*release(mutate=mutate))

@@ -21,10 +21,14 @@ source_notes:
     The supported weight domain is the household child biomarker population.
     The full roster is retained. Adults, including women, are excluded from this
     domain; HV005 must not be used to claim a women's biomarker population.
-    Measurement eligibility begins at four months (2023/2024 anthropometrist
-    manuals). RECH6 covers children under five. Downstream frozen target/support
+    Both annual Ficha Tecnica documents, section 5.2, PDF page 9, explicitly
+    describe HEMOGLOBIN collection beginning at four months, separately from
+    anthropometry. This is not the six-month cutoff of anemia indicators.
+    RECH6 covers children under five. Downstream frozen target/support
     restrictions remain the responsibility of the analysis design.
   eligibility_references:
+    - https://proyectos.inei.gob.pe/endes/2023/DOCUMENTOS/FICHA_TECNICA_ENDES_2023.pdf
+    - https://proyectos.inei.gob.pe/iinei/srienaho/Descarga/FichaTecnica/968-Ficha.pdf
     - https://proyectos.inei.gob.pe/iinei/srienaho/Descarga/DocumentosMetodologicos/2023-5/ManualAntropometrista.pdf
     - https://proyectos.inei.gob.pe/iinei/srienaho/Descarga/DocumentosMetodologicos/2024-5/ManualAntropometrista.pdf
   inference: >-
@@ -36,8 +40,11 @@ source_notes:
     procedure is invented. HV033 is preserved without interpreting it as an FPC.
   exposure: >-
     HV040 is documented cluster altitude in metres. Quantified altitude
-    uncertainty is not supplied by these dictionaries: null means unknown,
-    never zero. Exposure conversion/support assessment belongs downstream.
+    uncertainty is not supplied by these dictionaries: altitude_uncertainty_m
+    is null (unknown), never zero. This does not authorize a null altitude_m:
+    a numeric HV040 value is a required exposure prerequisite. Missing HV040
+    must block ingestion, since there is no approved alternative assignment.
+    Exposure conversion/support assessment belongs downstream.
     No alternative exposure assignment is approved by this mapping.
   lineage: >-
     The 2024 technical sheet explicitly identifies shared HV001 numbers in

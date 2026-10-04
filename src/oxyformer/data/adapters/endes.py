@@ -315,12 +315,13 @@ def load_endes(bundle: EndesBundle, year: int, mapping: dict,
     require(set(biomarkers) <= set(roster), "orphan biomarker person join")
     sampled = defaultdict(set)
     cluster_design = {}
+    psu_strata = {}
     for (hh,), row in households.items():
         require(_integer(row[column("household_year")], "HV007") == year, "household interview year mismatch")
         cluster = _id(row[column("cluster_id")], "HV001")
         psu = _id(row[column("psu_id")], "HV021")
-        require(cluster == psu, "HV001/HV021 PSU disagreement requires review")
         stratum = _id(row[column("stratum_id")], "HV022")
+        require(psu_strata.setdefault(psu, stratum) == stratum, "PSU assigned to inconsistent strata")
         altitude = _integer(row[column("altitude_m")], "HV040")
         require(-24 <= altitude <= 5100, "altitude outside year-documented range")
         design = (psu, stratum, altitude, _id(row[column("frame_cluster_id")], column("frame_cluster_id")))
