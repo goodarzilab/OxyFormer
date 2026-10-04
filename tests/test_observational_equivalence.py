@@ -114,3 +114,19 @@ def test_paired_response_retains_finite_result_across_intermediate_overflow():
     expected = float(Fraction(pair.mtau.observations.y[0])+Fraction(2.)*(Fraction(1e308)-Fraction(pair.mtau.observations.a[0])))
     assert np.isfinite(expected)
     assert pair.worldtau.intervene([1e308])[0] == expected
+
+
+@pytest.mark.parametrize("parameters", [{"c": 1.1e307}, {"tau": 1.1e300}, {"noise_sd": 101.}])
+def test_paired_scenario_domain_is_checked_before_latent_draws(parameters, monkeypatch):
+    from oxyformer.provenance import ContractError
+    monkeypatch.setattr(np.random, "default_rng", lambda *args: pytest.fail("latent draws preceded validation"))
+    with pytest.raises(ContractError, match="outside supported numeric domain"):
+        observational_equivalence_pair(**parameters)
+
+
+def test_paired_intervention_refuses_unsupported_dose_even_in_null_world():
+    from oxyformer.provenance import ContractError
+    pair = observational_equivalence_pair(n_geographies=1, cluster_size=1)
+    for world in (pair.world0, pair.worldtau):
+        with pytest.raises(ContractError, match="intervention doses outside supported numeric domain"):
+            world.intervene([1.1e308])
