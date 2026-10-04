@@ -20,7 +20,7 @@ from oxyformer.validation.analytic_truth import UniformShiftTruth
 from oxyformer.validation.scm import (
     AssignmentLaw, CovariateFrame, LatentState, SCMConfig, adjustment_key,
     latent_states, observation_probabilities, observation_log_probability, structural_mean, validate_count_rates,
-    LocalCoordinates, exact, exact_shift_intervals, wide,
+    LocalCoordinates, exact, exact_shift_intervals, wide, observation_transition_points,
     validate_numeric, validate_policy_domain, validate_seed, REGISTERED_NUMERIC_BOX, NUMERIC_DOMAIN, NUMERIC_MARGIN,
 )
 
@@ -222,6 +222,7 @@ def _groups(frame, config, policy):
 def _integration_breakpoints(terms, components, delta, config, shift_intervals):
     delta = exact(delta)
     boundaries = {v for term in terms for v in term.law.breakpoints}
+    boundaries.update(v for term in terms for v in observation_transition_points(term.state, config))
     for lo,hi in components:
         boundaries.update([exact(lo),exact(hi)])
     boundaries.update(v for interval in shift_intervals for v in interval)
