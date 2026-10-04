@@ -9,10 +9,10 @@ from pyproj import CRS, Transformer
 import rasterio
 from rasterio.windows import Window
 from shapely.geometry import box
-from oxyformer.exposure.physics import PHYSICS
+from oxyformer.exposure.physics import PHYSICS, APPROVED_DEM_PRODUCT, validate_owner_approval
 from oxyformer.provenance import canonical_json, check_hash, file_hash, require
 
-PRIMARY = 'usgs_3dep_one_third_arc_second_seamless'
+PRIMARY = APPROVED_DEM_PRODUCT
 FALLBACK = 'usgs_3dep_one_arc_second_seamless'
 FALLBACK_CELLS = frozenset(('n43w070', 'n40w074', 'n41w072', 'n46w083',
                           'n48w086', 'n49w088', 'n27w080', 'n29w091'))
@@ -102,6 +102,7 @@ class RasterSampler:
 
     def __enter__(self):
         try:
+            validate_owner_approval(use_fallback=any(t.product == FALLBACK for t in self.tiles))
             # Bind reads to the verified TIFF itself. GDAL otherwise discovers
             # undeclared .msk/.aux.xml siblings, including inside a tar archive.
             # Internal TIFF masks remain part of the verified bytes and are used.

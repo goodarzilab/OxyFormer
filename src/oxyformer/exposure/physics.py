@@ -11,6 +11,8 @@ at the approved fixed 47 mmHg water pressure, not alveolar oxygen.
 """
 from dataclasses import asdict, dataclass
 from hashlib import sha256
+from pathlib import Path
+import yaml
 import numpy as np
 from oxyformer.provenance import canonical_json, require
 
@@ -39,6 +41,39 @@ class PhysicalSpec:
 
 
 PHYSICS = PhysicalSpec()
+
+
+_APPROVAL_PATH = Path(__file__).resolve().parents[3] / 'configs/approvals.yaml'
+APPROVED_DEM_PRODUCT = 'usgs_3dep_one_third_arc_second_seamless'
+_APPROVED_FALLBACK = ('USGS 3DEP 1 arc-second seamless DEM (StagedProducts/Elevation/1) '
+                      'for only the eight cells with no 1/3 arc-second tile, recorded per tile')
+
+
+def validate_owner_approval(*, use_fallback=False):
+    """Stop on a missing/changed owner decision, even if version text is stale.
+
+    This reads the merged repository decision, never an adjacent attempt file.
+    Pure physical transforms remain immutable; service builds and collections
+    must revalidate the current authorization before producing artifacts.
+    """
+    try:
+        document = yaml.safe_load(_APPROVAL_PATH.read_text())
+    except yaml.YAMLError as exc:
+        raise ValueError('invalid owner exposure approval YAML') from exc
+    require(isinstance(document, dict) and isinstance(document.get('owner_decisions'), dict),
+            'owner exposure approval is missing')
+    decision = document['owner_decisions'].get('exposure')
+    require(isinstance(decision, dict), 'owner exposure approval is missing')
+    expected = {name: getattr(PHYSICS, name) for name in (
+        'sea_level_pressure_mmhg', 'sea_level_temperature_k', 'lapse_rate_k_per_m',
+        'gravity_m_per_s2', 'molar_mass_air_kg_per_mol', 'gas_constant_j_per_mol_k',
+        'inspired_o2_fraction', 'water_vapour_pressure_mmhg')}
+    expected.update(pressure_model='international_standard_atmosphere_troposphere',
+                    dem_product=APPROVED_DEM_PRODUCT)
+    if use_fallback:
+        expected['dem_fallback'] = _APPROVED_FALLBACK
+    for name, value in expected.items():
+        require(decision.get(name) == value, 'owner exposure approval missing or changed: ' + name)
 
 
 def pressure_mmhg(elevation_m):

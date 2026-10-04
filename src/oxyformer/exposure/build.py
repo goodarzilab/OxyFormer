@@ -34,8 +34,8 @@ from oxyformer.contracts import StageRequest, StageResult
 from oxyformer.data.source_manifest import load_source
 from oxyformer.exposure.archives import extract_member
 from oxyformer.exposure.census_blocks import read_census_blocks, validate_blocks
-from oxyformer.exposure.physics import PHYSICS, pressure_mmhg, oxygen_deficit_mmhg
-from oxyformer.exposure.population_allocation import AllocationSpec, DemTile, RasterSampler, placement_batches
+from oxyformer.exposure.physics import PHYSICS, pressure_mmhg, oxygen_deficit_mmhg, validate_owner_approval
+from oxyformer.exposure.population_allocation import AllocationSpec, DemTile, RasterSampler, placement_batches, FALLBACK
 from oxyformer.exposure.quality import QUANTILE_INTERPRETATION, REASONS, validate_accounting, placement_quantiles
 from oxyformer.provenance import ArtifactLineage, ArtifactRecord, canonical_json, check_hash, file_hash, require
 
@@ -268,9 +268,12 @@ def run_stage(request: StageRequest) -> StageResult:
     try:
         request.verify_inputs()
         require(request.stage in ('exposure-atlas', 'atlas-collect'), 'unsupported exposure stage')
+        validate_owner_approval()
         config = yaml.safe_load(Path(request.config_path).read_text())
         require(config['schema_version'] == 1 and config['physical_version'] == PHYSICS.version,
                 'inconsistent exposure configuration')
+        require(config['approval_reference'] == 'configs/approvals.yaml:owner_decisions.exposure',
+                'unexpected owner exposure approval reference')
         task = _json(request.task_path)
         require(task['schema_version'] == 1 and task['review_status'] == 'reviewed' and bool(task['review_id']),
                 'reviewed task manifest required')
@@ -287,6 +290,7 @@ def run_stage(request: StageRequest) -> StageResult:
             filename = 'atlas.parquet'
         exposure = exposure.sort_values(['tract_id', 'scenario']).reset_index(drop=True)
         validate_accounting(exposure, quality)
+        validate_owner_approval(use_fallback=any(t['product'] == FALLBACK for t in quality['dem_tiles']))
         status = 'fail' if (exposure.missing_population > 0).any() else 'pass'
         exposure.to_parquet(output / filename, index=False)
         (output / 'quality.json').write_text(canonical_json(quality))

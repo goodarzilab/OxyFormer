@@ -666,3 +666,26 @@ def test_dispersed_reads_are_bounded_and_nonfinite_points_are_missing(tmp_path, 
         z, reason = sampler.sample(np.array([[50, 50], [1000050, 50], [np.inf, 50]]))
     assert z[:2].tolist() == [0, 0] and reason[2] == 'outside_coverage'
     assert len(windows) == 2
+
+
+@pytest.mark.parametrize('problem', ['missing_decision', 'constant', 'product', 'missing_file'])
+def test_stage_requires_current_owner_exposure_approval(tmp_path, shard_fixture, monkeypatch, problem):
+    import oxyformer.exposure.physics as physics
+    inventory, paths = shard_fixture
+    approvals = yaml.safe_load((ROOT / 'configs/approvals.yaml').read_text())
+    if problem == 'missing_decision':
+        del approvals['owner_decisions']['exposure']
+    elif problem == 'constant':
+        approvals['owner_decisions']['exposure']['sea_level_pressure_mmhg'] = 750.
+    elif problem == 'product':
+        approvals['owner_decisions']['exposure']['dem_product'] = 'unapproved-replacement'
+    path = tmp_path / 'owner-approvals.yaml'
+    if problem != 'missing_file':
+        path.write_text(yaml.safe_dump(approvals))
+    monkeypatch.setattr(physics, '_APPROVAL_PATH', path, raising=False)
+    req = collect_request(tmp_path / 'approval-collection', inventory, paths)
+    result = run_stage(req)
+    assert result.status == ('blocked' if problem == 'missing_file' else 'fail')
+    assert not (Path(req.output_dir) / 'atlas.parquet').exists()
+    with pytest.raises((ContractError, FileNotFoundError)):
+        build_exposure(sources(write_raster(tmp_path / 'approval-dem.tif')), blocks(), SPEC)
