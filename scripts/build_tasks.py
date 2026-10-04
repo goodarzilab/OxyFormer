@@ -14,7 +14,9 @@ def main():
     parser.add_argument('--out', required=True)
     args = parser.parse_args()
     plan = expand_campaign(read_mapping(args.spec), read_mapping(args.approvals))
-    out = Path(args.out).resolve(strict=True)
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    out = out.resolve(strict=True)
     atomic_json(out, 'task_manifest.json', {'schema_version': 1, 'tasks': plan['tasks']})
     atomic_json(out, 'expanded_units.json', plan)
 

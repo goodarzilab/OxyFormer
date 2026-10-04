@@ -658,3 +658,27 @@ def test_locked_campaign_checks_upstream_science(runtime, tmp_path, monkeypatch,
     else:
         assert run('dummy', consumer, repo, deps_env=True, task_file=selected).status == 'pass'
     assert {str(p): file_hash(p) for p in upstream.rglob('*') if p.is_file()} == before
+
+
+@pytest.mark.parametrize('existing', [False, True])
+def test_build_tasks_cli_publishes_into_new_or_existing_directory(tmp_path, spec, existing):
+    root = Path(__file__).parents[1]
+    spec_file = tmp_path / 'spec.json'
+    approvals_file = tmp_path / 'approvals.yaml'
+    spec_file.write_text(json.dumps(spec))
+    approvals_file.write_text('schema_version: 1\napproved_by: fixture\n')
+    out = tmp_path / 'plans' / 'campaign'
+    if existing:
+        out.mkdir(parents=True)
+    command = [sys.executable, str(root / 'scripts/build_tasks.py'), '--spec', str(spec_file),
+               '--approvals', str(approvals_file), '--out', str(out)]
+    env = dict(os.environ, PYTHONPATH=str(root / 'src'), CUDA_VISIBLE_DEVICES='')
+    process = subprocess.run(command, cwd=tmp_path, env=env, text=True, capture_output=True)
+    assert process.returncode == 0, process.stdout + process.stderr
+    plan = json.loads((out / 'expanded_units.json').read_text())
+    assert validate_plan(plan, {}) == expand_campaign(spec, {})
+    assert json.loads((out / 'task_manifest.json').read_text())['tasks'] == plan['tasks']
+    before = {str(p): file_hash(p) for p in out.iterdir()}
+    repeated = subprocess.run(command, cwd=tmp_path, env=env, text=True, capture_output=True)
+    assert repeated.returncode != 0
+    assert {str(p): file_hash(p) for p in out.iterdir()} == before
