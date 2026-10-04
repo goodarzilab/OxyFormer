@@ -48,20 +48,29 @@ stages:
       simulation-smoke: [result.json, timing.json, artifact_manifest.json]
     outputs: [recipe_lock.json, task_manifest.json, expanded_units.json, budget.json, gate.json]
   coverage:
+    requires_recipe: true
     module: oxyformer.validation.coverage
   campaign-collect:
+    requires_recipe: true
     module: oxyformer.validation.campaign
   primary:
+    requires_recipe: true
     module: oxyformer.training.nested_cv
   ablation:
+    requires_recipe: true
     module: oxyformer.training.nested_cv
   anchor:
+    requires_recipe: true
     module: oxyformer.training.nested_cv
   refit-audit:
+    requires_recipe: true
     module: oxyformer.training.nested_cv
   anchor-review:
+    requires_recipe: true
     module: oxyformer.reporting
   audit-collect:
+    requires_recipe: true
     module: oxyformer.reporting
   tract-release:
+    requires_recipe: true
     module: oxyformer.reporting

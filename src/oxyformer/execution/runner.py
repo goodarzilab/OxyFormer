@@ -40,7 +40,18 @@ def resolve_dependencies(ids, environ=None):
 
 
 def read_mapping(path):
-    value = yaml.safe_load(Path(path).read_text())
+    path = Path(path)
+    text = path.read_text()
+    # JSON is also YAML syntax, but PyYAML's numeric resolver changes 1e-05
+    # into a string. Preserve canonical JSON types before considering YAML.
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        require(path.suffix.lower() != '.json', f'invalid JSON: {path}')
+        try:
+            value = yaml.safe_load(text)
+        except yaml.YAMLError as yaml_error:
+            raise ContractError(f'invalid YAML: {path}') from yaml_error
     require(isinstance(value, dict), f'expected mapping: {path}')
     return value
 
@@ -170,6 +181,8 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     output_path(out, '_execution').mkdir()
     verify_continuation(task, deps)
     lock_ref = task.get('recipe_lock')
+    if settings.get('requires_recipe', False) or 'campaign' in task:
+        require(bool(lock_ref), 'locked stage or campaign task requires a recipe lock')
     if lock_ref:
         require(set(lock_ref) == {'dependency', 'path', 'sha256'}, 'invalid recipe reference')
         require(lock_ref['dependency'] in deps, 'recipe lock dependency missing')
