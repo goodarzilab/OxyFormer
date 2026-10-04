@@ -21,6 +21,7 @@ from oxyformer.validation.scm import (
     AssignmentLaw, CovariateFrame, LatentState, SCMConfig, adjustment_key,
     latent_states, observation_probabilities, observation_log_probability, structural_mean, validate_count_rates,
     LocalCoordinates, exact, exact_shift_intervals, wide,
+    validate_numeric, validate_policy_domain, validate_seed, REGISTERED_NUMERIC_BOX, NUMERIC_DOMAIN, NUMERIC_MARGIN,
 )
 
 
@@ -122,6 +123,8 @@ def write_sample(sample: GeneratedSample, *, observations_dir: Path, truth_dir: 
 
 
 def _sample_observations(frame, config, policy, seed):
+    validate_seed(seed)
+    validate_policy_domain(policy)
     rng = np.random.default_rng(seed)
     regions, geographies, clusters = {}, {}, {}
     a, y, measured, flags, surveys, biomarkers, events, denominators = ([] for _ in range(8))
@@ -365,7 +368,10 @@ def generate_suite_a(frame: CovariateFrame, config: SCMConfig, policy: ShiftOrSt
     Integration marginalizes assignment, confounders and observation mechanisms,
     conditional on the supplied fixed covariate frame. No estimator fits enter.
     """
-    require(tolerance > 0 and max_order >= 32, "invalid integration controls")
+    validate_seed(seed)
+    validate_policy_domain(policy)
+    require(type(tolerance) in (int, float) and np.isfinite(tolerance) and tolerance > 0
+            and type(max_order) is int and max_order >= 32, "invalid integration controls")
     eligible_by_key = {key:exact_shift_intervals(c,policy.delta_mmhg) for key,c in policy.components_by_key}
     config.validate_policy(policy, frame, eligible_by_key=eligible_by_key)
     validate_count_rates(frame, config, policy, eligible_by_key=eligible_by_key)
@@ -428,10 +434,14 @@ class PairedWorld(Immutable):
 
     def __post_init__(self):
         Immutable.__post_init__(self)
+        validate_numeric(self.structural_effect, "paired_tau", "paired tau")
+        validate_numeric(self.factual_location_effect, "paired_c", "paired c")
+        validate_numeric(self.h_s, "dose", "paired centers")
         require(len(self.baseline) == len(self.h_s) == len(self.epsilon) == len(self.factual_y) > 0,
                 "paired structural world alignment")
 
     def intervene(self, a):
+        validate_numeric(a, "intervention_dose", "intervention doses")
         dose = np.asarray(a, dtype=float)
         require(dose.shape == (len(self.h_s),) and np.isfinite(dose).all(), "intervention alignment")
         tau = exact(self.structural_effect)
@@ -460,7 +470,12 @@ def observational_equivalence_pair(*, n_geographies=100, cluster_size=3, seed=0,
     as diagnostic geometry. Truth adjusts for X, never exact location. Shared
     observed Y is computed ONCE, not through the two floating-point equations.
     """
-    require(n_geographies > 0 and cluster_size > 0 and tau != 0 and noise_sd >= 0, "invalid pair controls")
+    validate_numeric(c, "paired_c", "paired c")
+    validate_numeric(tau, "paired_tau", "paired tau")
+    validate_numeric(noise_sd, "noise_sd", "noise_sd", allow_zero=True)
+    validate_seed(seed)
+    require(type(n_geographies) is int and type(cluster_size) is int
+            and n_geographies > 0 and cluster_size > 0 and tau != 0, "invalid pair controls")
     rng = np.random.default_rng(seed)
     n = n_geographies*cluster_size
     s = np.repeat(rng.uniform(0, 10, n_geographies), cluster_size)
@@ -516,5 +531,11 @@ def load_suite_a(path: str | Path):
     recipe = yaml.safe_load(Path(path).read_text())
     require(recipe["suite"] == "A" and recipe["scenario_expansion"] == "explicit_only", "not a Suite A recipe")
     configs = tuple(SCMConfig(**entry) for entry in recipe["scenarios"])
+    declaration = recipe.get("numeric_domain")
+    require(declaration is not None, "Suite A recipe must declare numeric_domain")
+    expected = {"id": "suite-a-100x-v1", "margin": NUMERIC_MARGIN,
+                "registered_box": {k:list(v) for k,v in REGISTERED_NUMERIC_BOX.items()},
+                "supported_box": {k:list(v) for k,v in NUMERIC_DOMAIN.items()}}
+    require(declaration == expected, "recipe numeric_domain differs from enforced domain")
     require(len({c.name for c in configs}) == len(configs), "duplicate scenarios")
     return configs
