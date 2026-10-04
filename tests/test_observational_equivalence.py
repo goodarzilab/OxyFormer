@@ -67,3 +67,50 @@ def test_location_only_diagnostic_is_not_an_identification_certificate():
         return float(np.mean(fixed_location_prediction-fixed_location_prediction))
     assert run_estimator(diagnostic,pair.m0.observations) == run_estimator(diagnostic,pair.mtau.observations) == 0.
     assert pair.m0.structural_causal_truth.value != pair.mtau.structural_causal_truth.value
+
+
+@pytest.mark.parametrize("tau,c", [(2.,1.5),(float(2**60),1.5),(-float(2**60),1.5),
+                                  (1e300,1e-200),(1e300,1e100)])
+def test_large_structural_effect_preserves_factual_anchor_and_serialized_world(tau,c):
+    from fractions import Fraction
+    from oxyformer.validation.generators import PairedWorld
+    pair = observational_equivalence_pair(n_geographies=1,cluster_size=1,seed=0,c=c,tau=tau,noise_sd=0.)
+    factual = pair.mtau.observations.a
+    for world in (pair.world0,pair.worldtau):
+        restored = PairedWorld.from_json(world.to_json())
+        assert_array_equal(restored.intervene(factual),pair.mtau.observations.y)
+        # Adjacent representable interventions retain their small displacement
+        # before multiplying by tau; direct tau*A + (c-tau)*S cannot do so.
+        doses = np.nextafter(np.asarray(factual),np.inf)
+        expected = [float(Fraction(y)+Fraction(world.structural_effect)*(Fraction(float(a))-Fraction(s)))
+                    for y,a,s in zip(pair.mtau.observations.y,doses,factual)]
+        assert_array_equal(restored.intervene(doses),expected)
+        assert restored.structural_effect == world.structural_effect
+        assert restored.factual_location_effect == c
+        assert "location_effect" not in restored.to_dict()["payload"]
+        # Only the final output is rounded. Coefficients are not replaced by
+        # rounded c-tau. The original factual rounding residual stays fixed.
+        original_factual = (Fraction(world.baseline[0])+Fraction(c)*Fraction(world.h_s[0])
+                            +Fraction(world.epsilon[0]))
+        residual = Fraction(pair.mtau.observations.y[0])-original_factual
+        original_intervention = (Fraction(world.baseline[0])+Fraction(world.structural_effect)*Fraction(float(doses[0]))
+                                 +(Fraction(c)-Fraction(world.structural_effect))*Fraction(world.h_s[0])
+                                 +Fraction(world.epsilon[0]))
+        assert float(original_intervention+residual) == expected[0]
+    assert_array_equal(pair.world0.intervene([1e308]),pair.m0.observations.y)
+
+
+def test_paired_world_nonrepresentable_response_is_explicit():
+    from oxyformer.provenance import ContractError
+    pair = observational_equivalence_pair(n_geographies=1,cluster_size=1,tau=1e300)
+    with pytest.raises(ContractError,match="nonfinite intervention response"):
+        pair.worldtau.intervene([1e308])
+
+
+
+def test_paired_response_retains_finite_result_across_intermediate_overflow():
+    from fractions import Fraction
+    pair = observational_equivalence_pair(n_geographies=1,cluster_size=1,c=-1e307,tau=2.,noise_sd=0.)
+    expected = float(Fraction(pair.mtau.observations.y[0])+Fraction(2.)*(Fraction(1e308)-Fraction(pair.mtau.observations.a[0])))
+    assert np.isfinite(expected)
+    assert pair.worldtau.intervene([1e308])[0] == expected

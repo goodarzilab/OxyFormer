@@ -685,3 +685,129 @@ def test_nearly_flat_laplace_law_against_independent_quad():
     result = generate_suite_a(frame(2),config("nonlinear",assignment="near_deterministic",near_scale=scale),policy())
     assert result.observed_law_truth.value == pytest.approx(expected,abs=1e-10)
     assert result.structural_causal_truth.value == pytest.approx(expected,abs=1e-10)
+
+
+def _nonbinary_cutoff_cases():
+    from fractions import Fraction
+    # A finite set of synthetic boundary cases, not a mechanism campaign grid.
+    cases = []
+    for lo,hi,coordinate in [(0.,1.,float(np.log(9.))), (9.8,10.,0.),
+                             (0.,10.,float(np.log(99.)))]:
+        cutoff = Fraction(hi)-Fraction(.1)
+        sides = {}
+        for direction in (-np.inf,np.inf):
+            point = coordinate
+            for _ in range(32):
+                center = lo+(hi-lo)*float(expit(point))
+                side = Fraction(center) < cutoff
+                sides.setdefault(side,point)
+                point = float(np.nextafter(point,direction))
+        # The narrow [9.8,10] center needs a finite logistic displacement:
+        # changing coordinate by a subnormal cannot change its rounded center.
+        for point in (-1e-12,1e-12) if lo == 9.8 else ():
+            sides.setdefault(Fraction(lo+(hi-lo)*float(expit(point))) < cutoff,point)
+        assert set(sides) == {False,True}
+        for side in (True,False):
+            for scale in (1e-16,1e-20,1e-100,float(np.nextafter(0.,1.))):
+                cases.append((lo,hi,sides[side],scale))
+    return cases
+
+
+@pytest.mark.parametrize("lo,hi,coordinate,scale", _nonbinary_cutoff_cases())
+def test_nonbinary_policy_cutoff_matches_exact_continuous_reference(lo,hi,coordinate,scale):
+    from decimal import Decimal, localcontext, MAX_EMAX, MIN_EMIN
+    from fractions import Fraction
+    # Independent truncated-Laplace CDF. Inputs are the actual declared floats;
+    # exact subtraction precedes conversion. Decimal tails can underflow to zero
+    # only far below the absolute truth tolerance, never at the near-mode cut.
+    center = lo+(hi-lo)*float(expit(coordinate))
+    exact_center, unit = Fraction(center), Fraction(scale)
+    with localcontext() as ctx:
+        ctx.prec,ctx.Emax,ctx.Emin = 80,MAX_EMAX,MIN_EMIN
+        def cdf(value):
+            ratio = (value-exact_center)/unit
+            distance = Decimal(ratio.numerator)/Decimal(ratio.denominator)
+            return (-abs(distance)).exp()/2 if distance <= 0 else 1-(-distance).exp()/2
+        cutoff = Fraction(hi)-Fraction(.1)
+        moved = (cdf(cutoff)-cdf(Fraction(lo)))/(cdf(Fraction(hi))-cdf(Fraction(lo)))
+        expected = float(Decimal.from_float(.1)*moved)
+    f = replace(frame(1,1),columns=("x",),x=((0.,),),coordinates=((coordinate,0.),))
+    sample = generate_suite_a(f,config(assignment="near_deterministic",near_scale=scale,noise_sd=0.),
+                              policy(((lo,hi),),delta=.1))
+    assert sample.observed_law_truth.value == pytest.approx(expected,abs=1e-11)
+    assert sample.structural_causal_truth.value == pytest.approx(expected,abs=1e-11)
+    assert sample.integration_uncertainty.converged
+    assert sample.integration_uncertainty.assignment_mass_error <= 1e-10
+
+
+def test_review_round2_exact_narrow_support_null_reproduction():
+    f = replace(frame(1,1),columns=("x",),x=((0.,),),coordinates=((0.,0.),))
+    sample = generate_suite_a(f,config("null",assignment="near_deterministic",near_scale=1e-100,noise_sd=0.),
+                              policy(((9.8,10.),),delta=.1))
+    assert sample.observed_law_truth.value == sample.structural_causal_truth.value == 0.
+
+
+@pytest.mark.parametrize("lo,hi,coordinate,scale", _nonbinary_cutoff_cases()[::4])
+def test_moved_quadrature_nodes_have_exact_supported_destinations(lo,hi,coordinate,scale):
+    from fractions import Fraction
+    from oxyformer.validation.scm import exact_shift_intervals
+    f = replace(frame(1,1),coordinates=((coordinate,0.),))
+    c = config(assignment="near_deterministic",near_scale=scale)
+    law = AssignmentLaw(f,0,LatentState(),c,((lo,hi),))
+    intervals = exact_shift_intervals(((lo,hi),),.1)
+    for rule in law.quadrature(32,[bound for pair in intervals for bound in pair]):
+        at = rule.coordinates
+        for lower,upper in intervals:
+            selected = at.inside(lower,upper)
+            for offset in at.values[selected]:
+                numerator,denominator = offset.as_integer_ratio()
+                origin = at.anchor+at.unit*Fraction(numerator,denominator)
+                assert Fraction(lo) <= origin <= Fraction(hi)
+                assert Fraction(lo) <= origin+Fraction(.1) <= Fraction(hi)
+
+
+def test_exact_width_controls_heterogeneous_eligibility_and_closed_endpoint():
+    from fractions import Fraction
+    from oxyformer.validation.scm import exact_shift_intervals
+    assert exact_shift_intervals(((.1,1.),),.9) == ()
+    assert exact_shift_intervals(((0.,1.),),1.) == ((Fraction(0),Fraction(0)),)
+    endpoint = replace(frame(1,1),coordinates=((-800.,0.),))
+    zero_mass = generate_suite_a(endpoint,config(assignment="near_deterministic",near_scale=1e-100),
+                                 policy(((0.,1.),),delta=1.))
+    assert zero_mass.observed_law_truth.value == zero_mass.structural_causal_truth.value == 0.
+    f = replace(frame(2,1),support_keys=("s","wide"))
+    p = replace(policy(delta=.9),components_by_key=(("s",((.1,1.),)),("wide",((0.,1.),))))
+    result = generate_suite_a(f,config(heterogeneous_eligibility=True),p)
+    expected = .5*.9*float(Fraction(1)-Fraction(.9))
+    assert result.structural_causal_truth.value == pytest.approx(expected,abs=1e-12)
+
+
+def test_count_reachable_intervals_use_exact_measurement_error_preimages(monkeypatch):
+    from fractions import Fraction
+    import oxyformer.validation.scm as scm
+    components = ((.1,1.),(1.5,2.4))
+    cfg = config(support_gaps=True,exposure_error=.3,registration_probability=.8)
+    calls = []
+    def record(a,f,row,state,c):
+        calls.append(tuple(np.asarray(a)))
+        return np.ones(len(a))
+    monkeypatch.setattr(scm,"structural_mean",record)
+    scm.validate_count_rates(frame(1,1),cfg,policy(components,delta=.9))
+    expected = []
+    delta = Fraction(.9)
+    for error in (Fraction(-.3),Fraction(.3)):
+        intervals = [(Fraction(lo),Fraction(hi)) for lo,hi in components]
+        for lo,hi in components:
+            for p_lo,p_hi in components:
+                lower,upper = Fraction(p_lo),Fraction(p_hi)-delta
+                if lower > upper:
+                    continue
+                start,end = max(Fraction(lo),lower-error),min(Fraction(hi),upper-error)
+                if start <= end:
+                    intervals.append((start+delta,end+delta))
+        expected.extend(intervals)
+    assert len(calls) == len(expected)
+    for actual,reference in zip(calls,expected):
+        # Comparison occurs only at the smooth-rate evaluation boundary.
+        values = tuple(np.longdouble(str(v.numerator))/np.longdouble(str(v.denominator)) for v in reference)
+        assert actual == values
