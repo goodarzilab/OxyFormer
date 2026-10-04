@@ -363,8 +363,7 @@ def test_run_stage_writes_only_attempt_outputs_and_verifies_result(case, tmp_pat
     assert all(Path(p).read_bytes() == content for p, content in before.items())
     report = json.loads((Path(request.output_dir) / 'report.json').read_text())
     assert report['state'] == 'released'
-    with pytest.raises(FileExistsError):
-        run_stage(request)
+    assert run_stage(request) == result
 
 
 def test_run_stage_real_owner_file_at_launch_base_blocks_without_edits(case, tmp_path):
@@ -545,3 +544,68 @@ def test_review_nonfinite_diagnostic_values_rejected_at_construction():
     for value in (float('nan'), float('inf')):
         with pytest.raises(ContractError, match='nonfinite'):
             probes.DiagnosticView(endpoint='synthetic', registry=registry, original_ids=('a', 'b'), columns=('terrain',), values=((value,), (1.,)))
+
+
+def test_review_identical_rerun_returns_verified_result(case, tmp_path, monkeypatch):
+    request = make_request(tmp_path, case, monkeypatch)
+    first = run_stage(request)
+    second = run_stage(request)
+    assert second == first
+    second.verify(request)
+
+
+def test_review_primary_confirmation_requires_same_frozen_oof_split(case):
+    b, m, r = case
+    other = replace(b.estimates[1], lineage=replace(b.estimates[1].lineage, split_hash='f'*64))
+    report = evaluate_case((replace(b, estimates=(b.estimates[0], other)), m, r))
+    assert report['state'] == 'failed'  # plan 4.4: same frozen OOF initial models
+    assert len(report['estimators']) == 2
+    sensitivity = Sensitivity(name='registered alternate split', estimate=other, target_change='unchanged')
+    report = evaluate_case((replace(b, sensitivities=(sensitivity,)), m, r))
+    assert report['state'] == 'released'
+    assert report['diagnostics']['sensitivities'][0]['estimate']['lineage']['split_hash'] == 'f'*64
+
+
+def test_review_equal_thirty_counties_reach_approved_boundary():
+    metric = concentration([(-1.)**i for i in range(30)], [str(i) for i in range(30)], ['state']*30)
+    assert metric['G_eff'] >= 30
+    assert metric['s_max'] <= .1
+
+
+def test_review_invalid_output_isolation_returns_failed_result(case, tmp_path, monkeypatch):
+    request = make_request(tmp_path, case, monkeypatch)
+    request = replace(request, output_dir=str(tmp_path))  # contains input artifacts
+    result = run_stage(request)
+    assert result.status == 'fail'
+    assert 'isolated' in result.message
+
+
+def test_review_partial_report_publication_resumes(case, tmp_path, monkeypatch):
+    request = make_request(tmp_path, case, monkeypatch)
+    first = run_stage(request)
+    (Path(request.output_dir)/'report.html').unlink()
+    second = run_stage(request)
+    assert second == first
+    second.verify(request)
+
+
+def test_review_conflicting_report_never_returns_stale_released_artifacts(case, tmp_path, monkeypatch):
+    request = make_request(tmp_path, case, monkeypatch)
+    assert run_stage(request).status == 'pass'
+    path = Path(request.output_dir)/'report.json'
+    path.write_text('conflicting prior content')
+    result = run_stage(request)
+    assert result.status == 'fail'
+    assert result.artifacts == ()
+    assert 'conflict' in result.message
+    assert path.read_text() == 'conflicting prior content'
+
+
+def test_review_rerun_reverifies_upstream_science(case, tmp_path, monkeypatch):
+    request = make_request(tmp_path, case, monkeypatch)
+    assert run_stage(request).status == 'pass'
+    _, _, receipts = case
+    (Path(receipts.items[0].request.output_dir)/'result.json').write_text('changed upstream evidence')
+    result = run_stage(request)
+    assert result.status == 'fail'
+    assert result.artifacts == ()
