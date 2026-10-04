@@ -1,5 +1,6 @@
 """Population accounting shared by exposure construction and collection."""
 import math
+from fractions import Fraction
 import numpy as np
 from oxyformer.provenance import require
 
@@ -31,6 +32,51 @@ def weighted_quantiles(values, weights):
             result.append(float(values[index]))
         if len(result) == 3:
             break
+    return result
+
+
+def placement_quantiles(blocks):
+    """Exact left CDF of population * placement area / full block area.
+
+    Each input is (integer population, full area, elevations, placement areas).
+    Areas are the represented binary64 geometry, not measured habitation. Keep
+    integer area prefixes and one rational scale per block; never construct a
+    heterogeneous-denominator rational object for every placement. CDF total
+    uses the same exact weights (area conservation is checked by the caller).
+    """
+    distributions = []
+    for population, block_area, values, areas in blocks:
+        order = np.argsort(values, kind='stable')
+        values, areas = values[order], areas[order]
+        require(population > 0 and math.isfinite(block_area) and block_area > 0 and
+                np.isfinite(values).all() and np.isfinite(areas).all() and (areas > 0).all(),
+                'invalid quantile placement inputs')
+        if not len(values):
+            continue
+        denominator = max(float(a).as_integer_ratio()[1] for a in areas)
+        prefix = [0]
+        for area in areas:
+            numerator, divisor = float(area).as_integer_ratio()
+            prefix.append(prefix[-1] + numerator * (denominator // divisor))
+        scale = Fraction(int(population)) / Fraction(float(block_area)) / denominator
+        distributions.append((values, prefix, scale))
+    if not distributions:
+        return [None, None, None]
+    candidates = np.unique(np.concatenate([d[0] for d in distributions]))
+    candidates[candidates == 0] = 0.0  # canonical positive zero in output
+    total = sum(prefix[-1] * scale for _, prefix, scale in distributions)
+    result = []
+    for numerator in (1, 5, 9):
+        low, high = 0, len(candidates) - 1
+        while low < high:
+            mid = (low + high) // 2
+            cumulative = sum(prefix[np.searchsorted(values, candidates[mid], side='right')] * scale
+                             for values, prefix, scale in distributions)
+            if 10 * cumulative >= numerator * total:
+                high = mid
+            else:
+                low = mid + 1
+        result.append(float(candidates[low]))
     return result
 
 

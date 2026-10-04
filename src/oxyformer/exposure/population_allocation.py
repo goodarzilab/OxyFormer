@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 from pyproj import CRS, Transformer
 import rasterio
+from rasterio.windows import Window
 from shapely.geometry import box
 from oxyformer.exposure.physics import PHYSICS
 from oxyformer.provenance import canonical_json, check_hash, file_hash, require
@@ -64,6 +65,27 @@ class DemTile:
         return identity
 
 
+def _validate_vertical_crs(crs):
+    """Corroborate explicit height semantics; a 2D CRS relies on reviewed labels.
+
+    pyproj CRS sub_crs_list/axis_info/Datum equality expose the PROJ semantics:
+    https://pyproj4.github.io/pyproj/stable/api/crs/crs.html
+    """
+    if crs.is_bound:
+        _validate_vertical_crs(crs.source_crs)
+    elif crs.is_compound:
+        for component in crs.sub_crs_list:
+            _validate_vertical_crs(component)
+    elif crs.is_vertical:
+        require(crs.datum == CRS('EPSG:5703').datum,
+                'DEM explicit vertical datum must be NAVD88')
+        require(len(crs.axis_info) == 1 and crs.axis_info[0].direction == 'up' and
+                crs.axis_info[0].unit_conversion_factor == 1.0,
+                'DEM vertical axis must be upward metres')
+    else:
+        require(len(crs.axis_info) == 2, 'DEM explicit ellipsoidal/3D height is not NAVD88')
+
+
 class RasterSampler:
     """Open verified local rasters once; read only sampled windows through GDAL.
 
@@ -106,14 +128,23 @@ class RasterSampler:
                 else:
                     require(tile.fallback_reason is None, 'primary tile has fallback reason')
                 ds = self.stack.enter_context(rasterio.open(raster_path))
-                require(ds.count == 1 and ds.crs is not None and CRS(ds.crs) == CRS(tile.crs),
-                        'DEM CRS mismatch or wrong band count')
+                require(ds.count == 1 and ds.crs is not None, 'DEM CRS missing or wrong band count')
+                embedded, declared = CRS(ds.crs), CRS(tile.crs)
+                _validate_vertical_crs(embedded)
+                _validate_vertical_crs(declared)
+                require(embedded.to_2d() == declared.to_2d(), 'DEM CRS mismatch')
+                require(all(math.isfinite(v) for v in ds.transform) and not ds.transform.is_degenerate,
+                        'DEM requires a finite invertible affine transform')
+                require(not (ds.transform.is_identity and (ds.gcps[0] or ds.rpcs)),
+                        'DEM requires affine rather than GCP/RPC-only georeferencing')
+                inverse = ~ds.transform
+                require(all(math.isfinite(v) for v in inverse), 'DEM affine inverse is nonfinite')
                 require(ds.nodata == tile.nodata or (ds.nodata is not None and tile.nodata is not None
                         and math.isnan(ds.nodata) and math.isnan(tile.nodata)), 'DEM nodata mismatch')
                 require(ds.units[0] in (None, 'm', 'metre', 'meter') and ds.scales == (1.0,) and
                         ds.offsets == (0.0,), 'DEM vertical units/scale mismatch')
-                transform = Transformer.from_crs(self.placement_crs, ds.crs, always_xy=True)
-                self.datasets.append((ds, transform))
+                transform = Transformer.from_crs(self.placement_crs, embedded.to_2d(), always_xy=True)
+                self.datasets.append((ds, transform, inverse))
                 self.identities.append(tile.identity(ds.crs))
             return self
         except Exception:
@@ -126,13 +157,22 @@ class RasterSampler:
     def sample(self, xy):
         z = np.full(len(xy), np.nan)
         reason = np.full(len(xy), 'outside_coverage', dtype=object)
-        for ds, transform in self.datasets:
+        for ds, transform, inverse in self.datasets:
             xx, yy = transform.transform(xy[:, 0], xy[:, 1])
-            indices = np.flatnonzero(np.isnan(z) & (xx >= ds.bounds.left) &
-                (xx < ds.bounds.right) & (yy > ds.bounds.bottom) & (yy <= ds.bounds.top))
+            # One inverse-affine calculation controls both footprint and pixel.
+            # https://gdal.org/en/stable/tutorials/geotransforms_tut.html
+            finite = np.isfinite(xx) & np.isfinite(yy)
+            columns, rows = np.full(len(xy), np.nan), np.full(len(xy), np.nan)
+            columns[finite] = inverse.a * xx[finite] + inverse.b * yy[finite] + inverse.c
+            rows[finite] = inverse.d * xx[finite] + inverse.e * yy[finite] + inverse.f
+            indices = np.flatnonzero(np.isnan(z) & (columns >= 0) & (columns < ds.width) &
+                                     (rows >= 0) & (rows < ds.height))
             if not len(indices):
                 continue
-            values = np.ma.concatenate(list(ds.sample(zip(xx[indices], yy[indices]), indexes=1, masked=True)))
+            # Dispersed locations must not create an unbounded bounding window.
+            pixels = zip(np.floor(rows[indices]).astype(int), np.floor(columns[indices]).astype(int))
+            values = np.ma.concatenate([ds.read(1, window=Window(col, row, 1, 1), masked=True).reshape(-1)
+                                        for row, col in pixels])
             data = values.astype(float).filled(np.nan)
             valid = ~np.ma.getmaskarray(values) & np.isfinite(data)
             domain = (data >= PHYSICS.minimum_elevation_m) & (data <= PHYSICS.maximum_elevation_m)
@@ -144,21 +184,21 @@ class RasterSampler:
 
 
 def placement_batches(polygon, scenario, spec, batch_size=4096):
-    """Yield (xy, area fractions), including locations outside raster coverage.
+    """Yield (xy, raw square-metre areas), including locations outside raster coverage.
 
     A global fixed grid makes area allocation invariant to block subdivision when
-    pieces follow grid boundaries and population follows area. Arbitrary new
-    polygon splits can move centroids: this is a placement sensitivity, not data.
+    pieces follow grid boundaries, population follows area, and represented
+    intersection areas stay identical. Arbitrary polygon splits can move centroids: this is a placement sensitivity, not data.
     """
-    require(polygon.area > 0, 'block has zero projected area')
+    require(math.isfinite(polygon.area) and polygon.area > 0, 'block has invalid projected area')
     if scenario == 'centroid':
         point = polygon.centroid
-        yield np.array([[point.x, point.y]]), np.ones(1)
+        yield np.array([[point.x, point.y]]), np.array([polygon.area])
         return
     size = spec.grid_size_m
     ox, oy = spec.grid_origin_m
     left, bottom, right, top = polygon.bounds
-    points, fractions = [], []
+    points, areas = [], []
     for iy in range(math.floor((bottom - oy) / size), math.ceil((top - oy) / size)):
         for ix in range(math.floor((left - ox) / size), math.ceil((right - ox) / size)):
             cell = box(ox + ix * size, oy + iy * size, ox + (ix + 1) * size, oy + (iy + 1) * size)
@@ -167,9 +207,9 @@ def placement_batches(polygon, scenario, spec, batch_size=4096):
                 continue
             point = piece.centroid
             points.append((point.x, point.y))
-            fractions.append(piece.area / polygon.area)
+            areas.append(piece.area)
             if len(points) == batch_size:
-                yield np.asarray(points), np.asarray(fractions)
-                points, fractions = [], []
+                yield np.asarray(points), np.asarray(areas)
+                points, areas = [], []
     if points:
-        yield np.asarray(points), np.asarray(fractions)
+        yield np.asarray(points), np.asarray(areas)

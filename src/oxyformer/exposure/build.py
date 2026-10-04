@@ -36,7 +36,7 @@ from oxyformer.exposure.archives import extract_member
 from oxyformer.exposure.census_blocks import read_census_blocks, validate_blocks
 from oxyformer.exposure.physics import PHYSICS, pressure_mmhg, oxygen_deficit_mmhg
 from oxyformer.exposure.population_allocation import AllocationSpec, DemTile, RasterSampler, placement_batches
-from oxyformer.exposure.quality import QUANTILE_INTERPRETATION, REASONS, validate_accounting, weighted_quantiles
+from oxyformer.exposure.quality import QUANTILE_INTERPRETATION, REASONS, validate_accounting, placement_quantiles
 from oxyformer.provenance import ArtifactLineage, ArtifactRecord, canonical_json, check_hash, file_hash, require
 
 
@@ -77,19 +77,25 @@ def build_exposure(source_manifests, geography, allocation_spec):
         quality['dem_tiles'] = sampler.identities
         for tract_id, tract in blocks.groupby('tract_id', sort=True):
             for scenario in allocation_spec.scenarios:
-                pressures, deficits, elevations, masses = [], [], [], []
+                pressures, deficits, quantile_blocks = [], [], []
                 missing_mass = []
                 for block in tract.itertuples():
                     pop = int(block.population)
                     ledger = dict(block_id=block.block_id, tract_id=tract_id, scenario=scenario,
                                   population=pop, covered_population=0.0, **{r: 0.0 for r in REASONS})
-                    fractions = []
+                    areas_total, weights_total, elevations, placement_areas = [], [], [], []
                     # Uninhabited blocks are retained but need no DEM query.
                     if pop:
-                        for xy, fraction in placement_batches(block.geometry, scenario, allocation_spec):
-                            fractions.append(float(math.fsum(fraction)))
+                        full_area = block.geometry.area
+                        require(math.isfinite(full_area) and full_area > 0, 'block has invalid projected area')
+                        density = pop / full_area
+                        for xy, areas in placement_batches(block.geometry, scenario, allocation_spec):
+                            areas_total.append(float(math.fsum(areas)))
                             z, reason = sampler.sample(xy)
-                            weights = pop * fraction
+                            weights = np.array([float(pop)]) if scenario == 'centroid' else density * areas
+                            require(np.isfinite(weights).all() and (weights > 0).all(),
+                                    'positive placement mass is zero or nonfinite')
+                            weights_total.append(float(math.fsum(weights)))
                             valid = np.isfinite(z)
                             for name in REASONS:
                                 ledger[name] += float(math.fsum(weights[reason == name]))
@@ -98,9 +104,14 @@ def build_exposure(source_manifests, geography, allocation_spec):
                                 pressures.append(float(np.dot(weights[valid], pressure_mmhg(z[valid]))))
                                 deficits.append(float(np.dot(weights[valid], oxygen_deficit_mmhg(z[valid]))))
                                 elevations.append(z[valid])
-                                masses.append(weights[valid])
-                        require(math.isclose(math.fsum(fractions), 1.0, rel_tol=1e-10, abs_tol=1e-10),
+                                placement_areas.append(areas[valid])
+                        require(math.isclose(math.fsum(areas_total), full_area, rel_tol=1e-10, abs_tol=1e-10),
                                 'placement does not conserve block area')
+                        require(math.isclose(math.fsum(weights_total), pop, rel_tol=1e-10, abs_tol=1e-8),
+                                'placement does not conserve block population')
+                        if elevations:
+                            quantile_blocks.append((pop, full_area, np.concatenate(elevations),
+                                                    np.concatenate(placement_areas)))
                     missing = math.fsum(ledger[r] for r in REASONS)
                     ledger['covered_population'] = max(0.0, pop - missing)
                     missing_mass.append(missing)
@@ -110,7 +121,7 @@ def build_exposure(source_manifests, geography, allocation_spec):
                 total = sum(int(value) for value in tract.population)
                 missing = math.fsum(missing_mass)
                 complete = total > 0 and missing == 0
-                quantiles = weighted_quantiles(np.concatenate(elevations), np.concatenate(masses)) if complete else [None] * 3
+                quantiles = placement_quantiles(quantile_blocks) if complete else [None] * 3
                 rows.append(dict(tract_id=tract_id, county_id=tract_id[:5], scenario=scenario,
                     block_count=len(tract), population=total, covered_population=max(0.0, total - missing),
                     missing_population=missing, status='complete' if complete else ('zero_population' if total == 0 else 'missing_dem'),

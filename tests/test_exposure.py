@@ -14,15 +14,15 @@ import pytest
 from pyproj import CRS
 import rasterio
 from rasterio.transform import from_origin
-from shapely.geometry import box
+from shapely.geometry import box, Polygon
 import yaml
 from oxyformer.contracts import StageRequest
 from oxyformer.data.source_manifest import load_source
 from oxyformer.exposure.build import ExposureSources, build_exposure, run_stage
 from oxyformer.exposure.census_blocks import read_census_blocks, read_sf1_population
 from oxyformer.exposure.physics import PHYSICS, pressure_mmhg, inspired_oxygen_mmhg, oxygen_deficit_mmhg
-from oxyformer.exposure.population_allocation import AllocationSpec, DemTile, PRIMARY, FALLBACK
-from oxyformer.exposure.quality import weighted_quantiles
+from oxyformer.exposure.population_allocation import AllocationSpec, DemTile, RasterSampler, PRIMARY, FALLBACK
+from oxyformer.exposure.quality import weighted_quantiles, placement_quantiles
 from oxyformer.provenance import ContractError, canonical_json, file_hash
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -451,3 +451,218 @@ def test_equivalent_crs_shards_collect_reproducibly(tmp_path, shard_fixture, crs
 
 def test_equivalent_placement_crs_has_same_identity():
     assert AllocationSpec(placement_crs=CRS('EPSG:5070').to_wkt()).content_hash == SPEC.content_hash
+
+
+@pytest.mark.parametrize('split_at', [1, 33, 49, 99])
+def test_nondyadic_block_split_preserves_all_quantiles(tmp_path, split_at):
+    tile = write_raster(tmp_path / 'split.tif', [0] * 10 + [1000] * 40 + [2000] * 40 + [3000] * 10)
+    split = blocks(pop=(split_at, 100 - split_at))
+    split.loc[0, 'geometry'] = box(0, 0, split_at * 100, 100)
+    split.loc[1, 'geometry'] = box(split_at * 100, 0, 10000, 100)
+    whole = split.iloc[:1].copy()
+    whole.loc[0, 'population'] = 100
+    whole.loc[0, 'geometry'] = box(0, 0, 10000, 100)
+    for geography in (whole, split, split.iloc[::-1]):
+        result, _ = build_exposure(sources(tile), geography, replace(SPEC, scenarios=('distributed',)))
+        assert result[['elevation_p10_m', 'elevation_p50_m', 'elevation_p90_m']].iloc[0].tolist() == [0, 1000, 2000]
+        assert result.pressure_mmhg.iloc[0] == pytest.approx(np.mean(pressure_mmhg([0] * 10 + [1000] * 40 + [2000] * 40 + [3000] * 10)))
+
+
+@pytest.mark.parametrize('many_cells', [10, 4100])
+@pytest.mark.parametrize('many_low', [True, False])
+def test_population_quantile_tie_across_different_densities(tmp_path, many_cells, many_low):
+    heights = [0] * many_cells + [3000] if many_low else [0] + [3000] * many_cells
+    tile = write_raster(tmp_path / 'density.tif', heights)
+    geography = blocks(pop=(1, 1))
+    boundary = many_cells * 100 if many_low else 100
+    geography.loc[0, 'geometry'] = box(0, 0, boundary, 100)
+    geography.loc[1, 'geometry'] = box(boundary, 0, (many_cells + 1) * 100, 100)
+    result, qc = build_exposure(sources(tile), geography, replace(SPEC, scenarios=('distributed',)))
+    # Each elevation has exactly one person, irrespective of cells or batching.
+    assert result.elevation_p50_m.iloc[0] == 0
+    assert result.pressure_mmhg.iloc[0] == pytest.approx(np.mean(pressure_mmhg([0, 3000])))
+    assert qc['population'] == result.covered_population.iloc[0] == 2
+
+
+@pytest.mark.parametrize('side', [-1, 1])
+def test_geometry_derived_near_median_ties_remain_distinct(tmp_path, side):
+    tile = write_raster(tmp_path / 'near.tif', [0, 3000])
+    epsilon = 2**-30
+    geography = blocks(pop=(4, 0)).iloc[:1].copy()
+    geography.loc[0, 'geometry'] = box(epsilon if side > 0 else 0, 0,
+                                      200 if side > 0 else 200 - epsilon, 100)
+    result, _ = build_exposure(sources(tile), geography, replace(SPEC, scenarios=('distributed',)))
+    assert result.elevation_p50_m.iloc[0] == (3000 if side > 0 else 0)
+
+
+def test_exact_area_cdf_uses_its_own_total_and_duplicate_elevations():
+    # A permitted tiny geometry-partition discrepancy must not substitute the
+    # Census total for the CDF's own exact total; this is not mass redistribution.
+    areas = np.array([0.5, 0.5 + 2**-40])
+    assert placement_quantiles([(1, 1., np.array([0., 3000.]), areas)])[1] == 3000
+    assert placement_quantiles([(1, 1., np.array([0., 0., 3000.]), np.array([0.25, 0.25, 0.5]))])[1] == 0
+    assert placement_quantiles([(1, 1., np.array([-0.]), np.array([1.]))]) == [0., 0., 0.]
+    assert not np.signbit(placement_quantiles([(1, 1., np.array([-0.]), np.array([1.]))])[0])
+
+
+def test_exact_area_cdf_many_nondyadic_blocks():
+    # Exercises heterogeneous rational denominators, rather than only the cheap
+    # single-block/binary-area case. No timing threshold: the suite has timeout.
+    distributions = []
+    for i in range(1500):
+        area = 3. + (i + 1) * 2**-40
+        distributions.append((3, area, np.array([0., 1., 2.]), np.array([1., 1., area - 2.])))
+    assert placement_quantiles(distributions) == [0., 1., 2.]
+
+
+@pytest.mark.parametrize('affine', [
+    rasterio.Affine(128, 0, 0, 0, -128, 128),
+    rasterio.Affine(128, 0, 0, 0, 128, 0),
+    rasterio.Affine(-128, 0, 256, 0, -128, 128),
+    rasterio.Affine(0, 128, 0, 128, 0, 0),
+    rasterio.Affine(128, 64, 0, 0, -128, 128),
+])
+def test_raster_orientation_uses_actual_pixels(tmp_path, affine):
+    tile = write_raster(tmp_path / 'orientation.tif')
+    with rasterio.open(tile.path, 'r+') as ds:
+        ds.transform = affine
+    tile = replace(tile, sha256=file_hash(tile.path))
+    # Dyadic transforms make these boundaries exact, including +/- one ulp.
+    pixel_xy = [(0, 0), (1, 0.5), (2, 0.5), (0.5, 1), (-0.125, 0.5),
+                (np.nextafter(1., 0.), 0.5), (np.nextafter(1., 2.), 0.5)]
+    xy = np.array([affine @ p for p in pixel_xy])
+    with RasterSampler([tile], 'EPSG:5070') as sampler:
+        z, reason = sampler.sample(xy)
+    assert z[:2].tolist() == [0, 3000]
+    assert reason[2:5].tolist() == ['outside_coverage'] * 3
+    # Translation/shear can round the world coordinate itself; compare the
+    # represented world points to their exact affine pixel mapping here.
+    for i in (5, 6):
+        col, _ = (~affine) @ xy[i]
+        assert z[i] == (0 if col < 1 else 3000)
+    geography = blocks(pop=(40, 60))
+    for i in range(2):
+        geography.loc[i, 'geometry'] = Polygon([affine @ p for p in [(i, 0), (i+1, 0), (i+1, 1), (i, 1)]])
+    result, _ = build_exposure(sources(tile), geography, replace(SPEC, scenarios=('centroid',)))
+    assert result.missing_population.eq(0).all()
+    assert result.pressure_mmhg.iloc[0] == pytest.approx(np.dot([0.4, 0.6], pressure_mmhg([0, 3000])))
+
+
+def test_south_up_complete_in_both_scenarios(tmp_path):
+    tile = write_raster(tmp_path / 'south.tif', [0])
+    with rasterio.open(tile.path, 'r+') as ds:
+        ds.transform = rasterio.Affine(100, 0, 0, 0, 100, 0)
+    tile = replace(tile, sha256=file_hash(tile.path))
+    result, _ = build_exposure(sources(tile), blocks(pop=(100, 0)).iloc[:1], SPEC)
+    assert result.missing_population.eq(0).all() and result.pressure_mmhg.eq(760).all()
+
+
+@pytest.mark.parametrize('affine', [rasterio.Affine(100, 0, 0, 0, 0, 100),
+                                   rasterio.Affine(float('nan'), 0, 0, 0, -100, 100)])
+def test_invalid_affine_rejected(tmp_path, affine):
+    tile = write_raster(tmp_path / 'bad-affine.tif')
+    with rasterio.open(tile.path, 'r+') as ds:
+        ds.transform = affine
+    tile = replace(tile, sha256=file_hash(tile.path))
+    with pytest.raises(ContractError, match='affine'):
+        build_exposure(sources(tile), blocks(), SPEC)
+
+
+@pytest.mark.parametrize('embedded,declared,passes', [
+    ('EPSG:5070+5703', 'EPSG:5070+5703', True),
+    ('EPSG:5070+5703', 'EPSG:5070', True),
+    ('EPSG:5070', 'EPSG:5070+5703', True),
+    ('EPSG:5070+5773', 'EPSG:5070+5773', False),
+    ('EPSG:5070+6360', 'EPSG:5070+6360', False),
+    ('EPSG:4979', 'EPSG:4979', False),
+    ('EPSG:5070', 'EPSG:5070+5773', False),
+])
+def test_vertical_crs_corroborates_reviewed_labels(tmp_path, embedded, declared, passes):
+    tile = write_raster(tmp_path / 'vertical.tif', [1000, 1000], crs=embedded)
+    with rasterio.open(tile.path) as ds:
+        assert CRS(ds.crs) == CRS(embedded)  # verify the actual GeoTIFF round-trip
+    tile = replace(tile, crs=declared)
+    if passes:
+        result, _ = build_exposure(sources(tile), blocks(), SPEC)
+        np.testing.assert_allclose(result.pressure_mmhg, pressure_mmhg(1000), rtol=1e-12)
+    else:
+        with pytest.raises(ContractError, match='vertical|ellipsoidal'):
+            build_exposure(sources(tile), blocks(), SPEC)
+
+
+def test_stage_rejects_declared_vertical_contradiction(tmp_path, shard_fixture):
+    inventory, _ = shard_fixture
+    task = json.loads((tmp_path / 'shard-AL/task.json').read_text())
+    task['raster_metadata']['synthetic']['crs'] = 'EPSG:5070+5773'
+    deps = [inventory, tmp_path / 'census-receipt.json', tmp_path / 'census.tar',
+            tmp_path / 'dem-receipt.json', tmp_path / 'dem.tar']
+    req = request(tmp_path / 'bad-vertical-stage', 'exposure-atlas', task, deps)
+    result = run_stage(req)
+    assert result.status == 'fail' and 'vertical datum' in result.message
+    assert not (Path(req.output_dir) / 'exposure.parquet').exists()
+
+
+@pytest.mark.parametrize('problem', ['depth', 'unknown'])
+def test_explicit_depth_and_unknown_vertical_crs_rejected(tmp_path, problem):
+    from pyproj.crs import CompoundCRS
+    vertical = CRS('EPSG:5703').to_json_dict()
+    vertical.pop('id', None)
+    if problem == 'depth':
+        vertical['coordinate_system']['axis'][0]['direction'] = 'down'
+    else:
+        vertical['datum'].pop('id', None)
+        vertical['datum']['name'] = 'Unidentified vertical datum'
+    vertical['name'] = 'Synthetic ' + problem + ' height'
+    crs = CompoundCRS('Synthetic vertical test', [CRS('EPSG:5070'), CRS.from_json_dict(vertical)])
+    tile = write_raster(tmp_path / 'vertical-custom.tif', crs=crs.to_wkt())
+    with rasterio.open(tile.path) as ds:
+        embedded = CRS(ds.crs).sub_crs_list[-1]
+        assert embedded.is_vertical
+        # GeoTIFF's vertical keys normalize a downward axis to upward height in
+        # this GDAL version. The reviewed declaration still carries the explicit
+        # contradictory direction and must be rejected before sampling.
+        if problem == 'depth':
+            assert crs.sub_crs_list[-1].axis_info[0].direction == 'down'
+        else:
+            assert embedded.datum != CRS('EPSG:5703').datum
+    with pytest.raises(ContractError, match='vertical'):
+        build_exposure(sources(tile), blocks(), SPEC)
+
+
+def test_gcp_only_raster_rejected(tmp_path):
+    from rasterio.control import GroundControlPoint
+    tile = write_raster(tmp_path / 'gcp.tif')
+    with rasterio.open(tile.path, 'r+') as ds:
+        ds.gcps = ([GroundControlPoint(row=0, col=0, x=0, y=100),
+                    GroundControlPoint(row=0, col=2, x=200, y=100),
+                    GroundControlPoint(row=1, col=0, x=0, y=0)], rasterio.crs.CRS.from_epsg(5070))
+    tile = replace(tile, sha256=file_hash(tile.path))
+    with pytest.raises(ContractError, match='CRS missing|GCP'):
+        build_exposure(sources(tile), blocks(), SPEC)
+
+
+def test_dispersed_reads_are_bounded_and_nonfinite_points_are_missing(tmp_path, monkeypatch):
+    tile = write_raster(tmp_path / 'islands.tif', np.zeros(10001))
+    original_open = rasterio.open
+    windows = []
+
+    class GuardedDataset:
+        def __init__(self, dataset):
+            self.dataset = dataset
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.dataset.close()
+        def __getattr__(self, name):
+            return getattr(self.dataset, name)
+        def read(self, *args, **kwargs):
+            window = kwargs['window']
+            assert window.width * window.height <= 4096
+            windows.append(window)
+            return self.dataset.read(*args, **kwargs)
+
+    monkeypatch.setattr(rasterio, 'open', lambda *a, **k: GuardedDataset(original_open(*a, **k)))
+    with RasterSampler([tile], 'EPSG:5070') as sampler:
+        z, reason = sampler.sample(np.array([[50, 50], [1000050, 50], [np.inf, 50]]))
+    assert z[:2].tolist() == [0, 0] and reason[2] == 'outside_coverage'
+    assert len(windows) == 2
