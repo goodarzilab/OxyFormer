@@ -86,6 +86,8 @@ class CountyOffsets(nn.Module):
     are reprofiled after changes to f_theta using ``update_identity``. Other
     families have trainable link-scale intercepts: optimize ``training_loss``
     jointly with the network. Labels enter only these training-ID-checked APIs.
+    Profiling requires complete training-ID coverage; repeated rows contribute
+    their supplied weights, as in training_loss. Callers own multiplicity weights.
     Prediction accepts routes alone; unseen strata receive zero. The adapter
     must declare the actual exposure assignment level, so offsets cannot be
     fitted at that exact level. No geographic embedding is constructed.
@@ -125,8 +127,7 @@ class CountyOffsets(nn.Module):
         require(bool(ids) and set(ids) <= set(self.training_ids),
                 "offset labels must belong only to permitted training IDs")
         if complete:
-            require(len(set(ids)) == len(ids) and set(ids) == set(self.training_ids),
-                    "profiling requires all training IDs exactly once")
+            require(set(ids) == set(self.training_ids), "profiling requires all training IDs")
         return tuple(self._routes[oid] for oid in ids)
 
     @torch.no_grad()

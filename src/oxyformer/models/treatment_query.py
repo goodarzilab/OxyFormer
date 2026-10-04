@@ -58,6 +58,17 @@ class TreatmentBasis(nn.Module):
         return torch.cat((standardized, spline), dim=-1)
 
 
+@dataclass(frozen=True, slots=True)
+class EncodedFeatures:
+    """CLS-first states plus the feature padding mask from the same encoding.
+
+    The CLS token is never padding. This explicit bundle preserves row-specific
+    feature masks when precomputing states; zero-valued states are not a mask.
+    """
+    states: Tensor             # [B,P+1,64]
+    padding: Tensor            # [B,P], True means excluded feature
+
+
 class TreatmentQueryNetwork(nn.Module):
     """Independent nuisance backbone and mandatory complete raw-X readout.
 
@@ -66,8 +77,10 @@ class TreatmentQueryNetwork(nn.Module):
     the copy preserves that *within-nuisance* alias. Owned offsets, if supplied,
     are copied and included in the full-network parameter cap.
 
-    x_tokens is [B,P+1,64], with CLS first, or a FeatureBatch to encode with this
-    network's own encoder. Use ``encode`` and ``county_context`` of this instance
+    x_tokens is unpadded [B,P+1,64] with CLS first, an EncodedFeatures bundle
+    from ``encode`` (which preserves padding), or a FeatureBatch to encode with
+    this network's own encoder. Bare tensors declare all their tokens valid.
+    Use ``encode`` and ``county_context`` of this instance
     when precomputing tensors; do not reuse another nuisance's learned states.
     raw_x is [B,raw_x_dim]: all approved covariates in the adapter's frozen
     numerical/missing/category representation, with no learned compression.
@@ -107,16 +120,18 @@ class TreatmentQueryNetwork(nn.Module):
         require(count <= 1_000_000, "complete nuisance network exceeds one-million-parameter cap")
         return count
 
-    def encode(self, batch: FeatureBatch) -> Tensor:
+    def encode(self, batch: FeatureBatch) -> EncodedFeatures:
         features, cls = self.encoder(batch)
-        return torch.cat((cls.unsqueeze(1), features), dim=1)
+        return EncodedFeatures(torch.cat((cls.unsqueeze(1), features), dim=1), batch.padding.clone())
 
-    def _predict(self, a_query: Tensor, x_tokens: Tensor | FeatureBatch, raw_x: Tensor,
+    def _predict(self, a_query: Tensor, x_tokens: Tensor | FeatureBatch | EncodedFeatures, raw_x: Tensor,
                  context: Tensor, design: TreatmentDesign | None = None) -> Tensor:
         padding = None
         if isinstance(x_tokens, FeatureBatch):
-            padding = x_tokens.padding
             x_tokens = self.encode(x_tokens)
+        if isinstance(x_tokens, EncodedFeatures):
+            padding = x_tokens.padding
+            x_tokens = x_tokens.states
         basis = self.basis(a_query, design)
         batch, queries, _ = basis.shape
         require(x_tokens.ndim == 3 and x_tokens.shape[0] == batch and x_tokens.shape[1] >= 1
@@ -126,6 +141,8 @@ class TreatmentQueryNetwork(nn.Module):
         memory = self.memory_norm(torch.cat((x_tokens, context), dim=1))
         memory_padding = None
         if padding is not None:
+            require(padding.dtype == torch.bool and padding.shape == (batch, x_tokens.shape[1] - 1)
+                    and padding.device == x_tokens.device, "encoded feature padding alignment mismatch")
             memory_padding = torch.cat((torch.zeros((batch, 1), dtype=torch.bool, device=padding.device),
                                         padding, torch.zeros((batch, 4), dtype=torch.bool,
                                                              device=padding.device)), dim=1)

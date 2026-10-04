@@ -30,10 +30,18 @@ def calibrated_logit_to_ratio(calibrated_logits: Tensor, *, class_prior: float) 
 def paired_origin_loss(logits: Tensor, pairs: PolicyPairs, *, reduction="mean") -> Tensor:
     """Consume authoritative paired_records weights; never reweight destinations.
 
-    Return weighted BCE. Pair construction and split ownership are supplied by
-    design.policies and the training unit, respectively.
+    Accept [n,2] logits with observed/shifted columns, or [2*n] / [2*n,1]
+    logits in PolicyPairs order (all observed, then all shifted). Transpose
+    query matrices before flattening so origin weights and labels stay aligned.
+    Pair construction and split ownership are supplied by design.policies and
+    the training unit, respectively.
     """
     require(type(pairs) is PolicyPairs, "expected PolicyPairs")
+    size = len(pairs.transformed)
+    if logits.ndim == 2 and logits.shape == (size // 2, 2) and size % 2 == 0:
+        logits = logits.transpose(0, 1).reshape(-1)
+    elif logits.shape == (size, 1):
+        logits = logits[:, 0]
     labels = logits.new_tensor(pairs.transformed)
     weights = logits.new_tensor(pairs.origin_weights)
     return bernoulli_loss(logits, labels, weights, reduction=reduction)
