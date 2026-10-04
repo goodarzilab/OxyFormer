@@ -237,7 +237,7 @@ class AssignmentLaw:
     def __init__(self, frame, row, state, config, components):
         self.components = components
         self.error = state.error
-        self.scale = config.near_scale
+        self.scale = np.longdouble(config.near_scale)
         self.near = config.assignment == "near_deterministic"
         self.rate = -4. if config.extreme_ratios else 0.
         if not self.near:
@@ -254,7 +254,7 @@ class AssignmentLaw:
                 if self.near:
                     rate += 1/self.scale if right <= self.center else -1/self.scale
                 intervals.append(_ExponentialPiece(left, right, rate, 0.))
-        peaks = np.array([piece.peak for piece in intervals])
+        peaks = np.array([piece.peak for piece in intervals], dtype=np.longdouble)
         anchor = max(peaks) if self.rate > 0 else min(peaks)
         relative_heights = self.rate*(peaks-anchor)
         if self.near:
@@ -265,9 +265,9 @@ class AssignmentLaw:
         # largest unnormalized mass may be exp(-millions) inside a support gap.
         log_masses -= log_masses.max()
         log_probabilities = log_masses-logsumexp(log_masses)
-        self.pieces = tuple(_ExponentialPiece(p.lower,p.upper,p.rate,float(logp))
+        self.pieces = tuple(_ExponentialPiece(p.lower,p.upper,p.rate,logp)
                             for p,logp in zip(intervals,log_probabilities))
-        self.probabilities = np.exp(log_probabilities)
+        self.probabilities = np.asarray(np.exp(log_probabilities), dtype=float)
         require(np.isfinite(self.probabilities).all(), "assignment normalization failed")
 
     @property
@@ -302,17 +302,28 @@ class AssignmentLaw:
             value = p.peak+(-distance if p.rate > 0 else distance)
         return float(value+self.error)
 
-    def quadrature(self, order, breakpoints):
+    def quadrature(self, order, breakpoints, *, shift_intervals=None):
         """Integrate the assignment measure in its own length scale.
 
         Every component's full support is included. Panels resolve the decay
         near its density maximum, irrespective of its width in exposure units.
         The returned weights must separately pass the unit-mass certificate.
-        Keep exposure coordinates in extended precision until policy branching:
-        FP64 rounding can move a whole narrow panel across a policy cutoff.
+        Optional recorded-dose shift intervals are evaluated in the scaled
+        coordinate BEFORE forming exposure values. Even extended precision can
+        round a concentrated continuous law onto its policy cutoff.
         """
         nodes, weights = leggauss(order)
-        points, masses = [], []
+        points, masses, moved_masks = [], [], []
+        def record(coordinate, mass, peak, direction, scale):
+            points.append(np.longdouble(peak)+direction*coordinate/scale+self.error)
+            masses.append(mass)
+            if shift_intervals is not None:
+                moved = np.zeros(len(coordinate), dtype=bool)
+                for lower,upper in shift_intervals:
+                    left = scale*direction*(np.longdouble(lower)-self.error-peak)
+                    right = scale*direction*(np.longdouble(upper)-self.error-peak)
+                    moved |= (min(left,right) <= coordinate) & (coordinate <= max(left,right))
+                moved_masks.append(moved)
         for p in self.pieces:
             probability = np.exp(p.log_probability)
             if probability == 0:
@@ -321,9 +332,8 @@ class AssignmentLaw:
                 edges = sorted({p.lower,p.upper} | {v-self.error for v in breakpoints
                                if p.lower < v-self.error < p.upper})
                 for lo,hi in zip(edges[:-1],edges[1:]):
-                    points.append((np.longdouble(lo)+hi)/2
-                                  +np.longdouble(hi-lo)/2*nodes+self.error)
-                    masses.append(probability*(hi-lo)/(p.upper-p.lower)*weights/2)
+                    coordinate = np.longdouble(lo)-p.lower+np.longdouble(hi-lo)/2*(nodes+1)
+                    record(coordinate,probability*(hi-lo)/(p.upper-p.lower)*weights/2,p.lower,1,1)
             else:
                 k = abs(p.rate)
                 direction = -1 if p.rate > 0 else 1
@@ -339,9 +349,9 @@ class AssignmentLaw:
                     mass = probability*(hi-lo)/2*weights*np.exp(-t)/normalizer
                     keep = mass > 0
                     if keep.any():
-                        points.append(np.longdouble(p.peak)+direction*t[keep].astype(np.longdouble)/k+self.error)
-                        masses.append(mass[keep])
-        return np.concatenate(points), np.concatenate(masses)
+                        record(t[keep].astype(np.longdouble),mass[keep],p.peak,direction,k)
+        result = np.concatenate(points), np.concatenate(masses)
+        return result if shift_intervals is None else (*result,np.concatenate(moved_masks))
 
 
 def validate_count_rates(frame, config, policy):
