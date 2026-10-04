@@ -73,6 +73,24 @@ def verify_dependency_result(root):
     return result
 
 
+def verify_dependency_recipe(root, lock):
+    """Bind locked upstream science to this recipe; preserve pre-lock inputs."""
+    request = StageRequest.from_json(dependency_file(root, '_execution/request.json').read_text())
+    task_path = dependency_file(root, '_execution/task.json')
+    require(file_hash(task_path) == request.task_hash, 'dependency task hash mismatch')
+    task = read_mapping(task_path)
+    # Acquisition/design/lock producers run before the final recipe exists.
+    # Their immutable receipts remain valid across later scientific code merges.
+    if not task.get('recipe_lock'):
+        return [task_path]
+    identity_path = dependency_file(root, '_execution/identity.json')
+    identity = read_mapping(identity_path)
+    require(identity.get('head') == request.code_identity, 'dependency code identity mismatch')
+    require(identity.get('scientific_fingerprint') == lock['scientific_fingerprint'],
+            'dependency scientific code/config drift')
+    return [task_path, identity_path]
+
+
 def verify_continuation(task, deps):
     chain = task.get('continuation')
     if chain is None:
@@ -148,6 +166,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     require(deps_env or not needs, 'dependencies require --deps-env')
     deps = resolve_dependencies(needs) if needs else {}
     files = []
+    stage_dependencies = []
     for unit, root in deps.items():
         require(not out.is_relative_to(root) and not root.is_relative_to(out),
                 'output overlaps an upstream attempt')
@@ -163,6 +182,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         if acquisition_receipt is None or (root / '_execution/result.json').exists():
             require((root / '_execution/result.json').is_file(), f'stage receipt missing: {unit}')
             result = verify_dependency_result(root)
+            stage_dependencies.append(root)
             allowed = {a.path for a in result.artifacts} | {
                 '_execution/task.json', '_execution/request.json', '_execution/result.json',
                 '_execution/environment.json', '_execution/identity.json'}
@@ -191,6 +211,10 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         require(file_hash(lock_file) == lock_ref['sha256'], 'recipe lock hash mismatch')
         lock = read_mapping(lock_file)
         verify_recipe(repo, lock)
+        for root in stage_dependencies:
+            for path in verify_dependency_recipe(root, lock):
+                if path not in files:
+                    files.append(path)
         require(file_hash(approvals_file) == file_hash(repo / 'configs/approvals.yaml'),
                 'locked approvals differ from fingerprinted repository config')
     config = {'stage': stage, 'settings': settings, 'approvals': approvals_value,
