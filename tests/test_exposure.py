@@ -307,3 +307,18 @@ def test_collection_rejects_inconsistency(tmp_path, shard_fixture, kind):
     result = run_stage(req)
     assert result.status == 'fail', result.message
     assert not (Path(req.output_dir) / 'atlas.parquet').exists()
+
+
+def test_unused_census_name_bytes_do_not_change_numeric_reader(tmp_path):
+    _, archive = write_census_archives(tmp_path)
+    with zipfile.ZipFile(archive) as z:
+        contents = {name: z.read(name) for name in z.namelist()}
+    geography = bytearray(contents['algeo2010.sf1'])
+    geography[226:230] = b'Pe\xf1a'  # unused NAME, fixed byte positions retained
+    contents['algeo2010.sf1'] = bytes(geography)
+    with zipfile.ZipFile(archive, 'w') as z:
+        for name, data in contents.items():
+            z.writestr(name, data)
+    table = read_sf1_population(archive, 'AL', '01')
+    assert table.block_id.tolist() == blocks().block_id.tolist()
+    assert table.population.tolist() == [40, 60]

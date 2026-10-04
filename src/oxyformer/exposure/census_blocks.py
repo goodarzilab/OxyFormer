@@ -56,13 +56,15 @@ def read_sf1_population(archive, state_abbreviation, state_fips):
         require(names.count(geo_name) == names.count(data_name) == 1, 'required SF1 members missing/duplicate')
         with z.open(geo_name) as stream:
             for raw in stream:
-                line = raw.decode('ascii')
+                # One byte per fixed-width position; NAME is not interpreted.
+                # Decode only selected codes below as ASCII, not unused names.
+                line = raw.decode('latin-1')
                 require(len(line.rstrip('\r\n')) == 500, 'SF1 geography record must be 500 characters')
                 if line[8:11] not in ('101', '140', '040') or line[11:13] != '00' or line[13:16] != '000':
                     continue
                 require(line[:6].strip() == 'SF1ST' and line[6:8] == state_abbreviation and
                         line[27:29] == state_fips, 'SF1 state/file mismatch')
-                values = {k: line[a:b] for k, (a, b) in GEO_FIELDS.items()}
+                values = {k: raw[a:b].decode('ascii') for k, (a, b) in GEO_FIELDS.items()}
                 key = values['logrecno']
                 require(key.isdigit() and key not in geography, 'duplicate/invalid SF1 LOGRECNO')
                 level = line[8:11]
