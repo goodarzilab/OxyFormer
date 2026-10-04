@@ -266,8 +266,9 @@ def test_missing_biomarker_record_preserved_for_review(release):
     assert row.hc53_raw is None and row.hc55_raw is None
     assert row.raw_hb_state == "no_biomarker_record"
     assert row.reasons == ("missing_biomarker_record",)
-    with pytest.raises(ContractError, match="require review"):
-        audit.assert_inference_ready()
+    audit.assert_inference_ready()
+    assert audit.review_records == ((row.original_id, row.review_flags),)
+    assert audit.blocking_review_records == ()
 
 
 @pytest.mark.parametrize("module,key,value,reason", [
@@ -508,8 +509,10 @@ def test_absent_biomarker_keeps_independently_known_eligibility(release, year):
     assert audit.eligible_count == 4 and audit.eligible_weight_sum == 10.0
     assert dict(audit.eligible_status_counts) == {"measured": 3, "no_biomarker_record": 1}
     assert dict(audit.weighted_eligible_status_sums) == {"measured": 9.0, "no_biomarker_record": 1.0}
-    with pytest.raises(ContractError, match="require review"):
-        audit.assert_inference_ready()
+    audit.assert_inference_ready()
+    assert audit.review_records == ((row.original_id, row.review_flags),)
+    assert audit.blocking_review_records == ()
+    assert EndesAudit.from_json(audit.to_json()) == audit
 
 
 @pytest.mark.parametrize("year", [2023, 2024])
@@ -539,6 +542,10 @@ def test_eligible_status_partition_reconciles_absence_and_all_nonmeasurements(re
     absent = next(r for r in records if r.state == "biomarker_record_absent")
     assert absent.eligibility == "eligible" and not absent.analysis_eligible
     assert not any(r.analysis_eligible for r in records if r.state != "measured")
+    audit.assert_inference_ready()
+    assert audit.review_records == ((absent.original_id, absent.review_flags),)
+    assert audit.blocking_review_records == ()
+    assert EndesAudit.from_json(audit.to_json()) == audit
     assert load_endes(*args) == (records, audit)
 
 
@@ -555,6 +562,8 @@ def test_absent_record_does_not_invent_age_eligibility(release, year, age):
     assert audit.eligible_count == 3 and audit.eligible_weight_sum == 9.0
     assert dict(audit.eligible_status_counts) == {"measured": 3}
     assert dict(audit.counts)["biomarker_record_absent"] == 1
+    assert audit.blocking_review_records == audit.review_records == ((row.original_id, row.review_flags),)
+    assert EndesAudit.from_json(audit.to_json()) == audit
     with pytest.raises(ContractError, match="require review"):
         audit.assert_inference_ready()
 
@@ -590,3 +599,67 @@ def test_year_dictionary_altitude_range(release, year, altitude, valid):
     else:
         with pytest.raises(ContractError, match="altitude outside year-documented range"):
             load_endes(*args)
+
+
+@pytest.mark.parametrize("year", [2023, 2024])
+@pytest.mark.parametrize("age", ["0", "98", ""])
+def test_present_record_unresolved_age_still_blocks(release, year, age):
+    def mutate(tables):
+        tables["RECH1"][0]["HV105"] = age
+        tables["RECH6"][0]["HC1"] = ""
+    args = release(year, mutate=mutate)
+    records, audit = load_endes(*args)
+    row = first_child(records)
+    assert row.eligibility == "unknown" and row.state == "eligibility_unknown"
+    assert row.review_flags == ("missing_biomarker_age",)
+    assert not row.analysis_eligible
+    assert audit.blocking_review_records == audit.review_records == ((row.original_id, row.review_flags),)
+    assert EndesAudit.from_json(audit.to_json()) == audit
+    assert load_endes(*args) == (records, audit)
+    with pytest.raises(ContractError, match="require review"):
+        audit.assert_inference_ready()
+
+
+@pytest.mark.parametrize("changes,blocking", [
+    ({}, False),
+    ({"eligibility": "unknown"}, True),
+    ({"state": "discordant"}, True),
+    ({"review_flags": ("missing_biomarker_record", "additional_issue")}, True),
+    ({"review_flags": ("unrecognized_issue",)}, True),
+    ({"review_flags": ()}, False),
+])
+def test_blocking_review_qualification(release, changes, blocking):
+    records, audit = load_endes(*release(mutate=lambda t: t["RECH6"].pop(0)))
+    row = replace(first_child(records), **changes)
+    assert endes._requires_blocking_review(row) is blocking
+
+
+@pytest.mark.parametrize("year", [2023, 2024])
+@pytest.mark.parametrize("issue,error", [
+    ("unknown_eligibility", "require review"),
+    ("discordance", "require review"),
+    ("singleton", "singleton"),
+    ("no_measured", "no measured"),
+])
+def test_informational_absence_does_not_hide_other_blockers(release, year, issue, error):
+    def mutate(tables):
+        tables["RECH6"].pop(0)
+        if issue == "unknown_eligibility":
+            tables["RECH1"][1]["HV105"] = "0"
+            tables["RECH6"][0]["HC1"] = ""
+        elif issue == "discordance":
+            tables["RECH6"][0].update(HC53="999", HC55="0")
+        elif issue == "singleton":
+            tables["RECH0"][0]["HV022"] = "03"
+        else:
+            for child in tables["RECH6"]:
+                child.update(HC53="999", HC55="9")
+    records, audit = load_endes(*release(year, mutate=mutate))
+    absent = first_child(records)
+    assert absent.eligibility == "eligible" and absent.state == "biomarker_record_absent"
+    assert (absent.original_id, absent.review_flags) in audit.review_records
+    assert absent.original_id not in dict(audit.blocking_review_records)
+    assert bool(audit.blocking_review_records) == (issue in {"unknown_eligibility", "discordance"})
+    assert EndesAudit.from_json(audit.to_json()) == audit
+    with pytest.raises(ContractError, match=error):
+        audit.assert_inference_ready()

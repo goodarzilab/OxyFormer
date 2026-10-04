@@ -16,6 +16,9 @@ covariates. This adapter grants no predictor permissions, defines no support
 policy, and does not fit or compute a variance. Call audit.assert_inference_ready()
 before using its measured subset; a pass still requires downstream identification,
 frozen target/support, approved adjustment and survey-variance validation.
+Known-eligible absent biomarker records stay flagged and unmeasured without
+blocking ingestion. Unresolved eligibility and discordance still block. Audit
+readiness neither identifies a missingness mechanism nor establishes ignorability.
 """
 from __future__ import annotations
 
@@ -112,6 +115,7 @@ class EndesAudit(Immutable):
     eligible_weight_sum: float
     measured_weight_sum: float
     review_records: tuple[tuple[str, tuple[str, ...]], ...]
+    blocking_review_records: tuple[tuple[str, tuple[str, ...]], ...]
     sampled_psus_by_stratum: tuple[tuple[str, tuple[str, ...]], ...]
     measured_psus_by_stratum: tuple[tuple[str, tuple[str, ...]], ...]
     singleton_strata: tuple[str, ...]
@@ -239,6 +243,16 @@ def _biomarker(raw_hb, raw_status, mapping):
     elif code != 0 and hb is not None:
         flags.append("valid_hb_unspecified_status" if code == 9 else "valid_hb_nonmeasurement_status")
     return hb, hb_state, status, tuple(flags)
+
+
+def _requires_blocking_review(record: EndesPerson) -> bool:
+    """Only a sole absence flag on an independently eligible absent row is informational."""
+    informational = (
+        record.eligibility == "eligible"
+        and record.state == "biomarker_record_absent"
+        and record.review_flags == ("missing_biomarker_record",)
+    )
+    return bool(record.review_flags) and not informational
 
 
 def _check_requests(records, bundle):
@@ -454,8 +468,9 @@ def load_endes(bundle: EndesBundle, year: int, mapping: dict,
             measured[row.stratum_id].add(row.psu_id)
     singleton = tuple(sorted(h for h, psus in sampled.items() if len(psus) == 1))
     review = tuple((r.original_id, r.review_flags) for r in records if r.review_flags)
+    blocking_review = tuple((r.original_id, r.review_flags) for r in records if _requires_blocking_review(r))
     blockers = []
-    if review:
+    if blocking_review:
         blockers.append("biomarker/eligibility records require review")
     if singleton:
         blockers.append("singleton strata require a documented variance treatment")
@@ -480,7 +495,7 @@ def load_endes(bundle: EndesBundle, year: int, mapping: dict,
             (status, math.fsum(values)) for status, values in eligible_status_weights.items())),
         eligible_weight_sum=math.fsum(r.survey_weight for r in records if r.eligibility == "eligible"),
         measured_weight_sum=math.fsum(r.survey_weight for r in records if r.analysis_eligible),
-        review_records=review, sampled_psus_by_stratum=tuple(sorted((h, tuple(sorted(p))) for h, p in sampled.items())),
+        review_records=review, blocking_review_records=blocking_review, sampled_psus_by_stratum=tuple(sorted((h, tuple(sorted(p))) for h, p in sampled.items())),
         measured_psus_by_stratum=tuple(sorted((h, tuple(sorted(p))) for h, p in measured.items())),
         singleton_strata=singleton, finite_population_status="not_documented; HV033 preserved, not interpreted as FPC",
         replicate_weight_status="not_documented", household_without_roster_ids=tuple(sorted(

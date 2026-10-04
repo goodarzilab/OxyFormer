@@ -35,7 +35,10 @@ source_notes:
     completed ages 1-4 establish the documented 4-59-month age domain without
     imputing an exact month. Age 0 or unknown age cannot establish this domain.
     Other selection/residence requirements still apply. Missing records remain
-    flagged for review and never enter the measured-Hb set. Eligible status
+    flagged for review and never enter the measured-Hb set. A sole absence flag
+    on a known-eligible absent record is informational; unresolved eligibility,
+    discordance and any additional or unrecognized flag still block readiness.
+    Absence is not equated with refusal or unspecified HC55 status. Eligible status
     counts and weight sums partition only the independently eligible population;
     reported measured status still needs valid raw Hb for analysis eligibility.
   eligibility_references:
@@ -48,6 +51,9 @@ source_notes:
     HV022 strata. HV021 is also preserved. These normalized weight sums are not
     population counts. Unmeasured eligible children remain in the audit; complete
     cases do not establish identification for the full eligible population.
+    Ingestion readiness does not establish ignorability or variance validity.
+    The audit preserves all flagged records and separately lists the blocking
+    subset, including unknown-eligibility absences even with the same absence flag.
     No singleton correction, finite-population fraction or replicate-weight
     procedure is invented. HV033 is preserved without interpreting it as an FPC.
   exposure: >-
