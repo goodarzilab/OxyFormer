@@ -28,6 +28,7 @@ import tempfile
 import numpy as np
 import pandas as pd
 import rasterio
+from pyproj.exceptions import ProjError
 import yaml
 from oxyformer.contracts import StageRequest, StageResult
 from oxyformer.data.source_manifest import load_source
@@ -177,6 +178,9 @@ def _build_shard(request, task, config, groups, output):
     census, census_tar = _receipt(request, task['census'])
     dem, dem_tar = _receipt(request, task['dem'])
     require(census['manifest_id'] == 'census' and dem['manifest_id'] == 'dem', 'acquisition source mismatch')
+    dem_source = load_source('dem')
+    require(dem['manifest_sha256'] == sha256(canonical_json(dem_source).encode()).hexdigest(),
+            'DEM receipt differs from reviewed source configuration')
     source = load_source(config['census_source'])
     require(census['manifest_sha256'] == sha256(canonical_json(source).encode()).hexdigest(),
             'Census receipt differs from reviewed source configuration')
@@ -295,5 +299,5 @@ def run_stage(request: StageRequest) -> StageResult:
         return result
     except FileNotFoundError as exc:
         return StageResult(request_hash=request.content_hash, status='blocked', artifacts=(), message=str(exc))
-    except (ValueError, KeyError, TypeError, OSError, rasterio.errors.RasterioError) as exc:
+    except (ValueError, KeyError, TypeError, OSError, ProjError, rasterio.errors.RasterioError) as exc:
         return StageResult(request_hash=request.content_hash, status='fail', artifacts=(), message=str(exc))

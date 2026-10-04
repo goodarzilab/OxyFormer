@@ -75,6 +75,8 @@ def read_sf1_population(archive, state_abbreviation, state_fips):
                 geography[key] = (level, ident, int(values['population']))
         with z.open(data_name) as stream:
             for row in csv.reader(io.TextIOWrapper(stream, encoding='ascii')):
+                # Official 2010 SF1 p. 6-21: file 01 has P1 only. P2 is
+                # in file 02, P3 in file 03; this is not the 2000 SF1 layout.
                 require(len(row) == 6, 'SF1 segment 01 requires five linking fields and P0010001')
                 require(row[:4] == ['SF1ST', state_abbreviation, '000', '01'], 'SF1 segment identity mismatch')
                 key = row[4]

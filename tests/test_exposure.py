@@ -223,7 +223,10 @@ def request(directory, stage, task, dependencies, config=None):
 
 
 @pytest.fixture
-def shard_fixture(tmp_path):
+def shard_fixture(tmp_path, monkeypatch):
+    # Explicit synthetic DEM inventory; production uses the merged source registry.
+    monkeypatch.setattr('oxyformer.exposure.build.load_source',
+                        lambda name: {'synthetic': True} if name == 'dem' else load_source(name))
     census_files = []
     for state, fips in [('AL', '01'), ('AZ', '04')]:
         bzip, szip = write_census_archives(tmp_path / state, state, fips)
@@ -322,3 +325,44 @@ def test_unused_census_name_bytes_do_not_change_numeric_reader(tmp_path):
     table = read_sf1_population(archive, 'AL', '01')
     assert table.block_id.tolist() == blocks().block_id.tolist()
     assert table.population.tolist() == [40, 60]
+
+
+def test_undeclared_mask_is_ignored_but_internal_mask_is_accounted(tmp_path):
+    tile = write_raster(tmp_path / 'dem.tif', [0, 0])
+    with rasterio.Env(GDAL_TIFF_INTERNAL_MASK=False):
+        with rasterio.open(tile.path, 'r+') as ds:
+            ds.write_mask(np.zeros((1, 2), dtype='uint8'))
+    assert Path(tile.path + '.msk').exists()
+    assert file_hash(tile.path) == tile.sha256
+    result, qc = build_exposure(sources(tile), blocks(), SPEC)
+    assert result.pressure_mmhg.eq(760).all() and result.missing_population.eq(0).all()
+    # The environment change is scoped, and the ignored sibling still exists.
+    with rasterio.open(tile.path) as ds:
+        assert ds.read(1, masked=True).mask.all()
+    internal = write_raster(tmp_path / 'internal.tif', [0, 0])
+    with rasterio.Env(GDAL_TIFF_INTERNAL_MASK=True):
+        with rasterio.open(internal.path, 'r+') as ds:
+            ds.write_mask(np.zeros((1, 2), dtype='uint8'))
+    internal = replace(internal, sha256=file_hash(internal.path))
+    assert not Path(internal.path + '.msk').exists()
+    result, qc = build_exposure(sources(internal), blocks(), SPEC)
+    assert result.missing_population.eq(100).all() and result.pressure_mmhg.isna().all()
+
+
+@pytest.mark.parametrize('problem', ['dem_identity', 'crs'])
+def test_stage_rejects_wrong_dem_source_and_invalid_crs(tmp_path, shard_fixture, problem):
+    inventory, _ = shard_fixture
+    task = json.loads((tmp_path / 'shard-AL/task.json').read_text())
+    deps = [inventory, tmp_path / 'census-receipt.json', tmp_path / 'census.tar',
+            tmp_path / 'dem-receipt.json', tmp_path / 'dem.tar']
+    if problem == 'dem_identity':
+        receipt = json.loads(deps[3].read_text())
+        receipt['manifest_sha256'] = 'c' * 64
+        deps[3].write_text(canonical_json(receipt))
+    else:
+        task['raster_metadata']['synthetic']['crs'] = 'EPSG:invalid'
+    req = request(tmp_path / ('reject-' + problem), 'exposure-atlas', task, deps)
+    result = run_stage(req)
+    assert result.status == 'fail'
+    assert ('reviewed source configuration' if problem == 'dem_identity' else 'Invalid projection') in result.message
+    assert not (Path(req.output_dir) / 'exposure.parquet').exists()

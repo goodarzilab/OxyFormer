@@ -71,6 +71,11 @@ class RasterSampler:
 
     def __enter__(self):
         try:
+            # Bind reads to the verified TIFF itself. GDAL otherwise discovers
+            # undeclared .msk/.aux.xml siblings, including inside a tar archive.
+            # Internal TIFF masks remain part of the verified bytes and are used.
+            self.stack.enter_context(rasterio.Env(GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR',
+                                                 GDAL_PAM_ENABLED=False))
             require(self.tiles and len({t.resource_id for t in self.tiles}) == len(self.tiles),
                     'empty or duplicate DEM resources')
             for tile in self.tiles:
