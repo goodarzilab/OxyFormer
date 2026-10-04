@@ -96,6 +96,11 @@ class ShiftOrStayPolicy(Immutable):
 
     @property
     def is_identity(self) -> bool:
+        """Pointwise identity of the frozen map, not equality almost surely.
+
+        The plan includes both endpoints of S=[L,U-delta]. At width == delta,
+        the lower endpoint still moves, so that policy is not declared identity.
+        """
         return self.delta_mmhg == 0 or all(
             upper - lower < self.delta_mmhg
             for _, components in self.components_by_key for lower, upper in components

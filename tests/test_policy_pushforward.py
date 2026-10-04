@@ -173,3 +173,15 @@ def test_tract_recipe_preserves_unresolved_support():
     assert config["components_by_key"] is config["policy_id"] is config["support_design_hash"] is None
     assert config["transformed_weights"] == "origin"
     assert config["refit_support_in_outcome_folds"] is False
+
+
+def test_width_equal_to_shift_retains_frozen_closed_boundary():
+    # Plan 4.1: S=[L,U-delta], empty only if width < delta. At equality
+    # S={L}; the map is identity a.s. under a continuous law, not pointwise.
+    p = policy(((0, 2),))
+    assert not p.is_identity
+    result = p.apply([0, 1, 2], covariates(3))
+    assert result.d_mmhg == (2, 1, 2)
+    assert result.moved == (True, False, False)
+    assert not result.identity
+    assert_array_equal(ratio(p, [0.5, 1.5], UniformShiftTruth(upper=2).density), [1, 1])
