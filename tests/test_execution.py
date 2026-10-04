@@ -614,3 +614,47 @@ def test_invalid_json_never_falls_back_to_yaml(tmp_path):
     task.write_text('lr: 1.0e-5\n')
     with pytest.raises(ContractError, match='invalid JSON'):
         read_mapping(task)
+
+
+@pytest.mark.parametrize('upstream_locked,change,error', [
+    (True, 'src/science.py', 'dependency scientific code/config drift'),
+    (True, 'README.md', None),
+    (False, 'src/science.py', None),
+])
+def test_locked_campaign_checks_upstream_science(runtime, tmp_path, monkeypatch,
+                                                upstream_locked, change, error):
+    repo, upstream = runtime
+    if upstream_locked:
+        old_task = locked_task(repo, upstream, tmp_path / 'old-lock', monkeypatch)
+        value = json.loads(old_task.read_text())
+        value.update(id='upstream', campaign='old-campaign')
+        old_task.write_text(json.dumps(value))
+    else:
+        old_task = task_file(upstream, id='upstream')
+    assert run('dummy', upstream, repo, deps_env=True, task_file=old_task).status == 'pass'
+    before = {str(p): file_hash(p) for p in upstream.rglob('*') if p.is_file()}
+    (repo / change).write_text('changed\n')
+    head = commit(repo)
+    consumer = tmp_path / 'consumer'
+    consumer.mkdir()
+    (consumer / 'code_commit.txt').write_text(head)
+    lock_task = locked_task(repo, consumer, tmp_path / 'new-lock', monkeypatch)
+    lock_ref = json.loads(lock_task.read_text())['recipe_lock']
+    spec = {'schema_version': 1, 'id': 'new-campaign', 'kind': 'screening',
+            'prerequisites': [],
+            'inputs': {'campaign-lock': ['recipe_lock.json'], 'upstream': ['value.json']},
+            'recipe_lock': lock_ref,
+            'work': [{'id': 'work', 'stage': 'dummy', 'outputs': ['value.json'],
+                      'slices': [{'gpus': 0, 'wall_seconds': 60}]}],
+            'collector': {'stage': 'dummy', 'outputs': ['summary.json'], 'wall_seconds': 60}}
+    generated = expand_campaign(spec, {})
+    selected = consumer / 'generated-task.json'
+    selected.write_text(json.dumps(generated['tasks'][0]))
+    monkeypatch.setenv('SWARM_DEP_UPSTREAM', str(upstream))
+    if error:
+        with pytest.raises(ContractError, match=error):
+            run('dummy', consumer, repo, deps_env=True, task_file=selected)
+        assert not (consumer / 'value.json').exists()
+    else:
+        assert run('dummy', consumer, repo, deps_env=True, task_file=selected).status == 'pass'
+    assert {str(p): file_hash(p) for p in upstream.rglob('*') if p.is_file()} == before
