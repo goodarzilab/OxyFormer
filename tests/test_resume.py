@@ -11,7 +11,7 @@ import pytest
 import torch
 
 from test_pretrain import cpu_only, make_case
-from oxyformer.provenance import ContractError, read_artifact
+from oxyformer.provenance import ContractError, canonical_json, read_artifact
 from oxyformer.training.checkpoint import (
     CheckpointArtifact, CheckpointRequest, capture_rng, load_checkpoint, restore_rng, save_checkpoint,
 )
@@ -322,3 +322,69 @@ def test_cpu_rng_ignores_previously_initialized_cuda(cuda_rng_on_cpu, monkeypatc
     torch.testing.assert_close(torch.rand(5), expected, rtol=0, atol=0)
     with pytest.raises(ContractError, match="RNG device mismatch"):
         restore_rng(state, "cuda:0")
+
+
+@pytest.mark.parametrize("completed", [False, True])
+def test_changed_default_dtype_rejects_resume_before_casting(tmp_path, completed):
+    view, split, config = make_case(tmp_path)
+    config = replace(config, settings=replace(config.settings, max_epochs=1))
+    previous_dtype = torch.get_default_dtype()
+    try:
+        torch.set_default_dtype(torch.float64)
+        first = pretrain(view, split, replace(config, max_batches=None if completed else 1), 1103)
+        predecessor_bytes = Path(first.path).read_bytes()
+        torch.set_default_dtype(torch.float32)
+        resume = replace(config, predecessor=first, output_dir=str(tmp_path / "resume"))
+        before = capture_rng()
+        with pytest.raises(ContractError, match="identity"):
+            pretrain(view, split, resume, 1103)
+        assert not Path(resume.output_dir).exists()
+        assert_state_equal(before, capture_rng())
+        assert Path(first.path).read_bytes() == predecessor_bytes
+    finally:
+        torch.set_default_dtype(previous_dtype)
+
+
+@pytest.mark.parametrize("empty_partition", ["stopping", "fitting"])
+def test_automatic_stopping_keeps_observed_targets_in_both_partitions(tmp_path, empty_partition):
+    view, split, config = make_case(tmp_path)
+    ranked = sorted(view.original_ids, key=lambda oid: sha256(
+        canonical_json([1103, oid, "ssl-stopping"]).encode()).digest())
+    missing = {ranked[0]} if empty_partition == "stopping" else set(ranked[2:])
+    view = replace(view, values=tuple((None, None, None) if oid in missing else row
+                                     for oid, row in zip(view.original_ids, view.values)))
+    settings = replace(config.settings, stopping_ids=(), max_epochs=1,
+                       validation_fraction=.1 if empty_partition == "stopping" else .9)
+    config = replace(config, settings=settings)
+    full = pretrain(view, split, config, 1103)
+    state = load_checkpoint(full, full.identity)
+    assert full.complete
+    assert set(state["fitting_ids"]) - missing
+    assert set(state["stopping_ids"]) - missing
+    assert len(state["stopping_ids"]) == (1 if empty_partition == "stopping" else 9)
+    assert set(state["fitting_ids"]) | set(state["stopping_ids"]) == set(split.training_ids(0))
+    assert set(state["fitting_ids"]).isdisjoint(state["stopping_ids"])
+    first = pretrain(view, split, replace(config, output_dir=str(tmp_path / "first"), max_batches=1), 1103)
+    resumed = pretrain(view, split, replace(config, output_dir=str(tmp_path / "resume"), predecessor=first), 1103)
+    assert_state_equal(state, load_checkpoint(resumed, resumed.identity))
+
+
+def test_compressed_checkpoint_is_refused_before_decompression(tmp_path, monkeypatch):
+    from io import BytesIO
+    import zipfile
+    view, split, config = make_case(tmp_path)
+    first = pretrain(view, split, replace(config, max_batches=1), 1103)
+    stream = BytesIO()
+    with zipfile.ZipFile(first.path) as original, zipfile.ZipFile(
+            stream, "w", compression=zipfile.ZIP_DEFLATED) as compressed:
+        for name in original.namelist():
+            compressed.writestr(name, original.read(name))
+    payload = stream.getvalue()
+    path = tmp_path / "compressed.ofc"
+    path.write_bytes(payload)
+    descriptor = replace(first, path=str(path), sha256=sha256(payload).hexdigest())
+    def forbid_decompression(*args, **kwargs):
+        pytest.fail("checkpoint member was read before rejecting compression")
+    monkeypatch.setattr(zipfile.ZipFile, "read", forbid_decompression)
+    with pytest.raises(ContractError, match="compressed checkpoint"):
+        load_checkpoint(descriptor, descriptor.identity)
