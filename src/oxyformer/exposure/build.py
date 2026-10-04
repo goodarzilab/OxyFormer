@@ -72,7 +72,7 @@ def build_exposure(source_manifests, geography, allocation_spec):
                'source_identities': source_manifests.identity_map(),
                'dem_tiles': [t.identity() for t in sorted(source_manifests.dem_tiles, key=lambda t: t.resource_id)],
                'quantile_interpretation': QUANTILE_INTERPRETATION,
-               'block_count': len(blocks), 'population': int(blocks.population.sum()), 'blocks': []}
+               'block_count': len(blocks), 'population': sum(int(value) for value in blocks.population), 'blocks': []}
     rows = []
     with RasterSampler(source_manifests.dem_tiles, allocation_spec.placement_crs) as sampler:
         for tract_id, tract in blocks.groupby('tract_id', sort=True):
@@ -105,7 +105,9 @@ def build_exposure(source_manifests, geography, allocation_spec):
                     ledger['covered_population'] = max(0.0, pop - missing)
                     missing_mass.append(missing)
                     quality['blocks'].append(ledger)
-                total = int(tract.population.sum())
+                # Counts are validated integral; accumulate as Python integers
+                # so neither float32 rounding nor fixed-width overflow changes mass.
+                total = sum(int(value) for value in tract.population)
                 missing = math.fsum(missing_mass)
                 complete = total > 0 and missing == 0
                 quantiles = weighted_quantiles(np.concatenate(elevations), np.concatenate(masses)) if complete else [None] * 3

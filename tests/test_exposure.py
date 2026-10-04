@@ -366,3 +366,23 @@ def test_stage_rejects_wrong_dem_source_and_invalid_crs(tmp_path, shard_fixture,
     assert result.status == 'fail'
     assert ('reviewed source configuration' if problem == 'dem_identity' else 'Invalid projection') in result.message
     assert not (Path(req.output_dir) / 'exposure.parquet').exists()
+
+
+def test_integral_float32_population_totals_remain_exact(tmp_path):
+    count = 16778
+    ids = [f'01001000{1 + i // 8389:01d}00{1 + i % 8389:04d}' for i in range(count)]
+    pop = np.full(count, 1000, dtype=np.float32)
+    pop[-1] = 217
+    geography = gpd.GeoDataFrame(dict(block_id=ids, tract_id=[x[:11] for x in ids], population=pop),
+        geometry=[box(i * 100, 0, (i + 1) * 100, 100) for i in range(count)], crs='EPSG:5070')
+    tile = write_raster(tmp_path / 'large-total.tif', np.zeros(count))
+    expected = 16777217
+    assert int(geography.population.sum()) != expected  # reproduces float32 accumulation loss
+    result, qc = build_exposure(sources(tile), geography, replace(SPEC, scenarios=('centroid',)))
+    assert qc['population'] == expected
+    assert result.population.sum() == expected
+    assert result.pressure_mmhg.eq(760).all()
+    # Also exercise loss within a single tract, not just across tract totals.
+    compact = blocks(pop=np.array([16777216, 1], dtype=np.float32))
+    result, qc = build_exposure(sources(tile), compact, replace(SPEC, scenarios=('centroid',)))
+    assert qc['population'] == result.population.iloc[0] == expected
