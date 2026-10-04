@@ -472,3 +472,10 @@ def test_invalid_seed_values_remain_blocked(backend, seed):
     prototype = backend[0]()
     with pytest.raises(ContractError, match='integer seed'):
         type(prototype)(prototype.checkpoint, task='outcome', family='identity', seed=seed)
+
+
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float64, torch.bfloat16])
+def test_real_floating_query_representations(backend, fold, dtype):
+    model = fitted(backend, fold)
+    result = query(model, fold[1], torch.ones(2, 1, 1, dtype=dtype))
+    assert result.dtype == dtype and torch.isfinite(result).all()
