@@ -12,18 +12,30 @@ completion from a resumable execution slice. Its archive contains both the lates
 model (paired with optimizer state) and best_model (for downstream initialization).
 The four-hour bound is cooperative at minibatch boundaries, including validation;
 reserve enough checkpoint_margin_seconds for the longest batch and serialization.
+
+The numerical policy owns autocast, gradient/inference mode, implicit CPU
+allocation and caller RNG restoration. It binds dtype, backend dispatch,
+precision/reduction, threading/determinism and numerical environment variables.
+One invocation must have exclusive use of process-global training state. External
+floating-point control-register changes, dynamic monkeypatches, distributed
+execution and equivalence across CPU microarchitectures are outside this runtime
+contract; platform/build/CPU capability are bound, not a hardware sandbox.
+Use a fresh CheckpointRequest for each continued attempt; requests remain latched.
 """
 from __future__ import annotations
 
+from contextlib import ExitStack, contextmanager
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from hashlib import sha256
 import importlib.metadata
 import json
 import math
+import os
 from pathlib import Path
 import platform
 import random
+import statistics
 import time
 from typing import Literal
 
@@ -34,7 +46,7 @@ from torch.nn import functional as F
 
 from oxyformer.contracts import CovariateView, SplitManifest
 from oxyformer.models.encoder import FeatureEncoder
-from oxyformer.models.tokens import FeatureBatch, FeatureSpec
+from oxyformer.models.tokens import FeatureBatch, FeatureSpec, FeatureTokenizer
 from oxyformer.provenance import ArtifactLineage, Immutable, canonical_json, require, unique
 from oxyformer.training.checkpoint import (
     CheckpointArtifact, CheckpointIdentity, CheckpointRequest,
@@ -43,6 +55,36 @@ from oxyformer.training.checkpoint import (
 
 
 _MAX_SEED = (1 << 64) - 1
+
+
+@dataclass(frozen=True, slots=True)
+class _NumericalPolicy:
+    """Owned execution semantics, shared by execution and cache identity."""
+    version: str = "ssl-full-precision-v1"
+    factory_device: str = "cpu"
+    autocast: bool = False
+    gradients: bool = True
+    inference: bool = False
+
+    def identity(self):
+        return {"execution_" + key: str(value) for key, value in asdict(self).items()}
+
+    @contextmanager
+    def scope(self, device):
+        with ExitStack() as stack:
+            stack.enter_context(torch.inference_mode(self.inference))
+            stack.enter_context(torch.set_grad_enabled(self.gradients))
+            stack.enter_context(torch.device(self.factory_device))
+            for kind in ("cpu",) + (("cuda",) if device.type == "cuda" else ()):
+                stack.enter_context(torch.autocast(kind, enabled=self.autocast))
+            caller_rng = capture_rng(device)
+            try:
+                yield
+            finally:
+                restore_rng(caller_rng, device)
+
+
+_NUMERICAL_POLICY = _NumericalPolicy()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -141,6 +183,25 @@ def _subset(view: CovariateView, ids: tuple[str, ...]) -> CovariateView:
                                    parent_hashes=(view.content_hash,)))
 
 
+
+def _population_moments(values):
+    if not values:
+        return 0.0, 1.0
+    if all(value == values[0] for value in values):
+        # True constancy must not become tiny variance through rounded summation.
+        return float(values[0]), 1.0
+    # Preserve ordinary NumPy bits, but own its ambient warning/error policy.
+    with np.errstate(all="ignore"):
+        mean, scale = float(np.mean(values)), float(np.std(values))
+    if not math.isfinite(mean) or not math.isfinite(scale) or scale == 0.0:
+        # The stdlib accumulates exact rational moments and avoids squaring in
+        # float64. This is ddof=0, with no clipping or change of transformation.
+        mean, scale = float(statistics.mean(values)), float(statistics.pstdev(values))
+    require(math.isfinite(mean) and math.isfinite(scale) and scale > 0,
+            "population moments are not representable")
+    return mean, scale
+
+
 def fit_preprocessing(view: CovariateView, settings: SSLSettings) -> tuple[FeatureSpec, ...]:
     """Fit on the optimization subset only, excluding the stopping subset."""
     kinds = dict(settings.feature_kinds)
@@ -149,9 +210,8 @@ def fit_preprocessing(view: CovariateView, settings: SSLSettings) -> tuple[Featu
         values = [x for x in view.column(name) if x is not None]
         if kinds[name] == "numeric":
             require(all(type(x) in (int, float) for x in values), f"non-numeric feature: {name}")
-            mean = float(np.mean(values)) if values else 0.0
-            scale = float(np.std(values)) if values else 1.0
-            result.append(FeatureSpec(name=name, kind="numeric", mean=mean, scale=scale or 1.0))
+            mean, scale = _population_moments(values)
+            result.append(FeatureSpec(name=name, kind="numeric", mean=mean, scale=scale))
         else:
             categories = {canonical_json(x): x for x in values}
             result.append(FeatureSpec(name=name, kind="categorical",
@@ -235,12 +295,36 @@ def environment_identity(device: torch.device) -> tuple[tuple[str, str], ...]:
               "torch_build": sha256(torch.__config__.show().encode()).hexdigest(),
               "threads": str(torch.get_num_threads()), "interop_threads": str(torch.get_num_interop_threads()),
               "device": str(device), "deterministic": str(torch.are_deterministic_algorithms_enabled()),
+              "deterministic_warn_only": str(torch.is_deterministic_algorithms_warn_only_enabled()),
+              "cpu_capability": torch.backends.cpu.get_cpu_capability(),
               "matmul_precision": torch.get_float32_matmul_precision(),
               "cuda": str(torch.version.cuda), "cudnn": str(torch.backends.cudnn.version()),
               "cudnn_deterministic": str(torch.backends.cudnn.deterministic),
               "cudnn_benchmark": str(torch.backends.cudnn.benchmark),
-              "matmul_tf32": str(torch.backends.cuda.matmul.allow_tf32),
-              "cudnn_tf32": str(torch.backends.cudnn.allow_tf32)}
+              # Use the native precision API: legacy allow_tf32 getters can
+              # throw after callers use the newer fp32_precision interface.
+              "fp32_precision": torch.backends.fp32_precision,
+              "matmul_fp32_precision": torch.backends.cuda.matmul.fp32_precision,
+              "cudnn_fp32_precision": torch.backends.cudnn.fp32_precision,
+              "cudnn_conv_fp32_precision": torch.backends.cudnn.conv.fp32_precision,
+              "cudnn_rnn_fp32_precision": torch.backends.cudnn.rnn.fp32_precision,
+              "mkldnn_matmul_precision": torch.backends.mkldnn.matmul.fp32_precision,
+              "mha_fastpath": str(torch.backends.mha.get_fastpath_enabled()),
+              "mkldnn": str(torch.backends.mkldnn.enabled),
+              "mkldnn_deterministic": str(torch.backends.mkldnn.deterministic),
+              "flash_sdp": str(torch.backends.cuda.flash_sdp_enabled()),
+              "math_sdp": str(torch.backends.cuda.math_sdp_enabled()),
+              "efficient_sdp": str(torch.backends.cuda.mem_efficient_sdp_enabled()),
+              "cudnn_sdp": str(torch.backends.cuda.cudnn_sdp_enabled()),
+              "math_sdp_reduction": str(torch.backends.cuda.fp16_bf16_reduction_math_sdp_allowed()),
+              "fp16_reduction": str(torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction),
+              "bf16_reduction": str(torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction),
+              "fp16_accumulation": str(torch.backends.cuda.matmul.allow_fp16_accumulation)}
+    values.update(_NUMERICAL_POLICY.identity())
+    for name in ("OMP_NUM_THREADS", "OMP_DYNAMIC", "OMP_SCHEDULE", "MKL_NUM_THREADS",
+                 "MKL_DYNAMIC", "MKL_CBWR", "ATEN_CPU_CAPABILITY", "CUBLAS_WORKSPACE_CONFIG",
+                 "NVIDIA_TF32_OVERRIDE"):
+        values["env_" + name] = canonical_json(os.environ.get(name))
     if device.type == "cuda":
         values["accelerator"] = str(torch.cuda.get_device_properties(device))
     return tuple(sorted(values.items()))
@@ -259,7 +343,15 @@ def pretrain(training_covariate_view: CovariateView, split_manifest: SplitManife
     require(type(training_covariate_view) is CovariateView, "expected CovariateView")
     require(type(split_manifest) is SplitManifest, "expected SplitManifest")
     require(type(config) is PretrainConfig, "expected PretrainConfig")
-    view, split, settings = training_covariate_view, split_manifest, config.settings
+    device = torch.device(config.device)
+    require(device.type in ("cpu", "cuda"), "unsupported training device")
+    # Enter before decoding predecessor tensors or constructing any tensors.
+    with _NUMERICAL_POLICY.scope(device):
+        return _pretrain(training_covariate_view, split_manifest, config, seed, started, device)
+
+
+def _pretrain(view, split, config, seed, started, device):
+    settings = config.settings
     view.spec.assert_compatible(split.spec)
     require(view.use == "ssl", "SSL view required")
     require(type(seed) is int and 0 <= seed <= _MAX_SEED,
@@ -298,8 +390,6 @@ def pretrain(training_covariate_view: CovariateView, split_manifest: SplitManife
     features = fit_preprocessing(fitting, settings)
     preprocessing = tuple(f.to_json() for f in features)
     preprocessing_hash = sha256(canonical_json([f.to_dict() for f in features]).encode()).hexdigest()
-    device = torch.device(config.device)
-    require(device.type in ("cpu", "cuda"), "unsupported training device")
     identity = CheckpointIdentity(training_ids=view.original_ids, data_hash=view.content_hash,
         split_hash=split.content_hash, config_hash=settings.content_hash,
         preprocessing_hash=preprocessing_hash, seed=seed,
@@ -312,6 +402,13 @@ def pretrain(training_covariate_view: CovariateView, split_manifest: SplitManife
         if config.controller_state is not None:
             require(loaded["controller"] == _controller_state(config.controller_state),
                     "cannot replace resumed controller state")
+    # Exercise the merged transformation directly; never substitute a local
+    # tokenizer or alter its mean/scale to hide the known cross-unit overflow.
+    with torch.no_grad():
+        prepared = FeatureTokenizer(features).prepare(view)
+        require(bool(torch.isfinite(prepared.numeric_values).all()),
+                "merged tokenizer produced nonfinite numerical targets; cross-unit follow-up required")
+    del prepared
     # Claim an exclusive directory even when the enclosing StageRequest root exists.
     root = Path(config.output_dir).resolve() / "ssl"
     root.parent.mkdir(parents=True, exist_ok=True)

@@ -388,3 +388,136 @@ def test_compressed_checkpoint_is_refused_before_decompression(tmp_path, monkeyp
     monkeypatch.setattr(zipfile.ZipFile, "read", forbid_decompression)
     with pytest.raises(ContractError, match="compressed checkpoint"):
         load_checkpoint(descriptor, descriptor.identity)
+
+
+@pytest.mark.parametrize("budget", [1, 4, 5])
+@pytest.mark.parametrize("autocast_first", [False, True])
+def test_ambient_autocast_cannot_change_exact_continuation(tmp_path, monkeypatch, budget, autocast_first):
+    import oxyformer.training.pretrain as module
+    constructor = module.MaskedReconstructor.__init__
+    observed_modes = set()
+    def observe_context(model, args):
+        assert not torch.is_autocast_enabled("cpu") and not torch.is_inference_mode_enabled()
+        assert torch.is_grad_enabled() == model.training
+        observed_modes.add(model.training)
+    def construct(self, *args):
+        constructor(self, *args)
+        self.register_forward_pre_hook(observe_context)
+    monkeypatch.setattr(module.MaskedReconstructor, "__init__", construct)
+    view, split, config = make_case(tmp_path)
+    config = replace(config, settings=replace(config.settings, max_epochs=1))
+    full = pretrain(view, split, config, 1103)
+    with torch.autocast("cpu", dtype=torch.bfloat16, enabled=autocast_first):
+        first = pretrain(view, split, replace(config, output_dir=str(tmp_path / "first"), max_batches=budget), 1103)
+        assert torch.is_autocast_enabled("cpu") == autocast_first
+    predecessor_bytes = Path(first.path).read_bytes()
+    with torch.autocast("cpu", dtype=torch.bfloat16, enabled=not autocast_first):
+        resumed = pretrain(view, split, replace(config, output_dir=str(tmp_path / "resume"), predecessor=first), 1103)
+        assert torch.is_autocast_enabled("cpu") != autocast_first
+    assert full.identity == first.identity == resumed.identity
+    assert_state_equal(load_checkpoint(full, full.identity), load_checkpoint(resumed, resumed.identity))
+    assert Path(first.path).read_bytes() == predecessor_bytes
+    assert observed_modes == {False, True}
+
+
+@pytest.mark.parametrize("ambient", ["no_grad", "inference", "placement"])
+def test_training_owns_gradient_and_factory_contexts(tmp_path, ambient):
+    view, split, config = make_case(tmp_path)
+    config = replace(config, settings=replace(config.settings, max_epochs=1))
+    full = pretrain(view, split, config, 1103)
+    first = pretrain(view, split, replace(config, output_dir=str(tmp_path / "first"), max_batches=1), 1103)
+    context = {"no_grad": torch.no_grad, "inference": torch.inference_mode,
+               "placement": lambda: torch.device("meta")}[ambient]
+    with context():
+        other = pretrain(view, split, replace(config, output_dir=str(tmp_path / "other")), 1103)
+        resumed = pretrain(view, split, replace(config, output_dir=str(tmp_path / "resume"), predecessor=first), 1103)
+        reused = pretrain(view, split, replace(config, output_dir=str(tmp_path / "reuse"), predecessor=full), 1103)
+        if ambient == "no_grad":
+            assert not torch.is_grad_enabled()
+        elif ambient == "inference":
+            assert torch.is_inference_mode_enabled()
+        else:
+            assert torch.empty(0).device.type == "meta"
+    for artifact in (other, resumed, reused):
+        assert_state_equal(load_checkpoint(full, full.identity), load_checkpoint(artifact, artifact.identity))
+
+
+def test_execution_context_is_restored_after_training_exception(tmp_path, monkeypatch):
+    import oxyformer.training.pretrain as module
+    view, split, config = make_case(tmp_path)
+    def fail_forward(*args):
+        assert torch.is_grad_enabled() and not torch.is_inference_mode_enabled()
+        assert not torch.is_autocast_enabled("cpu")
+        assert torch.empty(0).device.type == "cpu"
+        raise RuntimeError("synthetic training failure")
+    monkeypatch.setattr(module.MaskedReconstructor, "forward", fail_forward)
+    with torch.inference_mode(), torch.autocast("cpu", dtype=torch.bfloat16), torch.device("meta"):
+        with pytest.raises(RuntimeError, match="synthetic training failure"):
+            pretrain(view, split, config, 1103)
+        assert torch.is_inference_mode_enabled() and not torch.is_grad_enabled()
+        assert torch.is_autocast_enabled("cpu")
+        assert torch.empty(0).device.type == "meta"
+
+
+@pytest.mark.parametrize("control", ["mha_fastpath", "math_sdp_reduction"])
+def test_changed_attention_policy_rejects_resume_before_attempt(tmp_path, control):
+    view, split, config = make_case(tmp_path)
+    first = pretrain(view, split, replace(config, max_batches=1), 1103)
+    getter, setter = {
+        "mha_fastpath": (torch.backends.mha.get_fastpath_enabled, torch.backends.mha.set_fastpath_enabled),
+        "math_sdp_reduction": (torch.backends.cuda.fp16_bf16_reduction_math_sdp_allowed,
+                               torch.backends.cuda.allow_fp16_bf16_reduction_math_sdp),
+    }[control]
+    previous = getter()
+    try:
+        setter(not previous)
+        config = replace(config, predecessor=first, output_dir=str(tmp_path / "resume"))
+        before = capture_rng()
+        with pytest.raises(ContractError, match="identity"):
+            pretrain(view, split, config, 1103)
+        assert not Path(config.output_dir).exists()
+        assert_state_equal(before, capture_rng())
+    finally:
+        setter(previous)
+
+
+@pytest.mark.parametrize("failure", [None, "training", "validation", "publication"])
+def test_caller_rng_is_restored_on_every_exit(tmp_path, monkeypatch, failure):
+    import oxyformer.training.pretrain as module
+    view, split, config = make_case(tmp_path)
+    config = replace(config, settings=replace(config.settings, max_epochs=1))
+    if failure in ("training", "validation"):
+        forward = module.MaskedReconstructor.forward
+        def maybe_fail(self, batch):
+            if self.training == (failure == "training"):
+                raise RuntimeError("synthetic execution failure")
+            return forward(self, batch)
+        monkeypatch.setattr(module.MaskedReconstructor, "forward", maybe_fail)
+    elif failure == "publication":
+        def fail_save(*args, **kwargs):
+            raise RuntimeError("synthetic execution failure")
+        monkeypatch.setattr(module, "save_checkpoint", fail_save)
+    initial = capture_rng()
+    with torch.inference_mode(), torch.autocast("cpu", dtype=torch.bfloat16), torch.device("meta"):
+        if failure:
+            with pytest.raises(RuntimeError, match="synthetic execution failure"):
+                pretrain(view, split, config, 1103)
+        else:
+            assert pretrain(view, split, config, 1103).complete
+        assert torch.is_inference_mode_enabled() and not torch.is_grad_enabled()
+        assert torch.is_autocast_enabled("cpu") and torch.empty(0).device.type == "meta"
+    assert_state_equal(initial, capture_rng())
+
+
+def test_latched_request_stays_pending_and_fresh_request_allows_resume(tmp_path):
+    view, split, config = make_case(tmp_path)
+    request = CheckpointRequest()
+    request.request()
+    first = pretrain(view, split, replace(config, stop_request=request), 1103)
+    repeated = pretrain(view, split, replace(config, output_dir=str(tmp_path / "pending"),
+                                            predecessor=first, stop_request=request), 1103)
+    assert first.reason == repeated.reason == "requested" and repeated.step == 0
+    assert request.requested
+    resumed = pretrain(view, split, replace(config, output_dir=str(tmp_path / "fresh"),
+                                           predecessor=repeated, stop_request=CheckpointRequest()), 1103)
+    assert resumed.complete and resumed.step > repeated.step

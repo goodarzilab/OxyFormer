@@ -1,7 +1,9 @@
 """Synthetic, offline CPU checks for permissions, masking and fold-local SSL."""
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
+import math
 
+import numpy as np
 import pytest
 import torch
 import yaml
@@ -175,3 +177,63 @@ def test_patience_is_scientific_stopping_not_execution_budget(tmp_path, monkeypa
     config = replace(config, settings=replace(config.settings, patience=1, max_epochs=10))
     artifact = module.pretrain(view, split, config, 1103)
     assert artifact.complete and artifact.reason == "patience" and artifact.epoch == 2
+
+
+@pytest.mark.parametrize("values,expected_mean,expected_scale", [
+    ([1e160, -1e160] * 5, 0., 1e160),
+    ([1e-200, -1e-200] * 5, 0., 1e-200),
+    ([1.6e308] * 10, 1.6e308, 1.),
+    ([1e308, -1e308, 1e-308] + [0.] * 7, 1e-309, math.sqrt(.2) * 1e308),
+])
+def test_population_moments_avoid_intermediate_overflow_and_underflow(
+        tmp_path, values, expected_mean, expected_scale):
+    view, _, config = make_case(tmp_path)
+    view = replace(view, values=tuple((value, -value, row[2])
+                                     for value, row in zip(values, view.values)))
+    feature = fit_preprocessing(view, config.settings)[0]
+    assert math.isclose(feature.mean, expected_mean, rel_tol=1e-14, abs_tol=0.)
+    assert math.isclose(feature.scale, expected_scale, rel_tol=1e-14, abs_tol=0.)
+
+
+@pytest.mark.parametrize("magnitude", [1e160, 1e-200])
+def test_extreme_finite_predictors_train_with_unit_standardized_targets(tmp_path, magnitude):
+    view, split, config = make_case(tmp_path)
+    view = replace(view, values=tuple((magnitude if i % 2 else -magnitude,
+                                      -magnitude if i % 2 else magnitude, row[2])
+                                     for i, row in enumerate(view.values)))
+    artifact = pretrain(view, split, replace(config, settings=replace(config.settings, max_epochs=1)), 1103)
+    assert artifact.complete
+    state = load_checkpoint(artifact, artifact.identity)
+    features = tuple(FeatureSpec.from_json(item) for item in state["preprocessing"])
+    batch = FeatureTokenizer(features).prepare(view)
+    assert features[0].mean == 0. and features[0].scale == magnitude
+    torch.testing.assert_close(batch.numeric_values[:, :2].abs(), torch.ones(10, 2), rtol=0, atol=0)
+
+
+def test_fitted_moment_arithmetic_restores_numpy_error_policy(tmp_path):
+    view, _, config = make_case(tmp_path)
+    view = replace(view, values=tuple((1e160 if i % 2 else -1e160, row[1], row[2])
+                                     for i, row in enumerate(view.values)))
+    with np.errstate(all="raise"):
+        feature = fit_preprocessing(view, config.settings)[0]
+        assert feature.mean == 0. and feature.scale == 1e160
+        assert all(value == "raise" for value in np.geterr().values())
+
+
+def test_constant_column_uses_exact_observed_value_and_unit_scale(tmp_path):
+    view, split, config = make_case(tmp_path)
+    view = replace(view, values=tuple((.1, row[1], row[2]) for row in view.values))
+    artifact = pretrain(view, split, replace(config, max_batches=1), 1103)
+    state = load_checkpoint(artifact, artifact.identity)
+    feature = FeatureSpec.from_json(state["preprocessing"][0])
+    assert feature.mean == .1 and feature.scale == 1.
+
+
+def test_tokenizer_cross_unit_overflow_is_refused_before_attempt(tmp_path):
+    view, split, config = make_case(tmp_path)
+    values = [-1.6e308] * 3 + [1.6e308] + [0.] * 6
+    view = replace(view, values=tuple((value, row[1], row[2]) for value, row in zip(values, view.values)))
+    config = replace(config, settings=replace(config.settings, stopping_ids=view.original_ids[4:]))
+    with pytest.raises(ContractError, match="merged tokenizer.*nonfinite"):
+        pretrain(view, split, config, 1103)
+    assert not Path(config.output_dir).exists()
