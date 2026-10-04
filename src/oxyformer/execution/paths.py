@@ -107,7 +107,8 @@ def safe_extract(archive, root, relative, *, members=None, max_bytes=10 * 1024**
 @contextmanager
 def isolated_caches(root):
     names = ('HF_HOME', 'TORCH_HOME', 'XDG_CACHE_HOME', 'MPLCONFIGDIR',
-             'NUMBA_CACHE_DIR', 'TRITON_CACHE_DIR', 'TMPDIR')
+             'NUMBA_CACHE_DIR', 'TRITON_CACHE_DIR', 'TORCHINDUCTOR_CACHE_DIR',
+             'CUDA_CACHE_PATH', 'TMPDIR')
     previous = {name: os.environ.get(name) for name in names}
     try:
         for name in names:

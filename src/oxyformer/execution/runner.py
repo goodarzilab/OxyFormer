@@ -1,10 +1,9 @@
 """Trusted stage dispatch, with immutable inputs and attempt-owned writes.
 
-This is an execution contract, not a sandbox for hostile Python modules. Stage
-implementations must use output_dir for all writes and treat dependency_paths as
-read-only. The runner never modifies upstream files or their permissions; input
-hashes are rechecked before publishing success. Archives are extracted only via
-execution.paths.safe_extract into the consuming attempt.
+Stages run in a child with kernel write restrictions and supervised metadata
+operations. This protects against faulty stages, not hostile same-user actors.
+The runner never changes upstream permissions; hashes are also rechecked before
+publishing success. Archives are extracted into the consuming attempt.
 """
 import importlib
 import json
@@ -17,6 +16,7 @@ import yaml
 from oxyformer.contracts import StageRequest, StageResult
 from oxyformer.provenance import ContractError, file_hash, relative_artifact_path, require
 from .identity import code_identity, environment_record, scientific_fingerprint, verify_recipe
+from .isolation import isolated_stage
 from .paths import atomic_json, atomic_write, isolated_caches, output_path
 
 
@@ -235,15 +235,17 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         module_name = settings.get('module')
         require(isinstance(module_name, str) and module_name.startswith('oxyformer.'),
                 'stage module not registered')
-        with isolated_caches(out):
+        def invoke():
             try:
                 module = importlib.import_module(module_name)
             except (ImportError, FileNotFoundError) as exc:
-                result = StageResult(request_hash=request.content_hash, status='blocked', artifacts=(),
-                                     message=str(exc).strip() or type(exc).__name__)
-            else:
-                require(callable(getattr(module, 'run_stage', None)), 'stage has no run_stage(StageRequest)')
-                result = module.run_stage(request)
+                return StageResult(request_hash=request.content_hash, status='blocked', artifacts=(),
+                                   message=str(exc).strip() or type(exc).__name__)
+            require(callable(getattr(module, 'run_stage', None)), 'stage has no run_stage(StageRequest)')
+            return module.run_stage(request)
+
+        with isolated_caches(out):
+            result = isolated_stage(request, invoke, tuple(deps.values()))
         require(isinstance(result, StageResult), 'stage did not return StageResult')
         result.verify(request)
         require(all(not (out / a.path).resolve().is_relative_to(repo) for a in result.artifacts),

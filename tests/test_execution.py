@@ -108,6 +108,75 @@ def test_dependency_normalization(tmp_path):
         resolve_dependencies(['a-b', 'a_b'], {'SWARM_DEP_A_B': str(upstream)})
 
 
+@pytest.mark.parametrize('operation', [
+    'write', 'truncate', 'unlink', 'rename', 'mkdir', 'chmod', 'utime',
+    'subprocess_write', 'subprocess_chmod', 'native_write', 'dir_fd', 'inherited_fd',
+])
+def test_faulty_stage_cannot_mutate_upstream(runtime, tmp_path, monkeypatch, operation):
+    import ctypes
+
+    repo, out = runtime
+    upstream = tmp_path / 'upstream'
+    upstream.mkdir()
+    source = upstream / 'data.json'
+    source.write_text('{"fixture":1}')
+    (upstream / 'receipts.json').write_text('{}')
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(upstream))
+    before = source.read_bytes(), source.stat().st_mode, source.stat().st_mtime_ns
+    directory_before = upstream.stat().st_mtime_ns
+    inherited_fd = os.open(source, os.O_WRONLY)
+
+    def faulty(request):
+        path = Path(request.dependency_paths[0])
+        if operation == 'write':
+            path.write_text('corrupted')
+        elif operation == 'truncate':
+            os.truncate(path, 0)
+        elif operation == 'unlink':
+            path.unlink()
+        elif operation == 'rename':
+            path.rename(upstream / 'renamed')
+        elif operation == 'mkdir':
+            (upstream / 'unowned').mkdir()
+        elif operation == 'chmod':
+            path.chmod(0o600)
+        elif operation == 'utime':
+            os.utime(path, ns=(1, 1))
+        elif operation == 'subprocess_write':
+            subprocess.run([sys.executable, '-c',
+                            'import pathlib,sys; pathlib.Path(sys.argv[1]).write_text("bad")',
+                            str(path)], check=True)
+        elif operation == 'subprocess_chmod':
+            subprocess.run(['chmod', '600', str(path)], check=True)
+        elif operation == 'native_write':
+            libc = ctypes.CDLL(None, use_errno=True)
+            fd = libc.open(os.fsencode(path), os.O_WRONLY | os.O_TRUNC)
+            if fd < 0:
+                raise OSError(ctypes.get_errno(), 'native dependency write denied')
+            os.close(fd)
+        elif operation == 'dir_fd':
+            fd = os.open(upstream, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.chmod('data.json', 0o600, dir_fd=fd)
+            finally:
+                os.close(fd)
+        else:
+            os.write(inherited_fd, b'bad')
+        return dummy(request)
+
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty))
+    try:
+        result = run('dummy', out, repo, deps_env=True,
+                     task_file=task_file(out, needs={'data-unit': ['data.json', 'receipts.json']}))
+    finally:
+        os.close(inherited_fd)
+    assert result.status == 'fail'
+    assert source.exists()
+    assert (source.read_bytes(), source.stat().st_mode, source.stat().st_mtime_ns) == before
+    assert upstream.stat().st_mtime_ns == directory_before
+    assert sorted(p.name for p in upstream.iterdir()) == ['data.json', 'receipts.json']
+
+
 def test_upstream_unchanged_and_output_overlap_rejected(runtime, tmp_path, monkeypatch):
     repo, out = runtime
     upstream = tmp_path / 'upstream'
@@ -143,17 +212,92 @@ def test_output_symlink_escape(runtime, tmp_path):
 
 def test_result_symlink_escape(runtime, tmp_path, monkeypatch):
     repo, out = runtime
+    elsewhere = tmp_path / 'elsewhere'
+    elsewhere.write_text('{"value":1}')
     def escaping(request):
         result = dummy(request)
         target = out / 'value.json'
         target.unlink()
-        elsewhere = tmp_path / 'elsewhere'
-        elsewhere.write_text('{"value":1}')
         target.symlink_to(elsewhere)
         return result
     monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=escaping))
     result = run('dummy', out, repo, task_file=task_file(out))
     assert result.status == 'fail' and 'escapes output' in result.message
+
+
+def test_isolated_stage_allows_owned_metadata_native_io_and_temporary_files(runtime, monkeypatch):
+    repo, out = runtime
+
+    def owned(request):
+        import multiprocessing
+        import numpy as np
+        import tempfile
+
+        root = Path(request.output_dir)
+        data = np.memmap(root / 'array.bin', dtype='float64', mode='w+', shape=(3,))
+        data[:] = [1, 2, 3]
+        data.flush()
+        del data
+        shutil.copy2(root / 'array.bin', root / 'copy.bin')
+        subprocess.run(['chmod', '600', str(root / 'copy.bin')], check=True)
+        subprocess.run(['touch', str(root / 'copy.bin')], check=True)
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.chmod('copy.bin', 0o640, dir_fd=fd)
+        finally:
+            os.close(fd)
+        with tempfile.NamedTemporaryFile() as stream:
+            assert Path(stream.name).is_relative_to(root)
+            stream.write(b'fixture')
+        with tempfile.TemporaryFile() as stream:
+            os.fchmod(stream.fileno(), 0o600)
+        queue = multiprocessing.get_context('fork').Queue()
+        queue.put('fixture')
+        assert queue.get(timeout=5) == 'fixture'
+        queue.close()
+        queue.join_thread()
+        return dummy(request)
+
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=owned))
+    result = run('dummy', out, repo, task_file=task_file(out))
+    assert result.status == 'pass', result.message
+    assert (out / 'copy.bin').stat().st_mode & 0o777 == 0o640
+
+
+def test_isolation_unavailable_blocks_before_stage(runtime, monkeypatch):
+    from oxyformer.execution import isolation
+
+    repo, out = runtime
+
+    def unavailable(_):
+        raise OSError('synthetic unavailable kernel protection')
+
+    monkeypatch.setattr(isolation, 'restrict_writes', unavailable)
+    result = run('dummy', out, repo, task_file=task_file(out))
+    assert result.status == 'blocked'
+    assert 'unavailable kernel protection' in result.message
+    assert not (out / 'value.json').exists()
+
+
+def test_stage_import_is_already_guarded(runtime, tmp_path, monkeypatch):
+    from oxyformer.execution import runner
+
+    repo, out = runtime
+    upstream = tmp_path / 'upstream'
+    upstream.mkdir()
+    source = upstream / 'receipts.json'
+    source.write_text('{}')
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(upstream))
+
+    def faulty_import(_):
+        source.write_text('corrupted during import')
+        return SimpleNamespace(run_stage=dummy)
+
+    monkeypatch.setattr(runner.importlib, 'import_module', faulty_import)
+    result = run('dummy', out, repo, deps_env=True,
+                 task_file=task_file(out, needs={'data-unit': ['receipts.json']}))
+    assert result.status == 'fail'
+    assert source.read_text() == '{}'
 
 
 def test_code_commit_and_dirty_repo(runtime):
