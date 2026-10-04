@@ -1,0 +1,54 @@
+# Observation validation only. No mortality fitting, target, or standard chosen.
+schema_version: 1
+approval_reference: "Owner decision 2026-10-04, supplied by orchestrator; approvals PR #11"
+approval_key: owner_decisions.mexico_edr_registration_lag
+# approvals.yaml is read-only. The in-session owner decision supersedes this
+# attempt base's null lag and blocked denominator selection in sources/mexico.json.
+occurrence_years: [2015, 2016, 2017, 2018, 2019]
+registration_windows:
+  primary:
+    lag: 2
+    registration_years: [2015, 2016, 2017, 2018, 2019, 2020, 2021]
+  late_registration_check:
+    lag: 5
+    registration_years: [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024]
+  rule: "occurrence_year <= registration_year <= occurrence_year + lag, inclusive"
+edr:
+  dictionary: https://www.inegi.org.mx/rnm/index.php/catalog/617/data-dictionary/F1
+  archive_dictionary: https://www.inegi.org.mx/contenidos/programas/edr/datosabiertos/defunciones/2019/conjunto_de_datos_defunciones_registradas_2019_csv.zip
+  inspected_members: [catalogos/edad.csv, catalogos/edad_agrupada.csv, diccionario_de_datos/diccionario_datos_defunciones_registradas_2019.csv]
+  processing_documentation: https://www.inegi.org.mx/rnm/index.php/catalog/617
+  duplicate_policy: "INEGI removes duplicates during source production. Retain published row multiplicities. Reject multiple revisions/files of one registration year; never deduplicate on demographic fields. A file/row ID is not a person ID."
+  residence: [ENT_RESID, MUN_RESID]
+  time: [ANIO_OCUR, ANIO_REGIS]
+  cause: "CAUSA_DEF, detailed CIE-10 coding, retained verbatim; no cause classifier"
+  sex: {1: male, 2: female, 9: unknown}
+  unknown_age_code: 4998
+  infant_age_codes: "1001..1023,1097,1098,2001..2029,2098,3001..3011,3098 -> 00-04"
+  completed_year_age_codes: "4001..4120; aggregate exactly into CONAPO bins, including 85+"
+  coverage: "Each RegistrationRelease requires a reviewed municipality universe covering every published age/sex/cause/occurrence-year record. Missing coverage always blocks build_cells."
+conapo:
+  resource: https://www.datos.gob.mx/dataset/f2b9b220-3ef7-4e3a-bde6-87e1dac78c6a/resource/3c3092be-583e-4490-8c23-67ef9a64b198/download/pobproy_quinq1.csv
+  dictionary: https://www.datos.gob.mx/api/3/action/datastore_search?resource_id=3c3092be-583e-4490-8c23-67ef9a64b198&limit=0
+  metadata: https://www.datos.gob.mx/api/3/action/resource_show?id=3c3092be-583e-4490-8c23-67ef9a64b198
+  license: CC-BY-4.0
+  inspected_on: '2026-10-04'
+  inspected_bytes: 36658654
+  inspected_sha256: 1a8f07be08de082a0c33404f0fbce9d9292845a8c8290153a6ad2e1889bab31a
+  semantics: midyear_population
+  geography_frame: "Required reviewed metadata; never inferred from equal CLAVE values or ANO"
+  sex: {HOMBRES: male, MUJERES: female}
+  age_columns: [POB_00_04, POB_05_09, POB_010_014, POB_015_019, POB_20_24, POB_25_29, POB_30_34, POB_35_39, POB_40_44, POB_45_49, POB_50_54, POB_55_59, POB_60_64, POB_65_69, POB_70_74, POB_75_79, POB_80_84, POB_85_mm]
+  date_semantics: "ANO is the population year; fecha is not the release revision. Pin payload bytes and manifest version."
+  revision_policy: "One reviewed SourceManifest per local file; hash mismatch, duplicate cells and mixed revisions fail. Datastore preview is not the full CSV."
+join:
+  geographic_policy: "Same codes alone do not establish compatible vintages. Require same reviewed vintage or an explicit ReviewedCrosswalk of complete, stable municipal unions; no fractional splitting."
+  unmatched_policy: "Report all unmatched included residence codes, including unknown/foreign codes; refuse analysis. Never substitute registration/occurrence geography."
+  unknown_policy: "Retain all event rows. Account for unknown age/sex separately. Deaths are classified counts; a zero with unallocated deaths is not certified genuine_zero."
+  denominator_policy: "Explicit expected municipalities, years, both sexes and all 18 age bins. Require positive selected denominators and age counts summing to POB_TOTAL."
+weights:
+  target_mass: "Explicit caller-supplied cell mass or null; no default population weighting"
+  age_standardization_weight: "Explicit age distribution summing to one or null; never inferred from N"
+  population: "Poisson exposure N, positive midyear population"
+  poisson_log_offset: "log(N)"
+  poisson_loss_multiplier: "target_mass / N, or null when no estimand weights were supplied"
