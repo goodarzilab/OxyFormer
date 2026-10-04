@@ -69,7 +69,8 @@ def neighbors(query, candidates, x, scales, atlas, recipe, *, local):
                  if r.tract_id != query.tract_id and r.county == query.county
                  and atlas[r.tract_id].allocation_qualified and atlas[r.tract_id].population > 0
                  and (not local or distance_km(query, r) <= 25.0)
-                 and all((a == b if scale == 0 else abs(a - b) <= recipe.raw_x_radius * scale)
+                 and all((a == b if a is None or b is None or scale == 0
+                          else abs(a - b) <= recipe.raw_x_radius * scale)
                          for a, b, scale in zip(x[query.original_id], x[r.original_id], scales)))
 
 
@@ -77,15 +78,19 @@ def freeze_support(rows, design_ids, atlas, covariates, *, recipe=SupportRecipe(
     x = dict(zip(covariates.original_ids, covariates.values))
     require(set(x) == {r.original_id for r in rows}, "covariate/geography alignment mismatch")
     require(bool(covariates.columns), "explicit approved features required")
-    require(all(type(v) in (float, int) and np.isfinite(v)
+    require(all(v is None or (type(v) in (float, int) and np.isfinite(v))
                 for values in x.values() for v in values),
-            "support requires complete finite approved covariates")
+            "support requires finite numeric or missing approved covariates")
     design_set = set(design_ids)
     sealed = [r for r in rows if r.original_id in design_set and r.tract_id in atlas
               and atlas[r.tract_id].allocation_qualified and atlas[r.tract_id].population > 0]
     require(bool(sealed), "no allocation-qualified support-design records")
     matrix = np.asarray([x[r.original_id] for r in sealed], dtype=float)
-    scales = tuple((np.quantile(matrix, .75, axis=0) - np.quantile(matrix, .25, axis=0)).tolist())
+    # Missingness is an explicit conditioning pattern, never full-frame
+    # imputation. Scales use observed sealed values only; nuisance preprocessing
+    # remains the responsibility of each fitting partition.
+    scales = tuple(float(np.quantile(col[np.isfinite(col)], .75) - np.quantile(col[np.isfinite(col)], .25))
+                   if np.isfinite(col).any() else 0.0 for col in matrix.T)
     knots = tuple(float(v) for v in np.quantile(
         [atlas[r.tract_id].exposure_mmhg for r in sealed], np.linspace(0, 1, 6)))
     groups, exposures, strata = {}, {}, {}
