@@ -1,5 +1,6 @@
 """Synthetic, offline tests: never download production data in this suite."""
 import copy
+import gzip
 import hashlib
 import http.client
 import io
@@ -277,9 +278,9 @@ def test_shards_cover_intended_jurisdictions_once():
 
 def test_cli_validate_is_offline_and_blocked_fetch_refused(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv('SWARM_UNIT_DIR', str(tmp_path))
-    assert sm.main(['validate', '--source', 'dem']) == 0
+    assert sm.main(['validate', '--source', 'mexico']) == 0
     assert json.loads(capsys.readouterr().out)['status'] == 'blocked'
-    assert sm.main(['fetch', '--source', 'dem', '--output-dir', str(tmp_path / 'dem')]) == 1
+    assert sm.main(['fetch', '--source', 'mexico', '--output-dir', str(tmp_path / 'dem')]) == 1
     assert 'Blocked manifest' in capsys.readouterr().err
     assert not (tmp_path / 'dem').exists()
 
@@ -503,7 +504,7 @@ def test_parser_truncated_attempt_then_success(manifest, tmp_path, monkeypatch):
     assert {p.name for p in (tmp_path / 'result').iterdir()} == {'payload.tar', 'receipts.json', 'download.log'}
 
 
-@pytest.mark.parametrize('name', ['us', 'dem', 'mexico'])
+@pytest.mark.parametrize('name', ['mexico'])
 def test_each_production_manifest_blocks_without_outputs(name, tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(sm, '_open_url', lambda *a: calls.append(a))
@@ -585,7 +586,7 @@ def test_tile_inventory_expands_exact_paired_urls_and_preserves_year_precision()
     assert resources['n33w119']['url'] == sm.DEM_URL + 'n33w119/USGS_13_n33w119.tif'
     assert resources['n33w119_metadata']['url'] == sm.DEM_URL + 'n33w119/USGS_13_n33w119.xml'
     assert all(r['expected_bytes'] == r['max_bytes'] for r in m['resources'] if r['format'] in ('tiff', 'xml'))
-    assert m['coverage']['missing_tiles'] and m['status'] == 'blocked'
+    assert not m['coverage']['missing_tiles'] and m['status'] == 'ready'
 
 
 @pytest.mark.parametrize('change', ['ceiling', 'footprint', 'tile', 'ready'])
@@ -595,7 +596,7 @@ def test_shard_contract_rejects_unapproved_or_inconsistent_selection(change):
     if change == 'ceiling': g['max_bytes'] += 1
     elif change == 'footprint': g['dem_footprint'] = None
     elif change == 'tile': g['dem_resources'][0] = 'n00w000'
-    else: g.update(status='ready', blockers=[])
+    else: g.update(status='blocked', blockers=['Uninspected resource'])
     with pytest.raises(sm.ManifestError): sm.validate_shards(a)
 
 
@@ -836,16 +837,24 @@ def test_births_records_all_staged_files_and_inspected_pages():
     assert all(r['availability'] == 'verified' for r in m['resources'])
 
 
-def test_us_only_acs_structure_is_still_blocked():
+def test_us_acs_representation_is_ready_with_mandatory_stream_validation():
     m = sm.load_source('us')
-    assert [r['id'] for r in m['requirements'] if r['status'] == 'blocked'] == ['acs_tracts']
+    assert m['status'] == 'ready' and not m['blockers']
+    assert all(r['status'] == 'ready' for r in m['requirements'])
     layout = next(r for r in m['resources'] if r['id'] == 'usaleep_dictionary')
     assert layout['staging_key'] == 'usaleep_record_layout'
     assert layout['expected_bytes'] == 70785
     assert layout['expected_sha256'] == '7612e16609d73f958ff6618ae70aab51d6502745c093c307a7f217c967e24431'
     acs = next(r for r in m['resources'] if r['id'] == 'acs_tracts')
-    assert acs['availability'] == 'unverified'
-    assert not acs['range_inspection']['central_directory_verified']
+    assert acs['availability'] == 'verified'
+    assert acs['format'] == 'tar_gz' and acs['destination'].endswith('.tar.gz')
+    assert acs['archive_validation'] == sm.ACS_ARCHIVE_POLICY
+    assert not acs['range_inspection']['complete_stream_verified']
+    assert acs['expected_bytes'] == 3369803296
+    prefix = acs['range_inspection']['verified_ranges'][0]
+    assert prefix['bytes'] == 262144 and prefix['status'] == 206
+    assert prefix['first_member'] == 'tab4/sumfile/prod/2006thru2010/group2'
+    assert prefix['first_type'] == '5'
     assert acs['range_inspection']['object_bytes'] == acs['expected_bytes']
     assert 'endpoint_covariates' in m['selection_provenance']['covariate_approval_reference']
 
@@ -856,12 +865,12 @@ def test_dem_fallbacks_cover_only_inspected_approved_gaps_and_exact_budgets():
     fallback = {r['id'] for r in m['resources'] if r['role'] == 'data' and
                 r.get('product') == 'usgs_3dep_one_arc_second_seamless'}
     assert fallback == {'n46w083', 'n48w086', 'n49w088'}
-    assert fallback | set(m['coverage']['missing_tiles']) == sm.DEM_FALLBACK_CELLS
-    assert not fallback & set(m['coverage']['missing_tiles'])
+    assert fallback | set(m['coverage']['no_product_cells']) == sm.DEM_FALLBACK_CELLS
+    assert not fallback & set(m['coverage']['no_product_cells'])
     assert len([r for r in m['resources'] if r['format'] == 'tiff']) == 957
     for tile in sm.DEM_FALLBACK_CELLS:
         requirement = next(r for r in m['requirements'] if r['id'] == 'fallback_' + tile)
-        assert requirement['status'] == ('ready' if tile in fallback else 'blocked')
+        assert requirement['status'] == ('ready' if tile in fallback else 'no_product')
         if tile in fallback:
             assert requirement['resource_ids'] == [tile, tile + '_metadata']
             for rid in requirement['resource_ids']:
@@ -943,3 +952,197 @@ def test_production_usaleep_template_accepts_pdf_without_format_override(manifes
     with tarfile.open(tmp_path / 'result/payload.tar') as archive:
         assert archive.extractfile(resource['destination']).read() == data
     assert source.read_bytes() == data and source.stat().st_mode & 0o777 == 0o400
+
+
+@pytest.mark.parametrize('change', ['format', 'destination', 'policy'])
+def test_acs_cannot_drop_complete_archive_verification(change):
+    m = sm.load_source('us')
+    r = next(r for r in m['resources'] if r['id'] == 'acs_tracts')
+    if change == 'format': r['format'] = 'zip'
+    elif change == 'destination': r['destination'] = 'us/acs.zip'
+    else: r.pop('archive_validation')
+    with pytest.raises(sm.ManifestError, match='ACS requires|Invalid archive'):
+        sm.validate_manifest(m)
+
+
+def synthetic_tar(name='prefix/data.txt', kind=tarfile.REGTYPE, data=b'payload', fmt=tarfile.GNU_FORMAT):
+    out = io.BytesIO()
+    with tarfile.open(fileobj=out, mode='w', format=fmt) as archive:
+        directory = tarfile.TarInfo('prefix/')
+        directory.type = tarfile.DIRTYPE
+        archive.addfile(directory)
+        member = tarfile.TarInfo(name)
+        member.type = kind
+        member.linkname = 'prefix/data.txt' if kind in (tarfile.SYMTYPE, tarfile.LNKTYPE) else ''
+        member.size = len(data) if kind == tarfile.REGTYPE else 0
+        archive.addfile(member, io.BytesIO(data) if member.size else None)
+    return out.getvalue()
+
+
+def archive_response(manifest, monkeypatch, body):
+    r = manifest['resources'][0]
+    r.update(format='tar_gz', archive_validation=sm.ACS_ARCHIVE_POLICY,
+             destination='acs.tar.gz', max_bytes=len(body), expected_bytes=len(body),
+             expected_sha256=hashlib.sha256(body).hexdigest())
+    monkeypatch.setattr(sm, '_open_url', lambda url, timeout: Response(
+        body if url == r['url'] else b'dictionary/terms'))
+
+
+@pytest.mark.parametrize('fmt', [tarfile.GNU_FORMAT, tarfile.USTAR_FORMAT])
+def test_complete_gzip_tar_accepts_regular_files_and_directories(manifest, tmp_path, monkeypatch, fmt):
+    # Incompressible multi-chunk data exercises bounded streaming rather than header-only checks.
+    import random
+    raw = synthetic_tar(data=random.Random(41).randbytes(2 * sm.CHUNK + 7), fmt=fmt)
+    body = gzip.compress(raw)
+    archive_response(manifest, monkeypatch, body)
+    receipt = fetch(manifest, tmp_path)
+    assert receipt['resources'][0]['archive_integrity'] == {
+        'policy': sm.ACS_ARCHIVE_POLICY, 'members': 2,
+        'gzip_crc_and_length': 'verified', 'tar_end_marker': 'verified'}
+    with tarfile.open(tmp_path / 'result/payload.tar') as archive:
+        assert archive.extractfile('acs.tar.gz').read() == body
+
+
+@pytest.mark.parametrize('case', ['crc', 'isize', 'trailer', 'deflate', 'not_tar',
+    'header_checksum', 'no_end', 'one_end', 'partial_header', 'partial_member',
+    'member_padding', 'end_padding', 'after_end', 'second_tar', 'trailing_junk'])
+def test_corrupt_gzip_tar_never_partially_publishes(manifest, tmp_path, monkeypatch, case):
+    raw = synthetic_tar()
+    body = gzip.compress(raw)
+    if case == 'crc': body = body[:-8] + bytes([body[-8] ^ 1]) + body[-7:]
+    elif case == 'isize': body = body[:-1] + bytes([body[-1] ^ 1])
+    elif case == 'trailer': body = body[:-4]
+    elif case == 'deflate': body = body[:15]
+    elif case == 'not_tar': body = gzip.compress(b'not a tar archive' * 40)
+    elif case == 'header_checksum': body = gzip.compress(b'X' + raw[1:])
+    elif case == 'no_end': body = gzip.compress(raw[:1536])
+    elif case == 'one_end': body = gzip.compress(raw[:2048])
+    elif case == 'partial_header': body = gzip.compress(raw[:800])
+    elif case == 'partial_member': body = gzip.compress(raw[:1027])
+    elif case == 'member_padding': body = gzip.compress(raw[:1031] + b'X' + raw[1032:])
+    elif case == 'end_padding': body = gzip.compress(raw[:-1])
+    elif case == 'after_end': body = gzip.compress(raw + b'X' * 512)
+    elif case == 'second_tar': body += gzip.compress(raw)
+    else: body += b'junk'
+    # Matching transfer size and SHA-256 must never excuse invalid archive structure.
+    archive_response(manifest, monkeypatch, body)
+    with pytest.raises(sm.ManifestError):
+        fetch(manifest, tmp_path)
+    assert_failed_artifacts(tmp_path)
+    assert json.loads((tmp_path / 'result/receipts.json').read_text())['resources'] == []
+
+
+@pytest.mark.parametrize('name', ['/absolute', '../outside', 'prefix/../../outside',
+                                 'prefix/../sibling', 'C:/absolute', 'prefix\\outside'])
+def test_tar_member_paths_cannot_escape(manifest, tmp_path, monkeypatch, name):
+    archive_response(manifest, monkeypatch, gzip.compress(synthetic_tar(name=name)))
+    with pytest.raises(sm.ManifestError, match='relative prefix'):
+        fetch(manifest, tmp_path)
+    assert_failed_artifacts(tmp_path)
+
+
+@pytest.mark.parametrize('kind', [tarfile.SYMTYPE, tarfile.LNKTYPE, tarfile.CHRTYPE,
+                                 tarfile.BLKTYPE, tarfile.FIFOTYPE, tarfile.GNUTYPE_SPARSE,
+                                 tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.GNUTYPE_LONGNAME])
+def test_tar_disallows_links_devices_and_extension_members(manifest, tmp_path, monkeypatch, kind):
+    archive_response(manifest, monkeypatch, gzip.compress(synthetic_tar(kind=kind)))
+    with pytest.raises(sm.ManifestError, match='only regular-file and directory'):
+        fetch(manifest, tmp_path)
+    assert_failed_artifacts(tmp_path)
+
+
+def test_local_archive_uses_the_same_complete_validation(manifest, tmp_path, monkeypatch):
+    body = gzip.compress(synthetic_tar())[:-4]
+    archive_response(manifest, monkeypatch, body)
+    r = manifest['resources'][0]
+    staging = tmp_path / 'staging'
+    staging.mkdir()
+    (staging / 'source.tar.gz').write_bytes(body)
+    monkeypatch.setattr(sm, '_manual_acquisition', lambda: {'acs': {'staging_dir': str(staging)}})
+    r.update(transport='local', staging_key='acs', local_path='source.tar.gz')
+    with pytest.raises(sm.ManifestError): fetch(manifest, tmp_path)
+    assert_failed_artifacts(tmp_path)
+
+
+def test_dem_no_product_evidence_and_exposure_semantics():
+    m = sm.load_source('dem')
+    assert m['status'] == 'ready' and not m['coverage']['missing_tiles']
+    absent = m['coverage']['no_product_cells']
+    assert set(absent) == {'n27w080', 'n29w091', 'n40w074', 'n41w072', 'n43w070'}
+    assert m['coverage']['no_product_policy'] == sm.NO_PRODUCT_POLICY
+    for evidence in absent.values():
+        assert evidence['land_check']['land_intersects'] is False
+        assert len(evidence['listings']) == 4
+    atlas = json.loads((sm.REPO_ROOT / 'configs/sources/atlas_shards.json').read_text())
+    sm.validate_shards(atlas, m)
+    assert atlas['status'] == 'ready'
+    assert set(c for g in atlas['groups'] for c in g['no_product_cells']) == set(absent)
+
+
+@pytest.mark.parametrize('case', ['land', 'boundary', 'hash', 'date', 'listing', 'truncated',
+                                 'objects', 'url', 'duplicate_listing', 'resource', 'requirement',
+                                 'counts', 'policy', 'unknown', 'metadata', 'aliased_resource'])
+def test_dem_incomplete_or_contradictory_evidence_refused(case):
+    m = sm.load_source('dem')
+    cov = m['coverage']
+    evidence = cov['no_product_cells']['n27w080']
+    if case == 'land': evidence['land_check']['land_intersects'] = True
+    elif case == 'boundary': evidence['land_check']['boundary_resource'] = 'state_boundaries_2010'
+    elif case == 'hash': evidence['land_check']['boundary_sha256'] = '0' * 64
+    elif case == 'date': evidence.pop('inspected_on')
+    elif case == 'listing': evidence['listings'].pop()
+    elif case == 'truncated': evidence['listings'][0]['is_truncated'] = True
+    elif case == 'objects': evidence['listings'][0]['objects'] = 1
+    elif case == 'url': evidence['listings'][0]['url'] += 'wrong'
+    elif case == 'duplicate_listing': evidence['listings'][0] = evidence['listings'][1]
+    elif case == 'resource':
+        r = copy.deepcopy(next(r for r in m['resources'] if r['format'] == 'tiff'))
+        r.update(id='n27w080', destination='dem/n27w080.tif')
+        m['resources'].append(r)
+    elif case == 'aliased_resource':
+        r = next(r for r in m['resources'] if r['id'] == 'n46w083')
+        r['url'] = sm.DEM_FALLBACK_URL + 'n27w080/USGS_1_n27w080.tif'
+    elif case == 'requirement':
+        next(r for r in m['requirements'] if r.get('cell') == 'n27w080')['resource_ids'] = ['n46w083']
+    elif case == 'counts': cov['cataloged_tiles'] -= 1
+    elif case == 'policy': cov['no_product_policy']['renormalize'] = True
+    elif case == 'unknown': cov['no_product_cells']['n33w119'] = evidence
+    else: m['resources'] = [r for r in m['resources'] if r['id'] != 'n46w083_metadata']
+    with pytest.raises(sm.ManifestError): sm.validate_manifest(m)
+
+
+def test_land_intersection_must_remain_a_specific_blocker(tmp_path, monkeypatch):
+    m = sm.load_source('dem')
+    cov = m['coverage']
+    cov['no_product_cells'].pop('n27w080')
+    cov.update(missing_tiles=['n27w080'], national='incomplete')
+    reason = 'n27w080: synthetic shoreline land intersection; no approved elevation product'
+    req = next(r for r in m['requirements'] if r.get('cell') == 'n27w080')
+    req.update(status='blocked', reason=reason)
+    m.update(status='blocked', blockers=[reason])
+    sm.validate_manifest(m)
+    calls = []
+    monkeypatch.setattr(sm, '_open_url', lambda *a: calls.append(a))
+    with pytest.raises(sm.ManifestError, match='synthetic shoreline land intersection'):
+        fetch(m, tmp_path)
+    assert not calls and not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize('source', ['us', 'dem'])
+def test_uninspected_resource_prevents_ready_source(source):
+    m = sm.load_source(source)
+    m['resources'][-1]['availability'] = 'unverified'
+    with pytest.raises(sm.ManifestError, match='Unverified'):
+        sm.validate_manifest(m)
+
+
+@pytest.mark.parametrize('case', ['missing_absent', 'unknown_absent', 'paired_absent', 'policy', 'status'])
+def test_atlas_requires_complete_no_product_reconciliation(case):
+    a = json.loads((sm.REPO_ROOT / 'configs/sources/atlas_shards.json').read_text())
+    g = a['groups'][0]
+    if case == 'missing_absent': g['no_product_cells'] = []
+    elif case == 'unknown_absent': g['no_product_cells'].append('n00w000')
+    elif case == 'paired_absent': g['dem_resources'].append(g['no_product_cells'][0])
+    elif case == 'policy': a['no_product_policy']['fill'] = True
+    else: a['status'] = 'blocked'
+    with pytest.raises(sm.ManifestError): sm.validate_shards(a)
