@@ -163,7 +163,7 @@ owner_decisions:
   # Approved by the owner on 2026-10-04 ("I regardless approve what you listed above"): plan section 6.4's proposed gates as
   # written, and an influence-concentration gate drafted with gpt-6-astra for the metric the plan names but does not define.
   release_gates:
-    min_repetitions_per_scenario: 1000
+    min_repetitions_per_scenario: 1000        # for selected final scenarios: independent repetitions using the production tuning and stopping procedure
     coverage_one_sided_95_lower_bound_min: 0.925
     null_rejection_upper_bound_max: 0.075
     abs_bias_over_empirical_sd_max: 0.10
