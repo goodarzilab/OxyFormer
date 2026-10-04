@@ -22,9 +22,7 @@ HTTPS template reproduces inspected bucket keys. No runtime source discovery.
 
 ## Source constraints
 
-Source-specific terms and dictionary observations are recorded in each manifest.
-Keep flag-1-only primary training, unselected ACS concepts, pinned elevcan
-licenses, Census attribution and 2010 geographic vintage intact.
+Source terms and dictionary observations are in each manifest; science approvals stay fixed.
 
 DEM selection intersects full-resolution TIGER2010 state geometry without
 outcomes, flags or eligibility filters. Nine disjoint jurisdiction groups cover
