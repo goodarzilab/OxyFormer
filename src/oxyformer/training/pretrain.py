@@ -230,6 +230,7 @@ def environment_identity(device: torch.device) -> tuple[tuple[str, str], ...]:
     packages = sorted((d.metadata["Name"], d.version) for d in importlib.metadata.distributions())
     values = {"python": platform.python_version(), "platform": platform.platform(),
               "machine": platform.machine(), "torch": str(torch.__version__),
+              "default_dtype": str(torch.get_default_dtype()),
               "numpy": np.__version__, "packages": sha256(canonical_json(packages).encode()).hexdigest(),
               "torch_build": sha256(torch.__config__.show().encode()).hexdigest(),
               "threads": str(torch.get_num_threads()), "interop_threads": str(torch.get_num_interop_threads()),
@@ -276,8 +277,21 @@ def pretrain(training_covariate_view: CovariateView, split_manifest: SplitManife
         require(set(stopping_ids) < set(allowed), "stopping IDs must be within the current fitting partition")
     else:
         count = min(len(allowed) - 1, max(1, int(len(allowed) * settings.validation_fraction)))
-        stopping_ids = tuple(sorted(allowed, key=lambda oid: sha256(
-            canonical_json([seed, oid, "ssl-stopping"]).encode()).digest())[:count])
+        ranked = tuple(sorted(allowed, key=lambda oid: sha256(
+            canonical_json([seed, oid, "ssl-stopping"]).encode()).digest()))
+        observed = {oid for oid, row in zip(view.original_ids, view.values)
+                    if any(value is not None for value in row)}
+        require(len(observed) >= 2, "SSL fitting/stopping need two records with observed targets")
+        selected = set(ranked[:count])
+        # Keep the registered hash order and size; swap only if a partition has
+        # no reconstruction targets. This uses permitted X missingness only.
+        if not selected & observed:
+            selected.remove(ranked[count - 1])
+            selected.add(next(oid for oid in ranked[count:] if oid in observed))
+        elif observed <= selected:
+            selected.remove(next(oid for oid in ranked[:count] if oid in observed))
+            selected.add(ranked[count])
+        stopping_ids = tuple(oid for oid in ranked if oid in selected)
     stopping_set = set(stopping_ids)
     fitting_ids = tuple(oid for oid in view.original_ids if oid not in stopping_set)
     fitting, stopping = _subset(view, fitting_ids), _subset(view, stopping_ids)
