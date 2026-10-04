@@ -1,0 +1,51 @@
+# Owner approvals for the OxyFormer v2 run. Owner-originated: only the owner (or a PR the owner approves) may change this
+# file. Units read it and never write it. Anything a unit needs that is not listed under `plan_fixed` or `owner_decisions`
+# is NOT approved: the unit must stop and report rather than assume a value.
+schema_version: 1
+plan: docs/plan/OXYFORMER_V2_PLAN.md
+approved_by: Hani Goodarzi
+approved_on: 2026-10-04
+
+# Parameters the frozen plan states explicitly (section numbers refer to docs/plan/OXYFORMER_V2_PLAN.md).
+plan_fixed:
+  tract_shift_mmhg: 2.0                  # sections 1 and 4.1
+  policy_form: shift_or_stay             # section 4.1; no clipping, jitter or bridging of support gaps
+  support_design_fraction: 0.20          # section 4.1: outcome-sealed geographic sub-blocks
+  primary_outcome_flags: [1]             # sections 4.1 and 5.3: flag-1 USALEEP tracts; no flag-2/3 labels in primary training
+  min_flag1_tracts_per_county: 4         # section 4.1
+  min_inhabited_relief_m: 300            # section 4.1: inhabited P90-P10 tract-elevation contrast
+  max_local_comparison_km: 25            # section 4.1
+  min_outer_training_tracts_per_county: 8   # section 5.1
+  min_inner_partition_tracts_per_county: 4  # section 5.1
+  outer_folds: 5                         # section 5.1
+  inner_folds: 3                         # section 5.2
+  seeds: [1103, 2207, 3301]              # section 5.2
+  transform_before_aggregate: true       # section 3.1
+  location_terrain_satellite_inputs_in_nuisances: forbidden   # sections 2, 3.1 and 11
+  county_membership: coarse_comparison_stratum                # section 3.1
+
+# Decisions the owner made in the orchestrating session on 2026-10-04.
+owner_decisions:
+  foundation_models:
+    tabicl: {package: "2.2.0", status: approved}
+    tabpfn: {package: "9.1.0", versions: all, status: approved, note: "Arc is a nonprofit; research use"}
+  sources_named_in_approved_issues:      # the 44-issue DAG the owner approved
+    - usaleep_2010_2015
+    - acs_2006_2010_5yr
+    - elevcan_repository
+    - census_2010_blocks_and_sf1
+    - usgs_3dep
+    - endes_2023
+    - endes_2024
+    - dane_births
+    - inec_births
+    - inegi_edr
+    - conapo_municipal_population
+  exposure_atlas_footprint: nine_census_divisions_contiguous_us_plus_dc   # atlas issues the owner approved
+  access_rule: public_data_only           # applications (DHS, SEER Research Plus, UK Biobank, All of Us) are excluded
+
+# Not yet approved. A unit that needs one of these must stop and report; the orchestrator brings it to the owner.
+pending_owner_approval:
+  - endpoint covariate concepts for the US tract analysis (section 3.2 asks for 30-60 endpoint-approved concepts)
+  - any relief, flag or distance sensitivity analyses beyond plan_fixed
+  - exposure constants and DEM product resolution, which the exposure manifest records (section 3.1)
