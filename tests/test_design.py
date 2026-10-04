@@ -347,3 +347,35 @@ def test_duplicate_endpoint_tract_is_not_counted_as_two_equal_weight_tracts(tmp_
     result = run_stage(request)
     assert result.status == "fail"
     assert "duplicate tract observations" in result.message
+
+
+def test_numpy_values_cannot_bypass_the_merged_covariate_contract():
+    import numpy as np
+    v = make_inputs()
+    covariates = v["covariates"]
+    # The authoritative Immutable/Cell contract rejects numpy scalar instances
+    # during construction, before any design function can receive such a view.
+    for scalar in (np.float64(.5), np.float32(.5), np.int64(1)):
+        with pytest.raises(ContractError, match="value does not match"):
+            replace(covariates, values=((scalar,),) * len(covariates.original_ids))
+    # Honest numpy-backed adapters normalize at the existing contract boundary.
+    normalized = replace(covariates, values=np.full((len(covariates.original_ids), 1), .5).tolist())
+    restored = CovariateView.from_json(normalized.to_json())
+    assert all(type(row[0]) is float for row in restored.values)
+    reservation = reserve_design(v["geography"].rows, v["entity_graph"])
+    support = freeze_support(v["geography"].rows, reservation.design_ids,
+                              {r.tract_id: r for r in v["atlas"].rows}, restored)
+    assert any(components for _, components in support.policy.components_by_key)
+
+
+def test_missing_all_sealed_atlas_records_is_blocked_not_failed(tmp_path):
+    v = make_inputs()
+    reservation = reserve_design(v["geography"].rows, v["entity_graph"])
+    missing = set(reservation.design_ids)
+    v["atlas"] = replace(v["atlas"], rows=tuple(r for r in v["atlas"].rows if r.tract_id not in missing),
+                         missing_tract_ids=tuple(sorted(missing)), coverage_complete=False)
+    request = make_request(tmp_path, v)
+    result = run_stage(request)
+    assert result.status == "blocked", result.message
+    coverage = json.loads((Path(request.output_dir) / "support_report.json").read_text())["coverage"]
+    assert set(coverage["missing_tract_ids"]) == missing

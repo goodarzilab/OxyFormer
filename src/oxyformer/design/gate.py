@@ -5,6 +5,9 @@ Scientific inputs are canonical existing DataManifest/CovariateView/EntityGraph
 records plus the explicit outcome-free GeographyTable and CollectedAtlas in
 eligibility.py. Producers remain responsible for reviewed raw field mappings.
 No raw table, LoadedData, label column or outcome file is accepted by this stage.
+Consumers must check StageResult.status before decoding or consuming scientific
+artifacts. A nonpassing stage may publish an unavailable-design marker instead
+of a FrozenDesign; no fitted design is fabricated for missing prerequisites.
 """
 from dataclasses import dataclass
 from hashlib import sha256
@@ -204,6 +207,11 @@ def run_stage(request: StageRequest) -> StageResult:
                                   "sealed_subblocks": len(reservation.sealed_subblocks),
                                   "sealed_fraction": len(reservation.sealed_subblocks) / reservation.total_subblocks,
                                   "excluded_design_labels": len(reservation.design_ids)}}
+        design_ids = set(reservation.design_ids)
+        if not atlas.coverage_complete and not any(
+                r.original_id in design_ids and r.tract_id in a
+                and a[r.tract_id].allocation_qualified and a[r.tract_id].population > 0 for r in rows):
+            raise MissingPrerequisite("incomplete atlas coverage leaves no qualified sealed design records")
         frozen = freeze_support(rows, reservation.design_ids, a, covariates,
                                 recipe=SupportRecipe(**config["support"]))
         design = FrozenDesign(reservation=reservation, support=frozen, approved_features=manifest.registry)
@@ -260,6 +268,8 @@ def run_stage(request: StageRequest) -> StageResult:
         status, message = "blocked", f"missing prerequisite file: {exc.filename}"
     except (ContractError, KeyError, TypeError, ValueError) as exc:
         status, message = "fail", f"invalid design input or failed design: {exc}"
+    if not isinstance(design, FrozenDesign):
+        design = {"available": False, "status": status, "message": message, "effect_release_authorized": False}
     gate = {"status": status, "message": message, "effect_release_authorized": False,
             "request_hash": request.content_hash, "inference_frame": INFERENCE_FRAME}
     return _publish(request, {"design.json": design, "splits.json": split_payload,
