@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "kind": "acquisition",
+  "id": "dem",
+  "status": "blocked",
+  "blockers": [
+    "Owner-approved DEM product/resolution is absent in configs/approvals.yaml. No approved tile footprints, tile release inventory or tile byte ceilings exist; DEM acquisition stays blocked.",
+    "Per-tile dictionaries/metadata and coverage have not been selected or inspected."
+  ],
+  "release_identity": {
+    "releases": {
+      "agency": "USGS 3DEP",
+      "product": null,
+      "resolution": null,
+      "version": null
+    },
+    "payload_completeness": "not_verified"
+  },
+  "access_terms": {
+    "rule": "public_data_only",
+    "notes": [
+      "USGS general 3DEP use terms inspected. Public availability does not constitute owner approval of a scientific DEM product/resolution."
+    ]
+  },
+  "selection_provenance": {
+    "inspected_on": "2026-10-04",
+    "catalogs": [
+      "https://www.usgs.gov/3d-elevation-program/about-3dep-products-services"
+    ],
+    "method": "No tile selection. Owner approves nine census divisions of contiguous US plus DC, but DEM resolution is explicitly pending. Later selection must intersect approved outcome-blind footprints and record tile versions, metadata and transfer ceilings; do not select from outcomes or mortality flags.",
+    "approval_file": "configs/approvals.yaml",
+    "byte_ceilings": "Hard transfer limits, not measured file sizes or compute allocations."
+  },
+  "resources": [
+    {
+      "id": "product_dictionary",
+      "release": "unselected_3dep",
+      "role": "dictionary",
+      "url": "https://www.usgs.gov/3d-elevation-program/about-3dep-products-services",
+      "destination": "dem/product_dictionary.html",
+      "max_bytes": 4194304,
+      "format": "html",
+      "availability": "unverified",
+      "inspection": "Official page inspected: distinguishes source, project and seamless DEM resolutions. HEAD inspection: 200."
+    },
+    {
+      "id": "product_terms",
+      "release": "unselected_3dep",
+      "role": "terms",
+      "url": "https://www.usgs.gov/3d-elevation-program/about-3dep-products-services",
+      "destination": "dem/product_terms.html",
+      "max_bytes": 4194304,
+      "format": "html",
+      "availability": "unverified",
+      "inspection": "Official USGS page states 3DEP products are free of charge without use restrictions. HEAD inspection: 200."
+    }
+  ],
+  "requirements": [
+    {
+      "id": "approved_tiles",
+      "status": "blocked",
+      "resource_ids": [],
+      "reason": "Owner-approved DEM product/resolution is absent in configs/approvals.yaml. No approved tile footprints, tile release inventory or tile byte ceilings exist; DEM acquisition stays blocked."
+    },
+    {
+      "id": "tile_metadata",
+      "status": "blocked",
+      "resource_ids": [],
+      "reason": "Per-tile dictionaries/metadata and coverage have not been selected or inspected."
+    }
+  ],
+  "coverage": {
+    "intended_jurisdictions": 49,
+    "verified_jurisdictions": 0,
+    "national": "incomplete",
+    "reason": "No DEM tiles selected or acquired; jurisdiction partition is not elevation coverage."
+  }
+}

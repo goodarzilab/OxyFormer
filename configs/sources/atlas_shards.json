@@ -1,0 +1,179 @@
+{
+  "schema_version": 1,
+  "kind": "atlas_shards",
+  "id": "atlas_shards",
+  "status": "blocked",
+  "approval_reference": "configs/approvals.yaml: owner_decisions.exposure_atlas_footprint",
+  "selection_provenance": {
+    "inspected_on": "2026-10-04",
+    "method": "Exact owner-approved geographic partition; no outcome-based selection."
+  },
+  "national_dem_coverage": "incomplete",
+  "coverage_note": "49 intended jurisdictions partitioned exactly once; zero verified DEM footprints. AK, HI and territories excluded from this atlas. Partition coverage is not DEM coverage.",
+  "readiness_requirements": [
+    "Owner-approved DEM product/resolution",
+    "Approved outcome-blind footprint per group",
+    "Catalog-inspected versioned tile URLs and metadata",
+    "Positive maximum bytes per resource and group; no unlimited defaults",
+    "Coverage reconciliation independent of outcomes"
+  ],
+  "groups": [
+    {
+      "id": "new_england",
+      "jurisdictions": [
+        "CT",
+        "ME",
+        "MA",
+        "NH",
+        "RI",
+        "VT"
+      ],
+      "status": "blocked",
+      "blockers": [
+        "DEM product/resolution approval pending; footprint, tile inventory and byte ceiling unset."
+      ],
+      "dem_footprint": null,
+      "dem_resources": [],
+      "max_bytes": null
+    },
+    {
+      "id": "middle_atlantic",
+      "jurisdictions": [
+        "NJ",
+        "NY",
+        "PA"
+      ],
+      "status": "blocked",
+      "blockers": [
+        "DEM product/resolution approval pending; footprint, tile inventory and byte ceiling unset."
+      ],
+      "dem_footprint": null,
+      "dem_resources": [],
+      "max_bytes": null
+    },
+    {
+      "id": "east_north_central",
+      "jurisdictions": [
+        "IL",
+        "IN",
+        "MI",
+        "OH",
+        "WI"
+      ],
+      "status": "blocked",
+      "blockers": [
+        "DEM product/resolution approval pending; footprint, tile inventory and byte ceiling unset."
+      ],
+      "dem_footprint": null,
+      "dem_resources": [],
+      "max_bytes": null
+    },
+    {
+      "id": "west_north_central",
+      "jurisdictions": [
+        "IA",
+        "KS",
+        "MN",
+        "MO",
+        "NE",
+        "ND",
+        "SD"
+      ],
+      "status": "blocked",
+      "blockers": [
+        "DEM product/resolution approval pending; footprint, tile inventory and byte ceiling unset."
+      ],
+      "dem_footprint": null,
+      "dem_resources": [],
+      "max_bytes": null
+    },
+    {
+      "id": "south_atlantic",
+      "jurisdictions": [
+        "DE",
+        "DC",
+        "FL",
+        "GA",
+        "MD",
+        "NC",
+        "SC",
+        "VA",
+        "WV"
+      ],
+      "status": "blocked",
+      "blockers": [
+        "DEM product/resolution approval pending; footprint, tile inventory and byte ceiling unset."
+      ],
+      "dem_footprint": null,
+      "dem_resources": [],
+      "max_bytes": null
+    },
+    {
+      "id": "east_south_central",
+      "jurisdictions": [
+        "AL",
+        "KY",
+        "MS",
+        "TN"
+      ],
+      "status": "blocked",
+      "blockers": [
+        "DEM product/resolution approval pending; footprint, tile inventory and byte ceiling unset."
+      ],
+      "dem_footprint": null,
+      "dem_resources": [],
+      "max_bytes": null
+    },
+    {
+      "id": "west_south_central",
+      "jurisdictions": [
+        "AR",
+        "LA",
+        "OK",
+        "TX"
+      ],
+      "status": "blocked",
+      "blockers": [
+        "DEM product/resolution approval pending; footprint, tile inventory and byte ceiling unset."
+      ],
+      "dem_footprint": null,
+      "dem_resources": [],
+      "max_bytes": null
+    },
+    {
+      "id": "mountain",
+      "jurisdictions": [
+        "AZ",
+        "CO",
+        "ID",
+        "MT",
+        "NV",
+        "NM",
+        "UT",
+        "WY"
+      ],
+      "status": "blocked",
+      "blockers": [
+        "DEM product/resolution approval pending; footprint, tile inventory and byte ceiling unset."
+      ],
+      "dem_footprint": null,
+      "dem_resources": [],
+      "max_bytes": null
+    },
+    {
+      "id": "pacific",
+      "jurisdictions": [
+        "CA",
+        "OR",
+        "WA"
+      ],
+      "status": "blocked",
+      "blockers": [
+        "DEM product/resolution approval pending; footprint, tile inventory and byte ceiling unset."
+      ],
+      "dem_footprint": null,
+      "dem_resources": [],
+      "max_bytes": null
+    }
+  ]
+}

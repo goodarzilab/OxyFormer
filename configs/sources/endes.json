@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "kind": "acquisition",
+  "id": "endes",
+  "status": "blocked",
+  "blockers": [
+    "ENDES 2023 complete household/person/biomarker modules and accessible public-data terms are unverified. No guessed archive filenames or application-based DHS substitutions.",
+    "ENDES 2024 complete household/person/biomarker modules and accessible public-data terms are unverified. No guessed archive filenames or application-based DHS substitutions.",
+    "ENDES 2024 dictionary contents and stable download URL could not be verified through the 403 catalog."
+  ],
+  "release_identity": {
+    "releases": {
+      "development": 2023,
+      "locked_replication": 2024,
+      "agency": "INEI ENDES Peru"
+    },
+    "payload_completeness": "not_verified"
+  },
+  "access_terms": {
+    "rule": "public_data_only",
+    "notes": [
+      "Public INEI catalogs exist; year-specific permissions and complete module download links are not verified. No registration/application is performed."
+    ]
+  },
+  "selection_provenance": {
+    "inspected_on": "2026-10-04",
+    "catalogs": [
+      "https://proyectos.inei.gob.pe/endes/documentos.asp",
+      "https://www.datosabiertos.gob.pe/dataset/encuesta-demogr%C3%A1fica-y-de-salud-familiar-endes-2023-instituto-nacional-de-estad%C3%ADstica-e-0",
+      "https://www.datosabiertos.gob.pe/dataset/encuesta-demogr%C3%A1fica-y-de-salud-familiar-endes-2024-instituto-nacional-de-estad%C3%ADstica-e-0"
+    ],
+    "method": "Select 2023 development and keep 2024 replication distinct. Raw Hb versus adjusted Hb, altitude units, PSU/stratum/weight definitions and household/person joins must be verified in both year-specific dictionaries. No variable names or units inferred from DHS conventions.",
+    "approval_file": "configs/approvals.yaml",
+    "byte_ceilings": "Hard transfer limits, not measured file sizes or compute allocations."
+  },
+  "resources": [
+    {
+      "id": "design_2023",
+      "release": "2023",
+      "role": "metadata",
+      "url": "https://proyectos.inei.gob.pe/endes/2023/DOCUMENTOS/FICHA_TECNICA_ENDES_2023.pdf",
+      "destination": "endes/design_2023.pdf",
+      "max_bytes": 16777216,
+      "format": "pdf",
+      "availability": "unverified",
+      "inspection": "Exact technical-sheet link inspected in INEI catalog. HEAD inspection: 200."
+    },
+    {
+      "id": "dictionary_2023",
+      "release": "2023",
+      "role": "dictionary",
+      "url": "https://proyectos.inei.gob.pe/files/WEB_ENDES/DICCIONARIO/2023/DICCIONARIOS_2023.zip",
+      "destination": "endes/dictionary_2023.zip",
+      "max_bytes": 33554432,
+      "format": "zip",
+      "availability": "unverified",
+      "inspection": "Exact dictionary archive link inspected in INEI methodological catalog. HEAD inspection: 200."
+    },
+    {
+      "id": "catalog_2023",
+      "release": "2023",
+      "role": "metadata",
+      "url": "https://www.datosabiertos.gob.pe/dataset/encuesta-demogr%C3%A1fica-y-de-salud-familiar-endes-2023-instituto-nacional-de-estad%C3%ADstica-e-0",
+      "destination": "endes/catalog_2023.html",
+      "max_bytes": 4194304,
+      "format": "html",
+      "availability": "unavailable",
+      "inspection": "Official open-data catalog identified; browser HTTP 403 prevents resource/terms validation. HEAD inspection: HTTP Error 418: ."
+    },
+    {
+      "id": "terms_2023",
+      "release": "2023",
+      "role": "terms",
+      "url": "https://www.datosabiertos.gob.pe/dataset/encuesta-demogr%C3%A1fica-y-de-salud-familiar-endes-2023-instituto-nacional-de-estad%C3%ADstica-e-0",
+      "destination": "endes/terms_2023.html",
+      "max_bytes": 4194304,
+      "format": "html",
+      "availability": "unavailable",
+      "inspection": "Year-specific catalog terms must be inspected; currently inaccessible. HEAD inspection: HTTP Error 418: ."
+    },
+    {
+      "id": "catalog_2024",
+      "release": "2024",
+      "role": "metadata",
+      "url": "https://www.datosabiertos.gob.pe/dataset/encuesta-demogr%C3%A1fica-y-de-salud-familiar-endes-2024-instituto-nacional-de-estad%C3%ADstica-e-0",
+      "destination": "endes/catalog_2024.html",
+      "max_bytes": 4194304,
+      "format": "html",
+      "availability": "unavailable",
+      "inspection": "Official open-data catalog identified; browser HTTP 403 prevents resource/terms validation. HEAD inspection: HTTP Error 418: ."
+    },
+    {
+      "id": "terms_2024",
+      "release": "2024",
+      "role": "terms",
+      "url": "https://www.datosabiertos.gob.pe/dataset/encuesta-demogr%C3%A1fica-y-de-salud-familiar-endes-2024-instituto-nacional-de-estad%C3%ADstica-e-0",
+      "destination": "endes/terms_2024.html",
+      "max_bytes": 4194304,
+      "format": "html",
+      "availability": "unavailable",
+      "inspection": "Year-specific catalog terms must be inspected; currently inaccessible. HEAD inspection: HTTP Error 418: ."
+    }
+  ],
+  "requirements": [
+    {
+      "id": "microdata_2023",
+      "status": "blocked",
+      "resource_ids": [],
+      "reason": "ENDES 2023 complete household/person/biomarker modules and accessible public-data terms are unverified. No guessed archive filenames or application-based DHS substitutions."
+    },
+    {
+      "id": "microdata_2024",
+      "status": "blocked",
+      "resource_ids": [],
+      "reason": "ENDES 2024 complete household/person/biomarker modules and accessible public-data terms are unverified. No guessed archive filenames or application-based DHS substitutions."
+    },
+    {
+      "id": "dictionary_2024",
+      "status": "blocked",
+      "resource_ids": [],
+      "reason": "ENDES 2024 dictionary contents and stable download URL could not be verified through the 403 catalog."
+    }
+  ]
+}
