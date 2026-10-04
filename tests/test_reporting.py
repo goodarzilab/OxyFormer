@@ -515,3 +515,33 @@ def test_production_approval_path_cannot_be_redirected(case, tmp_path, monkeypat
     assert result.status == 'fail'
     report = json.loads((Path(request.output_dir)/'report.json').read_text())
     assert any('not owner registry' in gate['reason'] for gate in report['gates'])
+
+
+def test_review_tiny_nonzero_county_information_does_not_fail_release(case):
+    b, m, r = case
+    tiny = tuple(1e-200 if i % 2 else -1e-200 for i in range(40))
+    estimates = tuple(replace(e, influence=tiny) for e in b.estimates)
+    report = evaluate_case((replace(b, estimates=estimates), m, r))
+    assert report['state'] == 'released'
+    for metric in report['diagnostics']['information'].values():
+        assert metric['positive_D']
+        assert metric['G_eff'] == pytest.approx(40)
+
+
+def test_review_plain_cv_tmle_name_is_paired_and_concentration_checked(case):
+    b, m, r = case
+    e = replace(b.estimates[1], method='cv_tmle')
+    report = evaluate_case((replace(b, estimates=(b.estimates[0], e)), m, r))
+    assert report['state'] == 'released'
+    assert 'cv_tmle' in report['diagnostics']['cv_tmle_minus_one_step']
+    assert any(g['gate'] == 'influence_concentration:cv_tmle' for g in report['gates'])
+    e = replace(e, influence=(1., -1.) + (0.,)*38)
+    assert evaluate_case((replace(b, estimates=(b.estimates[0], e)), m, r))['state'] == 'failed'
+
+
+def test_review_nonfinite_diagnostic_values_rejected_at_construction():
+    probes = load_probes()
+    registry = FeatureRegistry(registry_id='diagnostics', rules=(FeatureRule(name='terrain', role='exposure_proxy', endpoints=('synthetic',), uses=('diagnostic',), approval_id='synthetic'),))
+    for value in (float('nan'), float('inf')):
+        with pytest.raises(ContractError, match='nonfinite'):
+            probes.DiagnosticView(endpoint='synthetic', registry=registry, original_ids=('a', 'b'), columns=('terrain',), values=((value,), (1.,)))

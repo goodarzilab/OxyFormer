@@ -1,11 +1,13 @@
 """Read-only summaries; use merged seed-averaged Estimate and covariance APIs."""
 from dataclasses import asdict
+from decimal import Decimal
 
 import numpy as np
 
 from oxyformer.contracts import source_lineage_hash
 from oxyformer.estimation.covariance import align_estimates, cluster_covariance, spatial_sensitivities
 from oxyformer.provenance import require
+from oxyformer.reporting.records import CV_TMLE_METHODS
 from oxyformer.validation.overlap import overlap_report
 
 CONCENTRATION_FORMULA = "U_g=sum_{i in county g} u_i (unkernelized); D=sum_g U_g^2; s_g=U_g^2/D; s_max=max_g s_g; G_eff=1/sum_g s_g^2"
@@ -31,16 +33,19 @@ def concentration(influence, counties, states):
         return {"D": 0.0, "s_max": None, "G_eff": 0.0, "ranked_counties": [], "state_shares": {}, "positive_D": False}
     squared = (values / scale) ** 2
     shares = squared / squared.sum()
-    d = float(np.sum(values ** 2))
-    require(np.isfinite(d), "nonfinite county information D")
+    # Preserve D outside the float64 range. Positivity follows from a nonzero
+    # county sum, not from whether its square is representable as a float.
+    decimal_d = Decimal.from_float(scale) ** 2 * Decimal.from_float(float(squared.sum()))
+    float_d = float(decimal_d)
+    d = float_d if np.isfinite(float_d) and float_d > 0 else None
     ranked = sorted([{"county": g, "U_g": totals[g], "share": float(s)} for g, s in zip(totals, shares)],
                     key=lambda row: (-row["share"], row["county"]))
     state_shares = {}
     for row in ranked:
         state = county_states[row["county"]]
         state_shares[state] = state_shares.get(state, 0.0) + row["share"]
-    return {"D": d, "s_max": float(shares.max()), "G_eff": float(1 / (shares @ shares)),
-            "ranked_counties": ranked, "state_shares": state_shares, "positive_D": d > 0}
+    return {"D": d, "D_scientific": format(decimal_d, ".17E"), "s_max": float(shares.max()), "G_eff": float(1 / (shares @ shares)),
+            "ranked_counties": ranked, "state_shares": state_shares, "positive_D": True}
 
 
 def summarize(bundle, manifest):
@@ -90,7 +95,7 @@ def summarize(bundle, manifest):
         sensitivities.append({"name": item.name, "estimate": asdict(item.estimate),
                               "target_change": item.target_change, "changed_spec_fields": changed})
     one = estimates.get("mtp_one_step")
-    confirmations = [e for name, e in estimates.items() if name.startswith("cv_tmle_")]
+    confirmations = [e for name, e in estimates.items() if name in CV_TMLE_METHODS]
     differences = {e.method: e.value - one.value for e in confirmations} if one else {}
     return {"sources": [asdict(s) for s in bundle.sources], "target": asdict(bundle.spec),
             "attrition": [{"step": name, "remaining": count} for name, count in bundle.attrition],
