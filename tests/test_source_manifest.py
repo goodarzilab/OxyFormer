@@ -703,3 +703,40 @@ def test_xml_retry_resets_parser(manifest, tmp_path, monkeypatch):
     result = fetch(manifest, tmp_path, attempts=2)
     assert len(calls) == 4 and result['resources'][0]['attempts'] == 2
     assert all(r['sha256'] == hashlib.sha256(b'<root/>').hexdigest() for r in result['resources'])
+
+
+@pytest.mark.parametrize('status', [302, 404, 503])
+def test_ignored_http_bodies_are_not_drained(manifest, tmp_path, monkeypatch, status):
+    wires = iter([f'HTTP/1.1 {status} Response\r\nLocation: https://example.test/final\r\nContent-Length: 101\r\n\r\n'.encode() + b'x' * 101,
+                  b'HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndata'])
+    reads = []
+    class Socket:
+        def makefile(self, mode):
+            return io.BytesIO(next(wires, b'HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndata'))
+        def sendall(self, data): pass
+        def close(self): pass
+    original = sm.AcquisitionResponse.read
+    def read(response, amount=None):
+        data = original(response, amount)
+        reads.append((response.status, len(data)))
+        return data
+    monkeypatch.setattr(http.client.HTTPSConnection, 'connect', lambda self: setattr(self, 'sock', Socket()))
+    monkeypatch.setattr(sm.AcquisitionResponse, 'read', read)
+    if status == 302:
+        assert fetch(manifest, tmp_path)['status'] == 'complete'
+    else:
+        with pytest.raises(urllib.error.HTTPError): fetch(manifest, tmp_path, attempts=1)
+        assert_failed_artifacts(tmp_path)
+    assert all(size == 0 for code, size in reads if code != 200)
+
+
+def test_xml_media_type_parameters_do_not_change_type(manifest, tmp_path, monkeypatch):
+    data = b'<metadata/>'
+    for r in manifest['resources']:
+        r.update(format='xml', expected_bytes=len(data), expected_sha256=hashlib.sha256(data).hexdigest())
+    monkeypatch.setattr(sm, '_open_url', lambda *a: Response(data, {
+        'Content-Length': str(len(data)), 'Content-Type': 'Application/XML; profile="https://example.test/text/html"'}))
+    result = fetch(manifest, tmp_path)
+    assert all(r['sha256'] == hashlib.sha256(data).hexdigest() for r in result['resources'])
+    with pytest.raises(sm.ManifestError):
+        sm._check_content({'format': 'xml'}, data, 'Text/HTML; charset=UTF-8')

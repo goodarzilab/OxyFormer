@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from datetime import datetime, timezone
+from email.message import Message
 import hashlib
 import http.client
 import json
@@ -268,6 +269,11 @@ class AcquisitionResponse(http.client.HTTPResponse):
         if self.headers is not None:
             return
         super().begin()
+        # Only 200 payloads are consumed. Close all other bodies before urllib
+        # can drain a redirect with read(); error bodies also have a zero-read ceiling.
+        if self.status != 200:
+            self.close()
+            return
         self.framing, self.declared_length, self.content_encoding = _framing(self.headers)
         self.chunked = self.framing == 'chunked'
         self.chunk_left = None
@@ -308,8 +314,10 @@ def _open_url(url, timeout):
 def _check_content(resource, prefix, content_type):
     fmt = resource['format']
     lower = prefix.lstrip().lower()
+    media = Message()
+    media['Content-Type'] = content_type
     if fmt != 'html':
-        _require('text/html' not in content_type.lower() and (fmt == 'xml' or not lower.startswith(
+        _require(media.get_content_type() != 'text/html' and (fmt == 'xml' or not lower.startswith(
             (b'<!doctype html', b'<html'))), 'Unexpected HTML/login/challenge response')
     if fmt == 'zip':
         _require(prefix.startswith((b'PK\x03\x04', b'PK\x05\x06')), 'Expected ZIP signature')

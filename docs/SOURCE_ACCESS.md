@@ -10,8 +10,8 @@ once; border tiles may overlap. Current USGS URLs are mutable. No national
 coverage claim, AK/HI/territories, or scientific approval changes.
 
 DANE staging is read-only and empty. Local resources require a relative year
-path, size and SHA-256. Colombia awaits the approvals.yaml fallback determination;
-INEC works independently. No CAPTCHA bypass or application-based access.
+path, size and SHA-256. DANE and births stay blocked awaiting manual staging;
+Colombia is not dropped. INEC works independently. No CAPTCHA bypass or application-based access.
 
 ```sh
 PYTHONPATH=src python -m oxyformer.data.source_manifest fetch --source inec --output-dir "$SWARM_UNIT_DIR/inec-acquisition"
@@ -22,7 +22,7 @@ attempt descendant. Success writes payload.tar, receipts.json and download.log;
 failures remove partial payloads. Hashes, ceilings and 1–5 retries bound transfer.
 No extraction/shared writes. Tests are offline; evidence stays in SWARM_UNIT_DIR.
 
-The adapter normalizes framing before decoding. Identity content only; chunked,
+The adapter closes redirect/error bodies unread and normalizes payload framing. Identity content only; chunked,
 consistent length, or close-with-expectation. Trailers require terminal CRLF and
 ≤64KiB/100 lines. Tree-free XML parsing reaches EOF without external retrieval;
-HTML roots fail. Expectations never excuse framing failure.
+HTML roots fail; media-type parameters do not change the type. Expectations never excuse framing failure.
