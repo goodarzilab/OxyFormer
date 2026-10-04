@@ -574,3 +574,44 @@ def test_boolean_identity_zero_mass_keeps_autograd(size):
     torch.testing.assert_close(loss, torch.tensor(0.), rtol=0, atol=0)
     gradient, = torch.autograd.grad(loss, base)
     torch.testing.assert_close(gradient, torch.zeros_like(base), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("wide_operand", ["population", "deaths", "weights"])
+@pytest.mark.parametrize("reduction", ["none", "sum", "mean"])
+@pytest.mark.parametrize("entrypoint", ["direct", "endpoint"])
+@pytest.mark.parametrize("predictor_dtype", [torch.float32, torch.float64])
+def test_poisson_mixed_inputs_share_precision(wide_operand, reduction, entrypoint, predictor_dtype):
+    f = torch.tensor([0., -.5, 1000.], dtype=predictor_dtype, requires_grad=True)
+    deaths = torch.tensor([16777217, 3, 16777217], dtype=torch.int64)
+    population = torch.tensor([16777217 if wide_operand == "deaths" else 1, 7, 100], dtype=torch.int64)
+    weights = torch.tensor([1., 2., 0.], dtype=torch.float32)
+    if wide_operand == "population":
+        population = population.double()
+    elif wide_operand == "deaths":
+        deaths = deaths.double()
+    else:
+        weights = weights.double()
+    if entrypoint == "direct":
+        loss = normalized_poisson_loss(f, deaths, population, weights, reduction=reduction)
+    else:
+        loss = endpoint_loss(f, deaths, weights, family="poisson", population=population, reduction=reduction)
+
+    # Evaluate the count likelihood only on contributing rows. FP64 arithmetic
+    # retains the original integer, including the unit above 2**24.
+    active = weights > 0
+    rate = f.detach()[active].double().exp()
+    d, n, w = deaths[active].double(), population[active].double(), weights[active].double()
+    rows = torch.zeros(3, dtype=torch.float64)
+    rows[active] = -w / n * torch.distributions.Poisson(n * rate).log_prob(d)
+    expected = rows if reduction == "none" else rows.sum()
+    expected_gradient = torch.zeros(3, dtype=torch.float64)
+    expected_gradient[active] = w * (rate - d / n)
+    if reduction == "mean":
+        expected = expected / w.sum()
+        expected_gradient /= w.sum()
+    gradient, = torch.autograd.grad(loss.sum(), f)
+    # Relative tolerances at magnitude 2**24 would conceal the lost count.
+    torch.testing.assert_close(gradient[0], expected_gradient.to(predictor_dtype)[0], rtol=0, atol=0)
+    torch.testing.assert_close(gradient, expected_gradient.to(predictor_dtype))
+    torch.testing.assert_close(loss, expected, rtol=1e-12, atol=1e-12)
+    assert gradient[2] == 0 and bool(torch.isfinite(gradient).all())
