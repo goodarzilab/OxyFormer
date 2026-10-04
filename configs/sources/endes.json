@@ -2,123 +2,24 @@
   "schema_version": 1,
   "kind": "acquisition",
   "id": "endes",
-  "status": "blocked",
-  "blockers": [
-    "ENDES 2023 complete household/person/biomarker modules and accessible public-data terms are unverified. No guessed archive filenames or application-based DHS substitutions.",
-    "ENDES 2024 complete household/person/biomarker modules and accessible public-data terms are unverified. No guessed archive filenames or application-based DHS substitutions.",
-    "ENDES 2024 dictionary contents and stable download URL could not be verified through the 403 catalog."
-  ],
-  "release_identity": {
-    "releases": {
-      "development": 2023,
-      "locked_replication": 2024,
-      "agency": "INEI ENDES Peru"
-    },
-    "payload_completeness": "not_verified"
-  },
-  "access_terms": {
-    "rule": "public_data_only",
-    "notes": [
-      "Public INEI catalogs exist; year-specific permissions and complete module download links are not verified. No registration/application is performed."
-    ]
-  },
-  "selection_provenance": {
-    "inspected_on": "2026-10-04",
-    "catalogs": [
-      "https://proyectos.inei.gob.pe/endes/documentos.asp",
-      "https://www.datosabiertos.gob.pe/dataset/encuesta-demogr%C3%A1fica-y-de-salud-familiar-endes-2023-instituto-nacional-de-estad%C3%ADstica-e-0",
-      "https://www.datosabiertos.gob.pe/dataset/encuesta-demogr%C3%A1fica-y-de-salud-familiar-endes-2024-instituto-nacional-de-estad%C3%ADstica-e-0"
-    ],
-    "method": "Select 2023 development and keep 2024 replication distinct. Raw Hb versus adjusted Hb, altitude units, PSU/stratum/weight definitions and household/person joins must be verified in both year-specific dictionaries. No variable names or units inferred from DHS conventions.",
-    "approval_file": "configs/approvals.yaml",
-    "byte_ceilings": "Hard transfer limits, not measured file sizes or compute allocations."
-  },
+  "status": "ready",
+  "blockers": [],
+  "release_identity": {"development":2023,"locked_replication":2024,"module_count_each":34,"notes":"2023 flat module folders; 2024 contains 13 nested module ZIPs. Archives are kept opaque by fetch.","payload_completeness":"acquisition_inventory_inspected; downstream scientific checks pending"},
+  "access_terms": {"rule":"public_data_only","notes":["Both official dataset-level catalogs declare ODbL. No DHS registration/application or CAPTCHA was used."]},
+  "selection_provenance": {"inspected_on":"2026-10-04","catalogs":["https://proyectos.inei.gob.pe/endes/documentos.asp","https://www.datosabiertos.gob.pe/dataset/encuesta-demogr%C3%A1fica-y-de-salud-familiar-endes-2023-instituto-nacional-de-estad%C3%ADstica-e-0","https://www.datosabiertos.gob.pe/dataset/encuesta-demogr%C3%A1fica-y-de-salud-familiar-endes-2024-instituto-nacional-de-estad%C3%ADstica-e-0"],"method":"Complete agency-labeled ENDES 2023 and 2024 datasets, selected by release year before outcomes. 2024 remains locked replication.","approval_file":"configs/approvals.yaml","byte_ceilings":"Hard transfer limits, not measured file sizes or compute allocations."},
   "resources": [
-    {
-      "id": "design_2023",
-      "release": "2023",
-      "role": "metadata",
-      "url": "https://proyectos.inei.gob.pe/endes/2023/DOCUMENTOS/FICHA_TECNICA_ENDES_2023.pdf",
-      "destination": "endes/design_2023.pdf",
-      "max_bytes": 16777216,
-      "format": "pdf",
-      "availability": "unverified",
-      "inspection": "Exact technical-sheet link inspected in INEI catalog. HEAD inspection: 200."
-    },
-    {
-      "id": "dictionary_2023",
-      "release": "2023",
-      "role": "dictionary",
-      "url": "https://proyectos.inei.gob.pe/files/WEB_ENDES/DICCIONARIO/2023/DICCIONARIOS_2023.zip",
-      "destination": "endes/dictionary_2023.zip",
-      "max_bytes": 33554432,
-      "format": "zip",
-      "availability": "unverified",
-      "inspection": "Exact dictionary archive link inspected in INEI methodological catalog. HEAD inspection: 200."
-    },
-    {
-      "id": "catalog_2023",
-      "release": "2023",
-      "role": "metadata",
-      "url": "https://www.datosabiertos.gob.pe/dataset/encuesta-demogr%C3%A1fica-y-de-salud-familiar-endes-2023-instituto-nacional-de-estad%C3%ADstica-e-0",
-      "destination": "endes/catalog_2023.html",
-      "max_bytes": 4194304,
-      "format": "html",
-      "availability": "unavailable",
-      "inspection": "Official open-data catalog identified; browser HTTP 403 prevents resource/terms validation. HEAD inspection: HTTP Error 418: ."
-    },
-    {
-      "id": "terms_2023",
-      "release": "2023",
-      "role": "terms",
-      "url": "https://www.datosabiertos.gob.pe/dataset/encuesta-demogr%C3%A1fica-y-de-salud-familiar-endes-2023-instituto-nacional-de-estad%C3%ADstica-e-0",
-      "destination": "endes/terms_2023.html",
-      "max_bytes": 4194304,
-      "format": "html",
-      "availability": "unavailable",
-      "inspection": "Year-specific catalog terms must be inspected; currently inaccessible. HEAD inspection: HTTP Error 418: ."
-    },
-    {
-      "id": "catalog_2024",
-      "release": "2024",
-      "role": "metadata",
-      "url": "https://www.datosabiertos.gob.pe/dataset/encuesta-demogr%C3%A1fica-y-de-salud-familiar-endes-2024-instituto-nacional-de-estad%C3%ADstica-e-0",
-      "destination": "endes/catalog_2024.html",
-      "max_bytes": 4194304,
-      "format": "html",
-      "availability": "unavailable",
-      "inspection": "Official open-data catalog identified; browser HTTP 403 prevents resource/terms validation. HEAD inspection: HTTP Error 418: ."
-    },
-    {
-      "id": "terms_2024",
-      "release": "2024",
-      "role": "terms",
-      "url": "https://www.datosabiertos.gob.pe/dataset/encuesta-demogr%C3%A1fica-y-de-salud-familiar-endes-2024-instituto-nacional-de-estad%C3%ADstica-e-0",
-      "destination": "endes/terms_2024.html",
-      "max_bytes": 4194304,
-      "format": "html",
-      "availability": "unavailable",
-      "inspection": "Year-specific catalog terms must be inspected; currently inaccessible. HEAD inspection: HTTP Error 418: ."
-    }
+    {"id":"endes_2023","release":"2023","role":"data","url":"https://www.datosabiertos.gob.pe/sites/default/files/2023_2.zip","destination":"endes_2023.zip","max_bytes":97370159,"format":"zip","inspection":"Full archive retrieved and CRC checked, including nested ZIPs in 2024; all 34 CSV module headers inspected.","expected_bytes":97370159,"expected_sha256":"e79da0dc33ebb3c149a367a7eb9028450e5409992d35666ecd3d57d3d616899d"},
+    {"id":"dictionary_2023_household","release":"2023","role":"dictionary","url":"https://www.datosabiertos.gob.pe/sites/default/files/Dicionario_Hogar_2023.pdf","destination":"dictionary_2023_household.pdf","max_bytes":1473643,"format":"pdf","inspection":"Full dictionary text inspected against module headers; raw Hb differs from altitude-adjusted Hb.","expected_bytes":1473643,"expected_sha256":"4731d5f0fcae2cfc0f14e11363e28c8e1ce341be599f484d068506736417a02f"},
+    {"id":"dictionary_2023_individual","release":"2023","role":"dictionary","url":"https://www.datosabiertos.gob.pe/sites/default/files/Dicionario_Individual_2023.pdf","destination":"dictionary_2023_individual.pdf","max_bytes":2377008,"format":"pdf","inspection":"Full dictionary text inspected against module headers; raw Hb differs from altitude-adjusted Hb.","expected_bytes":2377008,"expected_sha256":"6fdc42e9909a20a465077af7b4fe3393712bbdb6890c30c7a734ef69bda7d302"},
+    {"id":"dictionary_2023_health","release":"2023","role":"dictionary","url":"https://www.datosabiertos.gob.pe/sites/default/files/Dicionario_Salud_2023_0.pdf","destination":"dictionary_2023_health.pdf","max_bytes":679710,"format":"pdf","inspection":"Full dictionary text inspected against module headers; raw Hb differs from altitude-adjusted Hb.","expected_bytes":679710,"expected_sha256":"2f27365582f83467329afd088c3288dab6466f5c1ed41b5a1a3198a7582f2a4b"},
+    {"id":"terms_2023","release":"2023","role":"terms","url":"https://www.datosabiertos.gob.pe/dataset/encuesta-demogr%C3%A1fica-y-de-salud-familiar-endes-2023-instituto-nacional-de-estad%C3%ADstica-e","destination":"terms_2023.html","max_bytes":4194304,"format":"html","inspection":"Dataset-level official portal license: Open Data Commons Open Database License (ODbL); retain attribution and applicable share-alike/database conditions."},
+    {"id":"endes_2024","release":"2024","role":"data","url":"https://www.datosabiertos.gob.pe/sites/default/files/2024.zip","destination":"endes_2024.zip","max_bytes":71056297,"format":"zip","inspection":"Full archive retrieved and CRC checked, including nested ZIPs in 2024; all 34 CSV module headers inspected.","expected_bytes":71056297,"expected_sha256":"832fd314e4ef94796cb5b24000dc25884fbeaf5a15b6fccc9d2701d83d63913f"},
+    {"id":"dictionary_2024_household","release":"2024","role":"dictionary","url":"https://www.datosabiertos.gob.pe/sites/default/files/Dicionario_BD_Hogar_ENDES_2024.pdf","destination":"dictionary_2024_household.pdf","max_bytes":787877,"format":"pdf","inspection":"Full dictionary text inspected against module headers; raw Hb differs from altitude-adjusted Hb.","expected_bytes":787877,"expected_sha256":"1099fd34204ce1def7dcf84002ff87a6e93c906ef0afec3064024239121e483c"},
+    {"id":"dictionary_2024_individual","release":"2024","role":"dictionary","url":"https://www.datosabiertos.gob.pe/sites/default/files/Dicionario_BD_Individual_ENDES_2024.pdf","destination":"dictionary_2024_individual.pdf","max_bytes":3901724,"format":"pdf","inspection":"Full dictionary text inspected against module headers; raw Hb differs from altitude-adjusted Hb.","expected_bytes":3901724,"expected_sha256":"a5af63169604e20ef754c4bf8ad6a0a66e8500f76b27630c277196b3e601f1b8"},
+    {"id":"dictionary_2024_health","release":"2024","role":"dictionary","url":"https://www.datosabiertos.gob.pe/sites/default/files/Dicionario_BD_Salud_ENDES_2024.pdf","destination":"dictionary_2024_health.pdf","max_bytes":690491,"format":"pdf","inspection":"Full dictionary text inspected against module headers; raw Hb differs from altitude-adjusted Hb.","expected_bytes":690491,"expected_sha256":"a524711373f1778fab008a94824773820192b4d5fe3dbbff2b53f0d4e495e58a"},
+    {"id":"terms_2024","release":"2024","role":"terms","url":"https://www.datosabiertos.gob.pe/dataset/encuesta-demogr%C3%A1fica-y-de-salud-familiar-endes-2024-instituto-nacional-de-estad%C3%ADstica-e","destination":"terms_2024.html","max_bytes":4194304,"format":"html","inspection":"Dataset-level official portal license: Open Data Commons Open Database License (ODbL); retain attribution and applicable share-alike/database conditions."}
   ],
-  "requirements": [
-    {
-      "id": "microdata_2023",
-      "status": "blocked",
-      "resource_ids": [],
-      "reason": "ENDES 2023 complete household/person/biomarker modules and accessible public-data terms are unverified. No guessed archive filenames or application-based DHS substitutions."
-    },
-    {
-      "id": "microdata_2024",
-      "status": "blocked",
-      "resource_ids": [],
-      "reason": "ENDES 2024 complete household/person/biomarker modules and accessible public-data terms are unverified. No guessed archive filenames or application-based DHS substitutions."
-    },
-    {
-      "id": "dictionary_2024",
-      "status": "blocked",
-      "resource_ids": [],
-      "reason": "ENDES 2024 dictionary contents and stable download URL could not be verified through the 403 catalog."
-    }
-  ]
+  "requirements": [{"id":"complete_inspected_inventory","status":"ready","resource_ids":["endes_2023","dictionary_2023_household","dictionary_2023_individual","dictionary_2023_health","terms_2023","endes_2024","dictionary_2024_household","dictionary_2024_individual","dictionary_2024_health","terms_2024"]}],
+  "dictionary_observations": {"household":"RECH0 has HHID, HV040 (cluster altitude in meters), HV021, HV022, HV005.","biomarkers":"RECH5 HA53 and RECH6 HC53 are raw Hb; HA56/HC56 are altitude-adjusted. 2024 additionally includes HA56A/HC56A under the new adjustment guideline.","joins":"Module headers and dictionaries inspected. Row-level household/person uniqueness, scaling, missing-value handling and survey design validation remain ingestion gates."},
+  "resource_defaults": {"availability":"verified"}
 }

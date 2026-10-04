@@ -242,7 +242,7 @@ def test_repository_destination_rejected():
         sm._new_output(sm.REPO_ROOT / 'synthetic-output', sm.REPO_ROOT)
 
 
-@pytest.mark.parametrize('name', ['us', 'census', 'dem', 'endes', 'births', 'mexico'])
+@pytest.mark.parametrize('name', ['us', 'census', 'dem', 'endes', 'births', 'mexico', 'inec'])
 def test_committed_manifest_contract(name):
     manifest = sm.load_source(name)
     assert manifest['id'] == name
@@ -487,10 +487,102 @@ def test_parser_truncated_attempt_then_success(manifest, tmp_path, monkeypatch):
     assert {p.name for p in (tmp_path / 'result').iterdir()} == {'payload.tar', 'receipts.json', 'download.log'}
 
 
-@pytest.mark.parametrize('name', ['us', 'census', 'dem', 'endes', 'births', 'mexico'])
+@pytest.mark.parametrize('name', ['us', 'dem', 'births', 'mexico'])
 def test_each_production_manifest_blocks_without_outputs(name, tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(sm, '_open_url', lambda *a: calls.append(a))
     with pytest.raises(sm.ManifestError, match='Blocked manifest'):
         fetch(sm.load_source(name), tmp_path)
     assert not calls and list(tmp_path.iterdir()) == []
+
+
+@pytest.fixture
+def staged_manifest(manifest, tmp_path, monkeypatch):
+    root = tmp_path / 'staging'
+    (root / '2023').mkdir(parents=True)
+    monkeypatch.setattr(sm, 'DANE_STAGING_DIR', root)
+    for r in manifest['resources']:
+        data = ('staged ' + r['id']).encode()
+        path = root / '2023' / (r['id'] + '.txt')
+        path.write_bytes(data)
+        path.chmod(0o400)
+        r.update(transport='local', local_path='2023/' + path.name,
+                 expected_bytes=len(data), expected_sha256=hashlib.sha256(data).hexdigest())
+    return manifest
+
+
+def test_staged_resources_are_read_only_and_hash_audited(staged_manifest, tmp_path):
+    before = {p: (p.read_bytes(), p.stat().st_mode) for p in sm.DANE_STAGING_DIR.rglob('*.txt')}
+    receipt = fetch(staged_manifest, tmp_path)
+    assert receipt['status'] == 'complete'
+    with tarfile.open(tmp_path / 'result/payload.tar') as archive:
+        for entry in receipt['resources']:
+            assert entry['checksum_status'] == 'matched'
+            assert entry['transfer_integrity'] == 'staged_size_and_sha256'
+            assert archive.extractfile(entry['destination']).read() == before[Path(entry['local_path'])][0]
+    assert before == {p: (p.read_bytes(), p.stat().st_mode) for p in before}
+
+
+@pytest.mark.parametrize('corruption', ['same_size', 'size', 'symlink', 'directory'])
+def test_staged_corruption_cannot_publish(staged_manifest, tmp_path, corruption):
+    r = staged_manifest['resources'][0]
+    path = sm.DANE_STAGING_DIR / r['local_path']
+    path.chmod(0o600)
+    if corruption == 'same_size': path.write_bytes(b'x' * r['expected_bytes'])
+    elif corruption == 'size': path.write_bytes(b'x')
+    elif corruption == 'symlink':
+        outside = tmp_path / 'outside'
+        outside.write_bytes(path.read_bytes())
+        path.unlink()
+        path.symlink_to(outside)
+    else:
+        path.unlink()
+        path.mkdir()
+    with pytest.raises((sm.ManifestError, IsADirectoryError)):
+        fetch(staged_manifest, tmp_path)
+    assert not (tmp_path / 'result/payload.tar').exists()
+    assert json.loads((tmp_path / 'result/receipts.json').read_text())['status'] == 'failed'
+
+
+@pytest.mark.parametrize('change', [{'expected_sha256': None}, {'expected_bytes': None},
+                                  {'local_path': '../outside'}, {'local_path': '2022/data.txt'}])
+def test_staging_contract_requires_recorded_identity(staged_manifest, change):
+    staged_manifest['resources'][0].update(change)
+    with pytest.raises(sm.ManifestError): sm.validate_manifest(staged_manifest)
+
+
+def test_inec_is_usable_independently_of_dane():
+    inec = sm.load_source('inec')
+    assert inec['status'] == 'ready'
+    assert all('dane.gov' not in r['url'] for r in inec['resources'])
+    assert {'2015', '2024'} <= {r['release'] for r in inec['resources']}
+    for name in ('census', 'endes', 'inec'):
+        m = sm.load_source(name)
+        assert m['status'] == 'ready' and all(r['availability'] == 'verified' for r in m['resources'])
+
+
+def test_tile_inventory_expands_exact_paired_urls_and_preserves_year_precision():
+    m = sm.load_source('dem')
+    resources = {r['id']: r for r in m['resources']}
+    assert resources['n33w119']['release'].endswith('_2013')
+    assert resources['n33w119']['url'] == sm.DEM_URL + 'n33w119/USGS_13_n33w119.tif'
+    assert resources['n33w119_metadata']['url'] == sm.DEM_URL + 'n33w119/USGS_13_n33w119.xml'
+    assert all(r['expected_bytes'] == r['max_bytes'] for r in m['resources'] if r['format'] in ('tiff', 'xml'))
+    assert m['coverage']['missing_tiles'] and m['status'] == 'blocked'
+
+
+@pytest.mark.parametrize('change', ['ceiling', 'footprint', 'tile', 'ready'])
+def test_shard_contract_rejects_unapproved_or_inconsistent_selection(change):
+    a = json.loads((sm.REPO_ROOT / 'configs/sources/atlas_shards.json').read_text())
+    g = a['groups'][0]
+    if change == 'ceiling': g['max_bytes'] += 1
+    elif change == 'footprint': g['dem_footprint'] = None
+    elif change == 'tile': g['dem_resources'][0] = 'n00w000'
+    else: g.update(status='ready', blockers=[])
+    with pytest.raises(sm.ManifestError): sm.validate_shards(a)
+
+
+@pytest.mark.parametrize('fmt,content', [('tiff', b'II*\x00synthetic'), ('xml', b'<?xml version="1.0"?><metadata/>')])
+def test_dem_formats_accept_real_signatures_and_reject_html(fmt, content):
+    sm._check_content({'format': fmt}, content, '')
+    with pytest.raises(sm.ManifestError): sm._check_content({'format': fmt}, b'<html>challenge</html>', 'text/html')

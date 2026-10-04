@@ -15,6 +15,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import stat
 import sys
 import tarfile
 import time
@@ -24,6 +25,8 @@ import urllib.request
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CHUNK = 1024 * 1024
+DANE_STAGING_DIR = Path('/mnt/weka/home/hgoodarzi/oxyformer-swarm/staging/dane_births')
+DEM_URL = 'https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/current/'
 DIVISIONS = {
     'new_england': 'CT ME MA NH RI VT'.split(),
     'middle_atlantic': 'NJ NY PA'.split(),
@@ -83,6 +86,8 @@ def validate_manifest(manifest):
     for key in ('release_identity', 'access_terms', 'selection_provenance'):
         _require(isinstance(manifest.get(key), dict) and manifest[key], f'Missing {key}')
     _require(manifest['access_terms'].get('rule') == 'public_data_only', 'Public data only')
+    _require('tile_inventory' not in manifest and 'resource_defaults' not in manifest,
+             'Load packed production inventories through the committed registry')
     resources = manifest.get('resources')
     _require(isinstance(resources, list), 'resources must be a list')
     seen_ids, seen_paths = set(), set()
@@ -99,7 +104,7 @@ def validate_manifest(manifest):
         _require(_positive(resource.get('max_bytes')), 'Positive integer max_bytes required')
         _require(resource.get('role') in ('data', 'dictionary', 'terms', 'metadata', 'code'),
                  'Invalid resource role')
-        _require(resource.get('format') in ('zip', 'pdf', 'text', 'html', 'json', 'csv', 'tar_gz'),
+        _require(resource.get('format') in ('zip', 'pdf', 'text', 'html', 'json', 'csv', 'tar_gz', 'tiff', 'xml'),
                  'Invalid resource format')
         _require(resource.get('availability') in ('verified', 'unverified', 'unavailable'),
                  'Missing resource availability')
@@ -111,6 +116,13 @@ def validate_manifest(manifest):
         digest = resource.get('expected_sha256')
         _require(digest is None or isinstance(digest, str) and re.fullmatch('[0-9a-f]{64}', digest),
                  'Invalid expected SHA-256')
+        _require(resource.get('transport', 'https') in ('https', 'local'), 'Invalid transport')
+        if resource.get('transport') == 'local':
+            local = _destination(resource.get('local_path'))
+            _require(local.parts[0] in ('2023', '2024', '2025') and len(local.parts) > 1,
+                     'Local DANE resource must be under an approved year directory')
+            _require(expected_bytes is not None and digest is not None,
+                     'Local resources require recorded size and SHA-256')
     requirements = manifest.get('requirements')
     _require(isinstance(requirements, list) and requirements, 'Required resource checklist missing')
     requirement_ids = set()
@@ -136,7 +148,7 @@ def validate_manifest(manifest):
     return manifest
 
 
-def validate_shards(atlas):
+def validate_shards(atlas, dem=None):
     _require(atlas.get('schema_version') == 1 and atlas.get('kind') == 'atlas_shards',
              'Invalid atlas schema')
     groups = atlas.get('groups', [])
@@ -146,15 +158,68 @@ def validate_shards(atlas):
     counts = Counter(s for g in groups for s in g['jurisdictions'])
     _require(set(counts) == intended and set(counts.values()) == {1},
              'Each intended jurisdiction must occur exactly once')
+    dem = load_source('dem') if dem is None else validate_manifest(dem)
+    resources = {r['id']: r for r in dem['resources']}
+    tiles = {r['id'] for r in dem['resources'] if r['role'] == 'data' and r['format'] == 'tiff'}
+    assigned = set()
     for group in groups:
         _require(set(group['jurisdictions']) == set(DIVISIONS[group['id']]), 'Wrong division membership')
-        _require(group.get('status') == 'blocked' and group.get('blockers'),
-                 'Atlas acquisition is blocked pending approved DEM selections')
-        _require(group.get('dem_footprint') is None and group.get('dem_resources') == [],
-                 'Unapproved DEM footprint/resources')
-        _require(group.get('max_bytes') is None, 'No DEM byte ceiling is approved yet')
+        _require(group.get('status') in ('ready', 'blocked') and
+                 bool(group.get('blockers')) == (group['status'] == 'blocked'),
+                 'Invalid shard readiness')
+        footprint = group.get('dem_footprint', {})
+        _require(isinstance(footprint, dict) and footprint.get('method') == 'state_geometry_intersection' and
+                 footprint.get('outcome_blind') is True and
+                 footprint.get('boundary_resource') == 'state_boundaries_2010' and
+                 footprint['boundary_resource'] in resources and
+                 set(footprint.get('jurisdictions', [])) == set(group['jurisdictions']),
+                 'Approved outcome-blind footprint required')
+        ids = group.get('dem_resources', [])
+        _require(ids and len(ids) == len(set(ids)) and all(i in tiles for i in ids),
+                 'Unknown or repeated DEM tile')
+        assigned.update(ids)
+        # Border tiles can be read by both neighboring divisions; jurisdictions remain disjoint.
+        budget = sum(resources[i]['max_bytes'] + resources[i + '_metadata']['max_bytes'] for i in ids)
+        _require(group.get('max_bytes') == budget and _positive(budget), 'Wrong DEM byte ceiling')
+        if group['status'] == 'ready':
+            _require(dem['status'] == 'ready', 'Blocked DEM cannot authorize a ready shard')
+    _require(assigned == tiles, 'Tile inventory and shards disagree')
     _require(atlas.get('national_dem_coverage') == 'incomplete', 'National DEM coverage is incomplete')
     return atlas
+
+
+def _unpack_manifest(manifest):
+    """Expand compact committed tables; no filenames are discovered at fetch time."""
+    manifest = dict(manifest)
+    defaults = manifest.pop('resource_defaults', {})
+    manifest['resources'] = [dict(defaults, **r) for r in manifest['resources']]
+    inventory = manifest.pop('tile_inventory', None)
+    if inventory is not None:
+        _require(manifest['id'] == 'dem', 'Tile table is only supported for approved DEM')
+        _require(inventory['columns'] == ['tile', 'data_bytes', 'metadata_bytes', 'publication_date'],
+                 'Unknown tile table layout')
+        ids = []
+        for tile, size, metadata_size, date in inventory['rows']:
+            _require(isinstance(tile, str) and re.fullmatch(r'n[0-9]{2}w[0-9]{3}', tile),
+                     'Invalid tile identifier')
+            _require(isinstance(date, str) and re.fullmatch(r'(?:[0-9]{4}|[0-9]{8})', date), 'Invalid tile date')
+            # Every paired stem below was observed in the USGS current bucket inventory.
+            stem = tile + '/USGS_13_' + tile
+            for suffix, role, fmt, length in [('', 'data', 'tiff', size),
+                                             ('_metadata', 'metadata', 'xml', metadata_size)]:
+                rid = tile + suffix
+                ids.append(rid)
+                manifest['resources'].append({
+                    'id': rid, 'release': 'USGS_13_' + tile + '_' + date,
+                    'url': DEM_URL + stem + ('.tif' if fmt == 'tiff' else '.xml'),
+                    'destination': 'dem/' + tile + ('.tif' if fmt == 'tiff' else '.xml'),
+                    'role': role, 'format': fmt, 'max_bytes': length, 'expected_bytes': length,
+                    'availability': 'verified',
+                    'inspection': inventory['inspection'],
+                })
+        manifest['requirements'] = [dict(r, resource_ids=ids) if r['id'] == 'approved_tiles'
+                                    else r for r in manifest['requirements']]
+    return manifest
 
 
 def load_source(name):
@@ -165,7 +230,7 @@ def load_source(name):
     path = (REPO_ROOT / relative).resolve()
     _require(path.is_relative_to(REPO_ROOT / 'configs/sources') and path.suffix == '.json',
              'Production manifests must live under configs/sources')
-    return validate_manifest(json.loads(path.read_text()))
+    return validate_manifest(_unpack_manifest(json.loads(path.read_text())))
 
 
 class HTTPSRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -190,6 +255,11 @@ def _check_content(resource, prefix, content_type):
         _require(prefix.startswith((b'PK\x03\x04', b'PK\x05\x06')), 'Expected ZIP signature')
     elif fmt == 'pdf':
         _require(prefix.startswith(b'%PDF-'), 'Expected PDF signature')
+    elif fmt == 'tiff':
+        _require(prefix.startswith((b'II*\x00', b'MM\x00*', b'II+\x00', b'MM\x00+')),
+                 'Expected TIFF signature')
+    elif fmt == 'xml':
+        _require(lower.startswith((b'<?xml', b'<metadata')), 'Expected XML metadata')
     elif fmt == 'tar_gz':
         _require(prefix.startswith(b'\x1f\x8b'), 'Expected gzip signature')
 
@@ -261,6 +331,39 @@ def _download(resource, path, *, attempts, timeout, log):
     raise AssertionError('unreachable')
 
 
+def _copy_local(resource, path, *, log):
+    """Read an owner-staged DANE resource without changing its bytes or permissions."""
+    root = DANE_STAGING_DIR.resolve(strict=True)
+    source = root / resource['local_path']
+    _require(source.resolve(strict=True) == source and source.is_relative_to(root),
+             'Local resource escapes staging or uses a symlink')
+    fd = os.open(source, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    digest, count, prefix = hashlib.sha256(), 0, b''
+    with os.fdopen(fd, 'rb') as stream, path.open('wb') as output:
+        info = os.fstat(stream.fileno())
+        _require(stat.S_ISREG(info.st_mode), 'Local resource must be a regular file')
+        _require(info.st_size == resource['expected_bytes'], 'Local recorded size mismatch')
+        while True:
+            block = stream.read(min(CHUNK, resource['max_bytes'] - count + 1))
+            if not block:
+                break
+            count += len(block)
+            _require(count <= resource['max_bytes'], 'Local resource exceeds byte ceiling')
+            if len(prefix) < 512:
+                prefix += block[:512 - len(prefix)]
+            digest.update(block)
+            output.write(block)
+    _require(count == resource['expected_bytes'], 'Local recorded size mismatch')
+    _require(digest.hexdigest() == resource['expected_sha256'], 'Local SHA-256 mismatch')
+    _check_content(resource, prefix, '')
+    log.write(f"read-only staged resource={resource['id']}\n")
+    return {'id': resource['id'], 'url': resource['url'], 'local_path': str(source),
+            'destination': resource['destination'], 'bytes': count, 'sha256': digest.hexdigest(),
+            'expected_sha256': resource['expected_sha256'], 'expected_bytes': resource['expected_bytes'],
+            'checksum_status': 'matched', 'transfer_integrity': 'staged_size_and_sha256',
+            'attempts': 1, 'retrieved_at': datetime.now(timezone.utc).isoformat()}
+
+
 def _hash_file(path):
     digest = hashlib.sha256()
     with path.open('rb') as stream:
@@ -310,7 +413,8 @@ def fetch_manifest(manifest, output_dir, *, attempt_root, attempts=3, timeout=30
             try:
                 for index, resource in enumerate(manifest['resources']):
                     path = stage / str(index)
-                    entry = _download(resource, path, attempts=attempts, timeout=timeout, log=log)
+                    entry = (_copy_local(resource, path, log=log) if resource.get('transport') == 'local'
+                             else _download(resource, path, attempts=attempts, timeout=timeout, log=log))
                     receipt['resources'].append(entry)
                     log.write(f"audited {entry['id']} bytes={entry['bytes']} sha256={entry['sha256']}\n")
                 with tarfile.open(output / 'payload.tar.part', 'w', format=tarfile.PAX_FORMAT) as tar:
