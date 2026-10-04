@@ -359,3 +359,159 @@ def test_unknown_effect_is_rejected_by_inherited_contract_validation(tmp_path):
                       '  - name: unsupported\n    effect: quadratic\n    active_mechanisms: [quadratic]\n')
     with pytest.raises(ContractError, match="invalid enum value"):
         load_suite_a(recipe)
+
+
+@pytest.mark.parametrize("scale", [.05, 1e-3, 1e-6, 1e-8])
+def test_concentrated_assignment_retains_mass_and_shifted_conditional_mean(scale):
+    sample = generate_suite_a(frame(2), config(assignment="near_deterministic", near_scale=scale), policy())
+    from scipy.stats import laplace
+    expected = 2*(laplace.cdf(8,5,scale)-laplace.cdf(0,5,scale))/(laplace.cdf(10,5,scale)-laplace.cdf(0,5,scale))
+    assert sample.observed_law_truth.value == pytest.approx(expected, abs=1e-10)
+    assert sample.structural_causal_truth.value == pytest.approx(expected, abs=1e-10)
+
+
+@pytest.mark.parametrize("coordinate", [0., -800., 800.])
+def test_concentrated_gap_and_endpoint_assignments_are_continuous(coordinate):
+    f = replace(frame(2), coordinates=((coordinate,0.),)*2)
+    c = config(assignment="near_deterministic", near_scale=1e-6, support_gaps=True)
+    sample = generate_suite_a(f, c, policy(((0.,3.),(7.,10.))))
+    expected = {0.:1., -800.:2., 800.:0.}[coordinate]
+    assert sample.observed_law_truth.value == pytest.approx(expected, abs=1e-10)
+    assert sample.structural_causal_truth.value == pytest.approx(expected, abs=1e-10)
+    assert all(0 < a < 3 or 7 < a < 10 for a in sample.observations.a)
+
+
+@pytest.mark.parametrize("scale", [1e-3, 1e-6, 1e-8])
+@pytest.mark.parametrize("offset", [-1., 0., 1.])
+def test_concentrated_nonlinear_policy_threshold_has_independent_scaled_reference(scale, offset):
+    requested_center = 8+offset*scale
+    coordinate = float(np.log(requested_center/(10-requested_center)))
+    center = 10*expit(coordinate)  # Reference the actual floating-point SCM center.
+    f = replace(frame(2), coordinates=((coordinate,0.),)*2)
+    result = generate_suite_a(f, config("nonlinear",assignment="near_deterministic",near_scale=scale), policy())
+    boundary = (8-center)/scale
+    normalization = 1-.5*np.exp(-center/scale)-.5*np.exp(-(10-center)/scale)
+    def integrand(t):
+        a = center+scale*t
+        return .5*np.exp(-abs(t))*(np.sin((a+2)/2)-np.sin(a/2))/normalization
+    # Tail omitted beyond 50 scale lengths contributes < 2e-22.
+    expected = quad(integrand,-50,min(boundary,0.),epsabs=1e-12)[0]
+    if boundary > 0:
+        expected += quad(integrand,0,boundary,epsabs=1e-12)[0]
+    assert result.observed_law_truth.value == pytest.approx(expected, abs=1e-9)
+    assert result.structural_causal_truth.value == pytest.approx(expected, abs=1e-9)
+    u = result.integration_uncertainty
+    assert u.assignment_mass_error < 1e-10
+    assert u.selected_mass_fraction == pytest.approx(1., abs=1e-10)
+
+
+@pytest.mark.parametrize("scale", [.05, 1e-6])
+@pytest.mark.parametrize("measured", [False, True])
+def test_narrow_posterior_transition_at_shifted_assignment_peak(scale, measured):
+    # Positive local cause at center 2; negative local cause at center 6.
+    # Shifting the first peak lands exactly on the posterior's sharp crossing.
+    coordinates = (float(np.log(2/8)-.2), float(np.log(6/4)+.2))
+    f = replace(frame(2,cluster_size=1), coordinates=tuple((v,0.) for v in coordinates), weights=(1.,1.))
+    c = config("nonlinear", assignment="near_deterministic",near_scale=scale,
+               local_confounding="measured" if measured else "omitted")
+    result = generate_suite_a(f,c,policy())
+    states = [(10*expit(coord+.2*u),u) for coord in coordinates for u in (-1,1)]
+    def response(a,u):
+        return 50+np.sin(a/2)+2*u
+    def posterior(a,known_u):
+        terms = [(center,u) for center,u in states if not measured or u == known_u]
+        logs = np.array([-abs(np.longdouble(a)-np.longdouble(center))/scale
+                         -np.log1p(-.5*np.exp(-center/scale)-.5*np.exp(-(10-center)/scale))
+                         for center,u in terms],dtype=np.longdouble)
+        weights = np.exp(logs-logs.max())
+        return float(sum(w*response(a,u) for w,(_,u) in zip(weights,terms))/weights.sum())
+    observed = causal = 0.
+    for center,u in states:
+        norm = 1-.5*np.exp(-center/scale)-.5*np.exp(-(10-center)/scale)
+        lower,upper = max(-50.,-center/scale),min(50.,(8-center)/scale)
+        def integrand(t,statistical):
+            a = center+scale*t
+            difference = posterior(a+2,u)-posterior(a,u) if statistical else response(a+2,u)-response(a,u)
+            return .5*np.exp(-abs(t))*difference/norm
+        if lower < upper:
+            # Independently split at all pairwise log-density crossings and
+            # their shift preimages, including the one at the origin peak.
+            cuts = [0.]
+            for ci,_ in states:
+                for cj,_ in states:
+                    cuts.extend([(ci+cj-2*center)/(2*scale), (ci+cj-4-2*center)/(2*scale)])
+            cuts = sorted({v for v in cuts if lower < v < upper})
+            observed += .25*quad(lambda t: integrand(t,True),lower,upper,points=cuts,epsabs=2e-10,limit=300)[0]
+            causal += .25*quad(lambda t: integrand(t,False),lower,upper,points=[v for v in [0.] if lower<v<upper],epsabs=1e-12)[0]
+    assert result.observed_law_truth.value == pytest.approx(observed,abs=1e-8)
+    assert result.structural_causal_truth.value == pytest.approx(causal,abs=1e-10)
+    assert result.integration_uncertainty.selected_mass_fraction == pytest.approx(1.,abs=1e-10)
+
+
+def test_mass_certificate_rejects_false_convergence(monkeypatch):
+    original = AssignmentLaw.quadrature
+    def missing_half_the_mass(self, order, breakpoints):
+        a,w = original(self,order,breakpoints)
+        return a,.5*w
+    monkeypatch.setattr(AssignmentLaw,"quadrature",missing_half_the_mass)
+    # Both normalized contrasts and successive orders agree, but mass is wrong.
+    with pytest.raises(ContractError,match="did not converge"):
+        generate_suite_a(frame(2),config(),policy(),max_order=32)
+
+
+@pytest.mark.parametrize("delta", [0.,11.])
+def test_concentrated_identity_is_exactly_zero(delta):
+    result = generate_suite_a(frame(2),config(assignment="near_deterministic",near_scale=1e-6,
+                                             local_confounding="omitted"),policy(delta=delta))
+    assert result.observed_law_truth.value == result.structural_causal_truth.value == 0.
+
+
+def test_gap_law_sampler_preserves_component_mass_without_density_underflow():
+    c = config(assignment="near_deterministic",near_scale=1e-6,support_gaps=True)
+    law = AssignmentLaw(frame(2),0,LatentState(),c,((0.,3.),(7.,10.)))
+    rng = np.random.default_rng(718)
+    a = np.array([law.sample(rng) for _ in range(3000)])
+    assert np.all((a > 0) & (a < 10) & ((a < 3) | (a > 7)))
+    assert .47 < np.mean(a < 3) < .53
+    assert abs(np.mean(3-a[a<3])-1e-6) < 1e-7
+    assert abs(np.mean(a[a>7]-7)-1e-6) < 1e-7
+    assert np.isfinite(law.log_density([1.,9.])).all()
+    assert (law.density([1.,9.]) == 0).all()  # Underflow is not lack of support.
+    assert law.contains([1.,9.]).all()
+    assert not law.contains([5.])[0]
+
+
+def test_concentrated_selection_measurement_migration_and_count_scale_reference():
+    scale = 1e-6
+    c = config(assignment="near_deterministic",near_scale=scale,exposure_error=.4,migration=2.,
+               selected_outcome=True,survey_inclusion=True,missing_biomarkers=True,
+               registration_probability=.7,denominator_error=.2)
+    f = replace(frame(2),weights=(1.,3.))
+    result = generate_suite_a(f,c,policy())
+    selected_mass = selected_error = 0.
+    for illness in (0,1):
+        center = 10*expit(-.2*illness)
+        for error in (-.4,.4):
+            def integrand(t):
+                a = center+scale*t+error
+                selection = expit(1-.2*a-1.2*illness)*expit(.7-.12*a)*expit(1-.1*a-.8*illness)
+                return .5*np.exp(-abs(t))*selection
+            mass = .5*(.7 if illness == 0 else .3)*quad(integrand,-50,50,points=[0.],epsabs=1e-13)[0]
+            selected_mass += mass
+            selected_error += error*mass
+    multiplier = .7*(1/.8+1/1.2)/2
+    # Illness terms cancel in the linear response (migration=2, illness effect=2).
+    # All origins shift. At shifted doses the positive-error component dominates
+    # the posterior up to exponentially negligible exp(-hundreds of thousands).
+    expected_observed = multiplier*(2-.4+selected_error/selected_mass)
+    assert result.observed_law_truth.value == pytest.approx(expected_observed,abs=1e-9)
+    assert result.structural_causal_truth.value == pytest.approx(2*multiplier,abs=1e-10)
+    assert result.integration_uncertainty.selected_mass_fraction == pytest.approx(selected_mass,abs=1e-11)
+
+
+def test_geometric_support_gate_still_rejects_an_actual_gap():
+    from oxyformer.validation.generators import _Term, _posterior_mean
+    f,c = frame(2),config(support_gaps=True)
+    law = AssignmentLaw(f,0,LatentState(),c,((0.,3.),(7.,10.)))
+    with pytest.raises(ContractError,match="leaves conditional observed-law support"):
+        _posterior_mean(np.array([5.]),[_Term(0,LatentState(),1.,law)],f,c)
