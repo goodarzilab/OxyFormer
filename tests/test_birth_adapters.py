@@ -66,7 +66,8 @@ def make(monkeypatch):
         exposure = dane.ResidenceExposure(
             country=country, geography_vintage=release.geography_vintage,
             residence_fields=tuple(p['residence']), release_hashes=(release.content_hash,),
-            source_uri='synthetic://residence-survey', source_hash=digest('synthetic exposure source'),
+            source_uri='synthetic://residence-survey', source_kind='residence_altimetry',
+            exposure_definition='synthetic signed inspired-oxygen deficit from sea level', source_hash=digest('synthetic exposure source'),
             mapping_date='2026-10-04', placement='maternal_residence_point',
             placement_reference='synthetic://placement', geography_reference='synthetic://boundaries',
             review_id='synthetic-only', assignments=(
@@ -208,15 +209,15 @@ def test_delivery_field_substitution_in_reviewed_mapping_is_rejected(make):
         load(case, mapping=mapping)
 
 
-@pytest.mark.parametrize('source', ('usgs:3dep', 'hospital:altitude', 'capital-city:altitude'))
-def test_prohibited_exposure_substitutions(make, source):
+def test_prohibited_us_3dep_source(make):
     with pytest.raises(ContractError, match='prohibited exposure source'):
-        replace(make()['exposure_manifest'], source_uri=source)
+        replace(make()['exposure_manifest'], source_kind='us_3dep')
 
 
-def test_prohibited_placement(make):
+@pytest.mark.parametrize('placement', ('hospital', 'capital_city'))
+def test_prohibited_placement(make, placement):
     with pytest.raises(ContractError):
-        replace(make()['exposure_manifest'], placement='hospital')
+        replace(make()['exposure_manifest'], placement=placement)
 
 
 def test_duplicate_registrations_and_maternal_lineage(make):
@@ -377,3 +378,51 @@ def test_shared_immutable_contract_rejects_nonfinite_exposure(value):
     with pytest.raises(ContractError, match='nonfinite number'):
         dane.ResidenceAssignment(residence=('01', '001'), exposure_mmhg=value,
                                  lineage_namespace='synthetic', lineage_id='one')
+
+
+def test_residence_source_uri_is_not_a_placement_classifier(make, monkeypatch):
+    case = make()
+    exposure = replace(case['exposure_manifest'],
+                       source_uri='https://minsalud.gov.co/hospital-births/exposure.csv')
+    monkeypatch.setattr(dane, '_owner_approvals', lambda: {'owner_decisions': {'birth_exposure': {
+        'COL': {'status': 'approved', 'manifest_hash': exposure.content_hash}}}})
+    records, audit = load(case, exposure_manifest=exposure,
+                          mapping=replace(case['mapping'], expected_exposure_hash=exposure.content_hash))
+    assert records[0].exposure_mmhg == 10
+    audit.assert_anchor_ready()
+
+
+@pytest.mark.parametrize('shape', ('short', 'long', 'blank'))
+def test_ragged_records_preserve_cells_and_complete_attrition(make, shape):
+    case = make(weights=('4', '5'))
+    lines = case['bundle'].decode().splitlines()
+    cells = lines[-1].split(',')
+    cells = cells[:-1] if shape == 'short' else cells + ['extra-value'] if shape == 'long' else []
+    lines[-1] = ','.join(cells)
+    payload = ('\r\n'.join(lines) + '\r\n').encode()
+    mapping = replace(case['mapping'], source=replace(case['mapping'].source,
+                                                     payload_hash=sha256(payload).hexdigest()))
+    records, audit = load(case, bundle=payload, mapping=mapping)
+    assert len(records) == 2
+    assert records[0].observation_eligible
+    assert not records[1].observation_eligible
+    assert records[1].raw_cells == tuple(cells)
+    assert 'malformed_csv_record' in records[1].exclusion_reasons
+    if shape == 'short':
+        assert dict(records[1].raw)[lines[0].split(',')[-1]] is None
+    assert (audit.input_count, audit.eligible_count, audit.excluded_count) == (2, 1, 1)
+    assert dict(audit.attrition) == {'eligible': 1, 'malformed_csv_record': 1}
+    with pytest.raises(ContractError, match='malformed CSV records'):
+        audit.assert_anchor_ready()
+
+
+def test_signed_finite_exposure_is_preserved(make, monkeypatch):
+    case = make()
+    exposure = case['exposure_manifest']
+    exposure = replace(exposure, assignments=(replace(exposure.assignments[0], exposure_mmhg=-0.5),))
+    monkeypatch.setattr(dane, '_owner_approvals', lambda: {'owner_decisions': {'birth_exposure': {
+        'COL': {'status': 'approved', 'manifest_hash': exposure.content_hash}}}})
+    records, audit = load(case, exposure_manifest=exposure,
+                          mapping=replace(case['mapping'], expected_exposure_hash=exposure.content_hash))
+    assert records[0].exposure_mmhg == -0.5
+    audit.assert_anchor_ready()

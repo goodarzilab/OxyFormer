@@ -147,7 +147,7 @@ class ResidenceAssignment(Immutable):
         require(bool(self.residence), 'empty residence key')
         for value in self.residence + (self.lineage_namespace, self.lineage_id):
             nonempty(value, 'residence assignment')
-        require(self.exposure_mmhg >= 0, 'negative exposure')
+        # Oxygen deficit relative to a reference may be signed; Immutable checks finiteness.
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -157,6 +157,8 @@ class ResidenceExposure(Immutable):
     residence_fields: tuple[str, ...]
     release_hashes: tuple[str, ...]
     source_uri: str
+    source_kind: Literal['national_dem', 'global_dem', 'residence_altimetry', 'us_3dep']
+    exposure_definition: str
     source_hash: str
     mapping_date: str
     placement: Literal['maternal_residence_point', 'maternal_residence_population_weighted']
@@ -168,7 +170,7 @@ class ResidenceExposure(Immutable):
     def __post_init__(self):
         Immutable.__post_init__(self)
         for value in (self.geography_vintage, self.source_uri, self.placement_reference,
-                      self.geography_reference, self.review_id):
+                      self.geography_reference, self.review_id, self.exposure_definition):
             nonempty(value, 'exposure provenance')
         date.fromisoformat(self.mapping_date)
         check_hash(self.source_hash)
@@ -178,9 +180,7 @@ class ResidenceExposure(Immutable):
         unique(tuple(a.residence for a in self.assignments), 'residence exposure keys')
         require(all(len(a.residence) == len(self.residence_fields) for a in self.assignments),
                 'residence key width mismatch')
-        forbidden = ('3dep', 'hospital', 'capital_city', 'capital-city')
-        require(not any(word in self.source_uri.lower() for word in forbidden),
-                'prohibited exposure source')
+        require(self.source_kind != 'us_3dep', 'prohibited exposure source: US 3DEP')
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -236,7 +236,8 @@ class BirthRecord(Immutable):
     release: BirthRelease
     source_hash: str
     mapping_hash: str
-    raw: tuple[tuple[str, str], ...]
+    raw: tuple[tuple[str, str | None], ...]
+    raw_cells: tuple[str, ...]  # preserves short rows and any unnamed overflow cells
     outcome_scale: Literal['risk_difference', 'grams']
     weight_raw: str
     birth_weight_g: float | None
@@ -316,8 +317,8 @@ def _load(bundle, release, mapping, exposure_manifest, country, weight_reader, s
     require(mapping.source.version == release.release_id, 'source release identity mismatch')
     payload = bundle if isinstance(bundle, bytes) else Path(bundle).read_bytes()
     require(sha256(payload).hexdigest() == mapping.source.payload_hash, 'source payload hash mismatch')
-    reader = csv.DictReader(io.StringIO(payload.decode(mapping.encoding)), delimiter=mapping.delimiter)
-    headers = tuple(reader.fieldnames or ())
+    reader = csv.reader(io.StringIO(payload.decode(mapping.encoding)), delimiter=mapping.delimiter)
+    headers = tuple(next(reader, ()))
     require(bool(headers), 'empty birth schema')
     unique(headers, 'birth columns')
     require(mapping.source.schema_hash == schema_hash(tuple(
@@ -338,14 +339,18 @@ def _load(bundle, release, mapping, exposure_manifest, country, weight_reader, s
         exposure_manifest, release, mapping, profile, approvals)
     if release.status == 'unknown':
         blockers += ('release status unknown',)
-    rows = list(reader)
-    require(all(None not in row and all(v is not None for v in row.values()) for row in rows),
-            'ragged CSV records')
+    raw_rows = tuple(tuple(cells) for cells in reader)
+    rows = [{name: cells[i] if i < len(cells) else '' for i, name in enumerate(headers)}
+            for cells in raw_rows]
+    if any(len(cells) != len(headers) for cells in raw_rows):
+        blockers += ('malformed CSV records require source correction',)
     ids = tuple(f'{country}:{release.content_hash}:{mapping.source.payload_hash}:{i + 1}'
                 for i in range(len(rows)))
     registration_groups, row_groups = {}, {}
-    for oid, row in zip(ids, rows):
-        row_groups.setdefault(tuple(row.items()), []).append(oid)
+    for oid, row, cells in zip(ids, rows, raw_rows):
+        row_groups.setdefault(cells, []).append(oid)
+        if len(cells) != len(headers):
+            continue  # malformed records cannot establish a duplicate registration
         for ident in mapping.identifiers:
             value = row[ident.field].strip()
             if ident.kind == 'registration' and value not in ident.unknown_codes:
@@ -354,12 +359,14 @@ def _load(bundle, release, mapping, exposure_manifest, country, weight_reader, s
     duplicate_ids = {oid for group in duplicates for oid in group}
     possible = tuple(tuple(v) for v in row_groups.values() if len(v) > 1)
     records = []
-    for oid, row in zip(ids, rows):
+    for oid, row, cells in zip(ids, rows, raw_rows):
         grams, band, lbw, status = weight_reader(row[profile['weight']], profile)
         residence = _geography(row, profile['residence'])
         delivery = _geography(row, profile['delivery'])
         assignment = lookup.get(residence)
         reasons = []
+        if len(cells) != len(headers):
+            reasons.append('malformed_csv_record')
         for rule in mapping.exclusions:
             if row[rule.field].strip() in rule.values:
                 reasons.append('population:' + rule.reason)
@@ -389,7 +396,9 @@ def _load(bundle, release, mapping, exposure_manifest, country, weight_reader, s
                                         namespace=ident.namespace, entity_id=value))
         records.append(BirthRecord(
             original_id=oid, release=release, source_hash=mapping.source.payload_hash,
-            mapping_hash=mapping.content_hash, raw=tuple(row.items()), outcome_scale=scale,
+            mapping_hash=mapping.content_hash,
+            raw=tuple((name, cells[i] if i < len(cells) else None) for i, name in enumerate(headers)),
+            raw_cells=cells, outcome_scale=scale,
             weight_raw=row[profile['weight']], birth_weight_g=grams, weight_band=band, lbw=lbw,
             measurement_status=status, maternal_residence=residence, delivery_geography=delivery,
             occurrence=tuple(row[n] for n in profile['occurrence']),

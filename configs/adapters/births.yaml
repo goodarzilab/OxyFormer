@@ -10,6 +10,9 @@
 # Reviewed SourceManifest.schema_hash uses ordered, nonnullable string ColumnSpecs
 # for the CSV header. All raw cells are retained, even missing/invalid values.
 # Status/period/geography information belongs in BirthRelease and is never guessed.
+# ResidenceExposure source_kind and placement are reviewed semantic declarations,
+# not guessed from URI text. US 3DEP and hospital/capital-city placement are refused.
+# Structurally short/long CSV rows retain raw_cells; they block anchor fitting.
 schema_version: 1
 profiles:
   dane_2023:
