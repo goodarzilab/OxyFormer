@@ -1,0 +1,10 @@
+schema_version: 1
+partition: standard
+account: root
+qos: normal
+python: /mnt/weka/home/hgoodarzi/envs/oxyformer/bin/python
+repository: https://github.com/goodarzilab/OxyFormer.git
+branch: dev
+max_campaign_leaves: 40
+max_leaf_gpu_hours: 4
+arrays: false
