@@ -34,10 +34,12 @@ SHARED_TMP = "/mnt/weka/home/hgoodarzi/oxyformer-swarm/verify-tmp"
 UNOWNED_GRACE_SECONDS = 24 * 3600
 HOST = socket.gethostname()
 JOB = (
-    'set -u; d=$(mktemp -d /tmp/v-XXXXXX); trap \'rm -rf "$d"\' EXIT HUP INT TERM; '
-    'cp -a "$STAGED" "$d/tree" && cd "$d/tree" || exit 97; '
+    'set -u; d=$(mktemp -d /tmp/v-XXXXXX); trap \'rm -rf "$d"\' EXIT HUP INT QUIT TERM USR1 USR2 ALRM; '
+    'cp -a "$OXYFORMER_VERIFY_STAGED" "$d/tree" && cd "$d/tree" || exit 97; '
+    'py=$OXYFORMER_VERIFY_PYTHON; out=$OXYFORMER_VERIFY_RESULT; '
+    'unset OXYFORMER_VERIFY_PYTHON OXYFORMER_VERIFY_RESULT OXYFORMER_VERIFY_STAGED; '
     'for v in $(compgen -e); do case "$v" in SLURM_*|SRUN_*) unset "$v";; esac; done; '
-    'env -u RESULT -u STAGED "$PYTHON" -m pytest -q; rc=$?; echo "$rc" > "$RESULT"; exit $rc'
+    '"$py" -m pytest -q; rc=$?; echo "$rc" > "$out"; exit $rc'
 )
 
 
@@ -77,7 +79,8 @@ def _stop(signum, frame):
     raise SystemExit(1)
 
 
-HANDLED = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGQUIT)
+HANDLED = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGUSR1, signal.SIGUSR2,
+           signal.SIGALRM)
 for _sig in HANDLED:
     signal.signal(_sig, _stop)
 status = srun_status = None
@@ -91,7 +94,9 @@ try:
     shutil.copytree(os.getcwd(), staged, symlinks=True)
     srun = ["srun", "--partition=standard", "--account=root", "--nodes=1", "--ntasks=1", "--cpus-per-task=8",
             "--mem=32G", "--time=12:00:00", "--export=ALL", "--chdir=/tmp", "--job-name=oxyformer-merge-verify"]
-    env = dict(os.environ, PYTHONPATH="src", CUDA_VISIBLE_DEVICES="", STAGED=staged, PYTHON=PYTHON, RESULT=result)
+    # Job parameters use a private prefix and are removed before pytest, so the suite sees the original environment.
+    env = dict(os.environ, PYTHONPATH="src", CUDA_VISIBLE_DEVICES="", OXYFORMER_VERIFY_STAGED=staged,
+               OXYFORMER_VERIFY_PYTHON=PYTHON, OXYFORMER_VERIFY_RESULT=result)
     env.pop("SLURM_EXIT_ERROR", None)
     # Block handled signals while srun starts so a signal cannot arrive before the child is tracked.
     signal.pthread_sigmask(signal.SIG_BLOCK, HANDLED)
