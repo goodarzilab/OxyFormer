@@ -29,15 +29,18 @@ PYTHON = "/mnt/weka/home/hgoodarzi/envs/oxyformer/bin/python"
 # record yet is left alone for a day, since it may still be starting; PID reuse can only delay a sweep). Slurm job
 # variables are cleared before pytest so the suite sees the same environment as an in-place run. SIGKILL cannot be intercepted:
 # an uncatchable kill may leave a copy until the next sweep (shared) or the node's /tmp cleanup (compute node).
-# The Slurm time limit is generous because the merge operator's --verification-timeout bounds the whole run.
+# The verifier's environment is the merge operator's; options that point at login-node-local files (for example an
+# inherited PYTEST_ADDOPTS -c path) are the operator's responsibility. The Slurm time limit is generous because the
+# merge operator's --verification-timeout bounds the whole run.
 SHARED_TMP = "/mnt/weka/home/hgoodarzi/oxyformer-swarm/verify-tmp"
 UNOWNED_GRACE_SECONDS = 24 * 3600
 HOST = socket.gethostname()
 JOB = (
-    'set -u; d=$(mktemp -d /tmp/v-XXXXXX); trap \'rm -rf "$d"\' EXIT HUP INT QUIT TERM USR1 USR2 ALRM; '
+    'set -u; d=$(mktemp -d /tmp/v-XXXXXX); trap \'chmod -R u+w "$d" 2>/dev/null; rm -rf "$d"\' EXIT HUP INT QUIT TERM USR1 USR2 ALRM XCPU XFSZ VTALRM PROF; '
     'cp -a "$OXYFORMER_VERIFY_STAGED" "$d/tree" && cd "$d/tree" || exit 97; '
     'py=$OXYFORMER_VERIFY_PYTHON; out=$OXYFORMER_VERIFY_RESULT; '
-    'unset OXYFORMER_VERIFY_PYTHON OXYFORMER_VERIFY_RESULT OXYFORMER_VERIFY_STAGED; '
+    'if [ -n "${OXYFORMER_VERIFY_BASH_ENV+x}" ]; then export BASH_ENV=$OXYFORMER_VERIFY_BASH_ENV; fi; '
+    'unset OXYFORMER_VERIFY_PYTHON OXYFORMER_VERIFY_RESULT OXYFORMER_VERIFY_STAGED OXYFORMER_VERIFY_BASH_ENV; '
     'for v in $(compgen -e); do case "$v" in SLURM_*|SRUN_*) unset "$v";; esac; done; '
     '"$py" -m pytest -q; rc=$?; echo "$rc" > "$out"; exit $rc'
 )
@@ -80,7 +83,7 @@ def _stop(signum, frame):
 
 
 HANDLED = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGUSR1, signal.SIGUSR2,
-           signal.SIGALRM)
+           signal.SIGALRM, signal.SIGXCPU, signal.SIGXFSZ, signal.SIGVTALRM, signal.SIGPROF)
 for _sig in HANDLED:
     signal.signal(_sig, _stop)
 status = srun_status = None
@@ -98,11 +101,14 @@ try:
     env = dict(os.environ, PYTHONPATH="src", CUDA_VISIBLE_DEVICES="", OXYFORMER_VERIFY_STAGED=staged,
                OXYFORMER_VERIFY_PYTHON=PYTHON, OXYFORMER_VERIFY_RESULT=result)
     env.pop("SLURM_EXIT_ERROR", None)
+    job_env = {k: v for k, v in env.items() if k != "BASH_ENV"}  # the wrapper shell must not source startup files
+    if "BASH_ENV" in env:
+        job_env["OXYFORMER_VERIFY_BASH_ENV"] = env["BASH_ENV"]
     # Block handled signals while srun starts so a signal cannot arrive before the child is tracked.
     signal.pthread_sigmask(signal.SIG_BLOCK, HANDLED)
     try:
         # The child must not inherit the blocked mask, or srun could not receive the forwarded SIGTERM.
-        child = subprocess.Popen(srun + ["bash", "-c", JOB], env=env,
+        child = subprocess.Popen(srun + ["bash", "--noprofile", "--norc", "-c", JOB], env=job_env,
                                  preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_UNBLOCK, HANDLED))
     finally:
         signal.pthread_sigmask(signal.SIG_UNBLOCK, HANDLED)
