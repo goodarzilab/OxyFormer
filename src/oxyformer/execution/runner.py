@@ -22,9 +22,10 @@ import sys
 import yaml
 
 from oxyformer.contracts import StageRequest, StageResult
-from oxyformer.provenance import ContractError, file_hash, relative_artifact_path, require
-from .integrity import (FINGERPRINT, post_execution_check,
-                        publish_result, verify_published_tree)
+from oxyformer.provenance import ContractError, relative_artifact_path, require
+from .integrity import (FINGERPRINT, post_execution_check, publish_result,
+                        read_regular, regular_file_hash as file_hash,
+                        verify_inputs, verify_result, verify_published_tree)
 from .identity import code_identity, environment_record, scientific_fingerprint, verify_recipe
 from .paths import atomic_json, atomic_write, output_path
 
@@ -50,7 +51,7 @@ def resolve_dependencies(ids, environ=None):
 
 def read_mapping(path):
     path = Path(path)
-    text = path.read_text()
+    text = read_regular(path).decode('utf-8')
     # JSON is also YAML syntax, but PyYAML's numeric resolver changes 1e-05
     # into a string. Preserve canonical JSON types before considering YAML.
     try:
@@ -86,12 +87,12 @@ def verify_dependency_result(root, *, expected_hash=None, trees=None, active=Non
     active.add(root)
     try:
         result_file = dependency_file(root, '_execution/result.json')
-        request = StageRequest.from_json(dependency_file(root, '_execution/request.json').read_text())
-        result = StageResult.from_json(result_file.read_text())
+        request = StageRequest.from_json(read_regular(dependency_file(root, '_execution/request.json')))
+        result = StageResult.from_json(read_regular(result_file))
         require(Path(request.output_dir).resolve() == root, 'dependency attempt owner mismatch')
         require(result.status == 'pass', 'dependency stage did not pass')
         tree = verify_published_tree(root, result, expected_hash)
-        result.verify(request)
+        verify_result(result, request)
         # The request binds this dependency map and each parent's fingerprint
         # digest. Verify the entire recorded lineage, not just direct inputs.
         config = read_mapping(request.config_path)
@@ -114,7 +115,7 @@ def verify_dependency_result(root, *, expected_hash=None, trees=None, active=Non
 
 def verify_dependency_recipe(root, lock):
     """Bind locked upstream science to this recipe; preserve pre-lock inputs."""
-    request = StageRequest.from_json(dependency_file(root, '_execution/request.json').read_text())
+    request = StageRequest.from_json(read_regular(dependency_file(root, '_execution/request.json')))
     task_path = dependency_file(root, '_execution/task.json')
     require(file_hash(task_path) == request.task_hash, 'dependency task hash mismatch')
     task = read_mapping(task_path)
@@ -225,6 +226,11 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         # describes source data but cannot replace the publication fingerprint.
         require((root / '_execution/result.json').is_file(), f'stage receipt missing: {unit}')
         result = verify_dependency_result(root, trees=dependency_trees, verified=verified_dependencies)
+        if unit in task.get('expected_leaves', []):
+            # The environment key is only wiring. Bind collector fan-in to the
+            # actual producer ID in its hash-verified, published task record.
+            producer = read_mapping(dependency_file(root, '_execution/task.json'))
+            require(producer.get('id') == unit, f'collector producer identity mismatch: {unit}')
         published_hashes[root / FINGERPRINT] = next(
             a.sha256 for a in result.artifacts if a.path == FINGERPRINT)
         stage_dependencies.append(root)
@@ -279,7 +285,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     atomic_json(out, '_execution/environment.json', environment)
     atomic_json(out, '_execution/identity.json', {'head': head, 'scientific_fingerprint': scientific_fingerprint(repo)})
     try:
-        request.verify_inputs()
+        verify_inputs(request)
         module_name = settings.get('module')
         require(isinstance(module_name, str) and module_name.startswith('oxyformer.'),
                 'stage module not registered')
@@ -304,11 +310,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
             # Flush our streams before checking any stage-declared log hash.
             sys.stdout.flush()
             sys.stderr.flush()
-            inputs = (request.config_path, request.task_path) + request.dependency_paths
-            require(all(Path(path).is_file() for path in inputs), 'input is not a regular file')
-            require(all((out / a.path).is_file() for a in result.artifacts),
-                    'artifact is not a regular file')
-            result.verify(request)
+            verify_result(result, request)
             require(all(not (out / a.path).resolve().is_relative_to(repo) for a in result.artifacts),
                     'artifact overlaps cloned repository')
             require(all(not a.path.startswith('_execution/') for a in result.artifacts), 'reserved execution artifact')

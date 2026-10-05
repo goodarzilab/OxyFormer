@@ -4,6 +4,7 @@ Identity binds entries, types, modes, sizes, content hashes and symlink targets.
 Timestamps and inode numbers are deliberately excluded: an identical state is
 an identical consumer input, even after a rewrite. This is not a write log.
 """
+from contextlib import contextmanager
 from dataclasses import replace
 from hashlib import sha256
 import json
@@ -13,7 +14,7 @@ import stat
 import tempfile
 
 from oxyformer.contracts import StageResult
-from oxyformer.provenance import ArtifactRecord, canonical_json, file_hash, require
+from oxyformer.provenance import ArtifactRecord, canonical_json, require
 from .paths import atomic_json, atomic_write, output_path
 
 # These two control records are written after the snapshot. The passing
@@ -30,21 +31,53 @@ def _stable(metadata):
             metadata.st_mtime_ns, metadata.st_ctime_ns)
 
 
-def read_regular(path):
-    """Read a stable regular control file without blocking on a replaced FIFO."""
+@contextmanager
+def open_regular(path):
+    """Open one stable regular file without following links or blocking on FIFOs."""
     path = Path(path)
     before = path.lstat()
-    require(stat.S_ISREG(before.st_mode), f'dependency control is not a regular file: {path}')
+    require(stat.S_ISREG(before.st_mode), f'input is not a regular file: {path}')
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, 'rb') as stream:
         opened = os.fstat(stream.fileno())
         require(stat.S_ISREG(opened.st_mode) and _stable(opened) == _stable(before),
-                f'dependency control changed before reading: {path}')
-        raw = stream.read()
+                f'input changed before reading: {path}')
+        yield stream
         require(_stable(os.fstat(stream.fileno())) == _stable(before)
                 and _stable(path.lstat()) == _stable(before),
-                f'dependency control changed while reading: {path}')
-    return raw
+                f'input changed while reading: {path}')
+
+
+def read_regular(path):
+    with open_regular(path) as stream:
+        return stream.read()
+
+
+def regular_file_hash(path):
+    digest = sha256()
+    with open_regular(path) as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_inputs(request):
+    """StageRequest.verify_inputs checks using nonblocking regular-file reads."""
+    for path, digest in zip((request.config_path, request.task_path) + request.dependency_paths,
+                            (request.config_hash, request.task_hash) + request.dependency_hashes):
+        require(regular_file_hash(path) == digest, f'input hash mismatch: {path}')
+
+
+def verify_result(result, request):
+    """StageResult.verify checks using the same race-safe reader as preflight."""
+    require(result.request_hash == request.content_hash, 'stage request mismatch')
+    verify_inputs(request)
+    root = Path(request.output_dir).resolve(strict=True)
+    for artifact in result.artifacts:
+        path = (root / artifact.path).resolve(strict=True)
+        require(path.is_relative_to(root), 'artifact escapes output directory')
+        require(regular_file_hash(path) == artifact.sha256,
+                f'artifact hash mismatch: {artifact.path}')
 
 
 def fingerprint_tree(root, *, exclude=()):
@@ -176,7 +209,7 @@ def publish_result(root, result):
                 break
         else:
             raise ValueError('attempt changed during fingerprint publication')
-        fingerprint = ArtifactRecord(path=FINGERPRINT, sha256=file_hash(root / FINGERPRINT),
+        fingerprint = ArtifactRecord(path=FINGERPRINT, sha256=regular_file_hash(root / FINGERPRINT),
                                      lineage=result.artifacts[0].lineage, kind='attempt_fingerprint')
         published = replace(result, artifacts=(*result.artifacts, fingerprint))
         _replace_control(root, RESULT, published.to_json())
