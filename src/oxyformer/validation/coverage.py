@@ -324,9 +324,8 @@ def execute_draw(draw, frame, scenario, template, recipe, root, deadline):
     return record
 
 
-def _run_batch(request: StageRequest) -> StageResult:
+def _run_batch(request: StageRequest, started: float) -> StageResult:
     from oxyformer.validation.campaign import load_lock, validate_recipe, validate_leaf_task, fingerprint
-    started = time.monotonic()
     try:
         request.verify_inputs()
         require(request.stage in ("coverage", "simulation-smoke"), "unsupported coverage stage")
@@ -417,14 +416,14 @@ def run_stage(request: StageRequest) -> StageResult:
         request.verify_inputs()
         task = read_json(request.task_path)
         if task.get("parameters", {}).get("mode") != "profile":
-            return _run_batch(request)
+            return _run_batch(request, started)
         root = Path(request.output_dir)
         root.mkdir(parents=True, exist_ok=True)
         destination = output_path(root, "_profiled")
         require(not destination.exists(), "profile already attempted; never rerun failed draws")
         destination.mkdir()
         profiled_request = replace(request, output_dir=str(destination))
-        completed = _run_batch(profiled_request)
+        completed = _run_batch(profiled_request, started)
         if not completed.artifacts:
             return StageResult(request_hash=request.content_hash, status=completed.status,
                                artifacts=(), message=completed.message)
