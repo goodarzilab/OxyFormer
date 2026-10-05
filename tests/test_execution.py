@@ -3,6 +3,7 @@ from copy import deepcopy
 from dataclasses import replace
 from hashlib import sha256
 import io
+import inspect
 import json
 import os
 from pathlib import Path
@@ -19,7 +20,7 @@ import yaml
 from oxyformer.cli import main
 from oxyformer.contracts import StageRequest, StageResult
 from oxyformer.execution.campaign import expand_campaign, resources, validate_plan
-from oxyformer.execution.identity import code_identity, scientific_fingerprint, verify_module_origins
+from oxyformer.execution.identity import code_identity, scientific_fingerprint, verify_module_origins, verify_recipe
 from oxyformer.execution.paths import atomic_json, atomic_write, isolated_caches, safe_extract
 from oxyformer.execution.runner import (dependency_file, dependency_variable, read_mapping,
                                         resolve_dependencies, run as run_worker, verify_dependency_result)
@@ -88,6 +89,25 @@ def commit(repo):
     git(repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
         'commit', '-qm', 'Synthetic fixture')
     return git(repo, 'rev-parse', 'HEAD')
+
+
+def substitute(repo, relative, text, kind='commit', checkout=True):
+    """Make an ordinary Git replacement without moving HEAD."""
+    original = git(repo, 'rev-parse', 'HEAD')
+    old = original if kind == 'commit' else git(repo, 'rev-parse',
+                                               'HEAD^{tree}' if kind == 'tree' else 'HEAD:' + relative)
+    (repo / relative).write_text(text)
+    git(repo, 'add', relative)
+    tree = git(repo, 'write-tree')
+    if kind == 'commit':
+        new = git(repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                  'commit-tree', tree, '-m', 'Synthetic replacement')
+    else:
+        new = tree if kind == 'tree' else git(repo, 'rev-parse', ':' + relative)
+    if not checkout:
+        git(repo, 'reset', '--hard', original)
+    git(repo, 'replace', old, new)
+    return original
 
 
 @pytest.fixture
@@ -2093,6 +2113,98 @@ def test_git_replacement_ref_cannot_rebind_recorded_checkout(runtime, monkeypatc
     assert read_json(out / '_execution/identity.json')['head'] == original
     assert result.status == 'fail', 'Git replacement changed executed code under unchanged recorded HEAD'
     assert read_stage_result(out) == result
+    assert 'src/science.py' in result.message
+    with pytest.raises(ContractError, match='did not pass'):
+        verify_dependency_result(out)
+
+
+@pytest.mark.parametrize('kind', ['commit', 'tree'])
+@pytest.mark.parametrize('derive', ['commit', 'fingerprint', 'recipe'])
+def test_replacement_admission(runtime, kind, derive):
+    repo, out = runtime
+    original = git(repo, 'rev-parse', 'HEAD')
+    (repo / 'src/science.py').write_text('value = 2\n')
+    commit(repo)
+    substituted_lock = {'scientific_fingerprint': scientific_fingerprint(repo)}
+    git(repo, 'reset', '--hard', original)
+    substitute(repo, 'src/science.py', 'value = 2\n', kind)
+    assert git(repo, 'status', '--porcelain') == ''
+    with pytest.raises(ContractError, match='src/science.py'):
+        if derive == 'commit':
+            code_identity(repo, out)
+        elif derive == 'fingerprint':
+            scientific_fingerprint(repo)
+        else:
+            verify_recipe(repo, substituted_lock)
+
+
+@pytest.mark.parametrize('kind', ['commit', 'tree'])
+def test_replacement_refs_preserve_unchanged_checkout(runtime, kind):
+    repo, out = runtime
+    baseline = scientific_fingerprint(repo)
+    original = substitute(repo, 'src/science.py', 'value = 2\n', kind, checkout=False)
+    refs = git(repo, 'for-each-ref', 'refs/replace')
+    assert git(repo, 'status', '--porcelain')
+    assert code_identity(repo, out) == original
+    assert scientific_fingerprint(repo) == baseline
+    verify_recipe(repo, {'scientific_fingerprint': baseline})
+    assert_pass(run_task(repo, out, deps_env=False))
+    assert git(repo, 'for-each-ref', 'refs/replace') == refs
+
+
+@pytest.mark.parametrize('kind', ['commit', 'blob'])
+@pytest.mark.parametrize('altered', [False, True])
+def test_builder_replacement_approvals(runtime, tmp_path, spec, kind, altered):
+    repo, _ = runtime
+    (repo / 'scripts').mkdir()
+    shutil.copyfile(ROOT / 'scripts/build_tasks.py', repo / 'scripts/build_tasks.py')
+    spec['kind'] = 'final-coverage'
+    approved = {'owner_decisions': {'campaign_allocations': {
+        spec['id']: {'kind': spec['kind'], 'gpu_hours': 9}}}}
+    original = {} if altered else approved
+    (repo / 'configs/approvals.yaml').write_text(yaml.safe_dump(original))
+    commit(repo)
+    substitute(repo, 'configs/approvals.yaml', yaml.safe_dump(approved if altered else {}), kind, altered)
+    refs = git(repo, 'for-each-ref', 'refs/replace')
+    spec_file = tmp_path / 'spec.json'
+    spec_file.write_text(json.dumps(spec))
+    out = tmp_path / 'plan'
+    process = build_tasks('--spec', spec_file, '--out', out, root=repo)
+    if altered:
+        assert process.returncode != 0, 'replacement approvals authorized an unapproved campaign'
+        assert 'approvals' in process.stderr and 'HEAD' in process.stderr
+        assert not out.exists()
+    else:
+        assert_exit(process, 0)
+        assert validate_plan(read_json(out / 'expanded_units.json'), original) == expand_campaign(spec, original)
+    assert git(repo, 'for-each-ref', 'refs/replace') == refs
+
+
+def test_worker_replacement_fails_with_original_authority(runtime):
+    repo, out = runtime
+    body = 'import subprocess, runpy\nfrom dataclasses import replace\n'
+    body += inspect.getsource(git) + '\n' + inspect.getsource(substitute)
+    body += '''
+def run_stage(request):
+    result = dummy(request)
+    repo = Path(__file__).parents[2]
+    substitute(repo, 'src/science.py', 'value = 2\\n')
+    value = runpy.run_path(str(repo / 'src/science.py'))['value']
+    target = Path(request.output_dir) / 'value.json'
+    target.write_text(json.dumps({'value': value}))
+    return replace(result, artifacts=(replace(result.artifacts[0], sha256=file_hash(target)),))
+'''
+    process = run_cli_fixture(repo, out, body)
+    assert read_json(out / 'value.json') == {'value': 2}
+    original = git(repo, 'rev-parse', 'HEAD')
+    assert (out / 'code_commit.txt').read_text().strip() == original
+    assert StageRequest.from_json((out / '_execution/request.json').read_text()).code_identity == original
+    assert read_json(out / '_execution/identity.json')['head'] == original
+    assert_exit(process, 1)
+    result = read_stage_result(out)
+    assert result.status == 'fail' and 'src/science.py' in result.message
+    with pytest.raises(ContractError, match='did not pass'):
+        verify_dependency_result(out)
 
 
 def test_builder_existing_expansion_cannot_leave_mixed_task_manifest(tmp_path, spec):
