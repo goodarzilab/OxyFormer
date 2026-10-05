@@ -55,11 +55,20 @@ def _validate(network, a_query, raw_x, context, design):
 
 class _AlternativeHead:
     def __init__(self, *args, **kwargs):
+        self._initializing_alternative = True
         super().__init__(*args, **kwargs)
         # These alternatives replace treatment-query attention entirely.
         for name in ("query_projection", "query_norm", "memory_norm", "attention",
                      "ff_norm", "ff", "output_norm", "dropout"):
             delattr(self, name)
+        del self._initializing_alternative
+
+    def check_parameter_cap(self):
+        # The parent invokes this while its temporary query modules still exist.
+        # Each concrete alternative checks again after installing its final head.
+        if getattr(self, "_initializing_alternative", False):
+            return sum(p.numel() for p in self.parameters())
+        return super().check_parameter_cap()
 
 
 class _EarlyFusion(_AlternativeHead):

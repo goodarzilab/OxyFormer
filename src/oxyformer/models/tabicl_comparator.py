@@ -16,6 +16,7 @@ from pathlib import Path
 import platform
 import operator
 import re
+from types import MappingProxyType
 
 import numpy as np
 import torch
@@ -27,6 +28,11 @@ from oxyformer.provenance import ContractError, canonical_json, check_hash, requ
 
 PACKAGE_PINS = {"tabicl": "2.2.0", "tabpfn": "9.1.0"}
 RUNTIME_PACKAGES = ("torch", "numpy", "scipy", "scikit-learn")
+# Concrete endpoint units emitted by the merged data producers, not likelihood names.
+SUPPORTED_OUTCOME_SCALES = MappingProxyType({
+    "identity": frozenset({"years", "grams", "g/dL"}),
+    "bernoulli": frozenset({"risk_difference"}),
+})
 
 
 def runtime_environment(package: str) -> tuple[tuple[str, str], ...]:
@@ -83,8 +89,10 @@ class Checkpoint:
 
 def _unit_weights(weights, size: int, semantics: str):
     require(semantics == "unit", "unsupported target/survey weight semantics; comparator blocked")
-    weights = np.asarray(weights, dtype=float)
-    require(weights.shape == (size,) and np.isfinite(weights).all() and np.all(weights == 1),
+    # Compare in the input dtype: narrowing can turn a non-unit weight into 1.
+    weights = np.asarray(weights)
+    require(weights.shape == (size,) and weights.dtype.kind in "biuf" and
+            np.isfinite(weights).all() and np.all(weights == 1),
             "unsupported sample weights; comparator blocked, never silently unweighted")
 
 
@@ -177,6 +185,8 @@ class TabICLComparator:
 
     def fit_outcome(self, view, split, fold, a, y, *, sample_weight, weight_semantics):
         require(self.task == "outcome", "outcome fit requires outcome comparator")
+        require(view.spec.outcome_scale in SUPPORTED_OUTCOME_SCALES[self.family],
+                "unsupported outcome scale for comparator family; comparator blocked")
         raw = self._training_context(view, split, fold, sample_weight, weight_semantics)
         a = np.asarray(a, dtype=float)
         require(a.shape == (len(raw),) and np.isfinite(a).all(), "invalid training treatment")
