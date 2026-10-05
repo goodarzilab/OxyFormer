@@ -58,6 +58,10 @@
 # Latent denominators lie in [smallest_positive_longdouble, 2), with exact
 # admission before rounding. structural_mean refuses nonfinite output instead
 # of emitting NaN/inf. Normal generated factors are at least 2**-53.
+# structural_mean forms the complete response and scales it before rounding.
+# Its true-dose domain is the primitive dose box plus/minus abs(state.error),
+# rounded outward to longdouble to include smooth count-support diagnostics.
+# This admits valid error-shifted intervention doses, not arbitrary primitives.
 # Nonlinear response quadrature partitions all support components into exact
 # spans <= 16 (phase span <= 8), in addition to assignment/selection cutoffs.
 # The complete declared support endpoint box remains supported.

@@ -2361,3 +2361,54 @@ def test_seventh_helpers_reject_numeric_subclasses(helper):
     }
     with pytest.raises(ContractError, match='numeric|exact.*type'):
         calls[helper]()
+
+
+@pytest.mark.parametrize('kind', ['hidden_list', 'false_length', 'empty_tuple', 'empty_dict'])
+def test_seventh_round1_empty_geometry_validates_original_container(kind):
+    from oxyformer.validation.scm import exact_shift_intervals
+    class HiddenList(list):
+        def __iter__(self):
+            return iter([(-1e308, 1e308)])
+    class FalseLength(list):
+        def __len__(self):
+            return 0
+    class EmptyTuple(tuple):
+        pass
+    value = {'hidden_list': HiddenList(), 'false_length': FalseLength([(-10011., 10011.)]),
+             'empty_tuple': EmptyTuple(), 'empty_dict': {}}[kind]
+    with pytest.raises(ContractError, match='numeric|exact.*type'):
+        exact_shift_intervals(value, 2.)
+    for empty in ([], (), np.empty((0, 2))):
+        assert exact_shift_intervals(empty, 2.) == ()
+
+
+@pytest.mark.parametrize('beta,dose,tail', [
+    (20., 6.875+3.*2**-31, (-28.125, -45.*2**-30, -9.*2**-59)),
+    (15., 7.+2**-31, (-24., -12.*2**-30, -12.*2**-63)),
+])
+@pytest.mark.parametrize('tiny', [0., float(np.nextafter(0., 1.)), -float(np.nextafter(0., 1.))])
+@pytest.mark.parametrize('denominator', ['floor', 'one'])
+def test_seventh_round1_complete_response_cancels_before_denominator(beta, dose, tail, tiny, denominator):
+    from fractions import Fraction
+    from oxyformer.validation.scm import structural_mean, MIN_DENOMINATOR_FACTOR
+    values = (-100., -100., *tail, tiny)
+    f = replace(frame(1, 1), columns=tuple(f'x{i}' for i in range(len(values))), x=(values,))
+    baseline = Fraction(50)+sum(map(Fraction, values))/4
+    assert baseline+Fraction(beta)*(Fraction(dose)-5)**2/10 == Fraction(tiny)/4
+    factor = MIN_DENOMINATOR_FACTOR if denominator == 'floor' else Fraction(1)
+    # tiny/4 is an exact power of two; ldexp supplies an independent exact
+    # reference on the host, including a huge finite result after amplification.
+    exponent = (factor.denominator.bit_length()-1)-1076
+    expected = np.ldexp(np.longdouble(np.sign(tiny)), exponent)
+    actual = structural_mean([dose], f, 0, LatentState(denominator_factor=factor),
+                              config('sign_changing', beta=beta))
+    assert actual[0] == expected
+
+
+@pytest.mark.parametrize('dose', [np.longdouble(10011), np.longdouble(-10011),
+                                  np.nextafter(np.longdouble(10010), np.longdouble('inf')),
+                                  np.nextafter(np.longdouble(-10010), np.longdouble('-inf'))])
+def test_seventh_round1_structural_doses_enforce_declared_domain(dose):
+    from oxyformer.validation.scm import structural_mean
+    with pytest.raises(ContractError, match='structural doses.*supported numeric domain'):
+        structural_mean(dose, frame(1, 1), 0, LatentState(), config())
