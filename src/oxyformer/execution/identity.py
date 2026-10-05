@@ -19,8 +19,13 @@ from .integrity import open_regular, read_regular
 FINGERPRINT_VERSION = 'tracked-science-v2'
 
 
+def git_bytes(repo, *args):
+    # Inspection must never refresh a sealed dependency's index on disk.
+    return subprocess.check_output(['git', '--no-optional-locks', '-C', str(repo), *args])
+
+
 def git(repo, *args):
-    return subprocess.check_output(['git', '-C', str(repo), *args], text=True).strip()
+    return git_bytes(repo, *args).decode('utf-8').strip()
 
 
 def scientific_path(name):
