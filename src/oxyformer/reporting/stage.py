@@ -39,16 +39,17 @@ def _owner_registry(request):
 
 def _publish(root, name, text):
     destination = root / name
+    content = text.encode("utf-8")
     # Link a complete temporary file into place without replacing earlier output.
-    with tempfile.NamedTemporaryFile(dir=root, mode="w", encoding="utf-8", delete=False) as stream:
+    with tempfile.NamedTemporaryFile(dir=root, mode="wb", delete=False) as stream:
         temporary = Path(stream.name)
-        stream.write(text)
+        stream.write(content)
     try:
         try:
             os.link(temporary, destination)
         except FileExistsError:
             require(not destination.is_symlink() and destination.is_file() and
-                    destination.read_bytes() == text.encode("utf-8"),
+                    destination.read_bytes() == content,
                     f"report output conflict: {name}; use a new isolated output_dir")
     finally:
         temporary.unlink()
