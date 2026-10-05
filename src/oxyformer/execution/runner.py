@@ -69,12 +69,16 @@ def read_mapping(path):
 def dependency_file(root, relative):
     relative_artifact_path(relative)
     path = (root / relative).resolve(strict=True)
-    require(path.is_relative_to(root) and path.is_file(), 'dependency file escapes attempt')
+    require(path.is_relative_to(root) and path.is_file(), f'dependency file escapes attempt or is not regular: {path}')
     return path
 
 
-def verify_dependency_result(root, *, expected_hash=None, trees=None, active=None, verified=None):
+def verify_dependency_result(root, *, expected_hash=None, trees=None, active=None, verified=None,
+                             output_dir=None):
     root = Path(root).resolve(strict=True)
+    if output_dir is not None:
+        require(not output_dir.is_relative_to(root) and not root.is_relative_to(output_dir),
+                f'output overlaps an upstream attempt: {root}')
     active = set() if active is None else active
     verified = {} if verified is None else verified
     require(root not in active, 'dependency publication cycle')
@@ -104,7 +108,7 @@ def verify_dependency_result(root, *, expected_hash=None, trees=None, active=Non
             expected = hashes.get(str(parent / FINGERPRINT))
             require(expected is not None, 'dependency fingerprint absent from published request')
             verify_dependency_result(parent, expected_hash=expected, trees=trees,
-                                     active=active, verified=verified)
+                                     active=active, verified=verified, output_dir=output_dir)
         if trees is not None:
             trees[str(root)] = tree
         verified[root] = result
@@ -207,12 +211,11 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     deps = resolve_dependencies(needs) if needs else {}
     files = []
     published_hashes = {}
-    stage_dependencies = []
     dependency_trees = {}
     verified_dependencies = {}
     for unit, root in deps.items():
         require(not out.is_relative_to(root) and not root.is_relative_to(out),
-                'output overlaps an upstream attempt')
+                f'output overlaps an upstream attempt: {root}')
         require(isinstance(needs[unit], list) and needs[unit], 'dependency requires explicit files')
         for relative in needs[unit]:
             files.append(dependency_file(root, relative))
@@ -224,8 +227,9 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
             require(acquisition_receipt in needs[unit], 'acquisition receipt must be a declared input')
         # Every producer now seals its own attempt. An acquisition receipt
         # describes source data but cannot replace the publication fingerprint.
-        require((root / '_execution/result.json').is_file(), f'stage receipt missing: {unit}')
-        result = verify_dependency_result(root, trees=dependency_trees, verified=verified_dependencies)
+        require((root / '_execution/result.json').is_file(), f'stage receipt missing or not regular: {root / "_execution/result.json"}')
+        result = verify_dependency_result(root, trees=dependency_trees, verified=verified_dependencies,
+                                          output_dir=out)
         if unit in task.get('expected_leaves', []):
             # The environment key is only wiring. Bind collector fan-in to the
             # actual producer ID in its hash-verified, published task record.
@@ -233,7 +237,6 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
             require(producer.get('id') == unit, f'collector producer identity mismatch: {unit}')
         published_hashes[root / FINGERPRINT] = next(
             a.sha256 for a in result.artifacts if a.path == FINGERPRINT)
-        stage_dependencies.append(root)
         allowed = {a.path for a in result.artifacts} | {
             '_execution/task.json', '_execution/request.json', '_execution/result.json',
             '_execution/environment.json', '_execution/identity.json'}
@@ -262,7 +265,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         require(file_hash(lock_file) == lock_ref['sha256'], 'recipe lock hash mismatch')
         lock = read_mapping(lock_file)
         verify_recipe(repo, lock)
-        for root in stage_dependencies:
+        for root in verified_dependencies:
             for path in verify_dependency_recipe(root, lock):
                 if path not in files:
                     files.append(path)

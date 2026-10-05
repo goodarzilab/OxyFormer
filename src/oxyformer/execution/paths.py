@@ -1,5 +1,5 @@
 """Attempt-owned files. These helpers never chmod or write an upstream attempt."""
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import json
 import os
 from pathlib import Path
@@ -56,9 +56,14 @@ def safe_extract(archive, root, relative, *, members=None, max_bytes=10 * 1024**
         for name in selected:
             relative_artifact_path(name)
     entries = []
-    is_zip = zipfile.is_zipfile(archive)
-    handle = zipfile.ZipFile(archive) if is_zip else tarfile.open(archive, 'r:*')
-    with handle:
+    # Import locally: integrity publication also uses these output helpers.
+    from .integrity import open_regular
+    with ExitStack() as stack:
+        stream = stack.enter_context(open_regular(archive))
+        is_zip = zipfile.is_zipfile(stream)
+        stream.seek(0)
+        handle = stack.enter_context(zipfile.ZipFile(stream) if is_zip else
+                                     tarfile.open(fileobj=stream, mode='r:*'))
         seen = set()
         total = 0
         for item in handle.infolist() if is_zip else handle.getmembers():
