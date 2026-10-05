@@ -1188,7 +1188,7 @@ def test_nonfinite_balance_difference_cannot_release(case):
     report = evaluate_case((b, m, r))
     assert not report['releasable']
     assert report['state'] == 'failed'
-    assert report['estimators'] == [e.to_dict()['payload'] for e in b.estimates]
+    assert json.loads(canonical_json(report['estimators'])) == [e.to_dict()['payload'] for e in b.estimates]
     canonical_json(report)
 
 
