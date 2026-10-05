@@ -259,7 +259,8 @@ def evaluate(bundle, manifest, receipts, approvals, config_hash):
         gates.extend(coverage)
         report["warnings"].extend(warnings)
         concentration = owner.get("influence_concentration_gate")
-        if not concentration or not all(k in concentration for k in ("applies_to", "definitions", "s_max_max", "g_eff_min", "require", "on_failure")):
+        concentration_fields = ("applies_to", "definitions", "s_max_max", "g_eff_min", "require", "on_failure")
+        if not concentration or not all(k in concentration for k in concentration_fields):
             gates.append({"gate": "influence_concentration", "status": "blocked", "reason": "owner influence_concentration_gate approval missing"})
         else:
             for field in ("definitions", "require", "on_failure"):
@@ -275,7 +276,7 @@ def evaluate(bundle, manifest, receipts, approvals, config_hash):
                           Fraction(metric["G_eff_exact"]) >= Fraction(str(concentration["g_eff_min"])))
                 gates.append({"gate": f"influence_concentration:{method}", "status": "pass" if passed else "failed",
                               "reason": "approved county s_max/G_eff gate; never trim, cap or reweight post hoc"})
-            report["approved_concentration_gate"] = concentration
+            report["approved_concentration_gate"] = {k: concentration[k] for k in concentration_fields}
         approval_gates = list(required_gates) + ["expected_manifest"]
         if investigate:
             approval_gates.append("bias_investigation")

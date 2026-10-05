@@ -1,6 +1,7 @@
 """Synthetic, offline CPU tests for reporting boundaries and scientific stops."""
 from copy import deepcopy
 from dataclasses import replace
+from datetime import date
 from fractions import Fraction
 from hashlib import sha256
 import json
@@ -1888,3 +1889,62 @@ def test_deep_missing_suffix_preserves_reporting(case, tmp_path, monkeypatch, mi
             if directory.exists():
                 directory.rmdir()
             directory = directory.parent
+
+
+def test_utf8_approvals_ascii_locale_should_release(case,tmp_path,monkeypatch):
+    repository,request=isolated_repository_request(case,tmp_path,monkeypatch)
+    shutil.copytree(ROOT/'src/oxyformer',repository/'src/oxyformer',ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
+    task=json.loads(Path(request.task_path).read_text())
+    approval=Path(task['approvals']); content=yaml.safe_load(approval.read_text())
+    for record in content['owner_decisions']['reporting_approvals']: record['reviewer']='Jos\u00e9'
+    approval.write_text(yaml.safe_dump(content,allow_unicode=True),encoding='utf-8')
+    request=replace(request,dependency_hashes=tuple(file_hash(p) for p in request.dependency_paths))
+    path=tmp_path/'request.json';path.write_text(request.to_json(),encoding='utf-8')
+    script='''import json,sys
+from pathlib import Path
+from oxyformer.reporting import stage
+from oxyformer.contracts import StageRequest
+request=StageRequest.from_json(Path(sys.argv[1]).read_text(encoding='utf-8'))
+result=stage.run_stage(request)
+print(json.dumps(dict(status=result.status,message=result.message,artifacts=[a.path for a in result.artifacts])))
+'''
+    completed=subprocess.run([sys.executable,'-c',script,str(path)],cwd=repository,env={**os.environ,'PYTHONPATH':'src','LC_ALL':'C','PYTHONUTF8':'0','PYTHONCOERCECLOCALE':'0'},capture_output=True,text=True,check=True)
+    record=json.loads(completed.stdout);print(record)
+    assert record['status']=='pass'
+
+
+def test_owner_timestamp_metadata_should_not_abort(case,tmp_path,monkeypatch):
+    repository,request=isolated_repository_request(case,tmp_path,monkeypatch)
+    task=json.loads(Path(request.task_path).read_text())
+    approval=Path(task['approvals']); content=yaml.safe_load(approval.read_text())
+    content['owner_decisions']['influence_concentration_gate']['reviewed_on']=date(2026,1,1)
+    approval.write_text(yaml.safe_dump(content),encoding='utf-8')
+    request=replace(request,dependency_hashes=tuple(file_hash(p) for p in request.dependency_paths))
+    try:
+        result=stage.run_stage(request)
+    except TypeError as exc:
+        print(json.dumps(dict(error=str(exc),artifacts=[p.name for p in Path(request.output_dir).iterdir()])))
+        raise
+    assert result.status=='pass'
+    result.verify(request)
+
+
+def test_request_cli_emits_utf8_under_ascii_locale(case, tmp_path, monkeypatch):
+    b, m, r = case
+    ids = tuple(f'unit-\u00e9-{i}' for i in range(len(b.original_ids)))
+    b = replace(b, original_ids=ids, estimates=tuple(replace(e, original_ids=ids,
+                lineage=replace(e.lineage, unit_ids=ids)) for e in b.estimates))
+    repository, request = isolated_repository_request((b, m, r), tmp_path, monkeypatch)
+    shutil.copytree(ROOT / 'src/oxyformer', repository / 'src/oxyformer',
+                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    path = tmp_path / 'request.json'
+    path.write_text(request.to_json(), encoding='utf-8')
+    script = 'import sys; from oxyformer.reporting.stage import request_main; sys.exit(request_main(["--v2-request", sys.argv[1]]))'
+    completed = subprocess.run([sys.executable, '-c', script, str(path)], cwd=repository,
+        env={**os.environ, 'PYTHONPATH': 'src', 'LC_ALL': 'C', 'PYTHONUTF8': '0', 'PYTHONCOERCECLOCALE': '0'},
+        capture_output=True, timeout=60)
+    assert completed.returncode == 0, completed.stderr.decode('utf-8', errors='replace')
+    result = StageResult.from_json(completed.stdout.decode('utf-8'))
+    assert result.status == 'pass'
+    result.verify(request)
+    assert result.artifacts[0].lineage.unit_ids == ids

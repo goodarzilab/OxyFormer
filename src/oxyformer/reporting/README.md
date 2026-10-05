@@ -224,3 +224,9 @@ release. An exact value just above float maximum that converts to finite maximum
 remains admissible; no separate exact-magnitude gate is imposed.
 
 Atomic publication requires a filesystem supporting same-directory hard links.
+
+Reporting YAML, request JSON and CLI result bytes use UTF-8 independently of the
+host locale. The reported concentration-approval snapshot contains its six
+validated scientific fields; unrelated owner metadata, such as YAML timestamps,
+does not enter JSON serialization or change a gate. The entire registry remains
+hash-bound in request/artifact provenance.

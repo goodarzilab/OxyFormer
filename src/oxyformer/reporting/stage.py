@@ -130,7 +130,7 @@ def run_stage(request: StageRequest) -> StageResult:
         report["diagnostics"] = summarize(bundle, manifest)
         require(set(task.values()) == set(dependencies), "report task/dependency paths mismatch")
         request.verify_inputs()
-        config = require_container(yaml.safe_load(Path(request.config_path).read_text()), dict, "reporting config")
+        config = require_container(yaml.safe_load(Path(request.config_path).read_text(encoding="utf-8")), dict, "reporting config")
         require(config.get("schema_version") == 1, "unsupported reporting config")
         require(_realpath(request.config_path) == _realpath(authority.config),
                 "reporting config path is not repository configs/reporting.yaml")
@@ -138,7 +138,7 @@ def run_stage(request: StageRequest) -> StageResult:
         require(_realpath(task["approvals"]) == _realpath(authority.approvals), "approval path is not owner registry")
         receipts = read_artifact(task["receipts"], TaskReceipts, dependencies[task["receipts"]])
         require(manifest.stage == request.stage, "reporting stage mismatch")
-        approvals = require_container(yaml.safe_load(Path(task["approvals"]).read_text()), dict, "owner approvals")
+        approvals = require_container(yaml.safe_load(Path(task["approvals"]).read_text(encoding="utf-8")), dict, "owner approvals")
         report = evaluate(bundle, manifest, receipts, approvals, request.config_hash)
         # Recheck immutable dependencies after collection, before publication.
         request.verify_inputs()
@@ -199,9 +199,10 @@ def _write_report(request, report, bundle, authority):
 def request_main(argv=None):
     """Shared explicit v2 entry point for legacy report/asset scripts."""
     import argparse
+    import sys
     parser = argparse.ArgumentParser(description="Build isolated, gated OxyFormer v2 reporting artifacts")
     parser.add_argument("--v2-request", type=Path, required=True)
     args = parser.parse_args(argv)
-    result = run_stage(StageRequest.from_json(args.v2_request.read_text()))
-    print(result.to_json())
+    result = run_stage(StageRequest.from_json(args.v2_request.read_text(encoding="utf-8")))
+    sys.stdout.buffer.write((result.to_json() + "\n").encode("utf-8"))
     return 0 if result.status == "pass" else 1
