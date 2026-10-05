@@ -1,4 +1,5 @@
 schema_version: 1
+numerical_policy: represented_geometry_centroid_proj64_v1
 physical_version: owner-exposure-2026-10-04-v1
 approval_reference: configs/approvals.yaml:owner_decisions.exposure
 # Fixed, outcome-blind placement sensitivities, not observed habitation.
@@ -10,6 +11,9 @@ allocation:
 # Each distributed location is a block/grid-cell intersection centroid; its
 # population fraction is intersection area / full block area, including nodata.
 # No mask may remove population from that denominator.
+# GEOS represented geometry defines areas/intersections. Centroids are exact for
+# those vertices. Identical CRS sampling preserves rational coordinates; other
+# CRS sampling uses binary64 PROJ outputs, not an exact geodetic projection.
 quantile_interpretation: placement-dependent; not observed habitation
 census_source: census
 # Census ANSI/FIPS codes; https://www.census.gov/library/reference/code-lists/ansi.html

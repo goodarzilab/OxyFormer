@@ -8,9 +8,12 @@ from pathlib import Path
 import numpy as np
 from pyproj import CRS, Transformer
 import rasterio
+import pyproj
+import shapely
 from rasterio.windows import Window
 from shapely.geometry import box
 from oxyformer.exposure.physics import PHYSICS, APPROVED_DEM_PRODUCT, validate_owner_approval
+from oxyformer.exposure.numerics import NUMERICAL_POLICY, SAMPLING_MODES, exact_centroid, same_horizontal_crs
 from oxyformer.provenance import canonical_json, check_hash, file_hash, require
 
 PRIMARY = APPROVED_DEM_PRODUCT
@@ -31,7 +34,7 @@ class AllocationSpec:
         object.__setattr__(self, 'grid_origin_m', tuple(self.grid_origin_m))
         require(bool(self.scenarios) and len(set(self.scenarios)) == len(self.scenarios) and
                 set(self.scenarios) <= {'centroid', 'distributed'}, 'invalid placement scenarios')
-        require(CRS(self.placement_crs) == CRS('EPSG:5070'), 'placement CRS must be CONUS equal-area EPSG:5070')
+        require(same_horizontal_crs(self.placement_crs, 'EPSG:5070'), 'placement CRS must be CONUS equal-area EPSG:5070')
         require(math.isfinite(self.grid_size_m) and self.grid_size_m > 0 and
                 len(self.grid_origin_m) == 2 and all(math.isfinite(x) for x in self.grid_origin_m),
                 'invalid placement grid')
@@ -42,7 +45,7 @@ class AllocationSpec:
 
     @property
     def content_hash(self):
-        return sha256(canonical_json(asdict(self)).encode()).hexdigest()
+        return sha256(canonical_json({'parameters': asdict(self), 'numerical_policy': NUMERICAL_POLICY}).encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -148,9 +151,11 @@ class RasterSampler:
                         and math.isnan(ds.nodata) and math.isnan(tile.nodata)), 'DEM nodata mismatch')
                 require(ds.units[0] in (None, 'm', 'metre', 'meter') and ds.scales == (1.0,) and
                         ds.offsets == (0.0,), 'DEM vertical units/scale mismatch')
-                transform = Transformer.from_crs(self.placement_crs, embedded.to_2d(), always_xy=True)
-                self.datasets.append((ds, transform, inverse))
-                self.identities.append(tile.identity(ds.crs))
+                identical = same_horizontal_crs(self.placement_crs, embedded.to_2d())
+                mode = 'exact_identity' if identical else 'proj_binary64'
+                transform = None if identical else Transformer.from_crs(self.placement_crs, embedded.to_2d(), always_xy=True)
+                self.datasets.append((ds, transform, inverse, mode))
+                self.identities.append(dict(tile.identity(ds.crs), sampling_mode=mode))
             return self
         except BaseException:
             # __exit__ is not called when entry fails. Unwind acquired resources
@@ -164,17 +169,30 @@ class RasterSampler:
     def sample(self, xy):
         z = np.full(len(xy), np.nan)
         reason = np.full(len(xy), 'outside_coverage', dtype=object)
-        for ds, transform, inverse in self.datasets:
-            xx, yy = transform.transform(xy[:, 0], xy[:, 1])
+        self.last_modes = {mode: np.zeros(len(xy), dtype=bool) for mode in SAMPLING_MODES}
+        rounded = None
+        for ds, transform, inverse, mode in self.datasets:
+            active = np.isnan(z)
+            if not active.any():
+                break
+            self.last_modes[mode] |= active
+            if transform is None:
+                xx, yy = xy[:, 0], xy[:, 1]
+            else:
+                if rounded is None:
+                    rounded = np.asarray(xy, dtype=float)
+                xx, yy = transform.transform(rounded[:, 0], rounded[:, 1])
             # Pixel membership is discontinuous. Preserve the stored affine and
             # represented transformed coordinates exactly until integer flooring:
             # even 0.1*x can otherwise round an interior point into adjacent nodata.
             # https://gdal.org/en/stable/tutorials/geotransforms_tut.html
-            finite = np.isfinite(xx) & np.isfinite(yy)
             indices, pixels = [], []
             a, b, c, d, e, f = inverse
-            for index in np.flatnonzero(np.isnan(z) & finite):
-                x, y = Fraction(float(xx[index])), Fraction(float(yy[index]))
+            for index in np.flatnonzero(active):
+                pair = (xx[index], yy[index])
+                if not all(isinstance(v, Fraction) or math.isfinite(v) for v in pair):
+                    continue
+                x, y = (v if isinstance(v, Fraction) else Fraction(float(v)) for v in pair)
                 col, row = math.floor(a*x + b*y + c), math.floor(d*x + e*y + f)
                 if 0 <= col < ds.width and 0 <= row < ds.height:
                     indices.append(index)
@@ -194,6 +212,13 @@ class RasterSampler:
             reason[selected] = 'covered'
         return z, reason
 
+    def sampling_information(self):
+        return [dict(resource_id=identity['resource_id'], mode=mode,
+                     pyproj=pyproj.__version__, proj=pyproj.proj_version_str,
+                     shapely=shapely.__version__, geos=shapely.geos_version_string,
+                     transformer_definition=None if transform is None else transform.definition)
+                for identity, (_, transform, _, mode) in zip(self.identities, self.datasets)]
+
 
 def placement_batches(polygon, scenario, spec, batch_size=4096):
     """Yield (xy, raw square-metre areas), including locations outside raster coverage.
@@ -204,8 +229,7 @@ def placement_batches(polygon, scenario, spec, batch_size=4096):
     """
     require(math.isfinite(polygon.area) and polygon.area > 0, 'block has invalid projected area')
     if scenario == 'centroid':
-        point = polygon.centroid
-        yield np.array([[point.x, point.y]]), np.array([polygon.area])
+        yield np.array([exact_centroid(polygon)], dtype=object), np.array([polygon.area])
         return
     # Preserve represented bounds through subtraction/division: floating
     # cancellation at a translated grid origin can otherwise omit a real strip.
@@ -221,11 +245,10 @@ def placement_batches(polygon, scenario, spec, batch_size=4096):
             piece = polygon.intersection(cell)
             if piece.area <= 0:
                 continue
-            point = piece.centroid
-            points.append((point.x, point.y))
+            points.append(exact_centroid(piece))
             areas.append(piece.area)
             if len(points) == batch_size:
-                yield np.asarray(points), np.asarray(areas)
+                yield np.asarray(points, dtype=object), np.asarray(areas)
                 points, areas = [], []
     if points:
-        yield np.asarray(points), np.asarray(areas)
+        yield np.asarray(points, dtype=object), np.asarray(areas)

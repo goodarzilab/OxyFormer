@@ -1008,3 +1008,207 @@ def test_sampler_entry_interruption_closes_rasters_and_restores_gdal(tmp_path, m
     finally:
         # Keep pre-fix reproductions from leaking GDAL state into other tests.
         sampler.stack.close()
+
+
+@pytest.mark.parametrize('case', ['covered_sliver', 'missing_strip'])
+def test_geometric_centroid_does_not_round_across_pixel_boundary(tmp_path, case):
+    h = 2**-46
+    values = [0, -9999] if case == 'covered_sliver' else [-9999, 0]
+    tile = write_raster(tmp_path / 'centroid-edge.tif', values)
+    if case == 'missing_strip':
+        with rasterio.open(tile.path, 'r+') as ds:
+            ds.transform = rasterio.Affine(-100, 0, 200, 0, -100, 100)
+        tile = replace(tile, sha256=file_hash(tile.path))
+    geography = blocks(pop=(1, 0)).iloc[:1].copy()
+    geography.loc[0, 'geometry'] = box(100-h, 0, 100, 100) if case == 'covered_sliver' else box(0, 0, 100+h, 100)
+    result, qc = build_exposure(sources(tile), geography, replace(SPEC, scenarios=('distributed',)))
+    if case == 'covered_sliver':
+        assert result.missing_population.iloc[0] == 0
+        assert result.pressure_mmhg.iloc[0] == 760
+    else:
+        assert result.missing_population.iloc[0] > 0
+        assert qc['blocks'][0]['nodata'] > 0
+        assert result.pressure_mmhg.isna().all()
+
+
+@pytest.mark.parametrize('shape,expected', [
+    ('triangle', (Fraction(4, 3), Fraction(2, 3))),
+    ('concave', (Fraction(11, 10), Fraction(11, 10))),
+    ('hole', (Fraction(61, 30), Fraction(61, 30))),
+    ('multipart', (Fraction(29, 10), Fraction(9, 10))),
+    ('collection', (Fraction(29, 10), Fraction(9, 10))),
+    ('centroid_in_hole', (Fraction(2), Fraction(2))),
+])
+def test_exact_filled_centroids_match_analytic_geometry(shape, expected):
+    from shapely.geometry import MultiPolygon, GeometryCollection, LineString, Point
+    from oxyformer.exposure.numerics import exact_centroid
+    parts = MultiPolygon([box(0, 0, 2, 2), box(10, 0, 11, 1)])
+    geometries = {
+        'triangle': Polygon([(0, 0), (4, 0), (0, 2)]),
+        'concave': Polygon([(0, 0), (3, 0), (3, 1), (1, 1), (1, 3), (0, 3)]),
+        'hole': Polygon(box(0, 0, 4, 4).exterior.coords, [box(1, 1, 2, 2).exterior.coords]),
+        'multipart': parts,
+        'collection': GeometryCollection([parts, LineString([(100, 0), (100, 100)]), Point(500, 500), Polygon()]),
+        'centroid_in_hole': Polygon(box(0, 0, 4, 4).exterior.coords, [box(1, 1, 3, 3).exterior.coords]),
+    }
+    geometry = geometries[shape]
+    assert exact_centroid(geometry) == expected
+    assert exact_centroid(geometry.reverse()) == expected
+    if shape == 'centroid_in_hole':
+        assert not geometry.covers(Point(*map(float, expected)))
+
+
+def test_exact_centroid_survives_batch_boundary():
+    from oxyformer.exposure.population_allocation import placement_batches
+    end = 410000.0
+    h = np.spacing(end)
+    batches = list(placement_batches(box(0, 0, end+h, 100), 'distributed', SPEC))
+    assert [len(xy) for xy, _ in batches] == [4096, 5]
+    point = batches[-1][0][-1]
+    assert point[0] == Fraction(end) + Fraction(float(h))/2
+    assert point[1] == Fraction(50)
+    assert all(isinstance(v, Fraction) for xy, _ in batches for v in xy.flat)
+    assert sum(len(areas) for _, areas in batches) == 4101
+
+
+def test_identity_sampling_never_calls_proj_or_rounds_centroid(tmp_path, monkeypatch):
+    tile = write_raster(tmp_path / 'exact-location.tif', [0, -9999])
+    def forbidden(*args, **kwargs):
+        raise AssertionError('identity path rounded or invoked PROJ')
+    monkeypatch.setattr('oxyformer.exposure.population_allocation.Transformer.from_crs', forbidden)
+    with RasterSampler((tile,), SPEC.placement_crs) as sampler:
+        monkeypatch.setattr(Fraction, '__float__', forbidden)
+        xy = np.array([[Fraction(100)-Fraction(1, 2**47), Fraction(50)]], dtype=object)
+        z, reason = sampler.sample(xy)
+    assert z.tolist() == [0] and reason.tolist() == ['covered']
+    assert sampler.identities[0]['sampling_mode'] == 'exact_identity'
+
+
+@pytest.mark.parametrize('change', ['parameter', 'method', 'unit', 'datum', 'ellipsoid', 'axis'])
+def test_identity_crs_guard_retains_computational_differences(change):
+    from oxyformer.exposure.numerics import same_horizontal_crs
+    base = CRS('EPSG:5070')
+    doc = base.to_json_dict()
+    if change == 'parameter':
+        doc['conversion']['parameters'][0]['value'] += 1e-11
+    elif change == 'method':
+        doc['conversion']['method'] = {'name': 'Lambert Conic Conformal (2SP)', 'id': {'authority': 'EPSG', 'code': 9802}}
+    elif change == 'unit':
+        for axis in doc['coordinate_system']['axis']:
+            axis['unit'] = {'type': 'LinearUnit', 'name': 'foot', 'conversion_factor': 0.3048}
+    elif change == 'datum':
+        doc['base_crs']['datum']['name'] = 'Distinct synthetic reference frame'
+        doc['base_crs']['datum'].pop('id', None)
+    elif change == 'ellipsoid':
+        doc['base_crs']['datum']['ellipsoid']['semi_major_axis'] += 1
+    else:
+        doc['coordinate_system']['axis'].reverse()
+    different = CRS(doc)
+    if change == 'parameter':
+        assert base == different  # demonstrates why the semantic check alone is insufficient
+    assert not same_horizontal_crs(base, different)
+    with pytest.raises(ContractError, match='placement CRS'):
+        replace(SPEC, placement_crs=different.to_wkt())
+
+
+def test_identity_crs_guard_accepts_only_descriptive_roundtrip_changes(tmp_path):
+    from oxyformer.exposure.numerics import same_horizontal_crs, _crs_definition
+    base = CRS('EPSG:5070')
+    tile = write_raster(tmp_path / 'roundtrip.tif')
+    with rasterio.open(tile.path) as ds:
+        embedded = CRS(ds.crs)
+    for spelling in (base, CRS(base.to_wkt()), CRS(base.to_json()), embedded):
+        assert same_horizontal_crs(base, spelling)
+        assert _crs_definition(base) == _crs_definition(spelling)
+    cleaned = _crs_definition(embedded)
+    assert 'name' not in cleaned and 'id' not in cleaned
+    assert 'name' not in cleaned['conversion'] and 'id' not in cleaned['conversion']
+    assert all('abbreviation' not in axis and 'name' not in axis for axis in cleaned['coordinate_system']['axis'])
+    # Datum/method/parameter identities must survive descriptive pruning.
+    assert cleaned['base_crs']['datum'] == embedded.to_json_dict()['base_crs']['datum']
+    assert cleaned['conversion']['method'] == embedded.to_json_dict()['conversion']['method']
+    assert cleaned['conversion']['parameters'] == embedded.to_json_dict()['conversion']['parameters']
+
+
+def test_bound_and_dynamic_crs_never_receive_identity_shortcut():
+    from oxyformer.exposure.numerics import same_horizontal_crs
+    bound = CRS('+proj=aea +lat_1=29.5 +lat_2=45.5 +lat_0=23 +lon_0=-96 +datum=NAD83 +towgs84=0,0,0 +units=m +type=crs')
+    assert bound.is_bound and not same_horizontal_crs(bound, bound)
+    doc = CRS('EPSG:5070').to_json_dict()
+    doc['base_crs']['datum'].update(type='DynamicGeodeticReferenceFrame', frame_reference_epoch=2010)
+    dynamic = CRS(doc)
+    assert not same_horizontal_crs(dynamic, dynamic)
+
+
+def test_proj64_mode_and_mixed_participation_preserve_population(tmp_path):
+    tile = write_raster(tmp_path / 'geographic.tif', [0, 0], crs='EPSG:4269')
+    with rasterio.open(tile.path, 'r+') as ds:
+        ds.transform = rasterio.Affine(.01, 0, -96.01, 0, -.01, 23.01)
+    tile = replace(tile, sha256=file_hash(tile.path), resource_id='b')
+    frame, qc = build_exposure(sources(tile), blocks(), SPEC)
+    assert frame.pressure_mmhg.eq(760).all() and frame.population.eq(100).all()
+    assert qc['dem_tiles'][0]['sampling_mode'] == 'proj_binary64'
+    for scenario in SPEC.scenarios:
+        assert qc['sampling_modes'][scenario]['proj_binary64'] == dict(placement_count=2, population_mass=100)
+        assert qc['sampling_modes'][scenario]['exact_identity'] == dict(placement_count=0, population_mass=0)
+    assert qc['sampling_information'][0]['transformer_definition']
+    missing = replace(write_raster(tmp_path / 'first-missing.tif', [-9999, -9999]), resource_id='a')
+    both = replace(sources(tile), dem_tiles=(missing, tile))
+    mixed, mixed_qc = build_exposure(both, blocks(), SPEC)
+    pd.testing.assert_frame_equal(mixed, frame)
+    for scenario in SPEC.scenarios:
+        assert all(r['population_mass'] == 100 for r in mixed_qc['sampling_modes'][scenario].values())
+    assert 'not additive' in mixed_qc['sampling_mode_accounting']
+
+
+def test_collection_rejects_legacy_numerics_and_merges_runtime_information(tmp_path, shard_fixture):
+    from oxyformer.exposure.numerics import NUMERICAL_POLICY
+    inventory, paths = shard_fixture
+    legacy_hash = sha256(canonical_json(asdict(SPEC)).encode()).hexdigest()
+    assert SPEC.content_hash != legacy_hash
+    quality = json.loads(paths[5].read_text())
+    for info in quality['sampling_information']:
+        info['pyproj'] = 'other-synthetic-runtime'
+    paths[5].write_text(canonical_json(quality))
+    manifest = json.loads(paths[3].read_text())
+    manifest['files']['quality.json'] = file_hash(paths[5])
+    paths[3].write_text(canonical_json(manifest))
+    req = collect_request(tmp_path / 'runtime-union', inventory, paths)
+    result = run_stage(req)
+    assert result.status == 'pass', result.message
+    combined = json.loads((Path(req.output_dir) / 'quality.json').read_text())
+    assert len({r['pyproj'] for r in combined['sampling_information']}) == 2
+    assert combined['numerical_policy'] == NUMERICAL_POLICY
+    quality['allocation_hash'] = legacy_hash
+    quality['numerical_policy'] = 'legacy-rounded-centroid'
+    paths[5].write_text(canonical_json(quality))
+    manifest['allocation_hash'] = legacy_hash
+    manifest['files']['quality.json'] = file_hash(paths[5])
+    paths[3].write_text(canonical_json(manifest))
+    result = run_stage(collect_request(tmp_path / 'legacy-rejected', inventory, paths))
+    assert result.status == 'fail' and 'allocation' in result.message
+
+
+@pytest.mark.parametrize('axis', ['x', 'y'])
+@pytest.mark.parametrize('offset', [0, 1000])
+@pytest.mark.parametrize('missing_strip', [False, True])
+def test_exact_centroid_boundary_orientations(tmp_path, axis, offset, missing_strip):
+    values = [-9999, 0] if missing_strip else [0, -9999]
+    tile = write_raster(tmp_path / 'oriented-centroid.tif', values)
+    if axis == 'x':
+        affine = rasterio.Affine(-100, 0, offset+200, 0, -100, offset+100) if missing_strip else rasterio.Affine(100, 0, offset, 0, -100, offset+100)
+    else:
+        affine = rasterio.Affine(0, 100, offset, -100, 0, offset+200) if missing_strip else rasterio.Affine(0, 100, offset, 100, 0, offset)
+    with rasterio.open(tile.path, 'r+') as ds:
+        ds.transform = affine
+    tile = replace(tile, sha256=file_hash(tile.path))
+    edge = offset+100.0
+    h = np.spacing(edge)
+    lower, upper = (offset, edge+h) if missing_strip else (edge-h, edge)
+    polygon = box(lower, offset, upper, offset+100) if axis == 'x' else box(offset, lower, offset+100, upper)
+    geography = blocks(pop=(1, 0)).iloc[:1].copy()
+    geography.loc[0, 'geometry'] = polygon
+    scenario = 'distributed' if missing_strip else 'centroid'
+    frame, qc = build_exposure(sources(tile), geography, replace(SPEC, scenarios=(scenario,)))
+    assert bool(frame.missing_population.iloc[0] > 0) == missing_strip
+    assert bool(frame.pressure_mmhg.isna().iloc[0]) == missing_strip

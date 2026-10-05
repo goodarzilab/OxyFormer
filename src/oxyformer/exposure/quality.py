@@ -2,6 +2,7 @@
 import math
 from fractions import Fraction
 import numpy as np
+from oxyformer.exposure.numerics import NUMERICAL_POLICY, NUMERICAL_DOMAIN, MODE_ACCOUNTING, SAMPLING_MODES
 from oxyformer.provenance import require
 
 QUANTILE_INTERPRETATION = 'placement-dependent; not observed habitation'
@@ -121,3 +122,30 @@ def validate_accounting(exposure, quality):
                    for s in scenarios]
     require(all(p == populations[0] for p in populations) and
             sum(populations[0].values()) == quality['population'], 'QC total population mismatch')
+
+    require(quality['numerical_policy'] == NUMERICAL_POLICY and
+            quality['numerical_domain'] == NUMERICAL_DOMAIN and
+            quality['sampling_mode_accounting'] == MODE_ACCOUNTING, 'inconsistent numerical policy')
+    tile_modes = {t['resource_id']: t['sampling_mode'] for t in quality['dem_tiles']}
+    require(set(tile_modes.values()) <= set(SAMPLING_MODES), 'invalid raster sampling mode')
+    information = quality['sampling_information']
+    require({r['resource_id'] for r in information} == set(tile_modes) and
+            all(r['mode'] == tile_modes[r['resource_id']] and
+                all(isinstance(r[k], str) and r[k] for k in ('pyproj', 'proj', 'shapely', 'geos'))
+                for r in information), 'incomplete sampling provenance')
+    require(set(quality['sampling_modes']) == set(scenarios), 'sampling scenario omissions')
+    for scenario in scenarios:
+        records = quality['sampling_modes'][scenario]
+        require(set(records) == set(SAMPLING_MODES), 'sampling mode omissions')
+        masses = []
+        for mode, record in records.items():
+            count, mass = record['placement_count'], record['population_mass']
+            require(type(count) is int and count >= 0 and math.isfinite(mass) and mass >= 0 and
+                    ((count == 0) == (mass == 0)) and
+                    (mass <= quality['population'] or math.isclose(mass, quality['population'], rel_tol=1e-10, abs_tol=1e-8)),
+                    'invalid sampling participation accounting')
+            require(count == 0 or mode in tile_modes.values(), 'sampling mode contradicts raster modes')
+            masses.append(mass)
+        require(math.fsum(masses) >= quality['population'] or
+                math.isclose(math.fsum(masses), quality['population'], rel_tol=1e-10, abs_tol=1e-8),
+                'sampling participation omits population')

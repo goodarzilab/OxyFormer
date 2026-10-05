@@ -36,6 +36,7 @@ from oxyformer.exposure.archives import extract_member
 from oxyformer.exposure.census_blocks import read_census_blocks, validate_blocks
 from oxyformer.exposure.physics import PHYSICS, pressure_mmhg, oxygen_deficit_mmhg, validate_owner_approval
 from oxyformer.exposure.population_allocation import AllocationSpec, DemTile, RasterSampler, placement_batches, FALLBACK
+from oxyformer.exposure.numerics import NUMERICAL_POLICY, NUMERICAL_DOMAIN, MODE_ACCOUNTING, SAMPLING_MODES
 from oxyformer.exposure.quality import QUANTILE_INTERPRETATION, REASONS, validate_accounting, placement_quantiles
 from oxyformer.provenance import ArtifactLineage, ArtifactRecord, canonical_json, check_hash, file_hash, require
 
@@ -72,6 +73,10 @@ def build_exposure(source_manifests, geography, allocation_spec):
                'source_identities': source_manifests.identity_map(),
                'quantile_interpretation': QUANTILE_INTERPRETATION,
                'block_count': len(blocks), 'population': sum(int(value) for value in blocks.population), 'blocks': []}
+    quality.update(numerical_policy=NUMERICAL_POLICY, numerical_domain=NUMERICAL_DOMAIN,
+                   sampling_mode_accounting=MODE_ACCOUNTING,
+                   sampling_modes={s: {m: dict(placement_count=0, population_mass=0.0)
+                                       for m in SAMPLING_MODES} for s in allocation_spec.scenarios})
     rows = []
     with RasterSampler(source_manifests.dem_tiles, allocation_spec.placement_crs) as sampler:
         quality['dem_tiles'] = sampler.identities
@@ -99,6 +104,10 @@ def build_exposure(source_manifests, geography, allocation_spec):
                                                    dtype=float, count=len(areas)))
                             require(np.isfinite(weights).all() and (weights > 0).all(),
                                     'positive placement mass is zero or nonfinite')
+                            for mode, participation in sampler.last_modes.items():
+                                stat = quality['sampling_modes'][scenario][mode]
+                                stat['placement_count'] += int(np.count_nonzero(participation))
+                                stat['population_mass'] += float(math.fsum(weights[participation]))
                             weights_total.append(float(math.fsum(weights)))
                             valid = np.isfinite(z)
                             for name in REASONS:
@@ -133,6 +142,7 @@ def build_exposure(source_manifests, geography, allocation_spec):
                     oxygen_deficit_mmhg=math.fsum(deficits) / total if complete else np.nan,
                     elevation_p10_m=quantiles[0], elevation_p50_m=quantiles[1], elevation_p90_m=quantiles[2],
                     quantile_interpretation=QUANTILE_INTERPRETATION))
+        quality['sampling_information'] = sampler.sampling_information()
     exposure = pd.DataFrame(rows).sort_values(['tract_id', 'scenario']).reset_index(drop=True)
     for col in ('elevation_p10_m', 'elevation_p50_m', 'elevation_p90_m'):
         exposure[col] = pd.to_numeric(exposure[col], errors='raise').astype(float)
@@ -176,11 +186,18 @@ def _merge_quality(parts):
     result = dict(parts[0])
     for part in parts[1:]:
         for key in ('physical_spec', 'physical_hash', 'allocation', 'allocation_hash',
-                    'source_identities', 'quantile_interpretation'):
+                    'source_identities', 'quantile_interpretation', 'numerical_policy',
+                    'numerical_domain', 'sampling_mode_accounting'):
             require(part[key] == result[key], f'inconsistent {key}')
     result['blocks'] = sorted([row for p in parts for row in p['blocks']], key=lambda r: (r['block_id'], r['scenario']))
     result['population'] = sum(p['population'] for p in parts)
     result['block_count'] = sum(p['block_count'] for p in parts)
+    result['sampling_modes'] = {s: {m: dict(
+        placement_count=sum(p['sampling_modes'][s][m]['placement_count'] for p in parts),
+        population_mass=math.fsum(p['sampling_modes'][s][m]['population_mass'] for p in parts))
+        for m in SAMPLING_MODES} for s in result['allocation']['scenarios']}
+    information = {canonical_json(info): info for p in parts for info in p['sampling_information']}
+    result['sampling_information'] = [information[key] for key in sorted(information)]
     tiles = {}
     for part in parts:
         for tile in part['dem_tiles']:
@@ -304,6 +321,7 @@ def run_stage(request: StageRequest) -> StageResult:
         config = yaml.safe_load(Path(request.config_path).read_text())
         require(config['schema_version'] == 1 and config['physical_version'] == PHYSICS.version,
                 'inconsistent exposure configuration')
+        require(config['numerical_policy'] == NUMERICAL_POLICY, 'inconsistent numerical policy')
         require(config['approval_reference'] == 'configs/approvals.yaml:owner_decisions.exposure',
                 'unexpected owner exposure approval reference')
         task = _json(request.task_path)
