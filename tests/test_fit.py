@@ -37,7 +37,7 @@ def single_thread():
     torch.set_num_threads(previous)
 
 
-def make_case(root):
+def make_case(root, *, identity=False):
     ids = tuple(f"o{i:02d}" for i in range(30)) + ("unlabeled-acs",)
     rules = tuple(FeatureRule(name=n, role=r, endpoints=("synthetic",), uses=u,
         approval_id="synthetic-only") for n, r, u in (
@@ -51,7 +51,8 @@ def make_case(root):
     source = SourceManifest(source_id="synthetic", version="1", uri="synthetic://no-data",
         payload_hash=digest("synthetic"), license_hash=digest("license"), schema_hash=digest("schema"),
         field_mapping=(("raw_x", "x"),), mapping_status="reviewed", mapping_review_id="synthetic")
-    policy = ShiftOrStayPolicy(support_design_hash=digest("design"), components_by_key=(("s", ((0., 10.),)),))
+    policy = ShiftOrStayPolicy(support_design_hash=digest("design"), components_by_key=(("s", ((0., 10.),)),),
+                               delta_mmhg=0. if identity else 2.)
     spec = EstimandSpec(endpoint="synthetic", target_id="synthetic-target", outcome_scale="years",
         policy_id=policy.policy_id, weight_id="synthetic-target-mass", adjustment_schema_hash=registry.content_hash,
         inference_unit="tract", source_lineage_hash=source_lineage_hash((source,)))
@@ -114,6 +115,7 @@ def completed(tmp_path_factory):
 def test_registered_configuration():
     expected = yaml.safe_load(Path("configs/training/nuisance.yaml").read_text())
     actual = NuisanceSettings()
+    assert NuisanceSettings(**expected) == actual
     for key, value in expected.items():
         assert getattr(actual, key) == (tuple(value) if isinstance(value, list) else value)
     with pytest.raises(ContractError, match="unregistered"):
@@ -243,11 +245,15 @@ def test_group_splits_and_stopping_leakage_are_rejected(tmp_path):
         _partition(config, config.inner.split, 0, stopping=fit_ids[:1])
 
 
-def test_fitting_only_stopping_and_pair_batch_weights(completed, tmp_path, monkeypatch):
+@pytest.mark.parametrize("zero_stop", [False, True])
+def test_fitting_only_stopping_and_pair_batch_weights(completed, tmp_path, monkeypatch, zero_stop):
     case, artifact = completed
     config = replace(case[-1], output_dir=str(tmp_path / "stopping"))
     parent = config.inner.split
     stop = parent.training_ids(0)[:2]
+    if zero_stop:
+        rows = tuple((*row[:-1], 0.) if row[0] in stop else row for row in config.data.rows)
+        config = replace(config, data=replace(config.data, rows=rows))
     local, ids, held = _partition(config, parent, 0, stopping=stop)
     # Exercise the real training loop using fresh synthetic initialization.
     view = subset(config.data.covariates(("x",)), ids)
@@ -272,6 +278,9 @@ def test_fitting_only_stopping_and_pair_batch_weights(completed, tmp_path, monke
     monkeypatch.setattr(fitting, "paired_origin_loss", spy)
     model, saved, done, _ = _train_one(config, bundle, encoder, view, stop, 2, 1103, budget)
     assert done and saved["progress"]["best_epoch"] in (1, 2)
+    if zero_stop:
+        assert saved["progress"]["best_epoch"] == 2
+        assert saved["progress"]["history"] == [None, None]
     assert set(model.group_offsets.training_ids) == set(ids)
     assert set(x for batch in calls for x in batch) == set(ids)
     assert all(set(batch).isdisjoint(held + stop) for batch in calls)
@@ -293,3 +302,35 @@ def test_requested_checkpoint_does_not_claim_completion(tmp_path):
     artifact = run((*case[:3], replace(case[-1], stop_request=request)))
     assert not artifact.complete and artifact.checkpoint.reason == "requested"
     assert state(artifact)["position"] == 0
+
+
+def test_identity_policy_does_not_evaluate_exponential_ratio(tmp_path, monkeypatch):
+    case = make_case(tmp_path / "identity", identity=True)
+    artifact = run(case)
+    config = case[-1]
+    view = subset(config.data.covariates(("x",)), artifact.prediction_inputs.original_ids)
+    controller = state(artifact)
+    calibration = AffineCalibration.from_json(controller["calibration"])
+    # Synthetic boundary reproduction: even these finite origin/calibration
+    # outputs cannot change the exactly known ratio under the identity map.
+    replacement = replace(calibration, slope=.5, intercept=0.)
+    monkeypatch.setattr(AffineCalibration, "from_json", classmethod(lambda cls, text: replacement))
+    original_predict = fitting._predict
+    def extreme_origin(model, *args, **kwargs):
+        if isinstance(model, fitting.OriginTransformer):
+            return torch.full((len(view.original_ids), 2), 180.)
+        return original_predict(model, *args, **kwargs)
+    monkeypatch.setattr(fitting, "_predict", extreme_origin)
+    result = predict_fold(artifact, view, config.policy)
+    assert result.r_a == result.r_d == (1.,) * len(view.original_ids)
+
+
+def test_zero_mass_inner_evaluation_fold_is_a_zero_contribution(tmp_path):
+    spec, split, manifest, config = make_case(tmp_path / "zero-fold")
+    zero_ids = {oid for oid, fold in zip(config.inner.split.original_ids, config.inner.split.fold_ids) if fold == 0}
+    rows = tuple((*row[:-1], 0.) if row[0] in zero_ids else row for row in config.data.rows)
+    config = replace(config, data=replace(config.data, rows=rows))
+    artifact = fit_fold(spec, split, manifest, config, 1103)
+    results = state(artifact)["results"]
+    assert artifact.complete
+    assert all(r["mass"] == 0 and all(m == 0 for m in r["metrics"]) for r in results if r["fold"] == 0)

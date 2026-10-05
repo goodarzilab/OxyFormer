@@ -60,23 +60,26 @@ class AffineCalibration(Immutable):
         return result
 
 
-def paired_tensors(logits, weights):
+def paired_tensors(logits, weights, *, allow_zero_mass=False):
     z = torch.as_tensor(logits, dtype=torch.float32).detach()
     w = torch.as_tensor(weights, dtype=torch.float32, device=z.device).detach()
     require(z.ndim == 2 and z.shape[1] == 2 and w.shape == (len(z),),
             "calibration requires [original, observed/shifted] logits and origin weights")
     require(bool(torch.isfinite(z).all()) and bool(torch.isfinite(w).all()),
             "nonfinite calibration inputs")
-    require(bool((w >= 0).all()) and bool(w.sum() > 0) and bool(torch.isfinite(w.sum())),
-            "invalid calibration target weights")
+    total = w.sum()
+    require(bool((w >= 0).all()) and bool(torch.isfinite(total)) and
+            (allow_zero_mass or bool(total > 0)), "invalid calibration target weights")
     z = z.masked_fill(w[:, None] == 0, 0)
     labels = torch.tensor([0., 1.], device=z.device).expand_as(z)
     # Normalize before duplication; both copies always retain the same mass.
-    return z, labels, (w / w.sum())[:, None].expand_as(z) / 2
+    denominator = torch.where(total > 0, total, torch.ones_like(total))
+    return z, labels, (w / denominator)[:, None].expand_as(z) / 2
 
 
 def pair_metrics(logits, weights):
-    z, y, w = paired_tensors(logits, weights)
+    # A zero-mass evaluation partition contributes exactly zero to ranking.
+    z, y, w = paired_tensors(logits, weights, allow_zero_mass=True)
     loss = float((F.binary_cross_entropy_with_logits(z, y, reduction="none") * w).sum())
     brier = float(((z.sigmoid() - y).square() * w).sum())
     require(math.isfinite(loss) and math.isfinite(brier), "nonfinite calibration score")
