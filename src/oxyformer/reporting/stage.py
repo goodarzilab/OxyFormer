@@ -20,7 +20,21 @@ from oxyformer.reporting.evidence_matrix import LIMITATIONS, evaluate, require_c
 from oxyformer.reporting.records import ExpectedTasks, ReportBundle, STAGE_GATES, TaskReceipts
 from oxyformer.reporting.render import render_forest, render_html
 
-OWNER_APPROVALS = Path(__file__).resolve().parents[3] / "configs" / "approvals.yaml"
+_MODULE = Path(__file__).resolve()
+_SOURCE_ROOT = _MODULE.parents[3]
+# A source checkout has a fixed registry. Installed code has no repository
+# beside it: use the repository config already bound by the frozen request.
+OWNER_APPROVALS = (_SOURCE_ROOT / "configs" / "approvals.yaml"
+                   if _SOURCE_ROOT / "src/oxyformer/reporting/stage.py" == _MODULE else None)
+
+
+def _owner_registry(request):
+    if OWNER_APPROVALS is not None:
+        return OWNER_APPROVALS
+    config = Path(request.config_path).resolve()
+    require(config.name == "reporting.yaml" and config.parent.name == "configs",
+            "installed reporting requires repository configs/reporting.yaml")
+    return config.with_name("approvals.yaml")
 
 
 def _publish(root, name, text):
@@ -54,7 +68,7 @@ def run_stage(request: StageRequest) -> StageResult:
         require(set(task) == {"bundle", "manifest", "receipts", "approvals"}, "invalid reporting task fields")
         dependencies = dict(zip(request.dependency_paths, request.dependency_hashes))
         require(set(task.values()) == set(dependencies), "report task/dependency paths mismatch")
-        require(Path(task["approvals"]).resolve() == OWNER_APPROVALS.resolve(), "approval path is not owner registry")
+        require(Path(task["approvals"]).resolve() == _owner_registry(request).resolve(), "approval path is not owner registry")
         bundle = read_artifact(task["bundle"], ReportBundle, dependencies[task["bundle"]])
         report["estimators"] = [e.to_dict()["payload"] for e in bundle.estimates]
         report["sensitivities"] = sensitivity_records(bundle)
@@ -83,7 +97,7 @@ def run_stage(request: StageRequest) -> StageResult:
 
 def _write_report(request, report, bundle):
     root = Path(request.output_dir).resolve()
-    repository = OWNER_APPROVALS.resolve().parents[1]
+    repository = _owner_registry(request).parents[1].resolve()
     for protected in (repository / "outputs", repository / "report", repository / "src", repository / "configs"):
         require(not root.is_relative_to(protected), "report output overlaps protected repository path")
     require(not any(Path(p).resolve().is_relative_to(root) for p in

@@ -5,7 +5,12 @@
 `receipts`, and `approvals` to absolute paths. These must be exactly the
 request's `dependency_paths`, with their corresponding `dependency_hashes`.
 Config is `configs/reporting.yaml`. Approvals must resolve to the repository's
-read-only `configs/approvals.yaml`. Results are created once in `output_dir`:
+read-only `configs/approvals.yaml`. Source checkouts bind this registry to the
+code's repository. A non-editable installation uses the repository
+`configs/reporting.yaml` at the hash-bound `StageRequest.config_path`; its
+adjacent `approvals.yaml` is the only accepted registry. Installed code never
+looks for owner approvals beside `site-packages`. Output protection uses that
+same repository. Results are created once in `output_dir`:
 `report.json`, self-contained `report.html`, and `estimators.svg`. Existing
 outputs are never overwritten. Identical reruns reverify inputs and existing
 bytes and return the same result; matching partial publications are completed.
