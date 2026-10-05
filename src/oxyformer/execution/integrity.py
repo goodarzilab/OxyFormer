@@ -30,6 +30,23 @@ def _stable(metadata):
             metadata.st_mtime_ns, metadata.st_ctime_ns)
 
 
+def read_regular(path):
+    """Read a stable regular control file without blocking on a replaced FIFO."""
+    path = Path(path)
+    before = path.lstat()
+    require(stat.S_ISREG(before.st_mode), f'dependency control is not a regular file: {path}')
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as stream:
+        opened = os.fstat(stream.fileno())
+        require(stat.S_ISREG(opened.st_mode) and _stable(opened) == _stable(before),
+                f'dependency control changed before reading: {path}')
+        raw = stream.read()
+        require(_stable(os.fstat(stream.fileno())) == _stable(before)
+                and _stable(path.lstat()) == _stable(before),
+                f'dependency control changed while reading: {path}')
+    return raw
+
+
 def fingerprint_tree(root, *, exclude=()):
     """Return every entry, including '.', and explicit errors on unreadable paths.
 
@@ -188,7 +205,7 @@ def verify_published_tree(root, result, expected_hash=None):
     path = root / FINGERPRINT
     require(not path.is_symlink() and path.resolve().is_relative_to(root),
             'dependency fingerprint escapes attempt')
-    raw = path.read_bytes()
+    raw = read_regular(path)
     require(sha256(raw).hexdigest() == records[0].sha256, 'dependency fingerprint hash mismatch')
     value = json.loads(raw)
     require(isinstance(value, dict) and set(value) == {

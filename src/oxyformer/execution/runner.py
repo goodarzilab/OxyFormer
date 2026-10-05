@@ -153,7 +153,7 @@ def verify_continuation(task, deps):
     verify_dependency_result(deps[predecessor])
 
 
-def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, approvals=None, report=None, execute=None):
+def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, approvals=None, execute=None):
     out = Path(out).absolute()
     require(out.is_dir() and not out.is_symlink(), 'output must be an existing attempt directory')
     out = out.resolve(strict=True)
@@ -287,16 +287,6 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
             from .worker import execute
         result = execute(request, module_name, repo)
         require(isinstance(result, StageResult), 'stage did not return StageResult')
-        result.verify(request)
-        require(all(not (out / a.path).resolve().is_relative_to(repo) for a in result.artifacts),
-                'artifact overlaps cloned repository')
-        require(all(not a.path.startswith('_execution/') for a in result.artifacts), 'reserved execution artifact')
-        declared = set(task.get('outputs', []))
-        if result.status == 'pass':
-            require(declared <= {a.path for a in result.artifacts}, 'stage omitted declared outputs')
-        for path, digest in sources.items():
-            require(file_hash(path) == digest, f'input source changed: {path}')
-        code_identity(repo, out)
     except BaseException as exc:
         result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
                              message=str(exc).strip() or type(exc).__name__)
@@ -307,10 +297,29 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
                    for name in detail['changed_paths']]
         result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
                              message='upstream attempt tainted; changed paths: ' + ', '.join(changed))
-    if report is not None:
-        report(result)
-    # Flush redirected run.log before fingerprinting it. The CLI emits no
-    # further success output after publication, so that log is bound too.
-    sys.stdout.flush()
-    sys.stderr.flush()
+    else:
+        try:
+            # Compare upstream types before the contract's byte hashing: an
+            # upstream regular file replaced by a FIFO must fail, never block.
+            # Flush our streams before checking any stage-declared log hash.
+            sys.stdout.flush()
+            sys.stderr.flush()
+            inputs = (request.config_path, request.task_path) + request.dependency_paths
+            require(all(Path(path).is_file() for path in inputs), 'input is not a regular file')
+            require(all((out / a.path).is_file() for a in result.artifacts),
+                    'artifact is not a regular file')
+            result.verify(request)
+            require(all(not (out / a.path).resolve().is_relative_to(repo) for a in result.artifacts),
+                    'artifact overlaps cloned repository')
+            require(all(not a.path.startswith('_execution/') for a in result.artifacts), 'reserved execution artifact')
+            declared = set(task.get('outputs', []))
+            if result.status == 'pass':
+                require(declared <= {a.path for a in result.artifacts}, 'stage omitted declared outputs')
+            for path, digest in sources.items():
+                require(file_hash(path) == digest, f'input source changed: {path}')
+            code_identity(repo, out)
+        except BaseException as exc:
+            result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
+                                 message=str(exc).strip() or type(exc).__name__)
+    # No status output after artifact validation: run.log may be an artifact.
     return publish_result(out, result)

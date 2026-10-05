@@ -46,15 +46,13 @@ def execute(request, module_name, repo):
 
 
 def _reap_descendants():
-    statuses = []
     while True:
         try:
-            _, status = os.waitpid(-1, 0)
-            statuses.append(os.waitstatus_to_exitcode(status))
+            os.waitpid(-1, 0)
         except InterruptedError:
             continue
         except ChildProcessError:
-            return statuses
+            return
 
 
 def supervise(request_path, repository, module_name):
@@ -80,8 +78,10 @@ def supervise(request_path, repository, module_name):
     if interrupted:
         stage.send_signal(interrupted[-1])
     code = stage.wait()
-    descendants = _reap_descendants()
-    return 1 if interrupted or code != 0 or any(descendants) else 0
+    # Only the stage knows its helpers' exit conventions (grep uses 1 for no
+    # matches). Reap every helper for completion, without judging its result.
+    _reap_descendants()
+    return 1 if interrupted or code != 0 else 0
 
 
 def stage_main(request_path, repository, module_name):
