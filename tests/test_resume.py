@@ -700,3 +700,47 @@ def test_lineage_must_agree_with_identity(tmp_path, field, value, operation):
                              sha256=sha256(payload).hexdigest(), byte_size=len(payload))
         with pytest.raises(ContractError, match="lineage.*identity"):
             load_checkpoint(descriptor, first.identity)
+
+
+@pytest.mark.parametrize("missing_rows", [0, 4])
+def test_sparse_epoch_has_optimizer_update_and_exact_continuation(tmp_path, missing_rows):
+    view, split, config = make_case(tmp_path)
+    ids = view.original_ids[:missing_rows + 2]
+    values = ((0.,),) + ((None,),) * missing_rows + ((1.,),)
+    view = replace(view, original_ids=ids, columns=("part",), values=values,
+                   lineage=replace(view.lineage, unit_ids=ids))
+    all_ids = ids + ("external0", "external1")
+    split = replace(split, original_ids=all_ids, fold_ids=(1,) * len(ids) + (0, 0),
+                    lineage=replace(split.lineage, unit_ids=all_ids + split.design_ids + split.excluded_ids))
+    settings = replace(config.settings, feature_kinds=(("part", "numeric"),), families=(("part",),),
+                       stopping_ids=(ids[-1],), mask_rate=.3 if missing_rows == 0 else 1e-30,
+                       batch_size=1, max_epochs=1)
+    config = replace(config, settings=settings)
+    full = pretrain(view, split, config, 1103)
+    state = load_checkpoint(full, full.identity)
+    assert full.complete
+    assert state["optimizer"]["state"], "completed without an optimizer update"
+    assert state["progress"]["epoch_updates"] >= 1
+    first = pretrain(view, split, replace(config, max_batches=1,
+                                         output_dir=str(tmp_path / "first")), 1103)
+    resumed = pretrain(view, split, replace(config, predecessor=first,
+                                           output_dir=str(tmp_path / "resumed")), 1103)
+    assert_state_equal(state, load_checkpoint(resumed, resumed.identity))
+
+
+def test_changed_blas_preference_rejects_resume_before_attempt(tmp_path):
+    # Exercise the real selector without requiring a GPU; environment identity
+    # binds backend preferences on CPU too, as it does other CUDA precision flags.
+    preference = torch.backends.cuda.preferred_blas_library
+    original = preference()
+    try:
+        preference("cublas")
+        view, split, config = make_case(tmp_path)
+        first = pretrain(view, split, replace(config, max_batches=1), 1103)
+        preference("cublaslt")
+        config = replace(config, predecessor=first, output_dir=str(tmp_path / "resumed"))
+        with pytest.raises(ContractError, match="identity"):
+            pretrain(view, split, config, 1103)
+        assert not Path(config.output_dir).exists()
+    finally:
+        preference(original)

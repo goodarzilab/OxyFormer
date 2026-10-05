@@ -359,6 +359,7 @@ def environment_identity(device: torch.device) -> tuple[tuple[str, str], ...]:
               "cpu_capability": torch.backends.cpu.get_cpu_capability(),
               "matmul_precision": torch.get_float32_matmul_precision(),
               "cuda": str(torch.version.cuda), "cudnn": str(torch.backends.cudnn.version()),
+              "blas_preference": str(torch.backends.cuda.preferred_blas_library()),
               "cudnn_deterministic": str(torch.backends.cudnn.deterministic),
               "cudnn_benchmark": str(torch.backends.cudnn.benchmark),
               # Use the native precision API: legacy allow_tf32 getters can
@@ -511,7 +512,7 @@ def _run(view, settings, config, seed, features, preprocessing, identity,
             validation_batch.masked[first, list(members)] = True
     require(bool((~train_batch.missing).any()), "no observed fitting targets")
     require(bool((~validation_batch.missing).any()), "no observed stopping targets")
-    progress = {"epoch": 0, "step": 0, "phase": "train", "validation_cursor": 0,
+    progress = {"epoch": 0, "step": 0, "epoch_updates": 0, "phase": "train", "validation_cursor": 0,
                 "validation_units": [0] * len(features), "validation_counts": [0] * len(features),
                 "best_loss": None, "bad_epochs": 0, "history": []}
     best_model = None
@@ -541,6 +542,18 @@ def _run(view, settings, config, seed, features, preprocessing, identity,
         if progress["phase"] == "train":
             indices = sampler.indices(settings.batch_size)
             masked = family_mask(_batch(train_batch, indices), family_indices, settings.mask_rate)
+            if progress["epoch_updates"] == 0 and not bool((masked.masked & ~masked.missing).any()):
+                remaining = sampler.order[sampler.cursor + len(indices):]
+                if not bool((~train_batch.missing[remaining]).any()):
+                    # The final batch with observed values must train something
+                    # if all earlier draws missed. Preserve family masking and
+                    # the epoch bound; all-missing trailing batches can still
+                    # be consumed. No extra RNG draws or optimizer steps.
+                    observed = torch.nonzero(~masked.missing)
+                    if observed.numel():
+                        row, column = observed[0].tolist()
+                        family = next(members for members in family_indices if column in members)
+                        masked.masked[row, list(family)] = True
             model.train()
             optimizer.zero_grad(set_to_none=True)
             losses = reconstruction_losses(model(masked), masked, features)
@@ -550,6 +563,7 @@ def _run(view, settings, config, seed, features, preprocessing, identity,
                 require(bool(torch.isfinite(loss)), "nonfinite SSL loss")
                 loss.backward()
                 optimizer.step()
+                progress["epoch_updates"] += 1
             sampler.cursor += len(indices)
             progress["step"] += 1
             if sampler.cursor == sampler.size:
@@ -581,7 +595,7 @@ def _run(view, settings, config, seed, features, preprocessing, identity,
                     reason = "max_epochs" if progress["epoch"] >= settings.max_epochs else "patience"
                 else:
                     sampler.finish_epoch()
-                    progress.update(phase="train", validation_cursor=0,
+                    progress.update(phase="train", epoch_updates=0, validation_cursor=0,
                                     validation_units=[0] * len(features), validation_counts=[0] * len(features))
         slice_batches += 1
     state = {"model": model.state_dict(), "best_model": best_model,
