@@ -308,40 +308,50 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     except BaseException as exc:
         result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
                              message=str(exc).strip() or type(exc).__name__)
-    check = post_execution_check(dependency_trees)
-    control_directory_changed = _repair_control_directory(out)
-    collisions = [str(out / name) for name in (DEPENDENCY_CHECK, RESULT, FINGERPRINT)
-                  if os.path.lexists(out / name)]
-    if control_directory_changed:
-        collisions.append(str(out / '_execution'))
-    _replace_control(out, DEPENDENCY_CHECK, canonical_json(check))
-    if check['status'] == 'fail':
+    changed = []
+    try:
+        check = post_execution_check(dependency_trees)
         changed = [str(Path(root) / name) for root, detail in check['attempts'].items()
                    for name in detail['changed_paths']]
-        result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
-                             message='upstream attempt tainted; changed paths: ' + ', '.join(changed))
-    else:
-        try:
-            # Compare upstream types before the contract's byte hashing: an
-            # upstream regular file replaced by a FIFO must fail, never block.
-            # Flush our streams before checking any stage-declared log hash.
-            sys.stdout.flush()
-            sys.stderr.flush()
-            require(not collisions, 'reserved execution control collision: ' + ', '.join(collisions))
-            for path, digest in immutable_controls.items():
-                require(file_hash(path) == digest, f'execution control changed: {path}')
-            verify_result(result, request)
-            require(all(not (out / a.path).resolve().is_relative_to(repo) for a in result.artifacts),
-                    'artifact overlaps cloned repository')
-            require(all(not a.path.startswith('_execution/') for a in result.artifacts), 'reserved execution artifact')
-            declared = set(task.get('outputs', []))
-            if result.status == 'pass':
-                require(declared <= {a.path for a in result.artifacts}, 'stage omitted declared outputs')
-            for path, digest in sources.items():
-                require(file_hash(path) == digest, f'input source changed: {path}')
-            code_identity(repo, out)
-        except BaseException as exc:
+        control_directory_changed = _repair_control_directory(out)
+        collisions = [str(out / name) for name in (DEPENDENCY_CHECK, RESULT, FINGERPRINT)
+                      if os.path.lexists(out / name)]
+        if control_directory_changed:
+            collisions.append(str(out / '_execution'))
+        _replace_control(out, DEPENDENCY_CHECK, canonical_json(check))
+        if check['status'] == 'fail':
             result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
-                                 message=str(exc).strip() or type(exc).__name__)
-    # No status output after artifact validation: run.log may be an artifact.
-    return publish_result(out, result, owned_controls=True)
+                                 message='upstream attempt tainted; changed paths: ' + ', '.join(changed))
+        else:
+            try:
+                # Compare upstream types before the contract's byte hashing: an
+                # upstream regular file replaced by a FIFO must fail, never block.
+                # Flush our streams before checking any stage-declared log hash.
+                sys.stdout.flush()
+                sys.stderr.flush()
+                require(not collisions, 'reserved execution control collision: ' + ', '.join(collisions))
+                for path, digest in immutable_controls.items():
+                    require(file_hash(path) == digest, f'execution control changed: {path}')
+                verify_result(result, request)
+                require(all(not (out / a.path).resolve().is_relative_to(repo) for a in result.artifacts),
+                        'artifact overlaps cloned repository')
+                require(all(not a.path.startswith('_execution/') for a in result.artifacts), 'reserved execution artifact')
+                declared = set(task.get('outputs', []))
+                if result.status == 'pass':
+                    require(declared <= {a.path for a in result.artifacts}, 'stage omitted declared outputs')
+                for path, digest in sources.items():
+                    require(file_hash(path) == digest, f'input source changed: {path}')
+                code_identity(repo, out)
+            except BaseException as exc:
+                result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
+                                     message=str(exc).strip() or type(exc).__name__)
+        # No status output after artifact validation: run.log may be an artifact.
+        return publish_result(out, result, owned_controls=True)
+    except BaseException as exc:
+        message = 'stage finalization failed: ' + (str(exc).strip() or type(exc).__name__)
+        if changed:
+            message += '; upstream attempt tainted; changed paths: ' + ', '.join(changed)
+        # Execution already happened. Receipt I/O cannot turn failure into a
+        # missing-prerequisite status or hide the paths we detected in memory.
+        print('failed: ' + message, file=sys.stderr)
+        return StageResult(request_hash=request.content_hash, status='fail', artifacts=(), message=message)
