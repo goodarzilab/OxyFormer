@@ -2981,3 +2981,35 @@ def test_successful_acquisition_reader_preserves_positive_difference(runtime, ac
     assert read_json(Path(str(integrity.publication_receipt(acquisition)) + '.tainted')) == ['receipts.json']
     with raises(ContractError, match='tainted'):
         verify_dependency_result(producer)
+
+
+def test_partial_acquisition_enumeration_preserves_observed_addition(runtime, acquisition, tmp_path, monkeypatch):
+    import errno
+    from oxyformer.execution import runner, integrity
+    repo, producer = runtime
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']}
+    assert_pass(run_task(repo, producer, needs=needs))
+    added = acquisition / 'observed-before-eio'
+    original_scandir = os.scandir
+    class InterruptedEnumeration:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            added.unlink(missing_ok=True)
+        def __iter__(self):
+            added.write_text('faulty write')
+            yield SimpleNamespace(name=added.name)
+            added.unlink()
+            raise OSError(errno.EIO, 'synthetic interrupted enumeration')
+    def worker(request):
+        with monkeypatch.context() as observer:
+            observer.setattr(os, 'scandir', lambda path: InterruptedEnumeration()
+                if Path(path) == acquisition else original_scandir(path))
+            with raises(ContractError):
+                runner.verify_acquisition(acquisition, 'receipts.json')
+        return dummy(request)
+    install_stage(monkeypatch, repo, worker)
+    assert_failed(run_task(repo, new_attempt(repo, tmp_path / 'active'), needs=needs), added)
+    assert added.name in read_json(Path(str(integrity.publication_receipt(acquisition)) + '.tainted'))
+    with raises(ContractError, match='tainted'):
+        verify_dependency_result(producer)
