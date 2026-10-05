@@ -17,8 +17,16 @@ Use canonical `ReportBundle`, `ExpectedTasks`, and `TaskReceipts` artifacts from
 `records.py`. The merged `Estimate` contract contains final scores and normalized
 influence contributions averaged across seeds by original ID. Reporting aligns
 IDs, checks all estimand dimensions and seed/split identities, and uses the
-merged covariance functions. Primary confirmation shares its initial frozen OOF models and split under plan
-section 4.4. A different registered split belongs in `sensitivities`, where it
+merged covariance functions. The recorded `primary_input_consistency` gate
+enforces plan section 4.4 for
+`mtp_one_step` and every primary `CV_TMLE_METHODS` member. Under the merged
+producer convention, at least four parents are required and their ordered
+prefix must match: initial OOFNuisances, LoadedData, SplitManifest, policy.
+Parent index 2 must also equal each estimate's `split_hash`. Additional parent
+hashes remain visible and may differ. A mismatch fails release while retaining
+all estimates, influence/covariance, overlap, coverage and sensitivity diagnostics.
+Nonprimary comparators and disclosed sensitivities retain their existing handling.
+A different registered split belongs in `sensitivities`, where it
 remains visible with its own provenance. It does not average nuisance predictions or treat
 seeds as independent observations. A bundle's ratios are seed by original ID;
 functional balance arrays are original ID by frozen function. Attrition contains
@@ -51,7 +59,7 @@ existing reporting record and merged artifact API; no numerical threshold change
 
 Scientific parameters are read at runtime from
 `owner_decisions.release_gates` and `owner_decisions.influence_concentration_gate`.
-Fixtures mirror PR #18; the launch base intentionally predates that approval.
+Fixtures mirror the approved PR #18 parameters in the owner registry.
 The approved concentration definition is county-based: sum final contributions
 within county first, then square. Report D, s_max, G_eff and ranked counties for
 one-step and CV-TMLE separately. State shares sum these county information
