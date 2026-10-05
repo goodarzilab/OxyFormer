@@ -24,7 +24,7 @@ import yaml
 from oxyformer.contracts import StageRequest, StageResult
 from oxyformer.provenance import ContractError, relative_artifact_path, require
 from .integrity import (FINGERPRINT, post_execution_check, publish_result,
-                        read_regular, regular_file_hash as file_hash,
+                        directory_path, read_regular, regular_file_stat, regular_file_hash as file_hash,
                         verify_inputs, verify_result, verify_published_tree)
 from .identity import code_identity, environment_record, scientific_fingerprint, verify_recipe
 from .paths import atomic_json, atomic_write, output_path
@@ -44,14 +44,16 @@ def resolve_dependencies(ids, environ=None):
         require(name in environ, f'missing dependency variable {name}')
         path = Path(environ[name])
         require(path.is_absolute(), f'dependency must be absolute: {name}')
-        result[unit] = path.resolve(strict=True)
+        result[unit] = directory_path(path)
         require(result[unit].is_dir(), f'dependency must be an attempt directory: {name}')
     return result
 
 
-def read_mapping(path):
+def read_mapping(path, *, expected_bytes=None):
     path = Path(path)
-    text = read_regular(path).decode('utf-8')
+    raw = read_regular(path)
+    require(expected_bytes is None or raw == expected_bytes, f'input differs from HEAD: {path}')
+    text = raw.decode('utf-8')
     # JSON is also YAML syntax, but PyYAML's numeric resolver changes 1e-05
     # into a string. Preserve canonical JSON types before considering YAML.
     try:
@@ -68,14 +70,15 @@ def read_mapping(path):
 
 def dependency_file(root, relative):
     relative_artifact_path(relative)
-    path = (root / relative).resolve(strict=True)
-    require(path.is_relative_to(root) and path.is_file(), f'dependency file escapes attempt or is not regular: {path}')
+    path = Path(root) / relative
+    regular_file_stat(path)
+    require(path.resolve(strict=True).is_relative_to(root), f'dependency file escapes attempt: {path}')
     return path
 
 
 def verify_dependency_result(root, *, expected_hash=None, trees=None, active=None, verified=None,
                              output_dir=None):
-    root = Path(root).resolve(strict=True)
+    root = directory_path(root)
     if output_dir is not None:
         require(not output_dir.is_relative_to(root) and not root.is_relative_to(output_dir),
                 f'output overlaps an upstream attempt: {root}')
@@ -104,7 +107,7 @@ def verify_dependency_result(root, *, expected_hash=None, trees=None, active=Non
         for parent in config.get('dependencies', {}).values():
             parent = Path(parent)
             require(parent.is_absolute(), 'dependency publication path must be absolute')
-            parent = parent.resolve(strict=True)
+            parent = directory_path(parent)
             expected = hashes.get(str(parent / FINGERPRINT))
             require(expected is not None, 'dependency fingerprint absent from published request')
             verify_dependency_result(parent, expected_hash=expected, trees=trees,
@@ -180,7 +183,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     sources = {str(registry_file): file_hash(registry_file),
                str(approvals_file.resolve()): file_hash(approvals_file)}
     if task_file is not None:
-        task_file = Path(task_file).resolve(strict=True)
+        task_file = Path(task_file).absolute()
         document = read_mapping(task_file)
         sources[str(task_file)] = file_hash(task_file)
         if 'tasks' in document:
