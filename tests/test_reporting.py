@@ -901,3 +901,57 @@ def test_primary_input_suffix_provenance_and_nonprimary_inputs_remain_visible(ca
     for estimate, row in zip((one, tmle, comparator), report['estimators']):
         assert tuple(row['lineage']['parent_hashes']) == estimate.lineage.parent_hashes
     assert report['diagnostics']['sensitivities'][0]['estimate']['lineage']['parent_hashes'] == ('c'*64,)
+
+
+def test_fresh_round1_county_cancellation_preserves_information():
+    influence = [value for sign in [1.]*15 + [-1.]*15 for value in (sign*1e16, sign, -sign*1e16)]
+    counties = [str(i) for i in range(30) for _ in range(3)]
+    metric = concentration(influence, counties, ['state']*90)
+    assert metric['positive_D']
+    assert metric['D'] == pytest.approx(30.)
+    assert metric['s_max'] == pytest.approx(1/30)
+    assert metric['G_eff'] >= 30
+    assert {row['U_g'] for row in metric['ranked_counties']} == {-1., 1.}
+
+
+def test_fresh_round1_county_cancellation_keeps_covariance_consistent(case):
+    b, m, r = case
+    ids = tuple(f'cancel-{i}' for i in range(90))
+    influence = tuple(value for sign in [1.]*15 + [-1.]*15 for value in (sign*1e16, sign, -sign*1e16))
+    estimates = tuple(replace(e, original_ids=ids, influence=influence,
+                             scores=tuple(e.value+90*v for v in influence),
+                             lineage=replace(e.lineage, unit_ids=ids)) for e in b.estimates)
+    b = replace(b, original_ids=ids, estimates=estimates, attrition=(('source', 90), ('target', 90)),
+                weights=(1.,)*90, observed_exposure=(1.,)*90, shifted_exposure=(3.,)*90,
+                ratios=((1.,)*90,)*3, balance_observed=((1., 1.),)*90, balance_shifted=((1., 3.),)*90,
+                counties=tuple(f'county-{i}' for i in range(30) for _ in range(3)), states=('state',)*90,
+                county_locations=b.county_locations[:30])
+    report = evaluate_case((b, m, r))
+    # Exact county totals are +/-1. Both covariance and gate use these totals.
+    assert np.asarray(report['diagnostics']['cluster_covariance']['matrix']) == pytest.approx(np.full((2, 2), 30*30/29))
+    assert report['state'] == 'released'
+    assert report['diagnostics']['aligned_influence']['values'][0] == (1e16, 1e16)
+
+
+def test_fresh_round1_bad_sensitivity_disclosure_retains_every_diagnostic(case, tmp_path, monkeypatch):
+    b, m, r = case
+    alternate = replace(b.estimates[1], spec=replace(b.spec, policy_id='shift3'))
+    sensitivities = (Sensitivity(name='incorrect disclosure', estimate=alternate, target_change='unchanged'),
+                     Sensitivity(name='correct disclosure', estimate=alternate, target_change='three mmHg policy'))
+    b = replace(b, sensitivities=sensitivities)
+    request = make_request(tmp_path, (b, m, r), monkeypatch)
+    result = run_stage(request)
+    assert result.status == 'fail'
+    result.verify(request)
+    report = json.loads((Path(request.output_dir)/'report.json').read_text())
+    assert report['state'] == 'failed' and not report['releasable']
+    assert len(report['diagnostics']['sensitivities']) == 2
+    assert len(report['diagnostics']['aligned_influence']['values']) == 40
+    assert set(report['diagnostics']['spatial_sensitivities']) == {'50.0', '100.0', '200.0'}
+    assert 'overlap_by_seed' in report['diagnostics']
+    assert len(report['estimators']) == 2
+    assert any(g['status'] == 'failed' and 'undisclosed target change' in g['reason'] for g in report['gates'])
+    assert len(report['coverage_evidence']) == 2
+    html = (Path(request.output_dir)/'report.html').read_text()
+    assert all(s.name in html for s in sensitivities)
+    assert 'shift3' in html
