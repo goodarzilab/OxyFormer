@@ -225,7 +225,7 @@ def test_corrupted_archive_and_pickle_are_rejected_without_execution(tmp_path):
     payload = pickle.dumps(Unsafe())
     damaged.write_bytes(payload)
     with pytest.raises(ContractError, match="untrusted checkpoint serialization"):
-        load_checkpoint(replace(first, path=str(damaged), sha256=sha256(payload).hexdigest()), first.identity)
+        load_checkpoint(replace(first, path=str(damaged), sha256=sha256(payload).hexdigest(), byte_size=len(payload)), first.identity)
     assert not marker.exists()
 
 
@@ -272,7 +272,7 @@ def test_inconsistent_model_lineage_refused_on_load(tmp_path):
     payload = stream.getvalue()
     path = tmp_path / "substituted.ofc"
     path.write_bytes(payload)
-    artifact = replace(first, path=str(path), sha256=sha256(payload).hexdigest())
+    artifact = replace(first, path=str(path), sha256=sha256(payload).hexdigest(), byte_size=len(payload))
     with pytest.raises(ContractError, match="model hash"):
         load_checkpoint(artifact, first.identity)
 
@@ -382,7 +382,7 @@ def test_compressed_checkpoint_is_refused_before_decompression(tmp_path, monkeyp
     payload = stream.getvalue()
     path = tmp_path / "compressed.ofc"
     path.write_bytes(payload)
-    descriptor = replace(first, path=str(path), sha256=sha256(payload).hexdigest())
+    descriptor = replace(first, path=str(path), sha256=sha256(payload).hexdigest(), byte_size=len(payload))
     def forbid_decompression(*args, **kwargs):
         pytest.fail("checkpoint member was read before rejecting compression")
     monkeypatch.setattr(zipfile.ZipFile, "read", forbid_decompression)
@@ -569,3 +569,62 @@ def test_float64_large_loss_continues_through_validation(tmp_path, batch_size, b
         assert_state_equal(state, load_checkpoint(resumed, resumed.identity))
     finally:
         torch.set_default_dtype(previous)
+
+
+def test_oversized_replacement_is_rejected_before_payload_read(tmp_path, monkeypatch):
+    view, split, config = make_case(tmp_path)
+    first = pretrain(view, split, replace(config, max_batches=1), 1103)
+    replaced = tmp_path / "oversized.ofc"
+    with replaced.open("wb") as stream:
+        stream.truncate(Path(first.path).stat().st_size + 32 * 1024 * 1024)
+    original_open = Path.open
+
+    class Guard:
+        def __init__(self, stream):
+            self.stream = stream
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.stream.close()
+        def fileno(self):
+            return self.stream.fileno()
+        def read(self, size=-1):
+            pytest.fail("oversized untrusted payload read before size/hash rejection")
+
+    def guarded_open(path, *args, **kwargs):
+        stream = original_open(path, *args, **kwargs)
+        return Guard(stream) if path == replaced else stream
+    monkeypatch.setattr(Path, "open", guarded_open)
+    with pytest.raises(ContractError, match="size|hash"):
+        load_checkpoint(replace(first, path=str(replaced)), first.identity)
+
+
+def test_checkpoint_read_stays_bounded_if_file_grows_after_stat(tmp_path, monkeypatch):
+    view, split, config = make_case(tmp_path)
+    first = pretrain(view, split, replace(config, max_batches=1), 1103)
+    candidate = tmp_path / "growing.ofc"
+    original_bytes = Path(first.path).read_bytes()
+    candidate.write_bytes(original_bytes)
+    original_open = Path.open
+
+    class Guard:
+        def __init__(self, stream):
+            self.stream = stream
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.stream.close()
+        def fileno(self):
+            return self.stream.fileno()
+        def read(self, size=-1):
+            assert 0 <= size <= len(original_bytes) + 1, "unbounded read after stat"
+            with original_open(candidate, "ab") as writer:
+                writer.write(b"extra bytes")
+            return self.stream.read(size)
+
+    def guarded_open(path, *args, **kwargs):
+        stream = original_open(path, *args, **kwargs)
+        return Guard(stream) if path == candidate else stream
+    monkeypatch.setattr(Path, "open", guarded_open)
+    with pytest.raises(ContractError, match="size|hash"):
+        load_checkpoint(replace(first, path=str(candidate)), first.identity)
