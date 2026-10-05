@@ -26,7 +26,7 @@ from oxyformer.validation.scm import (
     latent_states, observation_probabilities, observation_log_probability, structural_mean, validate_count_rates, count_event_rate,
     sampled_mean, effect_fraction, LocalCoordinates, exact, exact_shift_intervals, wide, observation_transition_points, _count_baseline, _sine_bounds,
     numeric_scalar, binary64_scalar, integer_scalar, normalize_record_numbers,
-    validate_numeric, validate_policy_domain, validate_seed, REGISTERED_NUMERIC_BOX, NUMERIC_DOMAIN, NUMERIC_MARGIN,
+    validate_numeric, validate_policy_domain, validate_seed, REGISTERED_NUMERIC_BOX, NUMERIC_DOMAIN, NUMERIC_MARGIN, NUMERIC_ZERO_EXCEPTIONS,
 )
 
 
@@ -553,10 +553,13 @@ def _quadrature_tail_budget(frame, config, policy, groups, tolerance):
                      np.log(wide(1e-12)))
     extra = int(np.ceil(-budget_log))+4
     cutoff = penalty+extra
-    # Use higher precision only where amplification can erase a requested
-    # absolute contrast at ordinary longdouble precision.
+    # Route using the weakest arithmetic in the ordinary path: selection
+    # logits and initial Gauss nodes/weights are binary64, even on hosts with
+    # wider longdouble accumulators. Four guard digits cover bounded logits
+    # (up to a few thousand) before response amplification. This is a routing
+    # safeguard, not a claim that nested quadrature certifies total error.
     digits = max(0., (np.log(wide(contrast))-(math.log(tolerance.numerator)-math.log(tolerance.denominator)))/np.log(wide(10)))
-    precision = int(np.ceil(digits))+40 if digits > np.finfo(np.longdouble).precision-3 else 0
+    precision = int(np.ceil(digits))+40 if digits > np.finfo(float).precision-4 else 0
     for term in terms:
         term.law.tail_decay = cutoff
         term.precision = precision
@@ -914,6 +917,14 @@ def load_suite_a(path: str | Path):
     expected = {"id": "suite-a-100x-v1", "margin": NUMERIC_MARGIN,
                 "registered_box": {k:list(v) for k,v in REGISTERED_NUMERIC_BOX.items()},
                 "supported_box": {k:list(v) for k,v in NUMERIC_DOMAIN.items()}}
+    require(isinstance(declaration, dict), "recipe numeric_domain must be a mapping")
+    declaration = dict(declaration)
+    # Existing v1 declarations expressed these same disabled-zero exceptions
+    # in prose. Accept omission, but never accept a conflicting explicit list.
+    zeros = declaration.pop("zero_exceptions", NUMERIC_ZERO_EXCEPTIONS)
+    require(isinstance(zeros, (list, tuple)) and all(isinstance(v, str) for v in zeros)
+            and set(zeros) == set(NUMERIC_ZERO_EXCEPTIONS),
+            "recipe numeric_domain zero_exceptions differ from enforced domain")
     require(declaration == expected, "recipe numeric_domain differs from enforced domain")
     require(len({c.name for c in configs}) == len(configs), "duplicate scenarios")
     return configs
