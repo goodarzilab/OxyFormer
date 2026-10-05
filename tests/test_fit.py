@@ -697,3 +697,45 @@ def test_exact_mass_survives_checkpoint_and_score_ties(completed):
                   dict(mass_ratio=(0, 1), metrics=(1e300, 1e300))]
         candidates.append((fitting._pooled_metrics(values), grid))
     assert min(candidates)[1] == 1
+
+
+@pytest.mark.parametrize('small', [1e-50, 1e-10])
+@pytest.mark.parametrize('reduction', ['mean', 'sum'])
+def test_extreme_weight_ratio_preserves_representable_outcome_loss(tmp_path, small, reduction):
+    case = make_case(tmp_path / 'weight-ratio')
+    config = case[-1]
+    ids = ('o06', 'o07')
+    rows = tuple((row[0], 0. if row[0] == ids[0] else 1e38, *row[2:-1],
+                  1e300 if row[0] == ids[0] else small) if row[0] in ids else row
+                 for row in config.data.rows)
+    config = replace(config, data=replace(config.data, rows=rows))
+    predicted = torch.zeros(2, dtype=torch.float64, requires_grad=True)
+    actual = fitting._outcome_loss(config, predicted, ids, reduction=reduction, weight_unit=1e300)
+    target = float(torch.tensor(1e38, dtype=torch.float32))
+    expected = (target * small) * (target / 1e300)
+    assert expected > 0
+    assert actual.item() == pytest.approx(expected, rel=1e-12, abs=0.)
+    actual.backward()
+    expected_gradient = -(2 * target * small) / 1e300
+    assert expected_gradient != 0
+    assert predicted.grad[1].item() == pytest.approx(expected_gradient, rel=1e-10, abs=0.)
+
+
+@pytest.mark.parametrize('small', [1e-50, 1e-10])
+def test_extreme_weight_ratio_preserves_representable_origin_loss(tmp_path, small):
+    config = make_case(tmp_path / 'origin-ratio')[-1]
+    metadata = _inputs(config, ('o06', 'o07'))
+    pairs = fitting.paired_records(config.policy.apply(metadata.a_mmhg, metadata.policy_covariates),
+        (1e300, small), weight_id=config.data.manifest.spec.weight_id)
+    # The large-mass pair has zero representable BCE; both small-mass copies
+    # have a representable loss after weighting, despite subnormal raw shares.
+    prediction = torch.tensor([[-1000., 1000.], [1e38, -1e38]], dtype=torch.float32).double()
+    prediction.requires_grad_(True)
+    actual = fitting._origin_loss(prediction, pairs, 1e300)
+    expected = (2 * float(prediction[1, 0].detach()) * small) / 1e300
+    assert expected > 0
+    assert actual.item() == pytest.approx(expected, rel=1e-10, abs=0.)
+    actual.backward()
+    expected_gradient = torch.tensor([[0., 0.], [small / 1e300, -small / 1e300]], dtype=torch.float64)
+    torch.testing.assert_close(prediction.grad, expected_gradient, rtol=1e-10, atol=0.)
+    assert pairs.origin_weights == (1e300, small, 1e300, small)

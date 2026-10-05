@@ -343,3 +343,40 @@ def test_raw_positive_weight_retains_its_ratio_audit():
     # This raw positive row has negligible loss but an overflowing ratio.
     with pytest.raises(ContractError, match="nonfinite calibrated ratio"):
         fit_affine(logits, [1.] * 6 + [1e-50], **values)
+
+
+def test_subnormal_calibration_transfers_without_intermediate_normalization_overflow():
+    _, values = nonseparable_case()
+    core = torch.tensor([[-1., 1.]] * 3 + [[1., -1.]] * 2 + [[0., 0.]])
+    z = core * 1e-39
+    calibration = fit_affine(z, [1.] * 6, **values)
+    # Independent FP32 order multiplies before dividing, so the result fits
+    # even though the old intermediate normalized value overflowed.
+    baseline = fit_affine(core, [1.] * 6, **values)
+    refit = torch.full_like(z, -.5)
+    scale = float(z.abs().max())
+    expected = (refit * (baseline.slope / baseline.input_scale)) / scale + baseline.intercept
+    assert torch.isfinite(expected).all()
+    torch.testing.assert_close(calibration.logits(refit), expected)
+    assert torch.equal(calibration.ratios(refit), torch.zeros_like(refit))
+    diagnostics = transfer_diagnostics(calibration, z, refit, [1.] * 6, lineage=values['lineage'])
+    assert dict(diagnostics.metrics)['weighted_logit_rmse'] == pytest.approx(.5)
+
+
+@pytest.mark.parametrize('scale', [1e-44, 1e-20])
+def test_power_of_two_calibration_coordinates_preserve_small_slope_transfer(scale):
+    from oxyformer.training.calibration import AffineCalibration
+    _, values = nonseparable_case()
+    core = torch.tensor([[-1., 1.]] * 3 + [[1., -1.]] * 2 + [[0., 0.]])
+    z = core * scale
+    actual_scale = float(z.abs().max())
+    fitted = fit_affine(z, [1.] * 6, **values)
+    baseline = fit_affine(core, [1.] * 6, **values)
+    refit = torch.full_like(z, -actual_scale * 4e38)
+    gain = baseline.slope / baseline.input_scale
+    expected = (refit * gain) / actual_scale + baseline.intercept
+    assert torch.isfinite(expected).all()
+    torch.testing.assert_close(fitted.logits(refit), expected)
+    torch.testing.assert_close(fitted.ratios(z), baseline.ratios(core))
+    restored = AffineCalibration.from_json(fitted.to_json())
+    assert torch.equal(restored.logits(refit), fitted.logits(refit))
