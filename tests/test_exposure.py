@@ -735,3 +735,23 @@ def test_non_dyadic_pixel_scale_preserves_boundary_membership(tmp_path, nodata_p
     else:
         assert result.missing_population.iloc[0] == 0
         assert result.pressure_mmhg.iloc[0] == 760
+
+
+@pytest.mark.parametrize('dtype', ['object', 'Int64', 'Float64'])
+def test_integer_population_storage_does_not_change_exposure(tmp_path, dtype):
+    tile = write_raster(tmp_path / 'counts.tif')
+    geography = blocks()
+    expected, expected_qc = build_exposure(sources(tile), geography, SPEC)
+    geography['population'] = pd.Series([40, 60], dtype=dtype)
+    actual, actual_qc = build_exposure(sources(tile), geography, SPEC)
+    pd.testing.assert_frame_equal(actual, expected)
+    assert actual_qc == expected_qc
+
+
+@pytest.mark.parametrize('invalid', [True, '40', None, pd.NA, np.nan, np.inf, -1, 1.5, 40+0j])
+def test_object_population_rejects_invalid_values(tmp_path, invalid):
+    tile = write_raster(tmp_path / 'invalid-count.tif')
+    geography = blocks()
+    geography['population'] = pd.Series([invalid, 60], dtype=object)
+    with pytest.raises(ValueError, match='invalid Census population'):
+        build_exposure(sources(tile), geography, SPEC)

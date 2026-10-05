@@ -10,6 +10,8 @@ Only geography and segment 01 are read from SF1; GDAL reads the block ZIP in
 place. No archive extraction, downloads, outcomes or learned weights.
 """
 import csv
+from decimal import Decimal
+from numbers import Real
 import io
 from pathlib import Path
 import zipfile
@@ -24,6 +26,18 @@ GEO_FIELDS = {'state': (27, 29), 'county': (29, 32), 'tract': (54, 60),
               'block': (61, 65), 'logrecno': (18, 25), 'population': (318, 327)}
 
 
+def _is_population_count(value):
+    # pandas object/nullable storage must not change the numeric admission rule.
+    # No string coercion, truth values, complex numbers or tensor inputs.
+    if not isinstance(value, (Real, Decimal)) or isinstance(value, (bool, np.bool_)):
+        return False
+    try:
+        integer = int(value)
+    except (ValueError, OverflowError):
+        return False
+    return integer >= 0 and value == integer
+
+
 def validate_blocks(blocks):
     require(isinstance(blocks, gpd.GeoDataFrame) and blocks.crs is not None,
             'block geography requires CRS')
@@ -33,9 +47,8 @@ def validate_blocks(blocks):
     require(blocks.block_id.map(lambda x: isinstance(x, str) and len(x) == 15 and
             x.isascii() and x.isdigit()).all(), '2010 block IDs must be 15-digit strings')
     require((blocks.block_id.str[:11] == blocks.tract_id).all(), 'tract membership mismatch')
-    pop = blocks.population.to_numpy()
-    require(np.issubdtype(pop.dtype, np.number) and np.isfinite(pop).all() and
-            (pop >= 0).all() and (pop == np.floor(pop)).all(), 'invalid Census population')
+    require(all(_is_population_count(value) for value in blocks.population),
+            'invalid Census population')
     require(blocks.geometry.notna().all() and (~blocks.geometry.is_empty).all() and
             blocks.geometry.is_valid.all() and blocks.geom_type.isin(['Polygon', 'MultiPolygon']).all(),
             'invalid block polygons')
