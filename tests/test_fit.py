@@ -1,0 +1,741 @@
+"""Offline CPU acceptance evidence using synthetic records and real models."""
+from dataclasses import replace
+from hashlib import sha256
+from pathlib import Path
+
+import pytest
+import torch
+import yaml
+
+from oxyformer.contracts import ColumnSpec, DataManifest, EstimandSpec, SourceManifest, SplitManifest, source_lineage_hash
+from oxyformer.data.entity_graph import EntityGraph, EntityLink
+from oxyformer.data.feature_roles import FeatureRegistry, FeatureRule
+from oxyformer.data.loaders import load_records
+from oxyformer.design.policies import PolicyCovariates, ShiftOrStayPolicy
+from oxyformer.design.splits import InnerSplit
+from oxyformer.models.treatment_query import TreatmentDesign
+from oxyformer.provenance import ArtifactLineage, ContractError
+from oxyformer.training.calibration import AffineCalibration, CalibrationPartition
+from oxyformer.training.checkpoint import CheckpointRequest, load_checkpoint
+from oxyformer.training.fit import (
+    FitConfig, FoldArtifacts, NuisanceSettings, _Budget, _build, _bundle, _inputs, _partition,
+    _predict, _train_one, fit_fold, predict_fold, subset,
+)
+import oxyformer.training.fit as fitting
+
+
+def digest(value):
+    return sha256(value.encode()).hexdigest()
+
+
+@pytest.fixture(autouse=True)
+def single_thread():
+    previous = torch.get_num_threads()
+    torch.set_num_threads(1)
+    with torch.random.fork_rng():
+        yield
+    torch.set_num_threads(previous)
+
+
+def make_case(root, *, identity=False):
+    ids = tuple(f"o{i:02d}" for i in range(30)) + ("unlabeled-acs",)
+    rules = tuple(FeatureRule(name=n, role=r, endpoints=("synthetic",), uses=u,
+        approval_id="synthetic-only") for n, r, u in (
+        ("id", "identifier", ("linkage",)), ("y", "outcome", ("score",)),
+        ("a", "exposure", ("score",)), ("x", "predictor", ("nuisance", "ssl", "context")),
+        ("county", "county", ("county_routing",)), ("w", "outcome_metadata", ("linkage",))))
+    registry = FeatureRegistry(registry_id="synthetic", rules=rules)
+    links = tuple(EntityLink(observation_id=oid, relation="repeated_geography", namespace="fixture",
+                            entity_id=str(i // 2)) for i, oid in enumerate(ids[:-1]))
+    graph = EntityGraph(original_ids=ids, links=links)
+    source = SourceManifest(source_id="synthetic", version="1", uri="synthetic://no-data",
+        payload_hash=digest("synthetic"), license_hash=digest("license"), schema_hash=digest("schema"),
+        field_mapping=(("raw_x", "x"),), mapping_status="reviewed", mapping_review_id="synthetic")
+    policy = ShiftOrStayPolicy(support_design_hash=digest("design"), components_by_key=(("s", ((0., 10.),)),),
+                               delta_mmhg=0. if identity else 2.)
+    spec = EstimandSpec(endpoint="synthetic", target_id="synthetic-target", outcome_scale="years",
+        policy_id=policy.policy_id, weight_id="synthetic-target-mass", adjustment_schema_hash=registry.content_hash,
+        inference_unit="tract", source_lineage_hash=source_lineage_hash((source,)))
+    lineage = ArtifactLineage(source_hashes=(source.payload_hash,), unit_ids=ids, parent_hashes=(),
+        split_hash=None, config_hash=digest("config"), model_hash=None, environment=(("fixture", "cpu"),),
+        seed=None, parameter_count=None)
+    schema = tuple(ColumnSpec(name=n, dtype=t, nullable=n == "y") for n, t in
+                   (("id", "string"), ("y", "number"), ("a", "number"), ("x", "number"),
+                    ("county", "string"), ("w", "number")))
+    manifest = DataManifest(spec=spec, sources=(source,), schema=schema, registry=registry, original_ids=ids,
+        id_field="id", outcome_field="y", exposure_field="a", weight_field="w",
+        entity_graph_hash=graph.content_hash, lineage=lineage)
+    records = [dict(id=oid, y=2. + (i // 2) % 8 + (i % 3), a=float((i // 2) % 8 + 1),
+                    x=float(i % 7), county="c", w=float(i % 4 + 1)) for i, oid in enumerate(ids)]
+    records[-1].update(y=None, a=900., x=1e6, w=1e8)
+    data = load_records(records, manifest, spec, manifest.schema_hash)
+    split = SplitManifest(spec=spec, level="outer", original_ids=ids[:-1], fold_ids=tuple(i // 6 for i in range(30)),
+        design_ids=(), excluded_ids=ids[-1:], seed_ids=(1103, 2207, 3301), entity_graph_hash=graph.content_hash,
+        lineage=replace(lineage, parent_hashes=(manifest.content_hash,)))
+    train = split.training_ids(0)
+    inner_graph = EntityGraph(original_ids=train, links=tuple(link for link in links if link.observation_id in train))
+    inner_manifest = replace(manifest, original_ids=train, entity_graph_hash=inner_graph.content_hash,
+                             lineage=replace(lineage, unit_ids=train, parent_hashes=(manifest.content_hash,)))
+    inner = SplitManifest(spec=spec, level="inner", original_ids=train,
+        fold_ids=tuple((i // 2) % 3 for i in range(len(train))), design_ids=(), excluded_ids=(),
+        seed_ids=split.seed_ids, entity_graph_hash=inner_graph.content_hash,
+        lineage=replace(lineage, unit_ids=train, parent_hashes=(inner_manifest.content_hash,)))
+    binding = InnerSplit(outer_fold=0, data_manifest=inner_manifest, entity_graph=inner_graph,
+                         split=inner, buffer_excluded_ids=())
+    covariates = PolicyCovariates(original_ids=ids, geography_ids=tuple(str(i // 2) for i in range(len(ids))),
+                                 support_keys=("s",) * len(ids))
+    config = FitConfig(data=data, entity_graph=graph, inner=binding, fold=0, policy=policy,
+        policy_covariates=covariates, treatment_design=TreatmentDesign(center=5., scale=5.,
+            knots=(0., 2., 4., 6., 8., 10.), design_hash=digest("design")),
+        feature_kinds=(("x", "numeric"),), families=(("x",),), county_field="county",
+        exposure_assignment_level="tract", output_dir=str(root), ssl_epochs=1,
+        settings=NuisanceSettings(batch_size=8, frozen_epochs=1))
+    return spec, split, manifest, config
+
+
+def run(case):
+    spec, split, manifest, config = case
+    return fit_fold(spec, split, manifest, config, 1103)
+
+
+def state(artifact):
+    return load_checkpoint(artifact.checkpoint, artifact.checkpoint.identity)["controller"]
+
+
+@pytest.fixture(scope="module")
+def completed(tmp_path_factory):
+    previous = torch.get_num_threads()
+    torch.set_num_threads(1)
+    case = make_case(tmp_path_factory.mktemp("full") / "attempt")
+    artifact = run(case)
+    torch.set_num_threads(previous)
+    return case, artifact
+
+
+def test_registered_configuration():
+    expected = yaml.safe_load(Path("configs/training/nuisance.yaml").read_text())
+    actual = NuisanceSettings()
+    assert NuisanceSettings(**expected) == actual
+    for key, value in expected.items():
+        assert getattr(actual, key) == (tuple(value) if isinstance(value, list) else value)
+    with pytest.raises(ContractError, match="unregistered"):
+        replace(actual, learning_rates=(.1,))
+
+
+def test_pairs_preserve_grouping_weights_and_endpoint_target(completed):
+    case, artifact = completed
+    config = case[-1]
+    controller = state(artifact)
+    assert artifact.complete
+    for result in controller["results"]:
+        audit = CalibrationPartition.from_json(result["ownership"])
+        assert set(audit.evaluation_ids).isdisjoint(audit.fitting_ids + audit.checkpoint_ids)
+        for group in config.entity_graph.components():
+            assert not (set(group) & set(audit.fitting_ids) and set(group) & set(audit.evaluation_ids))
+        assert "unlabeled-acs" not in audit.fitting_ids + audit.evaluation_ids
+        if result["kind"] == "origin":
+            assert result["selection_ids"] == (audit.checkpoint_ids or audit.fitting_ids)
+            assert set(result["selection_ids"]).isdisjoint(audit.evaluation_ids)
+        assert result["mass"] == sum(_inputs(config, result["ids"]).origin_weights)
+    calibration = AffineCalibration.from_json(controller["calibration"])
+    assert set(calibration.original_ids) == set(case[1].training_ids(0))
+    assert len(calibration.original_ids) == len(set(calibration.original_ids))
+    assert calibration.class_prior == .5
+    assert Path(artifact.checkpoint.path).with_name("calibration-transfer.json").is_file()
+    restored = FoldArtifacts.from_json(artifact.to_json())
+    assert restored == artifact
+
+
+def test_both_treatments_predicted_from_label_free_views(completed):
+    case, artifact = completed
+    config = case[-1]
+    view = subset(config.data.covariates(("x",)), artifact.prediction_inputs.original_ids)
+    result = predict_fold(artifact, view, config.policy)
+    assert result.origin_weights == artifact.prediction_inputs.origin_weights
+    assert all(type(value) is float for value in result.mu_a + result.mu_d + result.r_a + result.r_d)
+    assert any(a != b for a, b in zip(result.mu_a, result.mu_d))
+    controller = state(artifact)
+    model = _build(controller["final"]["origin"]).eval()
+    calibration = AffineCalibration.from_json(controller["calibration"])
+    with torch.no_grad():
+        logits = _predict(model, view, artifact.prediction_inputs, config.policy)
+    # predict_fold computes calibration and ratios in FP32 before widening for
+    # output; use FP32 references and its default assert_close tolerances.
+    assert logits.dtype == torch.float32
+    normalized = (logits - calibration.input_offset) / calibration.input_scale
+    expected = (normalized * calibration.slope + calibration.intercept).exp()
+    torch.testing.assert_close(torch.tensor(result.r_a, dtype=torch.float32), expected[:, 0])
+    torch.testing.assert_close(torch.tensor(result.r_d, dtype=torch.float32), expected[:, 1])
+    for invalid in (config.data, replace(view, use="ssl")):
+        with pytest.raises(ContractError, match="label-free"):
+            predict_fold(artifact, invalid, config.policy)
+    with pytest.raises(ContractError, match="held-out fold"):
+        predict_fold(artifact, config.data.covariates(("x",)), config.policy)
+
+
+def test_nuisance_parameters_and_offsets_are_independent(completed):
+    case, artifact = completed
+    controller = state(artifact)
+    outcome, origin = (_build(controller["final"][kind]) for kind in ("outcome", "origin"))
+    assert {p.data_ptr() for p in outcome.parameters()}.isdisjoint(p.data_ptr() for p in origin.parameters())
+    before = next(origin.parameters()).detach().clone()
+    with torch.no_grad():
+        next(outcome.parameters()).add_(10)
+    assert torch.equal(before, next(origin.parameters()))
+    with pytest.raises(ContractError, match="permitted training"):
+        outcome.group_offsets.update_identity(artifact.prediction_inputs.original_ids,
+            torch.zeros(6), torch.zeros(6), torch.ones(6))
+    assert set(outcome.group_offsets.training_ids) == set(case[1].training_ids(0))
+
+
+def test_outer_labels_and_covariates_cannot_change_fitted_models(completed, tmp_path):
+    case, artifact = completed
+    spec, split, manifest, config = case
+    held = set(artifact.prediction_inputs.original_ids)
+    rows = tuple((row[0], -9000., row[2], row[3] + 100., row[4], row[5])
+                 if row[0] in held else row for row in config.data.rows)
+    changed = replace(config, data=replace(config.data, rows=rows), output_dir=str(tmp_path / "changed"))
+    other = fit_fold(spec, split, manifest, changed, 1103)
+    a, b = state(artifact), state(other)
+    assert a["calibration"] == b["calibration"]
+    assert a["selection"] == b["selection"]
+    for kind in ("outcome", "origin"):
+        for name, value in a["final"][kind]["state"].items():
+            if isinstance(value, torch.Tensor):
+                assert torch.equal(value, b["final"][kind]["state"][name]), name
+    original_view = subset(config.data.covariates(("x",)), artifact.prediction_inputs.original_ids)
+    new_view = subset(changed.data.covariates(("x",)), artifact.prediction_inputs.original_ids)
+    assert predict_fold(artifact, original_view, config.policy).mu_a != predict_fold(other, new_view, config.policy).mu_a
+
+
+def test_deterministic_continuation_mid_training_loop(completed, tmp_path):
+    case, complete = completed
+    spec, split, manifest, config = case
+    partial = fit_fold(spec, split, manifest,
+        replace(config, output_dir=str(tmp_path / "slice"), max_batches=5), 1103)
+    assert not partial.complete
+    assert state(partial)["active"] is not None
+    assert state(partial)["active"]["progress"]["phase"] in ("train", "evaluate")
+    with pytest.raises(ContractError, match="unfinished"):
+        predict_fold(partial, config.data.covariates(("x",)), config.policy)
+    resumed = fit_fold(spec, split, manifest,
+        replace(config, output_dir=str(tmp_path / "resume"), predecessor=partial), 1103)
+    a, b = state(complete), state(resumed)
+    assert a["results"] == b["results"]
+    assert a["calibration"] == b["calibration"]
+    for kind in ("outcome", "origin"):
+        for name, value in a["final"][kind]["state"].items():
+            if isinstance(value, torch.Tensor):
+                assert torch.equal(value, b["final"][kind]["state"][name]), name
+    assert resumed.checkpoint.predecessor_hash == partial.checkpoint.content_hash
+
+
+def test_interruption_in_ssl_is_not_complete_and_can_resume(completed, tmp_path):
+    case, complete = completed
+    spec, split, manifest, config = case
+    partial = fit_fold(spec, split, manifest,
+        replace(config, output_dir=str(tmp_path / "ssl-slice"), max_batches=1), 1103)
+    assert not partial.complete and state(partial)["ssl_pending"] is not None
+    resumed = fit_fold(spec, split, manifest,
+        replace(config, output_dir=str(tmp_path / "ssl-resume"), predecessor=partial), 1103)
+    assert state(resumed)["results"] == state(complete)["results"]
+
+
+def test_group_splits_and_stopping_leakage_are_rejected(tmp_path):
+    spec, split, manifest, config = make_case(tmp_path / "invalid")
+    evaluation = tuple(oid for oid, f in zip(config.inner.split.original_ids, config.inner.split.fold_ids) if f == 0)
+    bad = replace(config, stopping_ids=((0, evaluation[:2]),))
+    with pytest.raises(ContractError, match="inside the fitting partition"):
+        fit_fold(spec, split, manifest, bad, 1103)
+    fit_ids = config.inner.split.training_ids(0)
+    with pytest.raises(ContractError, match="entity lineage crosses"):
+        _partition(config, config.inner.split, 0, stopping=fit_ids[:1])
+
+
+@pytest.mark.parametrize("zero_stop", [False, True])
+def test_fitting_only_stopping_and_pair_batch_weights(completed, tmp_path, monkeypatch, zero_stop):
+    case, artifact = completed
+    config = replace(case[-1], output_dir=str(tmp_path / "stopping"))
+    parent = config.inner.split
+    stop = parent.training_ids(0)[:2]
+    if zero_stop:
+        rows = tuple((*row[:-1], 0.) if row[0] in stop else row for row in config.data.rows)
+        config = replace(config, data=replace(config.data, rows=rows))
+    local, ids, held = _partition(config, parent, 0, stopping=stop)
+    # Exercise the real training loop using fresh synthetic initialization.
+    view = subset(config.data.covariates(("x",)), ids)
+    budget = _Budget(config, CheckpointRequest())
+    init = fitting._ssl(config, local, ids, config.data.covariates(("x",)), tmp_path / "init", 1103, budget, None)
+    bundle, encoder = _bundle(config, local, ids, init, "origin", config.settings.grid[0])
+    calls = []
+    original_loss = fitting.paired_origin_loss
+    def spy(logits, pairs, *, reduction):
+        n = len(pairs.original_ids) // 2
+        assert pairs.original_ids[:n] == pairs.original_ids[n:]
+        assert pairs.origin_weights[:n] == pairs.origin_weights[n:]
+        assert pairs.origin_weights[:n] == _inputs(config, pairs.original_ids[:n]).origin_weights
+        calls.append(pairs.original_ids[:n])
+        expected = (logits.detach().sigmoid() - logits.new_tensor([0., 1.]))
+        expected *= logits.new_tensor(pairs.origin_weights[:n])[:, None]
+        expected *= len(ids) / (n * 2 * sum(_inputs(config, ids).origin_weights))
+        # This hook observes the derivative of the REAL minibatch objective,
+        # before clipping parameter gradients. A batch-mass denominator fails.
+        logits.register_hook(lambda gradient: torch.testing.assert_close(gradient, expected))
+        return original_loss(logits, pairs, reduction=reduction)
+    monkeypatch.setattr(fitting, "paired_origin_loss", spy)
+    model, saved, done, _ = _train_one(config, bundle, encoder, view, stop, 2, 1103, budget)
+    assert done and saved["progress"]["best_epoch"] in (1, 2)
+    if zero_stop:
+        assert saved["progress"]["best_epoch"] == 2
+        assert saved["progress"]["history"] == [None, None]
+    assert set(model.group_offsets.training_ids) == set(ids)
+    assert set(x for batch in calls for x in batch) == set(ids)
+    assert all(set(batch).isdisjoint(held + stop) for batch in calls)
+
+
+def test_nonfinite_targets_fail_without_completed_artifact(tmp_path):
+    spec, split, manifest, config = make_case(tmp_path / "nonfinite")
+    rows = tuple((row[0], 1e40, *row[2:]) if row[0] in split.training_ids(0) else row
+                 for row in config.data.rows)
+    with pytest.raises(ContractError, match="nonfinite"):
+        fit_fold(spec, split, manifest, replace(config, data=replace(config.data, rows=rows)), 1103)
+    assert not (tmp_path / "nonfinite/nuisance/fold.json").exists()
+
+
+def test_requested_checkpoint_does_not_claim_completion(tmp_path):
+    case = make_case(tmp_path / "request")
+    request = CheckpointRequest()
+    request.request()
+    artifact = run((*case[:3], replace(case[-1], stop_request=request)))
+    assert not artifact.complete and artifact.checkpoint.reason == "requested"
+    assert state(artifact)["position"] == 0
+
+
+def test_identity_policy_does_not_evaluate_exponential_ratio(tmp_path, monkeypatch):
+    case = make_case(tmp_path / "identity", identity=True)
+    artifact = run(case)
+    config = case[-1]
+    view = subset(config.data.covariates(("x",)), artifact.prediction_inputs.original_ids)
+    controller = state(artifact)
+    calibration = AffineCalibration.from_json(controller["calibration"])
+    # Synthetic boundary reproduction: even these finite origin/calibration
+    # outputs cannot change the exactly known ratio under the identity map.
+    replacement = replace(calibration, slope=.5, intercept=0.)
+    monkeypatch.setattr(AffineCalibration, "from_json", classmethod(lambda cls, text: replacement))
+    original_predict = fitting._predict
+    def extreme_origin(model, *args, **kwargs):
+        if isinstance(model, fitting.OriginTransformer):
+            return torch.full((len(view.original_ids), 2), 180.)
+        return original_predict(model, *args, **kwargs)
+    monkeypatch.setattr(fitting, "_predict", extreme_origin)
+    result = predict_fold(artifact, view, config.policy)
+    assert result.r_a == result.r_d == (1.,) * len(view.original_ids)
+
+
+def test_zero_mass_inner_evaluation_fold_is_a_zero_contribution(tmp_path):
+    spec, split, manifest, config = make_case(tmp_path / "zero-fold")
+    zero_ids = {oid for oid, fold in zip(config.inner.split.original_ids, config.inner.split.fold_ids) if fold == 0}
+    rows = tuple((*row[:-1], 0.) if row[0] in zero_ids else row for row in config.data.rows)
+    config = replace(config, data=replace(config.data, rows=rows))
+    artifact = fit_fold(spec, split, manifest, config, 1103)
+    results = state(artifact)["results"]
+    assert artifact.complete
+    assert all(r["mass"] == 0 and all(m == 0 for m in r["metrics"]) for r in results if r["fold"] == 0)
+
+
+def test_calibration_grid_choice_excludes_its_evaluation_metrics(completed, monkeypatch, tmp_path):
+    from copy import deepcopy
+    from types import SimpleNamespace
+    from oxyformer.training.calibration import pair_metrics
+
+    case, artifact = completed
+    config = case[-1]
+    saved = state(artifact)
+    captured = []
+    real_calibration = fitting.fit_affine
+
+    def capture(logits, weights, **kwargs):
+        captured.append(dict(zip(kwargs["original_ids"], logits)))
+        return real_calibration(logits, weights, **kwargs)
+
+    monkeypatch.setattr(fitting, "fit_affine", capture)
+    for reverse in (False, True):
+        controller = deepcopy(saved)
+        controller["position"] = 27  # Three inner folds, SSL + eight grid fits each.
+        for result in controller["results"]:
+            if result["kind"] != "origin":
+                continue
+            # Only fold 0's OOF measurements change. Its fitting-only grid
+            # evidence and every other fold's held-out measurements stay fixed.
+            if result["grid"] in (0, 1):
+                good = (result["grid"] == int(reverse)) if result["fold"] == 0 else False
+                pair = [-2., 2.] if good else [1., -1.]
+            else:
+                pair = [3., -3.]
+            result["predictions"] = [pair[:] for _ in result["ids"]]
+            result["metrics"] = pair_metrics(result["predictions"],
+                _inputs(config, result["ids"]).origin_weights)
+        calls = iter((None, "requested"))
+        budget = SimpleNamespace(reason=lambda: next(calls))
+        fitting._fit_controller(config, case[1], case[2], artifact.checkpoint.identity,
+                                controller, tmp_path, budget)
+    fold_zero = set(config.inner.split.original_ids[i]
+                    for i, fold in enumerate(config.inner.split.fold_ids) if fold == 0)
+    # Candidate selection must not switch in response to its own OOF metrics.
+    # Compare the selected grid, using its unique row values in each run.
+    selected = []
+    for reverse, predictions in zip((False, True), captured):
+        row = predictions[next(iter(fold_zero))]
+        selected.append(int(reverse) if row == [-2., 2.] else 1 - int(reverse)
+                        if row == [1., -1.] else 2)
+    assert selected[0] == selected[1]
+
+
+@pytest.mark.parametrize("weight,raw_logit,error", [
+    (0., 1000., None),
+    (1., 1000., "nonfinite calibrated ratio"),
+    (0., float("nan"), "nonfinite"),
+])
+def test_final_refit_ratio_audit_uses_validated_positive_weight_rows(
+        completed, tmp_path, monkeypatch, weight, raw_logit, error):
+    from copy import deepcopy
+    from types import SimpleNamespace
+    from oxyformer.training.calibration import TransferDiagnostics
+
+    case, artifact = completed
+    controller = deepcopy(state(artifact))
+    calibration = AffineCalibration.from_json(controller["calibration"])
+    calibration = replace(calibration, slope=1., intercept=0., input_offset=0., input_scale=1.)
+    controller["calibration"] = calibration.to_json()
+    ids = calibration.original_ids
+    config = case[-1]
+    rows = tuple((*row[:-1], weight) if row[0] == ids[-1] else row for row in config.data.rows)
+    config = replace(config, data=replace(config.data, rows=rows))
+    refit = torch.zeros(len(ids), 2)
+    refit[-1] = raw_logit
+    monkeypatch.setattr(fitting, "_predict", lambda *args, **kwargs: refit)
+    def audit():
+        return fitting._fit_controller(config, case[1], case[2], artifact.checkpoint.identity,
+            controller, tmp_path, SimpleNamespace(reason=lambda: None))
+    if error:
+        with pytest.raises(ContractError, match=error):
+            audit()
+    else:
+        result, complete, _ = audit()
+        assert complete
+        diagnostics = TransferDiagnostics.from_json(result["transfer_diagnostics"])
+        assert diagnostics.original_ids == ids
+        assert diagnostics.lineage.unit_ids == ids
+
+
+@pytest.mark.parametrize("kind", ["outcome", "origin"])
+@pytest.mark.parametrize("weight", [1e38, 1e-40])
+def test_training_objective_is_invariant_to_extreme_common_weight_scale(completed, kind, weight):
+    case, artifact = completed
+    config = case[-1]
+    local, ids, _ = _partition(config, config.inner.split, 0)
+    initialization = fitting.CheckpointArtifact.from_json(state(artifact)["initializations"][0])
+
+    def train(scale):
+        rows = tuple((*row[:-1], scale) if row[0] in ids else row for row in config.data.rows)
+        changed = replace(config, data=replace(config.data, rows=rows))
+        bundle, encoder = _bundle(changed, local, ids, initialization, kind, config.settings.grid[0])
+        view = subset(changed.data.covariates(("x",)), ids)
+        model, _, complete, _ = _train_one(changed, bundle, encoder, view, (), 1, 1103,
+                                           _Budget(changed, CheckpointRequest()))
+        assert complete
+        return model.state_dict()
+
+    baseline, actual = train(1.), train(weight)
+    for name, expected in baseline.items():
+        if isinstance(expected, torch.Tensor):
+            # Model parameters remain FP32; use the unchanged default tolerance.
+            torch.testing.assert_close(actual[name], expected)
+
+
+@pytest.mark.parametrize("kind", ["outcome", "origin"])
+@pytest.mark.parametrize("weight", [1e-310, 1e-311])
+def test_subnormal_raw_weights_do_not_overflow_training_normalization(completed, kind, weight):
+    test_training_objective_is_invariant_to_extreme_common_weight_scale(completed, kind, weight)
+
+
+@pytest.mark.parametrize("weight_scale", [1e-311, 1e307])
+def test_extreme_weights_complete_fold_with_same_predictions(completed, tmp_path, weight_scale):
+    case, baseline = completed
+    spec, split, manifest, config = case
+    training = set(split.training_ids(0))
+    rows = tuple((*row[:-1], row[-1] * weight_scale) if row[0] in training else row
+                 for row in config.data.rows)
+    changed = replace(config, data=replace(config.data, rows=rows),
+                      output_dir=str(tmp_path / "scaled-weight-fold"))
+    actual = fit_fold(spec, split, manifest, changed, 1103)
+    assert actual.complete
+    for result in state(actual)["results"]:
+        raw_weights = _inputs(changed, result["ids"]).origin_weights
+        assert result["mass"] == sum(w / result["mass_unit"] for w in raw_weights)
+        assert all(w > 0 for w in raw_weights)
+    view = subset(config.data.covariates(("x",)), baseline.prediction_inputs.original_ids)
+    expected = predict_fold(baseline, view, config.policy)
+    predicted = predict_fold(actual, view, config.policy)
+    for field in ("mu_a", "mu_d", "r_a", "r_d"):
+        torch.testing.assert_close(torch.tensor(getattr(predicted, field), dtype=torch.float32),
+                                   torch.tensor(getattr(expected, field), dtype=torch.float32))
+
+
+def test_identity_offsets_keep_positive_counties_at_different_weight_scales(completed):
+    case, artifact = completed
+    config = case[-1]
+    bundle = dict(state(artifact)["final"]["outcome"])
+    bundle.pop("state")
+    ids = case[1].training_ids(0)
+    tiny = set(ids[:len(ids)//2])
+    rows = tuple((*row[:4], "tiny" if row[0] in tiny else "large",
+                  1e-300 if row[0] in tiny else 1e300) for row in config.data.rows)
+    changed = replace(config, data=replace(config.data, rows=rows))
+    inputs = _inputs(changed, ids)
+    bundle["counties"] = inputs.counties
+    model = _build(bundle).eval()
+    view = subset(changed.data.covariates(("x",)), ids)
+    with torch.no_grad():
+        base = _predict(model, view, inputs, changed.policy, base_only=True)[:, 0]
+        target = torch.tensor(fitting._values(changed, "y", ids))
+        residual = target.double() - base.double()
+        expected = torch.tensor([float(residual[[oid in tiny for oid in ids]].mean())
+                                 if county == "tiny" else
+                                 float(residual[[oid not in tiny for oid in ids]].mean())
+                                 for county in inputs.counties], dtype=torch.float32)
+        fitting._profile(model, changed, view, inputs)
+    torch.testing.assert_close(model.group_offsets(inputs.counties), expected)
+
+
+def test_finite_large_gradients_receive_registered_norm_cap(completed, monkeypatch):
+    case, artifact = completed
+    config = case[-1]
+    local, ids, _ = _partition(config, config.inner.split, 0)
+    rows = tuple((row[0], 2e30 if int(row[0][1:]) % 2 else 0., *row[2:-1], 1.)
+                 if row[0] in ids else row for row in config.data.rows)
+    changed = replace(config, data=replace(config.data, rows=rows),
+                      settings=replace(config.settings, batch_size=1))
+    initialization = fitting.CheckpointArtifact.from_json(state(artifact)["initializations"][0])
+    bundle, encoder = _bundle(changed, local, ids, initialization, "outcome", changed.settings.grid[0])
+    norms = []
+    original_step = torch.optim.AdamW.step
+
+    def capped_step(optimizer, *args, **kwargs):
+        gradients = [p.grad for group in optimizer.param_groups for p in group['params']
+                     if p.grad is not None]
+        assert all(torch.isfinite(g).all() for g in gradients)
+        norm = float(sum(g.double().square().sum() for g in gradients).sqrt())
+        norms.append(norm)
+        assert 0 < norm <= changed.settings.gradient_norm + 1e-6
+        return original_step(optimizer, *args, **kwargs)
+
+    monkeypatch.setattr(torch.optim.AdamW, "step", capped_step)
+    view = subset(changed.data.covariates(("x",)), ids)
+    model, _, complete, _ = _train_one(changed, bundle, encoder, view, (), 1, 1103,
+                                       _Budget(changed, CheckpointRequest()))
+    assert complete and len(norms) == len(ids)
+    assert all(torch.isfinite(p).all() for p in model.parameters())
+
+
+def test_identity_refit_accepts_extreme_finite_logits_with_its_fitted_calibration(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    case = make_case(tmp_path / "identity-fit", identity=True)
+    artifact = run(case)
+    controller = state(artifact)
+    calibration = AffineCalibration.from_json(controller['calibration'])
+    for result in controller['results']:
+        if result['kind'] == 'origin':
+            pairs = torch.tensor(result['predictions'])
+            assert torch.equal(pairs[:, 0], pairs[:, 1])
+    # Identical queries have a balanced pair at each logit. Its two scores
+    # cancel exactly at the zero-parameter initialization, so slope is zero.
+    assert calibration.slope == calibration.intercept == 0.
+    extreme = torch.full((len(calibration.original_ids), 2), 1000.)
+    monkeypatch.setattr(fitting, '_predict', lambda *args, **kwargs: extreme)
+    _, complete, _ = fitting._fit_controller(case[-1], case[1], case[2], artifact.checkpoint.identity,
+        controller, tmp_path, SimpleNamespace(reason=lambda: None))
+    assert complete
+    assert torch.equal(calibration.ratios(extreme), torch.ones_like(extreme))
+
+
+def _overflow_training_case(completed):
+    case, artifact = completed
+    config = case[-1]
+    local, ids, _ = _partition(config, config.inner.split, 0)
+    assert len(ids) == 16 and {"o08", "o09"} <= set(ids)
+    rows = tuple((row[0], 2e38 if row[0] == "o09" else 0., *row[2:-1],
+                  1. if row[0] in ("o08", "o09") else 0.) if row[0] in ids else row
+                 for row in config.data.rows)
+    changed = replace(config, data=replace(config.data, rows=rows),
+                      settings=replace(config.settings, batch_size=1))
+    initialization = fitting.CheckpointArtifact.from_json(state(artifact)["initializations"][0])
+    bundle, encoder = _bundle(changed, local, ids, initialization, "outcome", changed.settings.grid[1])
+    view = subset(changed.data.covariates(("x",)), ids)
+    return changed, bundle, encoder, view
+
+
+def test_finite_loss_survives_backward_overflow_before_clipping(completed, monkeypatch):
+    config, bundle, encoder, view = _overflow_training_case(completed)
+    norms = []
+    original_step = torch.optim.AdamW.step
+
+    def capped_step(optimizer, *args, **kwargs):
+        gradients = [p.grad for group in optimizer.param_groups for p in group['params']
+                     if p.grad is not None]
+        assert all(torch.isfinite(g).all() for g in gradients)
+        norm = float(sum(g.double().square().sum() for g in gradients).sqrt())
+        norms.append(norm)
+        assert 0 < norm <= config.settings.gradient_norm + 1e-6
+        return original_step(optimizer, *args, **kwargs)
+
+    monkeypatch.setattr(torch.optim.AdamW, "step", capped_step)
+    model, _, complete, _ = _train_one(config, bundle, encoder, view, (), 1, 1103,
+                                      _Budget(config, CheckpointRequest()))
+    assert complete and len(norms) == 2
+    assert all(torch.isfinite(p).all() for p in model.parameters())
+
+
+def test_pooled_selection_preserves_tiny_positive_fold_mass(completed, tmp_path):
+    from copy import deepcopy
+    from fractions import Fraction
+    from types import SimpleNamespace
+
+    case, artifact = completed
+    controller = deepcopy(state(artifact))
+    controller['position'] = 27
+    # Real controller selection, with controlled finite candidate scores.
+    # Heavy folds tie; the small fold strictly favors grid 1. The score gap
+    # is below FP64 range, so rounded reporting scores cannot choose the grid.
+    for result in controller['results']:
+        mass = Fraction(1e-300 if result['fold'] == 1 else 1e300)
+        result.update(mass=float(mass / Fraction(1e300)), mass_unit=1e300,
+                      mass_ratio=(mass.numerator, mass.denominator))
+        if result['kind'] == 'outcome':
+            grid, fold = result['grid'], result['fold']
+            result['metrics'] = ((2. if grid == 0 else 1.) if fold == 1 else
+                                 (0. if grid < 2 else 1.),)
+    calls = iter((None, 'requested'))
+    selected, complete, reason = fitting._fit_controller(case[-1], case[1], case[2],
+        artifact.checkpoint.identity, controller, tmp_path,
+        SimpleNamespace(reason=lambda: next(calls)))
+    assert not complete and reason == 'requested'
+    assert selected['selection']['outcome']['grid'] == 1
+
+
+@pytest.mark.parametrize('magnitude', [1., 1e39])
+def test_backward_scaling_preserves_direction_cap_and_rng(magnitude):
+    parameter = torch.nn.Parameter(torch.tensor([1., 1.], dtype=torch.float32))
+    derivative = torch.tensor([magnitude, -2 * magnitude], dtype=torch.float64)
+    loss = (parameter.double() * derivative).sum()
+    rng = torch.get_rng_state().clone()
+    scale = fitting._backward_and_clip(loss, (parameter,), 1.)
+    expected = (derivative * min(1., 1. / (derivative.norm().item() + 1e-6))).float()
+    torch.testing.assert_close(parameter.grad, expected)
+    assert (scale < 1.) == (magnitude > torch.finfo(torch.float32).max)
+    assert torch.equal(torch.get_rng_state(), rng)
+
+
+def test_scaled_backward_continuation_commits_one_batch(completed, monkeypatch):
+    config, bundle, encoder, view = _overflow_training_case(completed)
+    assert bundle['dropout'] == .1
+    original_backward = fitting._backward_and_clip
+    scales = []
+    request = CheckpointRequest()
+
+    def interrupt_after_backward(loss, parameters, maximum):
+        rng = torch.get_rng_state().clone()
+        scale = original_backward(loss, parameters, maximum)
+        assert torch.equal(torch.get_rng_state(), rng)
+        scales.append(scale)
+        request.request()
+        return scale
+
+    _, expected, complete, _ = _train_one(config, bundle, encoder, view, (), 1, 1103,
+                                          _Budget(config, CheckpointRequest()))
+    assert complete
+    monkeypatch.setattr(fitting, '_backward_and_clip', interrupt_after_backward)
+    budget = _Budget(config, request)
+    _, partial, complete, reason = _train_one(config, bundle, encoder, view, (), 1, 1103, budget)
+    assert not complete and reason == 'requested'
+    assert len(scales) == 1 and scales[0] < 1.
+    assert partial['progress']['step'] == budget.batches == partial['sampler']['cursor']
+    assert {int(s['step']) for s in partial['optimizer']['state'].values()} == {1}
+    monkeypatch.setattr(fitting, '_backward_and_clip', original_backward)
+    _, resumed, complete, _ = _train_one(config, bundle, encoder, view, (), 1, 1103,
+        _Budget(config, CheckpointRequest()), saved=partial)
+    assert complete
+
+    def same(actual, reference):
+        if isinstance(reference, torch.Tensor):
+            assert torch.equal(actual, reference)
+        elif isinstance(reference, dict):
+            assert actual.keys() == reference.keys()
+            for key in reference:
+                same(actual[key], reference[key])
+        elif isinstance(reference, (list, tuple)):
+            assert len(actual) == len(reference)
+            for a, b in zip(actual, reference):
+                same(a, b)
+        else:
+            assert actual == reference
+    same(resumed, expected)
+
+
+def test_exact_mass_survives_checkpoint_and_score_ties(completed):
+    from fractions import Fraction
+
+    case, artifact = completed
+    for result in state(artifact)['results']:
+        raw_mass = sum(map(Fraction, _inputs(case[-1], result['ids']).origin_weights), Fraction())
+        assert Fraction(*result['mass_ratio']) == raw_mass
+    # A Brier difference resolves tied log loss, and an exact two-metric tie
+    # still resolves by grid index. A zero-mass fold contributes neither.
+    candidates = []
+    for grid, brier in enumerate((.2, .1, .1)):
+        values = [dict(mass_ratio=(1, 1), metrics=(.5, brier)),
+                  dict(mass_ratio=(0, 1), metrics=(1e300, 1e300))]
+        candidates.append((fitting._pooled_metrics(values), grid))
+    assert min(candidates)[1] == 1
+
+
+@pytest.mark.parametrize('small', [1e-50, 1e-10])
+@pytest.mark.parametrize('reduction', ['mean', 'sum'])
+def test_extreme_weight_ratio_preserves_representable_outcome_loss(tmp_path, small, reduction):
+    case = make_case(tmp_path / 'weight-ratio')
+    config = case[-1]
+    ids = ('o06', 'o07')
+    rows = tuple((row[0], 0. if row[0] == ids[0] else 1e38, *row[2:-1],
+                  1e300 if row[0] == ids[0] else small) if row[0] in ids else row
+                 for row in config.data.rows)
+    config = replace(config, data=replace(config.data, rows=rows))
+    predicted = torch.zeros(2, dtype=torch.float64, requires_grad=True)
+    actual = fitting._outcome_loss(config, predicted, ids, reduction=reduction, weight_unit=1e300)
+    target = float(torch.tensor(1e38, dtype=torch.float32))
+    expected = (target * small) * (target / 1e300)
+    assert expected > 0
+    assert actual.item() == pytest.approx(expected, rel=1e-12, abs=0.)
+    actual.backward()
+    expected_gradient = -(2 * target * small) / 1e300
+    assert expected_gradient != 0
+    assert predicted.grad[1].item() == pytest.approx(expected_gradient, rel=1e-10, abs=0.)
+
+
+@pytest.mark.parametrize('small', [1e-50, 1e-10])
+def test_extreme_weight_ratio_preserves_representable_origin_loss(tmp_path, small):
+    config = make_case(tmp_path / 'origin-ratio')[-1]
+    metadata = _inputs(config, ('o06', 'o07'))
+    pairs = fitting.paired_records(config.policy.apply(metadata.a_mmhg, metadata.policy_covariates),
+        (1e300, small), weight_id=config.data.manifest.spec.weight_id)
+    # The large-mass pair has zero representable BCE; both small-mass copies
+    # have a representable loss after weighting, despite subnormal raw shares.
+    prediction = torch.tensor([[-1000., 1000.], [1e38, -1e38]], dtype=torch.float32).double()
+    prediction.requires_grad_(True)
+    actual = fitting._origin_loss(prediction, pairs, 1e300)
+    expected = (2 * float(prediction[1, 0].detach()) * small) / 1e300
+    assert expected > 0
+    assert actual.item() == pytest.approx(expected, rel=1e-10, abs=0.)
+    actual.backward()
+    expected_gradient = torch.tensor([[0., 0.], [small / 1e300, -small / 1e300]], dtype=torch.float64)
+    torch.testing.assert_close(prediction.grad, expected_gradient, rtol=1e-10, atol=0.)
+    assert pairs.origin_weights == (1e300, small, 1e300, small)

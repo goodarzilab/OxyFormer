@@ -1,0 +1,21 @@
+# Frozen grid: plan section 5.2. Epoch schedules are frozen before OOF evaluation.
+learning_rates: [0.0003, 0.001]
+dropouts: [0.0, 0.10]
+weight_decay: 0.0001
+max_epochs: 150
+patience: 15
+gradient_norm: 1.0
+batch_size: 256
+frozen_epochs: 150
+# Public fit_affine accepts only finite logits in [-1e6, 1e6], including
+# zero-weight originals, before FP32 conversion or optimizer construction.
+# One million log-odds is far beyond meaningful origin-classifier evidence
+# (FP32 exp already overflows near 89). Normalized transformer features,
+# bounded training and a scalar classifier offset need nothing near this in
+# practice. This is an engineering input contract, not a mathematical bound
+# on the unconstrained readout/raw-feature bypass or a clipping operation.
+# Prediction, weighted metrics and transfer diagnostics retain their FP32 APIs.
+calibration_logit_abs_max: 1000000.0
+# Absolute weighted mean BCE gap allowed versus feasible comparison maps;
+# this accommodates FP32 objective rounding without loosening test tolerances.
+calibration_loss_tolerance: 0.000001
