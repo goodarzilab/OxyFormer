@@ -4,6 +4,9 @@ Only headers and paired XML metadata are read by offset in an uncompressed tar.
 Full payload integrity belongs to runner acquisition admission. No pixel reads,
 extraction, downloads, exposure calculations, or approval changes occur here.
 """
+from dataclasses import replace
+import shutil
+import tempfile
 from hashlib import sha256
 import json
 import math
@@ -13,13 +16,16 @@ import xml.etree.ElementTree as ET
 
 from pyproj import CRS
 import rasterio
+import yaml
 
 from oxyformer.data.source_manifest import load_source, validate_shards
 from oxyformer.exposure.population_allocation import PRIMARY, FALLBACK, FALLBACK_CELLS, _validate_vertical_crs
-from oxyformer.provenance import canonical_json, require
+from oxyformer.contracts import StageResult
+from oxyformer.execution.paths import atomic_json, atomic_write
+from oxyformer.provenance import ArtifactLineage, ArtifactRecord, canonical_json, file_hash, require
 
 ROOT = Path(__file__).resolve().parents[3]
-TASK_FILE = 'configs/execution/tasks/atlas.json'
+TASK_FILE = 'configs/execution/tasks/atlas.yaml'
 DIVISIONS = {
     'new_england': 'new-england', 'middle_atlantic': 'mid-atlantic',
     'east_north_central': 'east-north', 'west_north_central': 'west-north',
@@ -109,6 +115,11 @@ def build_tasks(inspected, atlas=None):
                 tile['vertical_datum'] == source['release_identity']['vertical_datum'] and
                 CRS(tile['crs']).to_2d() == CRS('EPSG:4269'), f'{rid}: inspected metadata mismatch')
         require(bool(tile['fallback_reason']) == (tile['product'] == FALLBACK), f'{rid}: fallback reason mismatch')
+    # Intern equal header records so YAML anchors avoid duplicating 957 identical
+    # CRS/unit/nodata declarations in the reviewed task source.
+    profiles = {}
+    raster_metadata = {rid: profiles.setdefault(canonical_json(tile), tile)
+                       for rid, tile in inspected['raster_metadata'].items()}
     reviewed = dict(schema_version=1, review_status='reviewed', review_id='atlas-tasks-implementation-review')
     tasks = [dict(reviewed, id='atlas-inputs', stage='atlas-inputs',
         needs={'fetch-dem': ['payload.tar', 'receipts.json']},
@@ -120,7 +131,7 @@ def build_tasks(inspected, atlas=None):
         tasks.append(dict(reviewed, id='atlas-' + DIVISIONS[group['id']], stage='exposure-atlas',
             needs=needs, outputs=SHARD_OUTPUTS, shard_manifest=0, inspected_metadata=1,
             shard_id=group['id'], census={'payload': 5, 'receipt': 6}, dem={'payload': 7, 'receipt': 8},
-            raster_metadata={rid: inspected['raster_metadata'][rid] for rid in group['dem_resources']},
+            raster_metadata={rid: raster_metadata[rid] for rid in group['dem_resources']},
             no_product_cells=group.get('no_product_cells', [])))
     # Preserve this explicit order in the checked-in manifest. Each shard
     # contributes three outputs and three runner control files.
@@ -136,12 +147,53 @@ def build_tasks(inspected, atlas=None):
 
 
 def write_tasks(path, document):
-    # Compact tile rows keep a complete review practical; never sort needs,
-    # whose file order defines StageRequest dependency indices.
+    # Preserve needs order: it defines StageRequest dependency indices. YAML
+    # anchors represent repeated *values*, not missing/uninspected tile records.
     with Path(path).open('w') as stream:
-        text = json.dumps(document, separators=(',', ':'), allow_nan=False)
-        # One tile per line, plus task boundaries, without reordering mappings.
-        import re
-        text = re.sub(r',(?="n[0-9]{2}w[0-9]{3}":)', ',\n', text)
-        text = text.replace('},{"schema_version":1,"review_status"', '},\n{"schema_version":1,"review_status"')
-        stream.write(text + '\n')
+        yaml.safe_dump(document, stream, sort_keys=False)
+
+
+def run_stage(request):
+    request.verify_inputs()
+    task = json.loads(Path(request.task_path).read_text())
+    committed = yaml.safe_load((ROOT / TASK_FILE).read_text())
+    expected = next((t for t in committed['tasks'] if t['id'] == task['id']), None)
+    require(task == expected and task['stage'] == request.stage, 'atlas task differs from reviewed configuration')
+    out = Path(request.output_dir)
+    if request.stage == 'atlas-inputs':
+        payload, receipt = map(Path, request.dependency_paths[:2])
+        require(payload.name == 'payload.tar' and receipt.name == 'receipts.json' and payload.parent == receipt.parent,
+                'atlas input dependency bindings mismatch')
+        inspected = inspect_dem(payload.parent)
+        require(build_tasks(inspected) == committed, 'actual DEM headers differ from reviewed atlas tasks')
+        atomic_write(out, 'atlas_shards.json', (ROOT / 'configs/sources/atlas_shards.json').read_text())
+        atomic_json(out, 'raster_metadata.json', inspected)
+        lineage = ArtifactLineage(source_hashes=request.dependency_hashes, unit_ids=('atlas-inputs',),
+            parent_hashes=(request.task_hash,), split_hash=None, config_hash=request.config_hash,
+            model_hash=None, environment=(('code_identity', request.code_identity),), seed=None, parameter_count=None)
+        return StageResult(request_hash=request.content_hash, status='pass', message='Inspected atlas inputs published',
+            artifacts=tuple(ArtifactRecord(path=name, sha256=file_hash(out / name), lineage=lineage, kind='atlas_input')
+                            for name in task['outputs']))
+    require(request.stage in ('exposure-atlas', 'atlas-collect'), 'unexpected atlas stage')
+    if request.stage == 'exposure-atlas':
+        inspected = json.loads(Path(request.dependency_paths[task['inspected_metadata']]).read_text())
+        require(task['raster_metadata'] == {rid: inspected['raster_metadata'][rid] for rid in task['raster_metadata']},
+                'task metadata differs from inspected upstream headers')
+        require(inspected['dem_payload_sha256'] == request.dependency_hashes[task['dem']['payload']],
+                'inspected metadata belongs to a different DEM payload')
+    # The science API owns an empty product directory and expects exposure.yaml,
+    # whereas the runner owns _execution and supplies execution configuration.
+    # Persist the derived request and configuration for audit, then rebind only
+    # the returned request identity when moving its declared products outward.
+    config = atomic_write(out, '_atlas/exposure.yaml', (ROOT / 'configs/exposure.yaml').read_text())
+    with tempfile.TemporaryDirectory(prefix='products-', dir=out / '_atlas') as scratch:
+        inner = replace(request, config_path=str(config), config_hash=file_hash(config), output_dir=scratch)
+        atomic_write(out, '_atlas/request.json', inner.to_json())
+        from oxyformer.exposure.build import run_stage as exposure_stage
+        result = exposure_stage(inner)
+        result.verify(inner)
+        for artifact in result.artifacts:
+            target = out / artifact.path
+            require(not target.exists(), 'atlas output already exists')
+            shutil.move(str(Path(scratch) / artifact.path), target)
+        return replace(result, request_hash=request.content_hash)
