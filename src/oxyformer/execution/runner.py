@@ -1,17 +1,9 @@
-"""Trusted stage dispatch, with immutable inputs and attempt-owned writes.
+"""Dispatch with immutable dependency states and attempt-owned outputs.
 
-This is an execution contract, not a sandbox for hostile Python modules. Stage
-implementations must use output_dir for all writes and treat dependency_paths as
-read-only. The runner never modifies upstream files or their permissions; input
-trees are fingerprinted before execution and rechecked after the stage worker
-exits. Fingerprints bind directory entries, types, modes, sizes, content hashes
-and symlink targets; timestamps and inode numbers are deliberately excluded.
-An identical rewrite or restored input state is accepted, not tracked as an
-event. Archives are extracted only via execution.paths.safe_extract into the
-consuming attempt. Runner-managed writes, receipts and declared artifacts are
-confined to output_dir, and caches are redirected there. General confinement of
-faulty stage code writing outside every attempt tree is the explicitly deferred
-host-runtime follow-up ARC-1339; such undeclared writes are not detected here.
+Compare entries, types, modes, sizes, bytes and symlink targets after worker
+exit; ignore timestamps, inodes and restored transient changes. Failed receipts
+name changed inputs; downstream requests bind publication digests. Never repair
+upstream files. Managed writes stay in output_dir; general confinement is ARC-1339.
 """
 import json
 import os
