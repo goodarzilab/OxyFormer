@@ -1,0 +1,193 @@
+# Verified legacy paths, source identities, and separate execution modes.
+schema_version: 1
+modes:
+- initial-release
+- repaired-benchmark
+- v2
+- elevcan-reproduction
+sources:
+  initial-release:
+    repository: goodarzilab/OxyFormer
+    commit: 2bdf22d568b37e6bb1ff4d2c85bab9f4ff06f277
+    archive_url: https://codeload.github.com/goodarzilab/OxyFormer/tar.gz/2bdf22d568b37e6bb1ff4d2c85bab9f4ff06f277
+    archive_sha256: 46183d525fc0811b20e75cac954b9383e5e3387b15562eb016062dc3ac102bcf
+    archive_bytes: 1493078
+    root: OxyFormer-2bdf22d568b37e6bb1ff4d2c85bab9f4ff06f277
+  elevcan-reproduction:
+    repository: dhimmel/elevcan
+    commit: 7aed9f29d2371eb4918f337a138608e6b6d9e311
+    archive_url: https://codeload.github.com/dhimmel/elevcan/tar.gz/7aed9f29d2371eb4918f337a138608e6b6d9e311
+    archive_sha256: 908c9eaa0f3ba1c399b06f7b699da2843134cf6d6ecdf3450a59021df0746628
+    archive_bytes: 10502723
+    root: elevcan-7aed9f29d2371eb4918f337a138608e6b6d9e311
+    entrypoint: code/run.R
+    inputs:
+    - data/county-data.txt
+    outputs:
+    - output/log.txt
+    - output/session.RData
+    r_dependencies:
+    - methods
+    - leaps
+    - glmnet
+    - ggplot2
+    - grid
+    - metafor
+    - reshape2
+    - Hmisc
+    - gridExtra
+    - boot
+    - plyr
+    system_dependencies:
+    - gs
+entrypoints:
+  phase1:
+    path: phase1_county_pipeline.py
+    sha256_initial: 789baf470438cf4162c4c68d5f16ec176cf0e715f741e9e76f2ee248d29a84e0
+    responsibility: County joins, county-elevation oxygen proxy, all-cancer Poisson
+      baselines and site support
+    inputs:
+    - counties_x_elevation.csv
+    - ACSST5Y2021.S1901-Data.csv
+    - DiabetesPercentage.csv
+    - ObesityAll.csv
+    - BYAREA_COUNTY.csv
+    python_dependencies:
+    - numpy
+    - pandas
+    output_dir: outputs/phase1
+    outputs:
+    - county_covariates.csv
+    - cancer_endpoints_long.csv
+    - county_master_table.csv
+    - site_support.csv
+    - baseline_model_metrics.csv
+    - baseline_model_coefficients.csv
+    - phase1_summary.json
+    v2_stages:
+    - exposure-atlas
+    - atlas-collect
+    initial_workspace: legacy/initial-release/workspace/OxyFormer-2bdf22d568b37e6bb1ff4d2c85bab9f4ff06f277
+    dependencies:
+    - source CSVs
+    repaired_execution: v2 owning stage only; no second ingestion/design implementation
+  phase25:
+    path: phase25_feature_engineering.py
+    sha256_initial: 4db17bf18a3ea784fefc937d56d8664a29400032b2c1ef004e26f56ee07c1400
+    responsibility: Curate phase2 public-data features; global imputation/standardization
+      in historical model matrix
+    inputs:
+    - outputs/phase2/county_master_table_phase2.csv
+    python_dependencies:
+    - numpy
+    - pandas
+    output_dir: outputs/phase25
+    outputs:
+    - curated_county_features.csv
+    - curated_model_matrix.csv
+    - incidence_modeling_table.csv
+    - mortality_modeling_table.csv
+    - feature_manifest.csv
+    - missingness_summary.csv
+    - phase25_summary.json
+    v2_stages:
+    - tract-support-gate
+    initial_workspace: legacy/initial-release/workspace/OxyFormer-2bdf22d568b37e6bb1ff4d2c85bab9f4ff06f277
+    dependencies:
+    - phase2_public_data.py output
+    repaired_execution: v2 owning stage only; no second ingestion/design implementation
+  phase26:
+    path: phase26_foundation_model.py
+    sha256_initial: 32480cb609e2d1035776e7bf280bfdc7d746d438ed84e2e0d309546ef215208d
+    responsibility: Global dual-view masked transformer, consistency and disease auxiliary
+      tasks in initial release
+    inputs:
+    - outputs/phase25/curated_model_matrix.csv
+    python_dependencies:
+    - numpy
+    - pandas
+    - torch
+    output_dir: outputs/phase26
+    outputs:
+    - foundation_model_weights.pt
+    - county_foundation_embeddings.csv
+    - foundation_training_history.csv
+    - phase26_summary.json
+    v2_stages:
+    - primary
+    - ablation
+    initial_workspace: legacy/initial-release/workspace/OxyFormer-2bdf22d568b37e6bb1ff4d2c85bab9f4ff06f277
+    dependencies:
+    - phase25 output
+    repaired_execution: legacy-reproduction with mode repaired-benchmark; approved
+      manifest/records required
+  phase3:
+    path: phase3_causal_demo.py
+    sha256_initial: 8d47b769e736a76deee43a89d75cf1606893ebab74c6a8cded23c08b40224c37
+    responsibility: Cross-fitted ridge partial-linear models with state indicators;
+      optional global embeddings and site outcomes
+    inputs:
+    - outputs/phase25/curated_county_features.csv
+    python_dependencies:
+    - numpy
+    - pandas
+    output_dir: outputs/phase3
+    outputs:
+    - causal_effect_estimates.csv
+    - fold_diagnostics.csv
+    - dose_response_curves.csv
+    - model_manifest.csv
+    - site_causal_effect_estimates.csv
+    - site_effect_forest_plot.csv
+    - phase3_summary.json
+    v2_stages:
+    - primary
+    - ablation
+    initial_workspace: legacy/initial-release/workspace/OxyFormer-2bdf22d568b37e6bb1ff4d2c85bab9f4ff06f277
+    dependencies:
+    - phase25 output
+    - optional phase26 embeddings
+    - optional phase1 site tables
+    optional_inputs:
+      include-site-models:
+      - outputs/phase1/site_support.csv
+      - outputs/phase1/cancer_endpoints_long.csv
+      use-foundation-embeddings:
+      - outputs/phase26/county_foundation_embeddings.csv
+    repaired_execution: legacy-reproduction with mode repaired-benchmark; approved
+      manifest/records required
+  phase4:
+    path: phase4_robustness.py
+    sha256_initial: 5f8921b62f127b2eb9c3f0600f07bf7a86ef3d7659e99c601f6037803d1a9edd
+    responsibility: Seed sensitivity and minimum-20-row-state deletion of historical
+      PLR; repaired mode refits every represented state
+    inputs:
+    - outputs/phase25/curated_county_features.csv
+    python_dependencies:
+    - numpy
+    - pandas
+    output_dir: outputs/phase4
+    outputs:
+    - full_model_effects.csv
+    - seed_sensitivity.csv
+    - seed_sensitivity_summary.csv
+    - leave_one_state_out.csv
+    - leave_one_state_out_summary.csv
+    - phase4_summary.json
+    v2_stages:
+    - coverage
+    - refit-audit
+    initial_workspace: legacy/initial-release/workspace/OxyFormer-2bdf22d568b37e6bb1ff4d2c85bab9f4ff06f277
+    dependencies:
+    - phase3_causal_demo.py code
+    - phase25 output
+    - optional phase26 embeddings
+    - optional phase1 site tables
+    optional_inputs:
+      include-site-models:
+      - outputs/phase1/site_support.csv
+      - outputs/phase1/cancer_endpoints_long.csv
+      use-foundation-embeddings:
+      - outputs/phase26/county_foundation_embeddings.csv
+    repaired_execution: legacy-reproduction with mode repaired-benchmark; approved
+      manifest/records required
