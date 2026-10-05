@@ -321,3 +321,16 @@ def test_repaired_foundation_rejects_prohibited_predictors(channel, tmp_path, co
     req=request_at(tmp_path/'request',parameters,paths)
     assert legacy.run_stage(req).status=='fail'
     assert 'unapproved ssl' in report_for(req)['reason']
+
+
+def test_unlabeled_legacy_cli_fails_before_execution(tmp_path, monkeypatch):
+    import oxyformer.cli
+    monkeypatch.chdir(tmp_path)
+    marker = tmp_path / 'synthetic-input'
+    marker.write_text('unchanged')
+    monkeypatch.setattr(oxyformer.cli, 'main', lambda args: pytest.fail('refused input executed'))
+    with pytest.raises(SystemExit) as error:
+        launcher.main('phase3', ['--root-dir', '.'])
+    assert error.value.code == 2
+    assert list(tmp_path.iterdir()) == [marker]
+    assert marker.read_text() == 'unchanged'
