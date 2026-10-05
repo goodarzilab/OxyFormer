@@ -1,0 +1,349 @@
+"""Fingerprint entries, types, modes, sizes, bytes and symlink targets.
+Ignore timestamps/inodes and restored transient changes; compare states.
+"""
+from contextlib import contextmanager
+from dataclasses import replace
+from hashlib import sha256
+import json
+import os
+from pathlib import Path
+import stat
+import tempfile
+
+from oxyformer.contracts import StageResult
+from oxyformer.provenance import ArtifactRecord, canonical_json, require
+from .paths import atomic_json, atomic_write, output_path, temporary_path
+
+FINGERPRINT = "_execution/fingerprint.json"
+RESULT = "_execution/result.json"
+DEPENDENCY_CHECK = "_execution/dependency_check.json"
+PUBLICATION_EXCLUSIONS = (FINGERPRINT, RESULT)
+
+
+def publication_receipt(root, *, create=False):
+    """Independent runner state; consumers never learn authority from payloads."""
+    store = Path(os.environ.get('OXYFORMER_PUBLICATION_STORE',
+            Path.home() / 'oxyformer-swarm/state/publications'))
+    require(store.is_absolute(), 'publication store must be absolute')
+    root = Path(os.path.abspath(root))
+    require(not store.resolve().is_relative_to(root) and not root.is_relative_to(store.resolve()),
+        'publication store overlaps attempt')
+    if create:
+        store.mkdir(parents=True, exist_ok=True)
+    return directory_path(store) / sha256(str(root).encode()).hexdigest()
+
+
+def record_publication(root, result):
+    receipt = publication_receipt(root, create=True)
+    atomic_json(receipt.parent, receipt.name, {'attempt': str(root),
+        'result_sha256': sha256(result.to_json().encode()).hexdigest()})
+
+
+def verify_publication(root, result):
+    receipt = publication_receipt(root)
+    require(not os.path.lexists(str(receipt) + '.tainted'), f'tainted upstream fingerprint: {root}')
+    require(json.loads(read_regular(receipt)) == {'attempt': str(root),
+        'result_sha256': sha256(result.to_json().encode()).hexdigest()},
+        f'dependency publication fingerprint authority mismatch: {root}')
+
+
+def record_taints(check):
+    for root, detail in check['attempts'].items():
+        if detail['changed_paths']:
+            receipt = publication_receipt(root)
+            try:
+                atomic_json(receipt.parent, receipt.name + '.tainted', detail['changed_paths'])
+            except FileExistsError:
+                pass  # Taint is permanent; a later observer cannot clear it.
+
+
+def _stable(metadata):
+    return (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_size,
+        metadata.st_mtime_ns, metadata.st_ctime_ns)
+
+
+def directory_path(path):
+    """Check directory components before resolving; never erase a symlink."""
+    path = temporary_path(path)
+    for component in (*reversed(path.parents), path):
+        require(stat.S_ISDIR(component.lstat().st_mode),
+            f'input directory is a symlink or special file: {component}')
+    return path.resolve(strict=True)
+
+
+def regular_file_stat(path):
+    path = temporary_path(path)
+    directory_path(path.parent)
+    metadata = path.lstat()
+    require(stat.S_ISREG(metadata.st_mode), f'input is not a regular file: {path}')
+    return metadata
+
+
+@contextmanager
+def open_regular(path):
+    """Open one stable regular file without following links or blocking on FIFOs."""
+    path = temporary_path(path)
+    before = regular_file_stat(path)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, 'rb') as stream:
+        opened = os.fstat(stream.fileno())
+        require(stat.S_ISREG(opened.st_mode) and _stable(opened) == _stable(before),
+            f'input changed before reading: {path}')
+        yield stream
+        require(_stable(os.fstat(stream.fileno())) == _stable(before)
+            and _stable(regular_file_stat(path)) == _stable(before),
+            f'input changed while reading: {path}')
+
+
+def read_regular(path):
+    with open_regular(path) as stream:
+        return stream.read()
+
+
+def regular_file_hash(path):
+    digest = sha256()
+    with open_regular(path) as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_inputs(request):
+    """StageRequest.verify_inputs checks using nonblocking regular-file reads."""
+    for path, digest in zip((request.config_path, request.task_path) + request.dependency_paths,
+        (request.config_hash, request.task_hash) + request.dependency_hashes):
+        require(regular_file_hash(path) == digest, f'input hash mismatch: {path}')
+
+
+def verify_result(result, request):
+    """StageResult.verify checks using the same race-safe reader as preflight."""
+    require(result.request_hash == request.content_hash, 'stage request mismatch')
+    verify_inputs(request)
+    root = directory_path(request.output_dir)
+    for artifact in result.artifacts:
+        path = (root / artifact.path).resolve(strict=True)
+        require(path.is_relative_to(root), 'artifact escapes output directory')
+        require(regular_file_hash(root / artifact.path) == artifact.sha256,
+            f'artifact hash mismatch: {artifact.path}')
+
+
+def fingerprint_tree(root, *, exclude=()):
+    """Return every entry, including '.', and explicit errors on unreadable paths."""
+    root = Path(root)
+    entries = {}
+    pending = [(root, '.', None)]
+
+    def visit(path, relative):
+        if relative in exclude:
+            return
+        entry = {}
+        entries[relative] = entry
+        try:
+            before = path.lstat()
+            kind = stat.S_IFMT(before.st_mode)
+            entry.update(type=kind, mode=stat.S_IMODE(before.st_mode),
+                size=before.st_size, sha256=None, target=None)
+            if stat.S_ISLNK(kind):
+                entry['target'] = os.readlink(path)
+            elif stat.S_ISREG(kind):
+                digest = sha256()
+                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                with os.fdopen(fd, 'rb') as stream:
+                    if _stable(os.fstat(stream.fileno())) != _stable(before):
+                        raise OSError('entry changed before hashing')
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                        digest.update(chunk)
+                    if _stable(os.fstat(stream.fileno())) != _stable(before):
+                        raise OSError('entry changed while hashing')
+                entry['sha256'] = digest.hexdigest()
+            elif stat.S_ISDIR(kind):
+                with os.scandir(path) as children:
+                    names = sorted(child.name for child in children)
+                pending.append((path, relative, before))
+                pending.extend((path / name, name if relative == '.' else relative + '/' + name, None)
+                    for name in reversed(names))
+                return
+            if _stable(path.lstat()) != _stable(before):
+                raise OSError('entry changed while fingerprinting')
+        except OSError as exc:
+            entry['error'] = f'{type(exc).__name__}: {exc}'
+
+    while pending:
+        path, relative, before = pending.pop()
+        if before is None:
+            visit(path, relative)
+        else:
+            try:
+                if _stable(path.lstat()) != _stable(before):
+                    raise OSError('entry changed while fingerprinting')
+            except OSError as exc:
+                entries[relative]['error'] = f'{type(exc).__name__}: {exc}'
+    return entries
+
+
+def changed_paths(before, after):
+    """All added, removed, changed or unreadable entries, in stable order."""
+    return sorted(name for name in before.keys() | after.keys()
+        if before.get(name) != after.get(name) or 'error' in after.get(name, {}))
+
+
+def post_execution_check(before):
+    """Recompute every dependency, including after an unsuccessful stage."""
+    attempts = {}
+    for root, expected in before.items():
+        actual = fingerprint_tree(root)
+        changed = changed_paths(expected, actual)
+        attempts[root] = {'status': 'tainted' if changed else 'unchanged',
+            'changed_paths': changed, 'fingerprint': actual}
+    return {'status': 'fail' if any(a['changed_paths'] for a in attempts.values()) else 'pass',
+        'attempts': attempts}
+
+
+def publication_view(entries):
+    return {name: entry for name, entry in entries.items()
+        if name not in PUBLICATION_EXCLUSIONS}
+
+
+def publication_tree(root):
+    return publication_view(fingerprint_tree(root))
+
+
+def _restore_control_permissions(path):
+    """Restore private control entries, without following links to other trees."""
+    pending = [path]
+    while pending:
+        path = pending.pop()
+        metadata = path.lstat()
+        directory = stat.S_ISDIR(metadata.st_mode)
+        if not directory and not (stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1):
+            continue
+        mode = stat.S_IMODE(metadata.st_mode)
+        restored = mode | (0o700 if directory else 0o600)
+        if restored != mode:
+            os.chmod(path, restored, follow_symlinks=False)
+        if directory:
+            pending.extend(path.iterdir())
+
+
+def _repair_control_directory(root):
+    """Recover only the directory this runner reserved in its own attempt."""
+    root = directory_path(root)
+    path = root / '_execution'
+    try:
+        if stat.S_ISDIR(path.lstat().st_mode):
+            _restore_control_permissions(path)
+            return False  # Permission restoration is not a directory collision.
+        quarantine = Path(tempfile.mkdtemp(prefix='.control-collision-', dir=root))
+        os.rename(path, quarantine / path.name)  # move the entry, never its target
+    except FileNotFoundError:
+        pass
+    path.mkdir()
+    return True
+
+
+def _replace_control(root, relative, text):
+    """Publish the current runner's control without opening a colliding entry."""
+    require(relative in (*PUBLICATION_EXCLUSIONS, DEPENDENCY_CHECK), 'not a publication control file')
+    path = directory_path(root) / relative
+    directory_path(path.parent)
+    try:
+        if stat.S_ISDIR(path.lstat().st_mode):
+            quarantine = Path(tempfile.mkdtemp(prefix='.control-collision-', dir=path.parent))
+            os.rename(path, quarantine / path.name)
+    except FileNotFoundError:
+        pass
+    fd, temporary = tempfile.mkstemp(prefix='.publish-', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def publish_result(root, result, *, owned_controls=False):
+    """Seal a producer's own completed tree; a consumer never calls this."""
+    root = directory_path(root)
+    collisions = [str(root / name) for name in PUBLICATION_EXCLUSIONS
+        if os.path.lexists(root / name)]
+    require(owned_controls or not collisions, 'publication controls already exist')
+    if collisions and result.status == 'pass':
+        result = replace(result, status='fail', artifacts=(),
+            message='reserved publication control collision: ' + ', '.join(collisions))
+    if result.status != 'pass':
+        _replace_control(root, RESULT, result.to_json())
+        return result
+    pending = replace(result, status='blocked', artifacts=(), message='publication incomplete')
+    _replace_control(root, RESULT, pending.to_json())
+    try:
+        atomic_json(root, FINGERPRINT, {})
+        for _ in range(3):
+            entries = publication_tree(root)
+            errors = [str(root / name) for name, entry in entries.items() if 'error' in entry]
+            require(not errors, 'publication fingerprint unreadable: ' + ', '.join(errors))
+            value = {'schema_version': 1, 'attempt': str(root),
+                'excluded': list(PUBLICATION_EXCLUSIONS), 'entries': entries,
+                'stage_result': result.to_dict(),
+                'control_modes': {name: stat.S_IMODE((root / name).lstat().st_mode)
+                    for name in PUBLICATION_EXCLUSIONS}}
+            _replace_control(root, FINGERPRINT, canonical_json(value))
+            if publication_tree(root) == entries:
+                break
+        else:
+            raise ValueError('attempt changed during fingerprint publication')
+        fingerprint = ArtifactRecord(path=FINGERPRINT, sha256=regular_file_hash(root / FINGERPRINT),
+            lineage=result.artifacts[0].lineage, kind='attempt_fingerprint')
+        published = replace(result, artifacts=(*result.artifacts, fingerprint))
+        _replace_control(root, RESULT, published.to_json())
+        require(publication_tree(root) == entries, 'attempt changed during result publication')
+        record_publication(root, published)
+        return published
+    except BaseException as exc:
+        failed = replace(result, status='fail', artifacts=(),
+            message='publication failed: ' + (str(exc).strip() or type(exc).__name__))
+        _replace_control(root, RESULT, failed.to_json())
+        return failed
+
+
+def verify_published_tree(root, result, expected_hash=None):
+    """Read the recorded baseline, hash-check it, then compare current entries."""
+    root = directory_path(root)
+    records = [record for record in result.artifacts if record.path == FINGERPRINT]
+    require(len(records) == 1 and records[0].kind == 'attempt_fingerprint',
+        'dependency publication fingerprint missing')
+    require(expected_hash is None or records[0].sha256 == expected_hash,
+        'dependency published fingerprint identity changed')
+    path = root / FINGERPRINT
+    require(not path.is_symlink() and path.resolve().is_relative_to(root),
+        'dependency fingerprint escapes attempt')
+    raw = read_regular(path)
+    require(sha256(raw).hexdigest() == records[0].sha256, 'dependency fingerprint hash mismatch')
+    value = json.loads(raw)
+    require(isinstance(value, dict) and set(value) == {
+            'schema_version', 'attempt', 'excluded', 'entries', 'stage_result', 'control_modes'}
+        and value['schema_version'] == 1 and value['attempt'] == str(root)
+        and value['excluded'] == list(PUBLICATION_EXCLUSIONS)
+        and isinstance(value['entries'], dict), 'invalid dependency fingerprint record')
+    original_result = replace(result, artifacts=tuple(a for a in result.artifacts if a.path != FINGERPRINT))
+    require(original_result.to_dict() == value['stage_result'], 'dependency result record changed since publication')
+    require(bool(original_result.artifacts) and
+        records[0].lineage == original_result.artifacts[0].lineage,
+        'dependency fingerprint artifact lineage changed since publication')
+    actual = fingerprint_tree(root)
+    changed = changed_paths(value['entries'], publication_view(actual))
+    for name in PUBLICATION_EXCLUSIONS:
+        entry = actual.get(name, {})
+        if ('error' in entry or entry.get('type') != stat.S_IFREG or
+            entry.get('mode') != value['control_modes'].get(name)):
+            changed.append(name)
+    require(actual.get(FINGERPRINT, {}).get('sha256') == records[0].sha256,
+        'dependency fingerprint changed during verification')
+    require(actual.get(RESULT, {}).get('sha256') == sha256(result.to_json().encode()).hexdigest(),
+        'dependency result record changed during verification')
+    require(not changed, 'dependency fingerprint mismatch (tainted): ' +
+        ', '.join(str(root / name) for name in sorted(set(changed))))
+    verify_publication(root, result)
+    return actual

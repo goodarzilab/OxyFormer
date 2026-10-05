@@ -1,0 +1,77 @@
+schema_version: 1
+# Lazy registrations reflect the declared owning units. A missing module blocks
+# execution. Each module receives the unchanged contracts.StageRequest API.
+# needs maps original unit IDs to immutable, relative input files. Code units
+# are coordinator merge barriers, never sources of unmerged scientific code.
+# Acquisition producers retain their declared source receipts. Every producer
+# also seals its own attempt with a passing StageResult that binds
+# _execution/fingerprint.json; consumers never seal an upstream attempt.
+# Unit IDs and stage names differ: unit tract-gate runs tract-support-gate.
+stages:
+  exposure-atlas:
+    module: oxyformer.exposure.build
+    acquisition_receipts: {fetch-census: receipts.json, fetch-dem: receipts.json}
+    needs:
+      fetch-census: [payload.tar, receipts.json]
+      fetch-dem: [payload.tar, receipts.json]
+    outputs: [exposure.parquet, quality.json, artifact_manifest.json]
+  atlas-collect:
+    module: oxyformer.exposure.build
+    needs:
+      atlas-new-england: [exposure.parquet, quality.json, artifact_manifest.json]
+      atlas-mid-atlantic: [exposure.parquet, quality.json, artifact_manifest.json]
+      atlas-east-north: [exposure.parquet, quality.json, artifact_manifest.json]
+      atlas-west-north: [exposure.parquet, quality.json, artifact_manifest.json]
+      atlas-south-atlantic: [exposure.parquet, quality.json, artifact_manifest.json]
+      atlas-east-south: [exposure.parquet, quality.json, artifact_manifest.json]
+      atlas-west-south: [exposure.parquet, quality.json, artifact_manifest.json]
+      atlas-mountain: [exposure.parquet, quality.json, artifact_manifest.json]
+      atlas-pacific: [exposure.parquet, quality.json, artifact_manifest.json]
+    outputs: [atlas.parquet, quality.json, artifact_manifest.json]
+  tract-support-gate:
+    unit_id: tract-gate
+    module: oxyformer.design.gate
+    acquisition_receipts: {fetch-us: receipts.json}
+    needs:
+      fetch-us: [payload.tar, receipts.json]
+      atlas-collect: [atlas.parquet, quality.json, artifact_manifest.json]
+    outputs: [design.json, splits.json, support_report.json, gate.json, artifact_manifest.json]
+  legacy-reproduction:
+    module: oxyformer.legacy
+  elevcan-reproduction:
+    module: oxyformer.legacy
+  simulation-smoke:
+    module: oxyformer.validation.coverage
+  campaign-lock:
+    module: oxyformer.validation.campaign
+    needs:
+      tract-gate: [design.json, splits.json, support_report.json, gate.json, artifact_manifest.json]
+      simulation-smoke: [result.json, timing.json, artifact_manifest.json]
+    outputs: [recipe_lock.json, task_manifest.json, expanded_units.json, budget.json, gate.json]
+  coverage:
+    requires_recipe: true
+    module: oxyformer.validation.coverage
+  campaign-collect:
+    requires_recipe: true
+    module: oxyformer.validation.campaign
+  primary:
+    requires_recipe: true
+    module: oxyformer.training.nested_cv
+  ablation:
+    requires_recipe: true
+    module: oxyformer.training.nested_cv
+  anchor:
+    requires_recipe: true
+    module: oxyformer.training.nested_cv
+  refit-audit:
+    requires_recipe: true
+    module: oxyformer.training.nested_cv
+  anchor-review:
+    requires_recipe: true
+    module: oxyformer.reporting
+  audit-collect:
+    requires_recipe: true
+    module: oxyformer.reporting
+  tract-release:
+    requires_recipe: true
+    module: oxyformer.reporting
