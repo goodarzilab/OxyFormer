@@ -397,6 +397,21 @@ def _decimal_normalizer(law, precision):
         return _decimal_logsumexp(logs, precision)
 
 
+def _decimal_selection_log(point, state, config):
+    logits = []
+    if config.selected_outcome:
+        logits.append(1-exact(.2)*point-exact(1.2)*exact(state.illness))
+    if config.survey_inclusion:
+        logits.append(exact(.7)-exact(.12)*point+exact(.5)*exact(state.local))
+    if config.missing_biomarkers:
+        logits.append(1-exact(.1)*point-exact(.8)*exact(state.illness))
+    result = Decimal(0)
+    for logit in logits:
+        z = _decimal(logit)
+        result += min(z, 0)-(1+(-abs(z)).exp()).ln()
+    return result
+
+
 def _decimal_posterior(point, terms, config, precision):
     kernels = []
     for i, term in enumerate(terms):
@@ -411,16 +426,7 @@ def _decimal_posterior(point, terms, config, precision):
         term = terms[i]
         value = (_decimal(kernel-reference)+_decimal(term.prior_weight).ln()
                  -_decimal_normalizer(term.law, precision))
-        logits = []
-        if config.selected_outcome:
-            logits.append(1-exact(.2)*point-exact(1.2)*exact(term.state.illness))
-        if config.survey_inclusion:
-            logits.append(exact(.7)-exact(.12)*point+exact(.5)*exact(term.state.local))
-        if config.missing_biomarkers:
-            logits.append(1-exact(.1)*point-exact(.8)*exact(term.state.illness))
-        for logit in logits:
-            z = _decimal(logit)
-            value += min(z, 0)-(1+(-abs(z)).exp()).ln()
+        value += _decimal_selection_log(point, term.state, config)
         logs.append(value)
     maximum = max(logs)
     probabilities = [(v-maximum).exp() if v-maximum > -3*precision else Decimal(0) for v in logs]
@@ -431,7 +437,7 @@ def _decimal_posterior(point, terms, config, precision):
     return result
 
 
-def _precise_posterior_contrast(factual, shifted, terms, frame, config):
+def _precise_posterior_contrast(factual, shifted, terms, frame, config, *, decimal_result=False):
     """Scale-aware precision for amplified posterior changes, before rounding.
 
     Exact local kernels and priors, analytic normalizers, and selection logits
@@ -457,8 +463,9 @@ def _precise_posterior_contrast(factual, shifted, terms, frame, config):
             after = [effect_fraction(d+moved-point,config,4*precision) for d in doses]
             contrast = sum((b-a)*_decimal(baselines[i]-baselines[0]+before[i]-before[0])
                            +b*_decimal(after[i]-before[i]) for i,(a,b) in enumerate(zip(first,second)))
-            values.append(wide(Fraction(contrast*_decimal(scale))))
-    return np.asarray(values, dtype=np.longdouble)
+            value = contrast*_decimal(scale)
+            values.append(value if decimal_result else wide(Fraction(value)))
+    return values if decimal_result else np.asarray(values, dtype=np.longdouble)
 
 
 def _posterior_contrast(factual, shifted, terms, frame, config):
@@ -541,7 +548,104 @@ def _quadrature_tail_budget(frame, config, policy, groups, tolerance):
     return float(2*wide(contrast)*relative/(1-relative))
 
 
+@lru_cache(maxsize=32)
+def _decimal_gauss(order, precision):
+    """Gauss-Legendre nodes and weights at the working response precision."""
+    from numpy.polynomial.legendre import leggauss
+    with localcontext() as context:
+        context.prec = precision
+        def polynomial(x):
+            previous, value = Decimal(1), x
+            for k in range(2, order+1):
+                previous, value = value, ((2*k-1)*x*value-(k-1)*previous)/k
+            derivative = order*(x*value-previous)/(x*x-1)
+            return value, derivative
+        pairs = []
+        for seed in leggauss(order)[0][order//2:]:
+            root = Decimal.from_float(float(seed))
+            for _ in range(30):
+                value, derivative = polynomial(root)
+                step = value/derivative
+                root -= step
+                if abs(step) < Decimal(10)**(5-precision):
+                    break
+            else:
+                raise ContractError("Gauss node refinement did not converge")
+            _, derivative = polynomial(root)
+            weight = 1/((1-root*root)*derivative*derivative)
+            pairs.extend(((Fraction((1-root)/2),weight),(Fraction((1+root)/2),weight)))
+        pairs.sort()
+        total = sum(weight for _,weight in pairs)
+        return tuple(v for v,_ in pairs), tuple(w/total for _,w in pairs)
+
+
+def _integrate_precise(frame, config, policy, groups, order, boundaries, eligibility):
+    """Carry local selection, mixture weights and contrasts through integration.
+
+    Increasing posterior precision alone is insufficient when the selected-law
+    measure varies below an absolute exposure's ULP. Nodes, weights, exact local
+    doses, selection and complete contrasts stay at the same working precision.
+    """
+    precision = next(iter(groups.values()))[0].precision
+    nodes, weights = _decimal_gauss(order, precision)
+    entries = []
+    mass_error = 0.
+    with localcontext() as context:
+        context.prec = precision
+        for key, terms in groups.items():
+            for term in terms:
+                rules = term.law.quadrature(order,boundaries[key])
+                # Independent ordinary-precision rule checks assignment mass;
+                # it also keeps the existing lost-mass diagnostic observable.
+                represented = logsumexp(np.concatenate([r.log_weights for r in rules]))
+                mass_error = max(mass_error,abs(float(np.expm1(represented))))
+                prior = _decimal(term.prior_weight).ln()
+                normalizer = _decimal_normalizer(term.law,precision)
+                scale = exact(config.registration_probability)/term.state.denominator_factor
+                for rule in rules:
+                    coordinates = replace(rule.coordinates,values=np.asarray(nodes,dtype=object))
+                    points = [coordinates.anchor+coordinates.unit*v for v in nodes]
+                    moved = np.array([any(lo <= p <= hi for lo,hi in eligibility[key[1]]) for p in points])
+                    observed = [Decimal(0)]*order
+                    causal = [Decimal(0)]*order
+                    for i in np.flatnonzero(moved):
+                        dose = points[i]-term.law.error-exact(config.migration)*exact(term.state.illness)
+                        change = (effect_fraction(dose+exact(policy.delta_mmhg),config,4*precision)
+                                  -effect_fraction(dose,config,4*precision))
+                        causal[i] = _decimal(scale*change)
+                    if len(terms) == 1:
+                        observed = causal
+                    elif moved.any():
+                        factual = coordinates.subset(moved)
+                        values = _precise_posterior_contrast(factual,factual.shifted(policy.delta_mmhg),
+                                                           terms,frame,config,decimal_result=True)
+                        for i,value in zip(np.flatnonzero(moved),values):
+                            observed[i] = value
+                    width = _decimal(coordinates.unit).ln()
+                    for point, weight, obs, cause in zip(points,weights,observed,causal):
+                        piece = next(p for p in term.law.pieces
+                                     if p.lower+term.law.error <= point <= p.upper+term.law.error)
+                        log_weight = (prior+width+weight.ln()+_decimal(term.law.kernel_at(piece,point))
+                                      -normalizer+_decimal_selection_log(point,term.state,config))
+                        entries.append((log_weight,obs,cause))
+        maximum = max(log_weight for log_weight,_,_ in entries)
+        mass, observed, causal = Decimal(0), Decimal(0), Decimal(0)
+        for log_weight, obs, cause in entries:
+            if log_weight-maximum <= -3*precision:
+                continue
+            weight = (log_weight-maximum).exp()
+            mass += weight
+            observed += weight*obs
+            causal += weight*cause
+        origin = sum((exact(w) for w in frame.weights),Fraction(0))
+        log_fraction = maximum+mass.ln()-_decimal(origin).ln()
+        values = np.array([wide(Fraction(observed/mass)),wide(Fraction(causal/mass))])
+        return values,wide(Fraction(log_fraction)),mass_error
+
+
 def _integrate(frame, config, policy, groups, order, boundaries_by_key, eligible_by_key):
+    if next(iter(groups.values()))[0].precision:
+        return _integrate_precise(frame,config,policy,groups,order,boundaries_by_key,eligible_by_key)
     mean_contrasts = np.zeros(2,dtype=np.longdouble)
     log_mass = -np.inf
     assignment_mass_error = 0.
@@ -614,6 +718,12 @@ def generate_suite_a(frame: CovariateFrame, config: SCMConfig, policy: ShiftOrSt
     """
     validate_seed(seed)
     validate_policy_domain(policy)
+    if isinstance(tolerance, np.integer):
+        tolerance = int(tolerance)
+    elif isinstance(tolerance, np.floating) and tolerance.dtype.itemsize <= 8:
+        tolerance = float(tolerance)
+    if isinstance(max_order, np.integer):
+        max_order = int(max_order)
     require(type(tolerance) in (int, float) and (type(tolerance) is int or np.isfinite(tolerance)) and tolerance > 0
             and type(max_order) is int and max_order >= 32, "invalid integration controls")
     eligible_by_key = {key:exact_shift_intervals(c,policy.delta_mmhg) for key,c in policy.components_by_key}
@@ -689,7 +799,7 @@ class PairedWorld(Immutable):
     def intervene(self, a):
         validate_numeric(a, "intervention_dose", "intervention doses")
         dose = np.asarray(a)
-        require(dose.shape == (len(self.h_s),) and np.isfinite(dose).all(), "intervention alignment")
+        require(dose.shape == (len(self.h_s),), "intervention alignment")
         tau = exact(self.structural_effect)
         try:
             response = np.array([float(exact(y)+tau*(exact(d)-exact(s)))
