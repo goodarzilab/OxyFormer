@@ -111,6 +111,20 @@ class CheckpointRequest:
                 signal.signal(sig, handler)
 
 
+_NUMPY_GENERATORS = {kind.__name__: kind for kind in (
+    np.random.MT19937, np.random.PCG64, np.random.PCG64DXSM, np.random.Philox, np.random.SFC64,
+)}
+
+
+def _numpy_state(value):
+    """Copy native NumPy state into the checkpoint codec's plain containers."""
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, dict):
+        return {key: _numpy_state(item) for key, item in value.items()}
+    return value
+
+
 def capture_rng(device: torch.device | str = "cpu") -> dict:
     """Capture global CPU RNGs and only the selected training accelerator.
 
@@ -119,10 +133,10 @@ def capture_rng(device: torch.device | str = "cpu") -> dict:
     """
     device = torch.device(device)
     require(device.type in ("cpu", "cuda"), "unsupported RNG device")
-    numpy_state = np.random.get_state()
+    numpy_state = _numpy_state(np.random.get_state(legacy=False))
     return {
         "python": random.getstate(),
-        "numpy": (numpy_state[0], numpy_state[1].tolist(), *numpy_state[2:]),
+        "numpy": numpy_state,
         "torch": torch.get_rng_state(),
         "cuda": torch.cuda.get_rng_state(device) if device.type == "cuda" else None,
     }
@@ -135,8 +149,12 @@ def restore_rng(state: dict, device: torch.device | str = "cpu") -> None:
     if device.type == "cuda":
         require(torch.cuda.is_available(), "checkpoint requires CUDA RNG")
     random.setstate(state["python"])
-    kind, keys, pos, gaussian, cached = state["numpy"]
-    np.random.set_state((kind, np.asarray(keys, dtype=np.uint32), pos, gaussian, cached))
+    numpy_state = state["numpy"]
+    kind = _NUMPY_GENERATORS.get(numpy_state["bit_generator"])
+    require(kind is not None, "unsupported NumPy bit generator")
+    if type(np.random.get_bit_generator()) is not kind:
+        np.random.set_bit_generator(kind(0))
+    np.random.set_state(numpy_state)
     torch.set_rng_state(state["torch"])
     if device.type == "cuda":
         torch.cuda.set_rng_state(state["cuda"], device)

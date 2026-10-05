@@ -66,6 +66,7 @@ class _NumericalPolicy:
     autocast: bool = False
     gradients: bool = True
     inference: bool = False
+    numpy_bit_generator: str = "MT19937"
 
     def identity(self):
         return {"execution_" + key: str(value) for key, value in asdict(self).items()}
@@ -79,9 +80,14 @@ class _NumericalPolicy:
             for kind in ("cpu",) + (("cuda",) if device.type == "cuda" else ()):
                 stack.enter_context(torch.autocast(kind, enabled=self.autocast))
             caller_rng = capture_rng(device)
+            caller_numpy_generator = np.random.get_bit_generator()
             try:
+                # Own the training stream independently of the caller's selected
+                # NumPy generator, retaining the registered legacy seed stream.
+                np.random.set_bit_generator(np.random.MT19937(0))
                 yield
             finally:
+                np.random.set_bit_generator(caller_numpy_generator)
                 restore_rng(caller_rng, device)
 
 
@@ -199,6 +205,11 @@ def _population_moments(values):
     scaled = [Fraction(value) / factor for value in values]
     mean = float(statistics.mean(scaled) * factor)
     scale = math.ldexp(float(statistics.pstdev(scaled)), exponent)
+    if scale == 0.:
+        # Nonconstant data can have a std below half a binary64 subnormal.
+        # FeatureSpec requires a positive binary64 scale; retain the closest
+        # positive representation instead of rounding it to an invalid zero.
+        scale = math.ulp(0.)
     require(math.isfinite(mean) and math.isfinite(scale) and scale > 0,
             "population moments are not representable")
     return mean, scale

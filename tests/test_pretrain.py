@@ -415,6 +415,24 @@ def test_population_moments_rescale_before_variance(tmp_path, magnitude):
     assert feature.scale == statistics.pstdev(values)
 
 
+@pytest.mark.parametrize("sign", [1, -1])
+def test_smallest_subnormal_spread_keeps_a_positive_fitted_scale(tmp_path, sign):
+    from oxyformer.training.pretrain import _population_moments
+    quantum = math.ulp(0.)
+    values = [0., sign * quantum] * 3
+    mean, scale = _population_moments(values)
+    # The exact std is half a quantum; FeatureSpec stores positive binary64.
+    assert mean == 0. and scale == quantum
+    view, split, config = make_case(tmp_path)
+    view = replace(view, values=tuple((value, row[1], row[2]) for value, row in
+                                     zip(values + [0., sign * quantum] * 2, view.values)))
+    artifact = pretrain(view, split, replace(config, settings=replace(config.settings,
+                                                                     max_epochs=1)), 1103)
+    assert artifact.complete
+    feature = FeatureSpec.from_json(load_checkpoint(artifact, artifact.identity)["preprocessing"][0])
+    assert feature.mean == mean and feature.scale == scale
+
+
 def test_subnormal_variance_accepts_finite_float32_stopping_target(tmp_path):
     view, split, config = make_case(tmp_path)
     names = tuple(f"x{i}" for i in range(30))

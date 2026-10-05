@@ -124,6 +124,54 @@ def test_rng_roundtrip_restores_python_numpy_and_torch():
     assert_state_equal(expected, actual)
 
 
+@pytest.mark.parametrize("kind", [np.random.MT19937, np.random.PCG64, np.random.PCG64DXSM,
+                                  np.random.Philox, np.random.SFC64])
+def test_numpy_bit_generators_roundtrip_and_preserve_caller(tmp_path, kind, monkeypatch):
+    original = np.random.get_bit_generator()
+    original_state = np.random.get_state(legacy=False)
+    try:
+        caller = kind(123)
+        np.random.set_bit_generator(caller)
+        np.random.standard_normal()  # Populate the legacy Gaussian cache too.
+        state = capture_rng()
+        expected = np.random.standard_normal(7).tolist()
+        restore_rng(state)
+        assert np.random.standard_normal(7).tolist() == expected
+        np.random.set_bit_generator(np.random.SFC64(321) if kind is np.random.MT19937
+                                    else np.random.MT19937(321))
+        restore_rng(state)
+        caller = np.random.get_bit_generator()
+        assert type(caller) is kind
+        assert_state_equal(capture_rng(), state)
+        view, split, config = make_case(tmp_path)
+        full = pretrain(view, split, config, 1103)
+        assert np.random.get_bit_generator() is caller
+        assert_state_equal(capture_rng(), state)
+        first = pretrain(view, split, replace(config, max_batches=1,
+                                             output_dir=str(tmp_path / "first")), 1103)
+        # A resumed slice must not depend on the caller's current generator.
+        np.random.set_bit_generator(np.random.SFC64(321))
+        other = np.random.get_bit_generator()
+        other_state = capture_rng()
+        resumed = pretrain(view, split, replace(config, predecessor=first,
+                                               output_dir=str(tmp_path / "resumed")), 1103)
+        assert np.random.get_bit_generator() is other
+        assert_state_equal(capture_rng(), other_state)
+        assert_state_equal(load_checkpoint(full, full.identity),
+                           load_checkpoint(resumed, resumed.identity))
+        import oxyformer.training.pretrain as module
+        def fail_forward(*args):
+            raise RuntimeError("synthetic training failure")
+        monkeypatch.setattr(module.MaskedReconstructor, "forward", fail_forward)
+        with pytest.raises(RuntimeError, match="synthetic training failure"):
+            pretrain(view, split, replace(config, output_dir=str(tmp_path / "failed")), 1103)
+        assert np.random.get_bit_generator() is other
+        assert_state_equal(capture_rng(), other_state)
+    finally:
+        np.random.set_bit_generator(original)
+        np.random.set_state(original_state)
+
+
 @pytest.mark.parametrize("change", ["values", "ids", "order", "split", "config", "seed", "code", "environment", "preprocessing"])
 def test_reuse_requires_identical_scientific_identity(tmp_path, monkeypatch, change):
     import oxyformer.training.pretrain as module
