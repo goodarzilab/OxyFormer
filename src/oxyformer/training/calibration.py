@@ -111,13 +111,18 @@ def fit_affine(logits, weights, *, original_ids, fold_ids, partitions,
                 "calibration predictions do not match held-out partition")
     z, labels, mass = paired_tensors(logits, weights)
     with torch.inference_mode(False), torch.enable_grad(), torch.autocast(z.device.type, enabled=False):
-        center = (mass * z).sum()
-        scale = ((z - center).square() * mass).sum().sqrt()
+        # Normalize magnitude before squaring: valid FP32 logits can have a
+        # representable standard deviation but unrepresentable squared values.
+        magnitude = z.abs().max()
+        magnitude = torch.where(magnitude > 0, magnitude, torch.ones_like(magnitude))
+        normalized = z / magnitude
+        center = (mass * normalized).sum()
+        scale = ((normalized - center).square() * mass).sum().sqrt()
         require(bool(torch.isfinite(scale)), "nonfinite calibration scale")
         if float(scale) == 0:
             slope, intercept = 0., 0.
         else:
-            x = (z - center) / scale
+            x = (normalized - center) / scale
             parameter = torch.zeros(2, dtype=torch.float32, device=z.device, requires_grad=True)
             optimizer = torch.optim.LBFGS([parameter], lr=1., max_iter=100,
                                          tolerance_grad=1e-7, tolerance_change=1e-9,
@@ -133,7 +138,7 @@ def fit_affine(logits, weights, *, original_ids, fold_ids, partitions,
                 return loss
 
             optimizer.step(closure)
-            slope = float((parameter[0] / scale).detach())
+            slope = float(((parameter[0] / scale) / magnitude).detach())
             intercept = float((parameter[1] - parameter[0] * center / scale).detach())
     require(math.isfinite(slope) and math.isfinite(intercept), "nonfinite affine coefficients")
     result = AffineCalibration(slope=slope, intercept=intercept, class_prior=.5,
