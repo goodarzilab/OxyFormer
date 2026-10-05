@@ -155,7 +155,7 @@ def _sample_observations(frame, config, policy, seed):
         state, dose, true_dose, flag, survey, geo_noise = geographies[geo]
         if cluster not in clusters:
             clusters[cluster] = rng.normal()
-        factor = 1 + config.denominator_error * float(rng.choice([-1, 1]))
+        factor = 1 + exact(config.denominator_error) * int(rng.choice([-1, 1]))
         state = replace(state, denominator_factor=factor)
         _, _, pbio = observation_probabilities(dose, state, config)
         flag = flag and frame.outcome_available[i]
@@ -168,7 +168,7 @@ def _sample_observations(frame, config, policy, seed):
             intensity = count_event_rate(true_dose, frame, i, state, config, poisson_intensity=True)
             true_events = rng.poisson(intensity)
             count = int(rng.binomial(true_events, config.registration_probability))
-            denominator = 100 * factor
+            denominator = float(100 * factor)
             outcome = count / denominator
         else:
             mean = float(structural_mean(dose-state.error, frame, i, state, config))

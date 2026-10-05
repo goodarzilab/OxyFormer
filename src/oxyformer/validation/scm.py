@@ -225,14 +225,17 @@ class LatentState:
     regional: float = 0.0
     illness: float = 0.0
     error: float = 0.0
-    denominator_factor: float = 1.0
+    denominator_factor: Fraction | float = 1.0
 
     def __post_init__(self):
         require(self.local in (-1., 0., 1.) and self.regional in (-1., 0., 1.)
                 and self.illness in (0., 1.), "invalid latent causes")
         validate_numeric(abs(self.error), "exposure_error", "latent exposure error", allow_zero=True)
-        require(np.isfinite(self.denominator_factor) and 0 < self.denominator_factor < 2,
-                "invalid latent denominator factor")
+        factor = self.denominator_factor
+        require(isinstance(factor, Fraction) or np.isfinite(factor), "invalid latent denominator factor")
+        factor = exact(factor)
+        require(0 < factor < 2, "invalid latent denominator factor")
+        object.__setattr__(self, "denominator_factor", factor)
 
 
 def latent_states(config: SCMConfig):
@@ -241,7 +244,8 @@ def latent_states(config: SCMConfig):
     regional = [(-1., .5), (1., .5)] if config.regional_confounding != "none" else [(0., 1.)]
     illness = [(0., .7), (1., .3)] if config.has_illness else [(0., 1.)]
     error = [(-config.exposure_error, .5), (config.exposure_error, .5)] if config.exposure_error else [(0., 1.)]
-    denom = [(1-config.denominator_error, .5), (1+config.denominator_error, .5)] if config.denominator_error else [(1., 1.)]
+    error_size = exact(config.denominator_error)
+    denom = [(1-error_size, .5), (1+error_size, .5)] if error_size else [(Fraction(1), 1.)]
     for states in product(local, regional, illness, error, denom):
         yield LatentState(*(s[0] for s in states)), float(np.prod([s[1] for s in states]))
 
@@ -279,7 +283,7 @@ def structural_mean(a_true, frame, row, state, config):
                 + exact(config.local_strength)*exact(state.local)
                 + exact(config.regional_strength)*exact(state.regional) + 2*exact(state.illness))
     mean = wide(baseline) + effect(np.asarray(a_true) - config.migration * state.illness, config)
-    return config.registration_probability * mean / state.denominator_factor
+    return config.registration_probability * mean / wide(state.denominator_factor)
 
 
 def _count_baseline(frame, row, state, config):
@@ -435,7 +439,11 @@ def observation_probabilities(a_observed, state, config):
 
 def exact(value):
     """Exact geometry of a declared float, not a decimal reinterpretation."""
-    return value if isinstance(value, Fraction) else Fraction(float(value))
+    if isinstance(value, Fraction):
+        return value
+    if hasattr(value, "as_integer_ratio"):
+        return Fraction(*value.as_integer_ratio())
+    return Fraction(value)
 
 
 def exact_shift_intervals(components, delta):
@@ -462,6 +470,24 @@ def wide(value):
     return np.longdouble(value)
 
 
+def directed_bound(value, *, upward):
+    """Round a rational toward the interior of a closed longdouble bound.
+
+    Compare each candidate as a rational, including the adjacent float, so the
+    decision does not depend on the rounding in numerator/denominator division.
+    All simulator geometry lies within longdouble's finite exponent range.
+    """
+    rounded = wide(value)
+    direction = np.longdouble(np.inf if upward else -np.inf)
+    while (exact(rounded) < value if upward else exact(rounded) > value):
+        rounded = np.nextafter(rounded, direction)
+    while True:
+        neighbour = np.nextafter(rounded, -direction)
+        if (exact(neighbour) < value if upward else exact(neighbour) > value):
+            return rounded
+        rounded = neighbour
+
+
 @dataclass(frozen=True)
 class LocalCoordinates:
     """anchor + unit*values; offsets are never absorbed into the anchor.
@@ -485,8 +511,11 @@ class LocalCoordinates:
         return replace(self, values=self.values[mask])
 
     def inside(self, lower, upper):
-        return ((self.values >= wide((exact(lower)-self.anchor)/self.unit))
-                & (self.values <= wide((exact(upper)-self.anchor)/self.unit)))
+        # A nearest-rounded rational cutoff can include an excluded node. Use
+        # the first/last representable value *inside* each exact closed bound.
+        lower = directed_bound((exact(lower)-self.anchor)/self.unit, upward=True)
+        upper = directed_bound((exact(upper)-self.anchor)/self.unit, upward=False)
+        return (self.values >= lower) & (self.values <= upper)
 
 
 @dataclass(frozen=True)
@@ -561,10 +590,11 @@ class AssignmentLaw:
         self.error = exact(state.error)
         self.scale = exact(config.near_scale)
         self.near = config.assignment == "near_deterministic"
-        rate = -4. if config.extreme_ratios else 0.
+        rate = Fraction(-4 if config.extreme_ratios else 0)
         if not self.near:
-            rate += .3*state.local+.2*state.regional-.25*state.illness
-        self.rate = exact(rate)
+            rate += (exact(.3)*exact(state.local)+exact(.2)*exact(state.regional)
+                     -exact(.25)*exact(state.illness))
+        self.rate = rate
         lo,hi = components[0][0],components[-1][1]
         self.center = exact(lo+(hi-lo)*float(expit(frame.coordinates[row][0]
                             +.2*state.local+.1*state.regional-.2*state.illness)))
@@ -600,8 +630,9 @@ class AssignmentLaw:
                 +piece.peak_kernel-self.kernel_reference)
 
     def contains(self, a_observed):
-        a = np.asarray(a_observed)-float(self.error)
-        return np.logical_or.reduce([(a >= lo) & (a <= hi) for lo,hi in self.components])
+        a = np.asarray(a_observed)
+        return np.array([any(p.lower+self.error <= exact(value) <= p.upper+self.error
+                             for p in self.pieces) for value in a.ravel()]).reshape(a.shape)
 
     def log_density(self, a_observed):
         # Convenience for ordinary recorded exposures. Truth posterior evaluation
