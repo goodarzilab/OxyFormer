@@ -1,0 +1,1326 @@
+"""Offline synthetic tests: no downloaded population, raster, or health data."""
+from dataclasses import asdict, replace
+from fractions import Fraction
+from hashlib import sha256
+import io
+import json
+from pathlib import Path
+import tarfile
+import zipfile
+import geopandas as gpd
+import numpy as np
+import pandas as pd
+import pytest
+from pyproj import CRS
+import rasterio
+from rasterio.transform import from_origin
+from shapely.geometry import box, Polygon
+import yaml
+from oxyformer.contracts import StageRequest
+from oxyformer.data.source_manifest import load_source
+from oxyformer.exposure.build import ExposureSources, build_exposure, run_stage
+from oxyformer.exposure.census_blocks import read_census_blocks, read_sf1_population
+from oxyformer.exposure.physics import PHYSICS, pressure_mmhg, inspired_oxygen_mmhg, oxygen_deficit_mmhg
+from oxyformer.exposure.population_allocation import AllocationSpec, DemTile, RasterSampler, PRIMARY, FALLBACK
+from oxyformer.exposure.quality import weighted_quantiles, placement_quantiles
+from oxyformer.provenance import ContractError, canonical_json, file_hash
+
+ROOT = Path(__file__).resolve().parents[1]
+SPEC = AllocationSpec(grid_size_m=100)
+H = 'a' * 64
+
+
+def write_raster(path, values=(0, 3000), crs='EPSG:5070', nodata=-9999):
+    with rasterio.open(path, 'w', driver='GTiff', height=1, width=len(values), count=1,
+                       dtype='float64', crs=crs, transform=from_origin(0, 100, 100, 100), nodata=nodata) as ds:
+        ds.write(np.array([values], dtype=float), 1)
+        ds.set_band_unit(1, 'm')
+    return DemTile(resource_id='synthetic', path=str(path), sha256=file_hash(path), crs=crs,
+                   nodata=nodata, vertical_unit='m', vertical_datum='NAVD88')
+
+
+def blocks(pop=(40, 60), state='01'):
+    ids = [state + '0010001001001', state + '0010001001002']
+    return gpd.GeoDataFrame({'block_id': ids, 'tract_id': [x[:11] for x in ids], 'population': pop},
+                           geometry=[box(0, 0, 100, 100), box(100, 0, 200, 100)], crs='EPSG:5070')
+
+
+def sources(tile):
+    return ExposureSources(identities=(('synthetic_census', H),), dem_tiles=(tile,))
+
+
+def test_sea_level_and_owner_constants():
+    approved = yaml.safe_load((ROOT / 'configs/approvals.yaml').read_text())['owner_decisions']['exposure']
+    for name, value in asdict(PHYSICS).items():
+        if name in approved:
+            assert value == approved[name]
+    assert pressure_mmhg(0) == 760
+    assert inspired_oxygen_mmhg(0) == pytest.approx(0.2093 * (760 - 47))
+    assert oxygen_deficit_mmhg(0) == 0
+    assert pressure_mmhg(0) * PHYSICS.pa_per_mmhg == 101325
+    z = np.linspace(-500, 11000, 100)
+    assert np.all(np.diff(pressure_mmhg(z)) < 0)
+    assert np.all(np.diff(oxygen_deficit_mmhg(z)) > 0)
+    assert oxygen_deficit_mmhg(-100) < 0
+
+
+@pytest.mark.parametrize('height', [np.nan, np.inf, -501, 11001])
+def test_invalid_physical_domain(height):
+    with pytest.raises(ContractError, match='validity'):
+        pressure_mmhg(height)
+
+
+def test_transform_before_average(tmp_path):
+    tile = write_raster(tmp_path / 'dem.tif')
+    result, qc = build_exposure(sources(tile), blocks(), SPEC)
+    expected = np.dot([0.4, 0.6], pressure_mmhg([0, 3000]))
+    wrong = pressure_mmhg(1800)
+    assert abs(expected - wrong) > 1
+    np.testing.assert_allclose(result.pressure_mmhg, expected, rtol=1e-12)
+    np.testing.assert_allclose(result.oxygen_deficit_mmhg, np.dot([0.4, 0.6], oxygen_deficit_mmhg([0, 3000])))
+    assert qc['population'] == 100 and qc['block_count'] == 2
+    assert set(result.population) == {100}
+    assert set(result.covered_population) == {100}
+    assert set(result.elevation_p10_m) == {0} and set(result.elevation_p90_m) == {3000}
+    assert all('placement-dependent' in x for x in result.quantile_interpretation)
+
+
+def test_distributed_transform_before_average_and_split_invariance(tmp_path):
+    tile = write_raster(tmp_path / 'dem.tif')
+    split = blocks(pop=(50, 50))
+    whole = split.iloc[:1].copy()
+    whole.loc[0, 'population'] = 100
+    whole.loc[0, 'geometry'] = box(0, 0, 200, 100)
+    spec = replace(SPEC, scenarios=('distributed',))
+    a, _ = build_exposure(sources(tile), whole, spec)
+    b, _ = build_exposure(sources(tile), split, spec)
+    assert a.pressure_mmhg.iloc[0] == pytest.approx(np.mean(pressure_mmhg([0, 3000])))
+    for col in ['population', 'pressure_mmhg', 'oxygen_deficit_mmhg', 'elevation_p10_m', 'elevation_p90_m']:
+        np.testing.assert_allclose(a[col], b[col], rtol=1e-12)
+
+
+@pytest.mark.parametrize('bad,reason', [(-9999, 'nodata'), (12000, 'outside_physical_domain'), (np.nan, 'nodata')])
+def test_missing_population_cannot_disappear(tmp_path, bad, reason):
+    tile = write_raster(tmp_path / 'dem.tif', [0, bad])
+    result, qc = build_exposure(sources(tile), blocks(), SPEC)
+    assert result.pressure_mmhg.isna().all() and result.oxygen_deficit_mmhg.isna().all()
+    assert set(result.population) == {100} and set(result.missing_population) == {60}
+    assert sum(r[reason] for r in qc['blocks'] if r['scenario'] == 'distributed') == 60
+    assert result.elevation_p10_m.isna().all()
+
+
+def test_outside_coverage_and_zero_population(tmp_path):
+    tile = write_raster(tmp_path / 'dem.tif', [0])
+    result, qc = build_exposure(sources(tile), blocks(), SPEC)
+    assert set(result.missing_population) == {60}
+    assert sum(r['outside_coverage'] for r in qc['blocks']) == 120  # separate scenarios
+    result, qc = build_exposure(sources(tile), blocks(pop=(40, 0)), SPEC)
+    assert result.pressure_mmhg.eq(760).all() and qc['block_count'] == 2
+    result, qc = build_exposure(sources(tile), blocks(pop=(0, 0)), SPEC)
+    assert result.status.eq('zero_population').all() and result.pressure_mmhg.isna().all()
+    assert len(qc['blocks']) == 4
+
+
+@pytest.mark.parametrize('change,message', [({'crs': 'EPSG:4326'}, 'CRS mismatch'),
+    ({'vertical_unit': 'ft'}, 'metres'), ({'vertical_datum': 'ellipsoid'}, 'datum'),
+    ({'nodata': None}, 'nodata mismatch'), ({'sha256': 'b' * 64}, 'hash mismatch'),
+    ({'product': FALLBACK}, 'fallback only')])
+def test_raster_metadata_validation(tmp_path, change, message):
+    tile = write_raster(tmp_path / 'dem.tif')
+    with pytest.raises(ContractError, match=message):
+        build_exposure(sources(replace(tile, **change)), blocks(), SPEC)
+
+
+def test_reprojection_and_input_boundary(tmp_path):
+    tile = write_raster(tmp_path / 'dem.tif')
+    a, _ = build_exposure(sources(tile), blocks(), SPEC)
+    b, _ = build_exposure(sources(tile), blocks().to_crs('EPSG:4326'), replace(SPEC, scenarios=('centroid',)))
+    assert a.pressure_mmhg.iloc[0] == pytest.approx(b.pressure_mmhg.iloc[0])
+    for forbidden in ['outcome', 'learned_weight', 'gradient']:
+        contaminated = blocks().assign(**{forbidden: [123, 999]})
+        with pytest.raises(ContractError, match='only block'):
+            build_exposure(sources(tile), contaminated, SPEC)
+    with pytest.raises(ContractError, match='CRS'):
+        build_exposure(sources(tile), blocks().set_crs(None, allow_override=True), SPEC)
+    with pytest.raises(ContractError, match='tract membership'):
+        build_exposure(sources(tile), blocks().assign(tract_id='00000000000'), SPEC)
+
+
+def write_census_archives(directory, state='AL', fips='01', mismatch=False, missing=False):
+    directory.mkdir(exist_ok=True)
+    b = blocks(state=fips)
+    geo = gpd.GeoDataFrame({'BLOCKID10': b.block_id, 'STATEFP10': fips, 'COUNTYFP10': '001',
+        'TRACTCE10': '000100', 'BLOCKCE': ['1001', '1002'], 'POP10': [40, 61 if mismatch else 60]},
+        geometry=b.geometry, crs=b.crs)
+    stem = f'tabblock2010_{fips}_pophu'
+    geo.to_file(directory / (stem + '.shp'))
+    block_zip = directory / 'blocks.zip'
+    with zipfile.ZipFile(block_zip, 'w') as z:
+        for suffix in ('.shp', '.shx', '.dbf', '.prj'):
+            z.write(directory / (stem + suffix), stem + suffix)
+        z.writestr('unneeded.txt', 'do not extract')
+    records = [('040', fips, 100), ('140', fips + '001000100', 100)]
+    records += [('101', row.block_id, row.population) for row in b.itertuples()]
+    geographic, segment = [], []
+    # Independent literal fixture offsets from SF1 geographic header (not reader constants).
+    for n, (level, ident, pop) in enumerate(records, 1):
+        line = list(' ' * 500)
+        for start, value in [(0, 'SF1ST '), (6, state), (8, level), (11, '00'), (13, '000'),
+                (16, '00'), (18, f'{n:07}'), (27, fips), (318, f'{pop:09}')]:
+            line[start:start + len(value)] = value
+        if level != '040':
+            line[29:32], line[54:60] = ident[2:5], ident[5:11]
+        if level == '101':
+            line[61:65] = ident[11:15]
+        geographic.append(''.join(line))
+        segment.append(f'SF1ST,{state},000,01,{n:07},{pop}')
+    sf_zip = directory / 'sf1.zip'
+    with zipfile.ZipFile(sf_zip, 'w') as z:
+        z.writestr(state.lower() + 'geo2010.sf1', '\n'.join(geographic) + '\n')
+        z.writestr(state.lower() + '000012010.sf1', '\n'.join(segment[:-1] if missing else segment) + '\n')
+        z.writestr(state.lower() + '000022010.sf1', 'not read')
+    return block_zip, sf_zip
+
+
+def test_census_reader_ids_population_and_inventory(tmp_path):
+    bzip, szip = write_census_archives(tmp_path)
+    table = read_census_blocks(bzip, szip, state_abbreviation='AL', state_fips='01')
+    assert table.block_id.tolist() == blocks().block_id.tolist()
+    assert table.population.tolist() == [40, 60]
+    assert table.tract_id.tolist() == blocks().tract_id.tolist()
+    assert set(p.name for p in tmp_path.iterdir()).isdisjoint({'unneeded.txt', 'al000022010.sf1'})
+
+
+@pytest.mark.parametrize('mismatch,missing,message', [(True, False, 'TIGER/SF1'), (False, True, 'missing SF1')])
+def test_census_join_failures(tmp_path, mismatch, missing, message):
+    bzip, szip = write_census_archives(tmp_path, mismatch=mismatch, missing=missing)
+    with pytest.raises(ContractError, match=message):
+        read_census_blocks(bzip, szip, state_abbreviation='AL', state_fips='01')
+
+
+def acquisition(directory, name, resource_files):
+    tar_path = directory / (name + '.tar')
+    resources = []
+    with tarfile.open(tar_path, 'w') as tar:
+        for rid, path in resource_files:
+            destination = name + '/' + rid + path.suffix
+            tar.add(path, arcname=destination)
+            resources.append(dict(id=rid, destination=destination, sha256=file_hash(path)))
+    source = load_source('census') if name == 'census' else {'synthetic': True}
+    receipt = dict(status='complete', manifest_id=name, manifest_sha256=sha256(canonical_json(source).encode()).hexdigest(),
+                   payload_sha256=file_hash(tar_path), resources=resources)
+    receipt_path = directory / (name + '-receipt.json')
+    receipt_path.write_text(canonical_json(receipt))
+    return receipt_path, tar_path
+
+
+def request(directory, stage, task, dependencies, config=None):
+    directory.mkdir(exist_ok=True)
+    task_path = directory / 'task.json'
+    task_path.write_text(canonical_json(task))
+    config_path = directory / 'config.yaml'
+    config_path.write_text(yaml.safe_dump(config or yaml.safe_load((ROOT / 'configs/exposure.yaml').read_text())))
+    return StageRequest(stage=stage, config_path=str(config_path), config_hash=file_hash(config_path),
+        task_path=str(task_path), task_hash=file_hash(task_path), dependency_paths=tuple(map(str, dependencies)),
+        dependency_hashes=tuple(file_hash(p) for p in dependencies), output_dir=str(directory / 'out'), code_identity='b' * 40)
+
+
+@pytest.fixture
+def shard_fixture(tmp_path, monkeypatch):
+    # Explicit synthetic DEM inventory; production uses the merged source registry.
+    monkeypatch.setattr('oxyformer.exposure.build.load_source',
+                        lambda name: {'synthetic': True} if name == 'dem' else load_source(name))
+    census_files = []
+    for state, fips in [('AL', '01'), ('AZ', '04')]:
+        bzip, szip = write_census_archives(tmp_path / state, state, fips)
+        census_files.extend([('blocks_' + fips, bzip), ('sf1_' + state.lower(), szip)])
+    census = acquisition(tmp_path, 'census', census_files)
+    tile = write_raster(tmp_path / 'dem.tif')
+    dem = acquisition(tmp_path, 'dem', [('synthetic', Path(tile.path))])
+    inventory = tmp_path / 'inventory.json'
+    inventory.write_text(canonical_json(dict(schema_version=1, kind='atlas_shards', approval_reference='synthetic-review',
+        groups=[dict(id=state, jurisdictions=[state], dem_resources=['synthetic']) for state in ['AL', 'AZ']])))
+    deps = [inventory, *census, *dem]
+    paths = []
+    for state in ['AL', 'AZ']:
+        task = dict(schema_version=1, review_status='reviewed', review_id='synthetic', shard_manifest=0, shard_id=state,
+                    census=dict(receipt=1, payload=2), dem=dict(receipt=3, payload=4),
+                    raster_metadata={'synthetic': dict(crs=tile.crs, nodata=tile.nodata, vertical_unit='m',
+                                                       vertical_datum='NAVD88', product=PRIMARY, fallback_reason=None)})
+        req = request(tmp_path / ('shard-' + state), 'exposure-atlas', task, deps)
+        result = run_stage(req)
+        assert result.status == 'pass', result.message
+        result.verify(req)
+        out = Path(req.output_dir)
+        assert sorted(p.name for p in out.iterdir()) == ['artifact_manifest.json', 'exposure.parquet', 'quality.json']
+        paths.extend([out / 'artifact_manifest.json', out / 'exposure.parquet', out / 'quality.json'])
+    return inventory, paths
+
+
+def collect_request(directory, inventory, paths, reverse=False):
+    binding = [dict(manifest=1, exposure=2, quality=3), dict(manifest=4, exposure=5, quality=6)]
+    if reverse:
+        binding.reverse()
+    task = dict(schema_version=1, review_status='reviewed', review_id='synthetic', shard_manifest=0, shards=binding)
+    return request(directory, 'atlas-collect', task, [inventory, *paths])
+
+
+def test_reproducible_collection(tmp_path, shard_fixture):
+    inventory, paths = shard_fixture
+    a = collect_request(tmp_path / 'collection-a', inventory, paths)
+    b = collect_request(tmp_path / 'collection-b', inventory, paths, reverse=True)
+    for req in [a, b]:
+        result = run_stage(req)
+        assert result.status == 'pass', result.message
+        result.verify(req)
+    for name in ['atlas.parquet', 'quality.json']:
+        assert file_hash(Path(a.output_dir) / name) == file_hash(Path(b.output_dir) / name)
+    atlas = pd.read_parquet(Path(a.output_dir) / 'atlas.parquet')
+    assert len(atlas) == 4 and atlas.population.sum() == 400
+
+
+def test_missing_shard_collection(tmp_path, shard_fixture):
+    inventory, paths = shard_fixture
+    req = collect_request(tmp_path / 'collection', inventory, paths)
+    task = json.loads(Path(req.task_path).read_text())
+    task['shards'].pop()
+    Path(req.task_path).write_text(canonical_json(task))
+    req = replace(req, task_hash=file_hash(req.task_path))
+    result = run_stage(req)
+    assert result.status == 'fail' and 'missing shards' in result.message
+    assert not list(Path(req.output_dir).glob('atlas.parquet'))
+
+
+@pytest.mark.parametrize('kind', ['physical', 'source', 'overlap', 'hash'])
+def test_collection_rejects_inconsistency(tmp_path, shard_fixture, kind):
+    inventory, paths = shard_fixture
+    if kind in ('physical', 'source'):
+        quality = json.loads(paths[5].read_text())
+        quality['physical_spec']['sea_level_pressure_mmhg'] += 1 if kind == 'physical' else 0
+        if kind == 'source':
+            quality['source_identities']['dem_receipt'] = 'e' * 64
+        paths[5].write_text(canonical_json(quality))
+        manifest = json.loads(paths[3].read_text())
+        manifest['files']['quality.json'] = file_hash(paths[5])
+        manifest['source_identities'] = quality['source_identities']
+        paths[3].write_text(canonical_json(manifest))
+    if kind == 'overlap':
+        for source, destination in zip(paths[:3], paths[3:]):
+            destination.write_bytes(source.read_bytes())
+    req = collect_request(tmp_path / 'collection', inventory, paths)
+    if kind == 'hash':
+        paths[2].write_text('{}')
+    result = run_stage(req)
+    assert result.status == 'fail', result.message
+    assert not (Path(req.output_dir) / 'atlas.parquet').exists()
+
+
+def test_unused_census_name_bytes_do_not_change_numeric_reader(tmp_path):
+    _, archive = write_census_archives(tmp_path)
+    with zipfile.ZipFile(archive) as z:
+        contents = {name: z.read(name) for name in z.namelist()}
+    geography = bytearray(contents['algeo2010.sf1'])
+    geography[226:230] = b'Pe\xf1a'  # unused NAME, fixed byte positions retained
+    contents['algeo2010.sf1'] = bytes(geography)
+    with zipfile.ZipFile(archive, 'w') as z:
+        for name, data in contents.items():
+            z.writestr(name, data)
+    table = read_sf1_population(archive, 'AL', '01')
+    assert table.block_id.tolist() == blocks().block_id.tolist()
+    assert table.population.tolist() == [40, 60]
+
+
+def test_undeclared_mask_is_ignored_but_internal_mask_is_accounted(tmp_path):
+    tile = write_raster(tmp_path / 'dem.tif', [0, 0])
+    with rasterio.Env(GDAL_TIFF_INTERNAL_MASK=False):
+        with rasterio.open(tile.path, 'r+') as ds:
+            ds.write_mask(np.zeros((1, 2), dtype='uint8'))
+    assert Path(tile.path + '.msk').exists()
+    assert file_hash(tile.path) == tile.sha256
+    result, qc = build_exposure(sources(tile), blocks(), SPEC)
+    assert result.pressure_mmhg.eq(760).all() and result.missing_population.eq(0).all()
+    # The environment change is scoped, and the ignored sibling still exists.
+    with rasterio.open(tile.path) as ds:
+        assert ds.read(1, masked=True).mask.all()
+    internal = write_raster(tmp_path / 'internal.tif', [0, 0])
+    with rasterio.Env(GDAL_TIFF_INTERNAL_MASK=True):
+        with rasterio.open(internal.path, 'r+') as ds:
+            ds.write_mask(np.zeros((1, 2), dtype='uint8'))
+    internal = replace(internal, sha256=file_hash(internal.path))
+    assert not Path(internal.path + '.msk').exists()
+    result, qc = build_exposure(sources(internal), blocks(), SPEC)
+    assert result.missing_population.eq(100).all() and result.pressure_mmhg.isna().all()
+
+
+@pytest.mark.parametrize('problem', ['dem_identity', 'crs'])
+def test_stage_rejects_wrong_dem_source_and_invalid_crs(tmp_path, shard_fixture, problem):
+    inventory, _ = shard_fixture
+    task = json.loads((tmp_path / 'shard-AL/task.json').read_text())
+    deps = [inventory, tmp_path / 'census-receipt.json', tmp_path / 'census.tar',
+            tmp_path / 'dem-receipt.json', tmp_path / 'dem.tar']
+    if problem == 'dem_identity':
+        receipt = json.loads(deps[3].read_text())
+        receipt['manifest_sha256'] = 'c' * 64
+        deps[3].write_text(canonical_json(receipt))
+    else:
+        task['raster_metadata']['synthetic']['crs'] = 'EPSG:invalid'
+    req = request(tmp_path / ('reject-' + problem), 'exposure-atlas', task, deps)
+    result = run_stage(req)
+    assert result.status == 'fail'
+    assert ('reviewed source configuration' if problem == 'dem_identity' else 'Invalid projection') in result.message
+    assert not (Path(req.output_dir) / 'exposure.parquet').exists()
+
+
+def test_integral_float32_population_totals_remain_exact(tmp_path):
+    count = 16778
+    ids = [f'01001000{1 + i // 8389:01d}00{1 + i % 8389:04d}' for i in range(count)]
+    pop = np.full(count, 1000, dtype=np.float32)
+    pop[-1] = 217
+    geography = gpd.GeoDataFrame(dict(block_id=ids, tract_id=[x[:11] for x in ids], population=pop),
+        geometry=[box(i * 100, 0, (i + 1) * 100, 100) for i in range(count)], crs='EPSG:5070')
+    tile = write_raster(tmp_path / 'large-total.tif', np.zeros(count))
+    expected = 16777217
+    assert int(geography.population.sum()) != expected  # reproduces float32 accumulation loss
+    result, qc = build_exposure(sources(tile), geography, replace(SPEC, scenarios=('centroid',)))
+    assert qc['population'] == expected
+    assert result.population.sum() == expected
+    assert result.pressure_mmhg.eq(760).all()
+    # Also exercise loss within a single tract, not just across tract totals.
+    compact = blocks(pop=np.array([16777216, 1], dtype=np.float32))
+    result, qc = build_exposure(sources(tile), compact, replace(SPEC, scenarios=('centroid',)))
+    assert qc['population'] == result.population.iloc[0] == expected
+
+
+def test_distributed_quantile_exact_boundary(tmp_path):
+    tile = write_raster(tmp_path / 'quantile.tif', [0] * 20 + [3000] * 20)
+    whole = blocks(pop=(4, 0)).iloc[:1].copy()
+    whole.loc[0, 'geometry'] = box(0, 0, 4000, 100)
+    result, _ = build_exposure(sources(tile), whole, replace(SPEC, scenarios=('distributed',)))
+    assert result.elevation_p50_m.iloc[0] == 0
+
+
+@pytest.mark.parametrize('weights', [
+    [0.1] * 40, [2, 2 + 2**-40], [2 + 2**-40, 2],
+    [1, 9], [9, 1], [2**-100, 1, 2**50, 2**50, 1, 2**-100],
+])
+def test_quantile_matches_exact_left_cdf(weights):
+    weights = np.asarray(weights, dtype=float)
+    values = np.repeat([0., 3000.], len(weights) // 2)
+    exact = [Fraction(float(w)) for w in weights]
+    total = sum(exact)
+    expected = []
+    for q in (Fraction(1, 10), Fraction(1, 2), Fraction(9, 10)):
+        cumulative = 0
+        for z, weight in zip(values, exact):
+            cumulative += weight
+            if cumulative >= q * total:
+                expected.append(z)
+                break
+    # Exact binary scaling and splitting retain the represented mass. A near
+    # tie must not be treated as an exact tie by an arbitrary numeric tolerance.
+    for scale in (0.5, 1., 2.):
+        assert weighted_quantiles(values, weights * scale) == expected
+        assert weighted_quantiles(values[::-1], weights[::-1] * scale) == expected
+        assert weighted_quantiles(np.repeat(values, 2), np.repeat(weights * scale / 2, 2)) == expected
+
+
+@pytest.mark.parametrize('crs_format', ['wkt', 'projjson'])
+def test_equivalent_crs_shards_collect_reproducibly(tmp_path, shard_fixture, crs_format):
+    inventory, original_paths = shard_fixture
+    task = json.loads((tmp_path / 'shard-AZ/task.json').read_text())
+    crs = CRS('EPSG:5070')
+    declaration = crs.to_wkt() if crs_format == 'wkt' else crs.to_json()
+    task['raster_metadata']['synthetic']['crs'] = declaration
+    deps = [inventory, tmp_path / 'census-receipt.json', tmp_path / 'census.tar',
+            tmp_path / 'dem-receipt.json', tmp_path / 'dem.tar']
+    req = request(tmp_path / 'equivalent-AZ', 'exposure-atlas', task, deps)
+    result = run_stage(req)
+    assert result.status == 'pass', result.message
+    out = Path(req.output_dir)
+    paths = original_paths[:3] + [out / name for name in ('artifact_manifest.json', 'exposure.parquet', 'quality.json')]
+    collections = [collect_request(tmp_path / 'original', inventory, original_paths),
+                   collect_request(tmp_path / 'equivalent', inventory, paths),
+                   collect_request(tmp_path / 'reversed', inventory, paths, reverse=True)]
+    for collection in collections:
+        result = run_stage(collection)
+        assert result.status == 'pass', result.message
+        result.verify(collection)
+    for name in ('atlas.parquet', 'quality.json'):
+        assert len({file_hash(Path(c.output_dir) / name) for c in collections}) == 1
+
+
+def test_equivalent_placement_crs_has_same_identity():
+    assert AllocationSpec(placement_crs=CRS('EPSG:5070').to_wkt()).content_hash == SPEC.content_hash
+
+
+@pytest.mark.parametrize('split_at', [1, 33, 49, 99])
+def test_nondyadic_block_split_preserves_all_quantiles(tmp_path, split_at):
+    tile = write_raster(tmp_path / 'split.tif', [0] * 10 + [1000] * 40 + [2000] * 40 + [3000] * 10)
+    split = blocks(pop=(split_at, 100 - split_at))
+    split.loc[0, 'geometry'] = box(0, 0, split_at * 100, 100)
+    split.loc[1, 'geometry'] = box(split_at * 100, 0, 10000, 100)
+    whole = split.iloc[:1].copy()
+    whole.loc[0, 'population'] = 100
+    whole.loc[0, 'geometry'] = box(0, 0, 10000, 100)
+    for geography in (whole, split, split.iloc[::-1]):
+        result, _ = build_exposure(sources(tile), geography, replace(SPEC, scenarios=('distributed',)))
+        assert result[['elevation_p10_m', 'elevation_p50_m', 'elevation_p90_m']].iloc[0].tolist() == [0, 1000, 2000]
+        assert result.pressure_mmhg.iloc[0] == pytest.approx(np.mean(pressure_mmhg([0] * 10 + [1000] * 40 + [2000] * 40 + [3000] * 10)))
+
+
+@pytest.mark.parametrize('many_cells', [10, 4100])
+@pytest.mark.parametrize('many_low', [True, False])
+def test_population_quantile_tie_across_different_densities(tmp_path, many_cells, many_low):
+    heights = [0] * many_cells + [3000] if many_low else [0] + [3000] * many_cells
+    tile = write_raster(tmp_path / 'density.tif', heights)
+    geography = blocks(pop=(1, 1))
+    boundary = many_cells * 100 if many_low else 100
+    geography.loc[0, 'geometry'] = box(0, 0, boundary, 100)
+    geography.loc[1, 'geometry'] = box(boundary, 0, (many_cells + 1) * 100, 100)
+    result, qc = build_exposure(sources(tile), geography, replace(SPEC, scenarios=('distributed',)))
+    # Each elevation has exactly one person, irrespective of cells or batching.
+    assert result.elevation_p50_m.iloc[0] == 0
+    assert result.pressure_mmhg.iloc[0] == pytest.approx(np.mean(pressure_mmhg([0, 3000])))
+    assert qc['population'] == result.covered_population.iloc[0] == 2
+
+
+@pytest.mark.parametrize('side', [-1, 1])
+def test_geometry_derived_near_median_ties_remain_distinct(tmp_path, side):
+    tile = write_raster(tmp_path / 'near.tif', [0, 3000])
+    epsilon = 2**-30
+    geography = blocks(pop=(4, 0)).iloc[:1].copy()
+    geography.loc[0, 'geometry'] = box(epsilon if side > 0 else 0, 0,
+                                      200 if side > 0 else 200 - epsilon, 100)
+    result, _ = build_exposure(sources(tile), geography, replace(SPEC, scenarios=('distributed',)))
+    assert result.elevation_p50_m.iloc[0] == (3000 if side > 0 else 0)
+
+
+def test_exact_area_cdf_uses_its_own_total_and_duplicate_elevations():
+    # A permitted tiny geometry-partition discrepancy must not substitute the
+    # Census total for the CDF's own exact total; this is not mass redistribution.
+    areas = np.array([0.5, 0.5 + 2**-40])
+    assert placement_quantiles([(1, 1., np.array([0., 3000.]), areas)])[1] == 3000
+    assert placement_quantiles([(1, 1., np.array([0., 0., 3000.]), np.array([0.25, 0.25, 0.5]))])[1] == 0
+    assert placement_quantiles([(1, 1., np.array([-0.]), np.array([1.]))]) == [0., 0., 0.]
+    assert not np.signbit(placement_quantiles([(1, 1., np.array([-0.]), np.array([1.]))])[0])
+
+
+def test_exact_area_cdf_many_nondyadic_blocks():
+    # Exercises heterogeneous rational denominators, rather than only the cheap
+    # single-block/binary-area case. No timing threshold: the suite has timeout.
+    distributions = []
+    for i in range(1500):
+        area = 3. + (i + 1) * 2**-40
+        distributions.append((3, area, np.array([0., 1., 2.]), np.array([1., 1., area - 2.])))
+    assert placement_quantiles(distributions) == [0., 1., 2.]
+
+
+@pytest.mark.parametrize('affine', [
+    rasterio.Affine(128, 0, 0, 0, -128, 128),
+    rasterio.Affine(128, 0, 0, 0, 128, 0),
+    rasterio.Affine(-128, 0, 256, 0, -128, 128),
+    rasterio.Affine(0, 128, 0, 128, 0, 0),
+    rasterio.Affine(128, 64, 0, 0, -128, 128),
+])
+def test_raster_orientation_uses_actual_pixels(tmp_path, affine):
+    tile = write_raster(tmp_path / 'orientation.tif')
+    with rasterio.open(tile.path, 'r+') as ds:
+        ds.transform = affine
+    tile = replace(tile, sha256=file_hash(tile.path))
+    # Dyadic transforms make these boundaries exact, including +/- one ulp.
+    pixel_xy = [(0, 0), (1, 0.5), (2, 0.5), (0.5, 1), (-0.125, 0.5),
+                (np.nextafter(1., 0.), 0.5), (np.nextafter(1., 2.), 0.5)]
+    xy = np.array([affine @ p for p in pixel_xy])
+    with RasterSampler([tile], 'EPSG:5070') as sampler:
+        z, reason = sampler.sample(xy)
+    assert z[:2].tolist() == [0, 3000]
+    assert reason[2:5].tolist() == ['outside_coverage'] * 3
+    # Translation/shear can round the world coordinate itself; compare the
+    # represented world points to their exact affine pixel mapping here.
+    for i in (5, 6):
+        col, _ = (~affine) @ xy[i]
+        assert z[i] == (0 if col < 1 else 3000)
+    geography = blocks(pop=(40, 60))
+    for i in range(2):
+        geography.loc[i, 'geometry'] = Polygon([affine @ p for p in [(i, 0), (i+1, 0), (i+1, 1), (i, 1)]])
+    result, _ = build_exposure(sources(tile), geography, replace(SPEC, scenarios=('centroid',)))
+    assert result.missing_population.eq(0).all()
+    assert result.pressure_mmhg.iloc[0] == pytest.approx(np.dot([0.4, 0.6], pressure_mmhg([0, 3000])))
+
+
+def test_south_up_complete_in_both_scenarios(tmp_path):
+    tile = write_raster(tmp_path / 'south.tif', [0])
+    with rasterio.open(tile.path, 'r+') as ds:
+        ds.transform = rasterio.Affine(100, 0, 0, 0, 100, 0)
+    tile = replace(tile, sha256=file_hash(tile.path))
+    result, _ = build_exposure(sources(tile), blocks(pop=(100, 0)).iloc[:1], SPEC)
+    assert result.missing_population.eq(0).all() and result.pressure_mmhg.eq(760).all()
+
+
+@pytest.mark.parametrize('affine', [rasterio.Affine(100, 0, 0, 0, 0, 100),
+                                   rasterio.Affine(float('nan'), 0, 0, 0, -100, 100)])
+def test_invalid_affine_rejected(tmp_path, affine):
+    tile = write_raster(tmp_path / 'bad-affine.tif')
+    with rasterio.open(tile.path, 'r+') as ds:
+        ds.transform = affine
+    tile = replace(tile, sha256=file_hash(tile.path))
+    with pytest.raises(ContractError, match='affine'):
+        build_exposure(sources(tile), blocks(), SPEC)
+
+
+@pytest.mark.parametrize('embedded,declared,passes', [
+    ('EPSG:5070+5703', 'EPSG:5070+5703', True),
+    ('EPSG:5070+5703', 'EPSG:5070', True),
+    ('EPSG:5070', 'EPSG:5070+5703', True),
+    ('EPSG:5070+5773', 'EPSG:5070+5773', False),
+    ('EPSG:5070+6360', 'EPSG:5070+6360', False),
+    ('EPSG:4979', 'EPSG:4979', False),
+    ('EPSG:5070', 'EPSG:5070+5773', False),
+])
+def test_vertical_crs_corroborates_reviewed_labels(tmp_path, embedded, declared, passes):
+    tile = write_raster(tmp_path / 'vertical.tif', [1000, 1000], crs=embedded)
+    with rasterio.open(tile.path) as ds:
+        assert CRS(ds.crs) == CRS(embedded)  # verify the actual GeoTIFF round-trip
+    tile = replace(tile, crs=declared)
+    if passes:
+        result, _ = build_exposure(sources(tile), blocks(), SPEC)
+        np.testing.assert_allclose(result.pressure_mmhg, pressure_mmhg(1000), rtol=1e-12)
+    else:
+        with pytest.raises(ContractError, match='vertical|ellipsoidal'):
+            build_exposure(sources(tile), blocks(), SPEC)
+
+
+def test_stage_rejects_declared_vertical_contradiction(tmp_path, shard_fixture):
+    inventory, _ = shard_fixture
+    task = json.loads((tmp_path / 'shard-AL/task.json').read_text())
+    task['raster_metadata']['synthetic']['crs'] = 'EPSG:5070+5773'
+    deps = [inventory, tmp_path / 'census-receipt.json', tmp_path / 'census.tar',
+            tmp_path / 'dem-receipt.json', tmp_path / 'dem.tar']
+    req = request(tmp_path / 'bad-vertical-stage', 'exposure-atlas', task, deps)
+    result = run_stage(req)
+    assert result.status == 'fail' and 'vertical datum' in result.message
+    assert not (Path(req.output_dir) / 'exposure.parquet').exists()
+
+
+@pytest.mark.parametrize('problem', ['depth', 'unknown'])
+def test_explicit_depth_and_unknown_vertical_crs_rejected(tmp_path, problem):
+    from pyproj.crs import CompoundCRS
+    vertical = CRS('EPSG:5703').to_json_dict()
+    vertical.pop('id', None)
+    if problem == 'depth':
+        vertical['coordinate_system']['axis'][0]['direction'] = 'down'
+    else:
+        vertical['datum'].pop('id', None)
+        vertical['datum']['name'] = 'Unidentified vertical datum'
+    vertical['name'] = 'Synthetic ' + problem + ' height'
+    crs = CompoundCRS('Synthetic vertical test', [CRS('EPSG:5070'), CRS.from_json_dict(vertical)])
+    tile = write_raster(tmp_path / 'vertical-custom.tif', crs=crs.to_wkt())
+    with rasterio.open(tile.path) as ds:
+        embedded = CRS(ds.crs).sub_crs_list[-1]
+        assert embedded.is_vertical
+        # GeoTIFF's vertical keys normalize a downward axis to upward height in
+        # this GDAL version. The reviewed declaration still carries the explicit
+        # contradictory direction and must be rejected before sampling.
+        if problem == 'depth':
+            assert crs.sub_crs_list[-1].axis_info[0].direction == 'down'
+        else:
+            assert embedded.datum != CRS('EPSG:5703').datum
+    with pytest.raises(ContractError, match='vertical'):
+        build_exposure(sources(tile), blocks(), SPEC)
+
+
+def test_gcp_only_raster_rejected(tmp_path):
+    from rasterio.control import GroundControlPoint
+    tile = write_raster(tmp_path / 'gcp.tif')
+    with rasterio.open(tile.path, 'r+') as ds:
+        ds.gcps = ([GroundControlPoint(row=0, col=0, x=0, y=100),
+                    GroundControlPoint(row=0, col=2, x=200, y=100),
+                    GroundControlPoint(row=1, col=0, x=0, y=0)], rasterio.crs.CRS.from_epsg(5070))
+    tile = replace(tile, sha256=file_hash(tile.path))
+    with pytest.raises(ContractError, match='CRS missing|GCP'):
+        build_exposure(sources(tile), blocks(), SPEC)
+
+
+def test_dispersed_reads_are_bounded_and_nonfinite_points_are_missing(tmp_path, monkeypatch):
+    tile = write_raster(tmp_path / 'islands.tif', np.zeros(10001))
+    original_open = rasterio.open
+    windows = []
+
+    class GuardedDataset:
+        def __init__(self, dataset):
+            self.dataset = dataset
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            self.dataset.close()
+        def __getattr__(self, name):
+            return getattr(self.dataset, name)
+        def read(self, *args, **kwargs):
+            window = kwargs['window']
+            assert window.width * window.height <= 4096
+            windows.append(window)
+            return self.dataset.read(*args, **kwargs)
+
+    monkeypatch.setattr(rasterio, 'open', lambda *a, **k: GuardedDataset(original_open(*a, **k)))
+    with RasterSampler([tile], 'EPSG:5070') as sampler:
+        z, reason = sampler.sample(np.array([[50, 50], [1000050, 50], [np.inf, 50]]))
+    assert z[:2].tolist() == [0, 0] and reason[2] == 'outside_coverage'
+    assert len(windows) == 2
+
+
+@pytest.mark.parametrize('problem', ['missing_decision', 'constant', 'product', 'missing_file'])
+def test_stage_requires_current_owner_exposure_approval(tmp_path, shard_fixture, monkeypatch, problem):
+    import oxyformer.exposure.physics as physics
+    inventory, paths = shard_fixture
+    approvals = yaml.safe_load((ROOT / 'configs/approvals.yaml').read_text())
+    if problem == 'missing_decision':
+        del approvals['owner_decisions']['exposure']
+    elif problem == 'constant':
+        approvals['owner_decisions']['exposure']['sea_level_pressure_mmhg'] = 750.
+    elif problem == 'product':
+        approvals['owner_decisions']['exposure']['dem_product'] = 'unapproved-replacement'
+    path = tmp_path / 'owner-approvals.yaml'
+    if problem != 'missing_file':
+        path.write_text(yaml.safe_dump(approvals))
+    monkeypatch.setattr(physics, '_APPROVAL_PATH', path, raising=False)
+    req = collect_request(tmp_path / 'approval-collection', inventory, paths)
+    result = run_stage(req)
+    assert result.status == ('blocked' if problem == 'missing_file' else 'fail')
+    assert not (Path(req.output_dir) / 'atlas.parquet').exists()
+    with pytest.raises((ContractError, FileNotFoundError)):
+        build_exposure(sources(write_raster(tmp_path / 'approval-dem.tif')), blocks(), SPEC)
+
+
+@pytest.mark.parametrize('identity', ['physical_hash', 'allocation_hash'])
+def test_collection_rejects_contradictory_manifest_specification(tmp_path, shard_fixture, identity):
+    inventory, paths = shard_fixture
+    manifest = json.loads(paths[0].read_text())
+    manifest[identity] = 'e' * 64
+    paths[0].write_text(canonical_json(manifest))
+    req = collect_request(tmp_path / 'contradictory-manifest', inventory, paths)
+    result = run_stage(req)
+    assert result.status == 'fail' and 'inconsistent' in result.message
+    assert not (Path(req.output_dir) / 'atlas.parquet').exists()
+
+
+@pytest.mark.parametrize('thin', [False, True])
+def test_translated_grid_does_not_omit_positive_area_strip(tmp_path, thin):
+    tile = write_raster(tmp_path / 'strip.tif', [0, 0] if thin else [0])
+    geography = blocks(pop=(1, 0)).iloc[:1].copy()
+    geography.loc[0, 'geometry'] = box(100 if thin else 0, 0, 100 + 2**-46, 100)
+    spec = AllocationSpec(scenarios=('distributed',), grid_origin_m=(-1000., 0.))
+    result, qc = build_exposure(sources(tile), geography, spec)
+    if thin:
+        assert result.missing_population.iloc[0] == 0
+        assert result.pressure_mmhg.iloc[0] == 760
+    else:
+        assert result.missing_population.iloc[0] > 0
+        assert result.pressure_mmhg.isna().all()
+        assert qc['blocks'][0]['outside_coverage'] > 0
+
+
+@pytest.mark.parametrize('nodata_pixel', [False, True])
+def test_non_dyadic_pixel_scale_preserves_boundary_membership(tmp_path, nodata_pixel):
+    tile = write_raster(tmp_path / 'reciprocal.tif', [0, 0, -9999, 0] if nodata_pixel else [0, 0, 0])
+    with rasterio.open(tile.path, 'r+') as ds:
+        ds.transform = rasterio.Affine(10, 0, 0, 0, -10, 10)
+    tile = replace(tile, sha256=file_hash(tile.path))
+    geography = blocks(pop=(1, 0)).iloc[:1].copy()
+    geography.loc[0, 'geometry'] = Polygon([(30, 0), (30, 8/3), (30 - 3*2**-48, 0)])
+    assert geography.geometry.iloc[0].centroid.x == 30 - 2**-48
+    result, qc = build_exposure(sources(tile), geography, replace(SPEC, scenarios=('centroid',)))
+    if nodata_pixel:
+        assert result.missing_population.iloc[0] == qc['blocks'][0]['nodata'] == 1
+        assert result.pressure_mmhg.isna().all()
+    else:
+        assert result.missing_population.iloc[0] == 0
+        assert result.pressure_mmhg.iloc[0] == 760
+
+
+@pytest.mark.parametrize('dtype', ['object', 'Int64', 'Float64'])
+def test_integer_population_storage_does_not_change_exposure(tmp_path, dtype):
+    tile = write_raster(tmp_path / 'counts.tif')
+    geography = blocks()
+    expected, expected_qc = build_exposure(sources(tile), geography, SPEC)
+    geography['population'] = pd.Series([40, 60], dtype=dtype)
+    actual, actual_qc = build_exposure(sources(tile), geography, SPEC)
+    pd.testing.assert_frame_equal(actual, expected)
+    assert actual_qc == expected_qc
+
+
+@pytest.mark.parametrize('invalid', [True, '40', None, pd.NA, np.nan, np.inf, -1, 1.5, 40+0j])
+def test_object_population_rejects_invalid_values(tmp_path, invalid):
+    tile = write_raster(tmp_path / 'invalid-count.tif')
+    geography = blocks()
+    geography['population'] = pd.Series([invalid, 60], dtype=object)
+    with pytest.raises(ValueError, match='invalid Census population'):
+        build_exposure(sources(tile), geography, SPEC)
+
+
+@pytest.mark.parametrize('height', [0, -9999])
+def test_finite_placement_mass_with_subnormal_block_area(tmp_path, height):
+    tile = write_raster(tmp_path / 'tiny.tif', [height])
+    geography = blocks(pop=(1, 0)).iloc[:1].copy()
+    geography.loc[0, 'geometry'] = box(0, 0, 1e-312, 100)
+    result, qc = build_exposure(sources(tile), geography, replace(SPEC, scenarios=('distributed',)))
+    assert result.population.iloc[0] == qc['population'] == 1
+    if height == 0:
+        assert result.pressure_mmhg.iloc[0] == 760
+        assert result.missing_population.iloc[0] == 0
+    else:
+        assert result.missing_population.iloc[0] == qc['blocks'][0]['nodata'] == 1
+        assert result.pressure_mmhg.isna().all()
+
+
+@pytest.mark.parametrize('kind', ['index', 'empty_shard_ids'])
+def test_malformed_collection_returns_failed_result(tmp_path, shard_fixture, kind):
+    inventory, paths = shard_fixture
+    if kind == 'empty_shard_ids':
+        manifest = json.loads(paths[0].read_text())
+        manifest['shard_ids'] = []
+        paths[0].write_text(canonical_json(manifest))
+    req = collect_request(tmp_path / 'malformed-collection', inventory, paths)
+    if kind == 'index':
+        task = json.loads(Path(req.task_path).read_text())
+        task['shards'][0]['exposure'] = len(req.dependency_paths)
+        Path(req.task_path).write_text(canonical_json(task))
+        req = replace(req, task_hash=file_hash(req.task_path))
+    result = run_stage(req)
+    assert result.status == 'fail' and result.artifacts == ()
+    assert not (Path(req.output_dir) / 'atlas.parquet').exists()
+
+
+@pytest.mark.parametrize('kind', ['zip', 'tar'])
+def test_verified_malformed_archive_returns_failed_result(tmp_path, shard_fixture, kind):
+    inventory, _ = shard_fixture
+    directory = tmp_path / 'malformed-input'
+    bzip, szip = write_census_archives(directory)
+    szip.write_bytes(b'invalid ZIP bytes')
+    receipt, payload = acquisition(directory, 'census', [('blocks_01', bzip), ('sf1_al', szip)])
+    if kind == 'tar':
+        payload.write_bytes(b'invalid TAR bytes')
+        doc = json.loads(receipt.read_text())
+        doc['payload_sha256'] = file_hash(payload)
+        receipt.write_text(canonical_json(doc))
+    task = json.loads((tmp_path / 'shard-AL/task.json').read_text())
+    req = request(tmp_path / 'malformed-shard', 'exposure-atlas', task,
+                  [inventory, receipt, payload, tmp_path / 'dem-receipt.json', tmp_path / 'dem.tar'])
+    result = run_stage(req)
+    assert result.status == 'fail' and result.artifacts == ()
+    assert not (Path(req.output_dir) / 'exposure.parquet').exists()
+
+
+@pytest.mark.parametrize('kind', ['deflate', 'encrypted', 'patched_flag', 'strong_flag', 'unsupported', 'csv', 'shapefile'])
+def test_verified_inner_decoder_failure_returns_failed_result(tmp_path, shard_fixture, kind):
+    import csv
+    import struct
+    inventory, _ = shard_fixture
+    directory = tmp_path / 'decoder-input'
+    bzip, szip = write_census_archives(directory)
+    path = bzip if kind == 'shapefile' else szip
+    with zipfile.ZipFile(path) as archive:
+        members = {name: archive.read(name) for name in archive.namelist()}
+    target = next(name for name in members if name.endswith('.shp')) if kind == 'shapefile' else 'al000012010.sf1'
+    if kind == 'shapefile':
+        members[target] = b'invalid shapefile bytes'
+    if kind == 'csv':
+        members[target] = b'x' * (csv.field_size_limit() + 1) + b'\n'
+    with zipfile.ZipFile(path, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+    if kind in ('deflate', 'encrypted', 'patched_flag', 'strong_flag', 'unsupported'):
+        with zipfile.ZipFile(path) as archive:
+            local = archive.getinfo(target).header_offset
+            central = archive.start_dir
+        data = bytearray(path.read_bytes())
+        while True:
+            name_len, extra_len, comment_len = struct.unpack_from('<HHH', data, central + 28)
+            if bytes(data[central+46:central+46+name_len]).decode() == target:
+                break
+            central += 46 + name_len + extra_len + comment_len
+        if kind == 'deflate':
+            name_len, extra_len = struct.unpack_from('<HH', data, local + 26)
+            data[local + 30 + name_len + extra_len] = 0x07
+        elif kind in ('encrypted', 'patched_flag', 'strong_flag'):
+            flag = {'encrypted': 1, 'patched_flag': 32, 'strong_flag': 64}[kind]
+            for position in (local + 6, central + 8):
+                flags = struct.unpack_from('<H', data, position)[0]
+                struct.pack_into('<H', data, position, flags | flag)
+        else:
+            for position in (local + 8, central + 10):
+                struct.pack_into('<H', data, position, 99)
+        path.write_bytes(data)
+    receipt, payload = acquisition(directory, 'census', [('blocks_01', bzip), ('sf1_al', szip)])
+    task = json.loads((tmp_path / 'shard-AL/task.json').read_text())
+    req = request(tmp_path / 'decoder-shard', 'exposure-atlas', task,
+                  [inventory, receipt, payload, tmp_path / 'dem-receipt.json', tmp_path / 'dem.tar'])
+    with pytest.raises(Exception) as raw:
+        read_census_blocks(bzip, szip, state_abbreviation='AL', state_fips='01')
+    expected = {'deflate': 'error', 'encrypted': 'RuntimeError', 'patched_flag': 'NotImplementedError',
+                'strong_flag': 'NotImplementedError', 'unsupported': 'NotImplementedError',
+                'csv': 'Error'}
+    if kind == 'shapefile':
+        assert raw.type.__module__.startswith(('pyogrio.', 'fiona.'))
+    else:
+        assert raw.type.__name__ == expected[kind]
+    result = run_stage(req)
+    assert result.status == 'fail' and result.artifacts == ()
+    assert result.message.startswith(f'{raw.type.__module__}.{raw.type.__qualname__}: ')
+    assert len(result.message) <= 4096
+    assert list(Path(req.output_dir).iterdir()) == []
+    result.verify(req)
+
+
+def boundary_request(tmp_path, shard_fixture, stage):
+    inventory, paths = shard_fixture
+    if stage == 'atlas-collect':
+        return collect_request(tmp_path / 'boundary-collection', inventory, paths)
+    task = json.loads((tmp_path / 'shard-AL/task.json').read_text())
+    return request(tmp_path / 'boundary-shard', stage, task,
+                   [inventory, tmp_path / 'census-receipt.json', tmp_path / 'census.tar',
+                    tmp_path / 'dem-receipt.json', tmp_path / 'dem.tar'])
+
+
+@pytest.mark.parametrize('stage', ['exposure-atlas', 'atlas-collect'])
+@pytest.mark.parametrize('interruption', [KeyboardInterrupt, SystemExit, GeneratorExit])
+def test_stage_does_not_swallow_control_flow(tmp_path, shard_fixture, monkeypatch, interruption, stage):
+    req = boundary_request(tmp_path, shard_fixture, stage)
+    def interrupt(*args):
+        raise interruption('synthetic interruption')
+    monkeypatch.setattr('oxyformer.exposure.build.' + ('_collect' if stage == 'atlas-collect' else '_build_shard'), interrupt)
+    with pytest.raises(interruption, match='synthetic interruption'):
+        run_stage(req)
+
+
+@pytest.mark.parametrize('stage', ['exposure-atlas', 'atlas-collect'])
+@pytest.mark.parametrize('kind', ['unfamiliar', 'empty', 'memory', 'recursion', 'broken_message'])
+def test_stage_reports_ordinary_failures(tmp_path, shard_fixture, monkeypatch, stage, kind):
+    req = boundary_request(tmp_path, shard_fixture, stage)
+    class BackendFailure(Exception):
+        pass
+    class BrokenMessage(Exception):
+        def __str__(self):
+            raise ValueError('formatting failed')
+    error = {'unfamiliar': BackendFailure('x' * 10000), 'empty': AssertionError(),
+             'memory': MemoryError('synthetic resource failure'), 'recursion': RecursionError(),
+             'broken_message': BrokenMessage()}[kind]
+    def fail(*args):
+        raise error
+    monkeypatch.setattr('oxyformer.exposure.build.' + ('_collect' if stage == 'atlas-collect' else '_build_shard'), fail)
+    result = run_stage(req)
+    assert result.status == 'fail' and result.artifacts == ()
+    assert result.message.startswith(f'{type(error).__module__}.{type(error).__qualname__}: ')
+    assert 0 < len(result.message) <= 4096
+    assert list(Path(req.output_dir).iterdir()) == []
+    result.verify(req)
+
+
+def test_late_stage_failure_does_not_claim_or_delete_outputs(tmp_path, shard_fixture, monkeypatch):
+    req = boundary_request(tmp_path, shard_fixture, 'atlas-collect')
+    def fail(*args, **kwargs):
+        raise RuntimeError('synthetic late lineage failure')
+    monkeypatch.setattr('oxyformer.exposure.build.ArtifactLineage', fail)
+    result = run_stage(req)
+    assert result.status == 'fail' and result.artifacts == ()
+    assert 'RuntimeError: synthetic late lineage failure' in result.message
+    assert sorted(p.name for p in Path(req.output_dir).iterdir()) == ['artifact_manifest.json', 'atlas.parquet', 'quality.json']
+    retry = run_stage(req)
+    assert retry.status == 'fail' and 'empty output directory' in retry.message
+
+
+def test_declared_missing_tar_member_fails_instead_of_blocking(tmp_path, shard_fixture):
+    from oxyformer.exposure.archives import extract_member
+    inventory, _ = shard_fixture
+    receipt = tmp_path / 'census-receipt.json'
+    payload = tmp_path / 'census.tar'
+    doc = json.loads(receipt.read_text())
+    resource = next(r for r in doc['resources'] if r['id'] == 'sf1_al')
+    resource['destination'] = 'census/missing.zip'
+    receipt.write_text(canonical_json(doc))
+    with pytest.raises(KeyError):
+        extract_member(payload, resource['destination'], tmp_path / 'unused.zip', resource['sha256'])
+    req = boundary_request(tmp_path, shard_fixture, 'exposure-atlas')
+    result = run_stage(req)
+    assert result.status == 'fail' and result.artifacts == ()
+    assert result.message.startswith('builtins.KeyError: ')
+    assert list(Path(req.output_dir).iterdir()) == []
+
+
+
+def test_stage_coverage_failure_still_declares_accounting_artifacts(tmp_path, shard_fixture):
+    tile = write_raster(tmp_path / 'missing-dem.tif', [0, -9999])
+    acquisition(tmp_path, 'dem', [('synthetic', Path(tile.path))])
+    req = boundary_request(tmp_path, shard_fixture, 'exposure-atlas')
+    result = run_stage(req)
+    assert result.status == 'fail' and len(result.artifacts) == 3
+    result.verify(req)
+    out = Path(req.output_dir)
+    frame = pd.read_parquet(out / 'exposure.parquet')
+    assert frame.population.eq(100).all() and frame.missing_population.eq(60).all()
+    assert frame.pressure_mmhg.isna().all()
+    assert json.loads((out / 'artifact_manifest.json').read_text())['status'] == 'fail'
+
+
+@pytest.mark.parametrize('old_default', [False, True])
+def test_unused_categorical_tracts_do_not_create_empty_exposure_rows(tmp_path, monkeypatch, old_default):
+    tile = write_raster(tmp_path / 'categorical.tif', [0])
+    geography = blocks(pop=(100, 0)).iloc[:1].copy()
+    geography['tract_id'] = pd.Categorical(['01001000100'], categories=['01001000100', '01001000200'])
+    if old_default:
+        # pandas 3 changed observed's default. Exercise the documented 2.x
+        # default on the mandated runtime without installing another pandas.
+        original = pd.DataFrame.groupby
+        def groupby(frame, *args, **kwargs):
+            kwargs.setdefault('observed', False)
+            return original(frame, *args, **kwargs)
+        monkeypatch.setattr(pd.DataFrame, 'groupby', groupby)
+    result, qc = build_exposure(sources(tile), geography, SPEC)
+    assert set(result.tract_id) == {'01001000100'}
+    assert result.block_count.eq(1).all() and result.population.eq(100).all()
+    assert result.pressure_mmhg.eq(760).all() and qc['population'] == 100
+
+
+@pytest.mark.parametrize('interruption', [KeyboardInterrupt, SystemExit, GeneratorExit])
+def test_sampler_entry_interruption_closes_rasters_and_restores_gdal(tmp_path, monkeypatch, interruption):
+    first = replace(write_raster(tmp_path / 'first.tif'), resource_id='a')
+    second = replace(write_raster(tmp_path / 'second.tif'), resource_id='b')
+    probe = write_raster(tmp_path / 'probe.tif', [0, 0])
+    with rasterio.Env(GDAL_TIFF_INTERNAL_MASK=False):
+        with rasterio.open(probe.path, 'r+') as ds:
+            ds.write_mask(np.zeros((1, 2), dtype='uint8'))
+    assert Path(probe.path + '.msk').exists()
+    original = rasterio.open
+    opened = []
+    def interrupted_open(path, *args, **kwargs):
+        if str(path) == second.path:
+            raise interruption('during second open')
+        ds = original(path, *args, **kwargs)
+        opened.append(ds)
+        return ds
+    monkeypatch.setattr(rasterio, 'open', interrupted_open)
+    sampler = RasterSampler((first, second), SPEC.placement_crs)
+    try:
+        with pytest.raises(interruption, match='during second open'):
+            sampler.__enter__()
+        with original(probe.path) as ds:
+            external_mask_honored = ds.read(1, masked=True).mask.all()
+        assert opened[0].closed and external_mask_honored
+    finally:
+        # Keep pre-fix reproductions from leaking GDAL state into other tests.
+        sampler.stack.close()
+
+
+@pytest.mark.parametrize('case', ['covered_sliver', 'missing_strip'])
+def test_geometric_centroid_does_not_round_across_pixel_boundary(tmp_path, case):
+    h = 2**-46
+    values = [0, -9999] if case == 'covered_sliver' else [-9999, 0]
+    tile = write_raster(tmp_path / 'centroid-edge.tif', values)
+    if case == 'missing_strip':
+        with rasterio.open(tile.path, 'r+') as ds:
+            ds.transform = rasterio.Affine(-100, 0, 200, 0, -100, 100)
+        tile = replace(tile, sha256=file_hash(tile.path))
+    geography = blocks(pop=(1, 0)).iloc[:1].copy()
+    geography.loc[0, 'geometry'] = box(100-h, 0, 100, 100) if case == 'covered_sliver' else box(0, 0, 100+h, 100)
+    result, qc = build_exposure(sources(tile), geography, replace(SPEC, scenarios=('distributed',)))
+    if case == 'covered_sliver':
+        assert result.missing_population.iloc[0] == 0
+        assert result.pressure_mmhg.iloc[0] == 760
+    else:
+        assert result.missing_population.iloc[0] > 0
+        assert qc['blocks'][0]['nodata'] > 0
+        assert result.pressure_mmhg.isna().all()
+
+
+@pytest.mark.parametrize('shape,expected', [
+    ('triangle', (Fraction(4, 3), Fraction(2, 3))),
+    ('concave', (Fraction(11, 10), Fraction(11, 10))),
+    ('hole', (Fraction(61, 30), Fraction(61, 30))),
+    ('multipart', (Fraction(29, 10), Fraction(9, 10))),
+    ('collection', (Fraction(29, 10), Fraction(9, 10))),
+    ('centroid_in_hole', (Fraction(2), Fraction(2))),
+])
+def test_exact_filled_centroids_match_analytic_geometry(shape, expected):
+    from shapely.geometry import MultiPolygon, GeometryCollection, LineString, Point
+    from oxyformer.exposure.numerics import exact_centroid
+    parts = MultiPolygon([box(0, 0, 2, 2), box(10, 0, 11, 1)])
+    geometries = {
+        'triangle': Polygon([(0, 0), (4, 0), (0, 2)]),
+        'concave': Polygon([(0, 0), (3, 0), (3, 1), (1, 1), (1, 3), (0, 3)]),
+        'hole': Polygon(box(0, 0, 4, 4).exterior.coords, [box(1, 1, 2, 2).exterior.coords]),
+        'multipart': parts,
+        'collection': GeometryCollection([parts, LineString([(100, 0), (100, 100)]), Point(500, 500), Polygon()]),
+        'centroid_in_hole': Polygon(box(0, 0, 4, 4).exterior.coords, [box(1, 1, 3, 3).exterior.coords]),
+    }
+    geometry = geometries[shape]
+    assert exact_centroid(geometry) == expected
+    assert exact_centroid(geometry.reverse()) == expected
+    if shape == 'centroid_in_hole':
+        assert not geometry.covers(Point(*map(float, expected)))
+
+
+def test_exact_centroid_survives_batch_boundary():
+    from oxyformer.exposure.population_allocation import placement_batches
+    end = 410000.0
+    h = np.spacing(end)
+    batches = list(placement_batches(box(0, 0, end+h, 100), 'distributed', SPEC))
+    assert [len(xy) for xy, _ in batches] == [4096, 5]
+    point = batches[-1][0][-1]
+    assert point[0] == Fraction(end) + Fraction(float(h))/2
+    assert point[1] == Fraction(50)
+    assert all(isinstance(v, Fraction) for xy, _ in batches for v in xy.flat)
+    assert sum(len(areas) for _, areas in batches) == 4101
+
+
+def test_identity_sampling_never_calls_proj_or_rounds_centroid(tmp_path, monkeypatch):
+    tile = write_raster(tmp_path / 'exact-location.tif', [0, -9999])
+    def forbidden(*args, **kwargs):
+        raise AssertionError('identity path rounded or invoked PROJ')
+    monkeypatch.setattr('oxyformer.exposure.population_allocation.Transformer.from_crs', forbidden)
+    with RasterSampler((tile,), SPEC.placement_crs) as sampler:
+        monkeypatch.setattr(Fraction, '__float__', forbidden)
+        xy = np.array([[Fraction(100)-Fraction(1, 2**47), Fraction(50)]], dtype=object)
+        z, reason = sampler.sample(xy)
+    assert z.tolist() == [0] and reason.tolist() == ['covered']
+    assert sampler.identities[0]['sampling_mode'] == 'exact_identity'
+
+
+@pytest.mark.parametrize('change', ['parameter', 'method', 'unit', 'datum', 'ellipsoid', 'axis'])
+def test_identity_crs_guard_retains_computational_differences(change):
+    from oxyformer.exposure.numerics import same_horizontal_crs
+    base = CRS('EPSG:5070')
+    doc = base.to_json_dict()
+    if change == 'parameter':
+        doc['conversion']['parameters'][0]['value'] += 1e-11
+    elif change == 'method':
+        doc['conversion']['method'] = {'name': 'Lambert Conic Conformal (2SP)', 'id': {'authority': 'EPSG', 'code': 9802}}
+    elif change == 'unit':
+        for axis in doc['coordinate_system']['axis']:
+            axis['unit'] = {'type': 'LinearUnit', 'name': 'foot', 'conversion_factor': 0.3048}
+    elif change == 'datum':
+        doc['base_crs']['datum']['name'] = 'Distinct synthetic reference frame'
+        doc['base_crs']['datum'].pop('id', None)
+    elif change == 'ellipsoid':
+        doc['base_crs']['datum']['ellipsoid']['semi_major_axis'] += 1
+    else:
+        doc['coordinate_system']['axis'].reverse()
+    different = CRS(doc)
+    if change == 'parameter':
+        assert base == different  # demonstrates why the semantic check alone is insufficient
+    assert not same_horizontal_crs(base, different)
+    with pytest.raises(ContractError, match='placement CRS'):
+        replace(SPEC, placement_crs=different.to_wkt())
+
+
+def test_identity_crs_guard_accepts_only_descriptive_roundtrip_changes(tmp_path):
+    from oxyformer.exposure.numerics import same_horizontal_crs, _crs_definition
+    base = CRS('EPSG:5070')
+    tile = write_raster(tmp_path / 'roundtrip.tif')
+    with rasterio.open(tile.path) as ds:
+        embedded = CRS(ds.crs)
+    for spelling in (base, CRS(base.to_wkt()), CRS(base.to_json()), embedded):
+        assert same_horizontal_crs(base, spelling)
+        assert _crs_definition(base) == _crs_definition(spelling)
+    cleaned = _crs_definition(embedded)
+    assert 'name' not in cleaned and 'id' not in cleaned
+    assert 'name' not in cleaned['conversion'] and 'id' not in cleaned['conversion']
+    assert all('abbreviation' not in axis and 'name' not in axis for axis in cleaned['coordinate_system']['axis'])
+    # Datum/method/parameter identities must survive descriptive pruning.
+    assert cleaned['base_crs']['datum'] == embedded.to_json_dict()['base_crs']['datum']
+    assert cleaned['conversion']['method'] == embedded.to_json_dict()['conversion']['method']
+    assert cleaned['conversion']['parameters'] == embedded.to_json_dict()['conversion']['parameters']
+
+
+def test_bound_and_dynamic_crs_never_receive_identity_shortcut():
+    from oxyformer.exposure.numerics import same_horizontal_crs
+    bound = CRS('+proj=aea +lat_1=29.5 +lat_2=45.5 +lat_0=23 +lon_0=-96 +datum=NAD83 +towgs84=0,0,0 +units=m +type=crs')
+    assert bound.is_bound and not same_horizontal_crs(bound, bound)
+    doc = CRS('EPSG:5070').to_json_dict()
+    doc['base_crs']['datum'].update(type='DynamicGeodeticReferenceFrame', frame_reference_epoch=2010)
+    dynamic = CRS(doc)
+    assert not same_horizontal_crs(dynamic, dynamic)
+
+
+def test_proj64_mode_and_mixed_participation_preserve_population(tmp_path):
+    tile = write_raster(tmp_path / 'geographic.tif', [0, 0], crs='EPSG:4269')
+    with rasterio.open(tile.path, 'r+') as ds:
+        ds.transform = rasterio.Affine(.01, 0, -96.01, 0, -.01, 23.01)
+    tile = replace(tile, sha256=file_hash(tile.path), resource_id='b')
+    frame, qc = build_exposure(sources(tile), blocks(), SPEC)
+    assert frame.pressure_mmhg.eq(760).all() and frame.population.eq(100).all()
+    assert qc['dem_tiles'][0]['sampling_mode'] == 'proj_binary64'
+    for scenario in SPEC.scenarios:
+        assert qc['sampling_modes'][scenario]['proj_binary64'] == dict(placement_count=2, population_mass=100)
+        assert qc['sampling_modes'][scenario]['exact_identity'] == dict(placement_count=0, population_mass=0)
+    assert qc['sampling_information'][0]['transformer_definition']
+    missing = replace(write_raster(tmp_path / 'first-missing.tif', [-9999, -9999]), resource_id='a')
+    both = replace(sources(tile), dem_tiles=(missing, tile))
+    mixed, mixed_qc = build_exposure(both, blocks(), SPEC)
+    pd.testing.assert_frame_equal(mixed, frame)
+    for scenario in SPEC.scenarios:
+        assert all(r['population_mass'] == 100 for r in mixed_qc['sampling_modes'][scenario].values())
+    assert 'not additive' in mixed_qc['sampling_mode_accounting']
+
+
+def test_collection_rejects_legacy_numerics_and_merges_runtime_information(tmp_path, shard_fixture):
+    from oxyformer.exposure.numerics import NUMERICAL_POLICY
+    inventory, paths = shard_fixture
+    legacy_hash = sha256(canonical_json(asdict(SPEC)).encode()).hexdigest()
+    assert SPEC.content_hash != legacy_hash
+    quality = json.loads(paths[5].read_text())
+    for info in quality['sampling_information']:
+        info['pyproj'] = 'other-synthetic-runtime'
+    paths[5].write_text(canonical_json(quality))
+    manifest = json.loads(paths[3].read_text())
+    manifest['files']['quality.json'] = file_hash(paths[5])
+    paths[3].write_text(canonical_json(manifest))
+    req = collect_request(tmp_path / 'runtime-union', inventory, paths)
+    result = run_stage(req)
+    assert result.status == 'pass', result.message
+    combined = json.loads((Path(req.output_dir) / 'quality.json').read_text())
+    assert len({r['pyproj'] for r in combined['sampling_information']}) == 2
+    assert combined['numerical_policy'] == NUMERICAL_POLICY
+    quality['allocation_hash'] = legacy_hash
+    quality['numerical_policy'] = 'legacy-rounded-centroid'
+    paths[5].write_text(canonical_json(quality))
+    manifest['allocation_hash'] = legacy_hash
+    manifest['files']['quality.json'] = file_hash(paths[5])
+    paths[3].write_text(canonical_json(manifest))
+    result = run_stage(collect_request(tmp_path / 'legacy-rejected', inventory, paths))
+    assert result.status == 'fail' and 'allocation' in result.message
+
+
+@pytest.mark.parametrize('axis', ['x', 'y'])
+@pytest.mark.parametrize('offset', [0, 1000])
+@pytest.mark.parametrize('missing_strip', [False, True])
+def test_exact_centroid_boundary_orientations(tmp_path, axis, offset, missing_strip):
+    values = [-9999, 0] if missing_strip else [0, -9999]
+    tile = write_raster(tmp_path / 'oriented-centroid.tif', values)
+    if axis == 'x':
+        affine = rasterio.Affine(-100, 0, offset+200, 0, -100, offset+100) if missing_strip else rasterio.Affine(100, 0, offset, 0, -100, offset+100)
+    else:
+        affine = rasterio.Affine(0, 100, offset, -100, 0, offset+200) if missing_strip else rasterio.Affine(0, 100, offset, 100, 0, offset)
+    with rasterio.open(tile.path, 'r+') as ds:
+        ds.transform = affine
+    tile = replace(tile, sha256=file_hash(tile.path))
+    edge = offset+100.0
+    h = np.spacing(edge)
+    lower, upper = (offset, edge+h) if missing_strip else (edge-h, edge)
+    polygon = box(lower, offset, upper, offset+100) if axis == 'x' else box(offset, lower, offset+100, upper)
+    geography = blocks(pop=(1, 0)).iloc[:1].copy()
+    geography.loc[0, 'geometry'] = polygon
+    scenario = 'distributed' if missing_strip else 'centroid'
+    frame, qc = build_exposure(sources(tile), geography, replace(SPEC, scenarios=(scenario,)))
+    assert bool(frame.missing_population.iloc[0] > 0) == missing_strip
+    assert bool(frame.pressure_mmhg.isna().iloc[0]) == missing_strip
+
+
+@pytest.mark.parametrize('dtype', ['complex64', 'complex128'])
+@pytest.mark.parametrize('imaginary', [float('nan'), 2.0])
+def test_complex_dem_is_rejected_before_discarding_components(tmp_path, dtype, imaginary):
+    path = tmp_path / 'complex-elevation.tif'
+    with rasterio.open(path, 'w', driver='GTiff', height=1, width=1, count=1,
+                       dtype=dtype, crs='EPSG:5070', transform=from_origin(0, 100, 100, 100)) as ds:
+        ds.write(np.array([[complex(0, imaginary)]], dtype=dtype), 1)
+        ds.set_band_unit(1, 'm')
+    tile = DemTile(resource_id='complex', path=str(path), sha256=file_hash(path), crs='EPSG:5070',
+                   nodata=None, vertical_unit='m', vertical_datum='NAVD88')
+    geography = blocks(pop=(1, 0)).iloc[:1].copy()
+    with pytest.raises(ContractError, match='real numeric elevation'):
+        build_exposure(sources(tile), geography, SPEC)
+
+
+@pytest.mark.parametrize('dtype', ['int16', 'uint16', 'float32', 'float64'])
+def test_real_dem_scalar_types_remain_accepted(tmp_path, dtype):
+    path = tmp_path / 'real-elevation.tif'
+    with rasterio.open(path, 'w', driver='GTiff', height=1, width=1, count=1,
+                       dtype=dtype, crs='EPSG:5070', transform=from_origin(0, 100, 100, 100)) as ds:
+        ds.write(np.array([[100]], dtype=dtype), 1)
+        ds.set_band_unit(1, 'm')
+    tile = DemTile(resource_id='real', path=str(path), sha256=file_hash(path), crs='EPSG:5070',
+                   nodata=None, vertical_unit='m', vertical_datum='NAVD88')
+    frame, qc = build_exposure(sources(tile), blocks(pop=(1, 0)).iloc[:1].copy(), SPEC)
+    assert frame.missing_population.eq(0).all()
+    assert frame.pressure_mmhg.eq(float(pressure_mmhg(100))).all()
+    assert qc['population'] == 1
+
+
+@pytest.mark.parametrize('transform', [pressure_mmhg, inspired_oxygen_mmhg, oxygen_deficit_mmhg])
+@pytest.mark.parametrize('dtype', ['complex64', 'complex128', object])
+@pytest.mark.parametrize('imaginary', [float('nan'), 2.0])
+def test_physics_rejects_complex_elevation_before_cast(transform, dtype, imaginary):
+    values = np.array([np.complex128(complex(0, imaginary))], dtype=dtype)
+    with pytest.raises(ContractError, match='elevation must be real'):
+        transform(values)
+
+
+@pytest.mark.parametrize('decimal', [False, True])
+def test_physics_preserves_real_object_numeric_inputs(decimal):
+    from decimal import Decimal
+    values = [Decimal('0'), Decimal('1000.5')] if decimal else [0, 1000.5]
+    actual = pressure_mmhg(np.array(values, dtype=object))
+    np.testing.assert_array_equal(actual, pressure_mmhg([0, 1000.5]))
+
+
+@pytest.mark.parametrize('name', ['dem.payload', 'dem', 'dem.TAR', 'archive space/dem.payload',
+                                  'parent.tar/dem.payload', 'closing}name', 'opening{name', 'both{}.payload'])
+def test_verified_dem_archive_name_does_not_change_exposure(tmp_path, shard_fixture, name):
+    inventory, paths = shard_fixture
+    old = tmp_path / 'dem.tar'
+    renamed = tmp_path / name
+    renamed.parent.mkdir(parents=True, exist_ok=True)
+    old.rename(renamed)
+    task = json.loads((tmp_path / 'shard-AL/task.json').read_text())
+    dependencies = [inventory, tmp_path / 'census-receipt.json', tmp_path / 'census.tar',
+                    tmp_path / 'dem-receipt.json', renamed]
+    req = request(tmp_path / 'renamed-archive', 'exposure-atlas', task, dependencies)
+    result = run_stage(req)
+    assert result.status == 'pass', result.message
+    result.verify(req)
+    for name, expected in [('exposure.parquet', paths[1]), ('quality.json', paths[2])]:
+        assert file_hash(Path(req.output_dir) / name) == file_hash(expected)
+
+
+def test_listed_fallback_requires_approval_even_if_primary_covers(tmp_path, monkeypatch):
+    primary = replace(write_raster(tmp_path / 'primary.tif', [0, 0]), resource_id='a-primary')
+    fallback = replace(write_raster(tmp_path / 'fallback.tif', [3000, 3000]), resource_id='n43w070',
+                       product=FALLBACK, fallback_reason='reviewed missing primary cell')
+    mixed = replace(sources(primary), dem_tiles=(primary, fallback))
+    expected, _ = build_exposure(sources(primary), blocks(), SPEC)
+    actual, _ = build_exposure(mixed, blocks(), SPEC)
+    pd.testing.assert_frame_equal(actual, expected)  # fallback contributes no placement
+    approval = yaml.safe_load((ROOT / 'configs/approvals.yaml').read_text())
+    del approval['owner_decisions']['exposure']['dem_fallback']
+    path = tmp_path / 'without-fallback-approval.yaml'
+    path.write_text(yaml.safe_dump(approval))
+    monkeypatch.setattr('oxyformer.exposure.physics._APPROVAL_PATH', path)
+    actual, _ = build_exposure(sources(primary), blocks(), SPEC)
+    pd.testing.assert_frame_equal(actual, expected)
+    with pytest.raises(ContractError, match='approval missing or changed: dem_fallback'):
+        build_exposure(mixed, blocks(), SPEC)
+
+
+@pytest.mark.parametrize('name', ['blocks.payload', 'blocks', 'closing}name', 'opening{name'])
+def test_census_zip_filename_does_not_change_population(tmp_path, name):
+    blocks_path, sf1_path = write_census_archives(tmp_path / 'source')
+    expected = read_census_blocks(blocks_path, sf1_path, state_abbreviation='AL', state_fips='01')
+    renamed = tmp_path / name
+    blocks_path.rename(renamed)
+    actual = read_census_blocks(renamed, sf1_path, state_abbreviation='AL', state_fips='01')
+    pd.testing.assert_frame_equal(actual, expected)
+
+
+def test_archive_address_does_not_reuse_another_payload_index(tmp_path):
+    import os
+    from oxyformer.exposure.archives import gdal_archive_uri
+    sizes = []
+    for index in range(5):
+        tile = write_raster(tmp_path / f'{index}.tif', [index*1000])
+        archive = tmp_path / f'closing}}{index} & %.payload'
+        member = f'dem/{index}.tif'
+        with tarfile.open(archive, 'w') as out:
+            out.add(tile.path, arcname=member)
+        os.utime(archive, (1000000000, 1000000000))
+        sizes.append(archive.stat().st_size)
+        with rasterio.open(gdal_archive_uri(archive, 'tar') + '/' + member) as ds:
+            assert ds.read(1)[0, 0] == index*1000
+    assert len(set(sizes)) == 1
