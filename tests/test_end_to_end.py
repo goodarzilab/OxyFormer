@@ -6,8 +6,10 @@ The common CLI has separately documented prerequisite defects; no substitute
 dispatcher, owner approval or production adapter is fabricated here.
 """
 from dataclasses import replace
+from concurrent.futures import ProcessPoolExecutor
 from hashlib import sha256
 import json
+import multiprocessing
 from pathlib import Path
 import shutil
 
@@ -46,7 +48,7 @@ def exposure_design_inputs():
     geography, atlas = [], []
     elevations = {}
     for county in ("c1", "c2"):
-        names = [f"b{i:02}" for i in range(10)]
+        names = [f"b{i:02}" for i in range(7)]
         sealed = set(sorted(names, key=lambda b: sha256(canonical_json([1103, county, b]).encode()).hexdigest())[:2])
         for block, name in enumerate(names):
             # High-altitude synthetic bins keep the approved 300 m relief
@@ -92,6 +94,45 @@ def chain(tmp_path_factory):
         torch.set_num_threads(old_threads)
 
 
+def fit_partition(arguments):
+    """Independent CPU processes keep RNG and torch state isolated per fit."""
+    prepared, root, fold, seed = arguments
+    torch.set_num_threads(1)
+
+    def config(path, **kwargs):
+        return prepared.configuration(fold, path, ssl_epochs=1,
+            settings=NuisanceSettings(batch_size=256, frozen_epochs=1), **kwargs)
+
+    location = root / f"fold-{fold}-seed-{seed}"
+    artifact = nested.run_fold(config(location), prepared.outer, seed, geography=prepared.geography)
+    assert artifact.complete
+    controller = load_checkpoint(artifact.checkpoint, artifact.checkpoint.identity)["controller"]
+    assert controller["counts"]["nuisance_fits"] == 26
+    assert controller["counts"]["ssl_fits"] == 4
+    ids = artifact.prediction_inputs.original_ids
+    view = subset(prepared.data.covariates(("female_share",)), ids)
+    prediction = nested.predict(artifact, view, prepared.policy)
+    if fold == 0 and seed == nested.SEEDS[0]:
+        partial_root = root / "interrupted"
+        partial = nested.run_fold(config(partial_root / "work", max_batches=1), prepared.outer,
+                                  seed, geography=prepared.geography)
+        assert not partial.complete
+        archive = root / "continuation.tar"
+        binding = {"endpoint": prepared.content_hash, "design": prepared.treatment_design.design_hash}
+        nested.export_continuation(partial, archive, binding=binding, task_id="first",
+            chain=dict(owner="synthetic-chain", step=0, predecessor=None), allowed_root=partial_root)
+        shutil.rmtree(partial_root)  # Resume cannot rely on the old attempt.
+        destination = root / "continued"
+        destination.mkdir()
+        restored = nested.import_continuation(archive, destination, binding=binding,
+            chain=dict(owner="synthetic-chain", step=1, predecessor="first"))
+        resumed = nested.run_fold(config(destination / "work", predecessor=restored), prepared.outer,
+                                  seed, geography=prepared.geography)
+        assert_fitted_invariant(artifact, resumed)
+        assert_prediction_invariant(prediction, nested.predict(resumed, view, prepared.policy))
+    return prediction
+
+
 def build_chain(root):
     inputs, elevations = exposure_design_inputs()
     request = make_request(root / "design", inputs)
@@ -119,40 +160,9 @@ def build_chain(root):
             scale=knots[-1] - knots[0], knots=knots, design_hash=design.content_hash),
         feature_kinds=(("female_share", "numeric"),), families=(("female_share",),),
         county_field="county", exposure_assignment_level="tract")
-    parts = []
-    for fold in range(5):
-        for seed in nested.SEEDS:
-            def config(path, **kwargs):
-                return prepared.configuration(fold, path, ssl_epochs=1,
-                    settings=NuisanceSettings(batch_size=256, frozen_epochs=1), **kwargs)
-            location = root / f"fold-{fold}-seed-{seed}"
-            artifact = nested.run_fold(config(location), prepared.outer, seed, geography=prepared.geography)
-            assert artifact.complete
-            controller = load_checkpoint(artifact.checkpoint, artifact.checkpoint.identity)["controller"]
-            assert controller["counts"]["nuisance_fits"] == 26
-            assert controller["counts"]["ssl_fits"] == 4
-            ids = artifact.prediction_inputs.original_ids
-            view = subset(data.covariates(("female_share",)), ids)
-            prediction = nested.predict(artifact, view, prepared.policy)
-            if fold == 0 and seed == nested.SEEDS[0]:
-                partial_root = root / "interrupted"
-                partial = nested.run_fold(config(partial_root / "work", max_batches=1), prepared.outer,
-                                          seed, geography=prepared.geography)
-                assert not partial.complete
-                archive = root / "continuation.tar"
-                binding = {"endpoint": prepared.content_hash, "design": design.content_hash}
-                nested.export_continuation(partial, archive, binding=binding, task_id="first",
-                    chain=dict(owner="synthetic-chain", step=0, predecessor=None), allowed_root=partial_root)
-                shutil.rmtree(partial_root)  # Resume cannot rely on the old attempt.
-                destination = root / "continued"
-                destination.mkdir()
-                restored = nested.import_continuation(archive, destination, binding=binding,
-                    chain=dict(owner="synthetic-chain", step=1, predecessor="first"))
-                resumed = nested.run_fold(config(destination / "work", predecessor=restored), prepared.outer,
-                                          seed, geography=prepared.geography)
-                assert_fitted_invariant(artifact, resumed)
-                assert_prediction_invariant(prediction, nested.predict(resumed, view, prepared.policy))
-            parts.append(prediction)
+    arguments = [(prepared, root, fold, seed) for fold in range(5) for seed in nested.SEEDS]
+    with ProcessPoolExecutor(max_workers=2, mp_context=multiprocessing.get_context("spawn")) as pool:
+        parts = list(pool.map(fit_partition, arguments))
     fields = ("original_ids", "fold_ids", "seed_ids", "mu_a", "mu_d", "r_a", "r_d", "origin_weights")
     lineage = replace(parts[0].lineage, unit_ids=prepared.outer.original_ids,
         parent_hashes=(manifest.content_hash, *(p.content_hash for p in parts)),

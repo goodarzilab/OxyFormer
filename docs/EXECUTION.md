@@ -13,7 +13,8 @@ offline; the common dispatcher is not yet an executable route through every
 stage. The integration tests exercise those direct APIs, without a replacement
 dispatcher or a fabricated production adapter.
 
-Reproduced on Slurm in both the oxyformer and CI CPU environments:
+The first three boundaries below were reproduced on Slurm in both the oxyformer
+and CI CPU environments. The final row records source inspection:
 
 | Boundary | Reproduction / required owning-unit correction |
 | --- | --- |
@@ -117,8 +118,9 @@ complete suite below ten minutes. Record failures and build-specific skips;
 do not relax tolerances to hide CPU float32 differences. The focused files are
 `tests/test_end_to_end.py` and `tests/test_plan_integrity.py`.
 
-For the required mutation, remove a leaf from the expanded final collector's
-`needs` in `test_final_collector_dependencies`, run that test, and require the
+For the required mutation, use an isolated copy of
+`test_final_coverage_collector_dependencies` with its repository root preserved.
+Remove a leaf from the expanded final collector's `needs`, run that test, and require the
 `collector omitted required leaf dependency` failure. Revert the injection,
 rerun the test and complete suites, and record both results outside Git.
 
