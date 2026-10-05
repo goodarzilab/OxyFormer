@@ -7,13 +7,18 @@ Alignment, ownership, finiteness and nonnegative weights cover every original
 row. Weighted arithmetic uses only raw positive-weight rows, without replacing
 excluded observations by placeholders. Public logits/ratios remain unweighted.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
 
 import torch
 from torch.nn import functional as F
 
-from oxyformer.provenance import ArtifactLineage, Immutable, require, unique
+from oxyformer.provenance import ArtifactLineage, ContractError, Immutable, require, unique
+
+
+# Registered in configs/training/nuisance.yaml; limits fitting, not prediction.
+CALIBRATION_LOGIT_ABS_MAX = 1_000_000.
+CALIBRATION_LOSS_TOLERANCE = 1e-6
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -151,8 +156,46 @@ def _weighted_median(values, mass):
     return values[order[index]]
 
 
+def _comparison_loss(coordinates, z, labels, mass):
+    """Best loss of fixed, feasible public FP32 maps, independent of the fit."""
+    candidates = [replace(coordinates, slope=0., intercept=0.),
+                  replace(coordinates, slope=1., intercept=0., input_offset=0., input_scale=1.)]
+    x = coordinates.logits(z)
+    for scale in (1., max(1., float(x.abs().max()))):
+        for sign in (-1., 1.):
+            candidates.append(replace(coordinates, slope=sign / scale))
+    comparison = math.inf
+    probes = []
+    for candidate in candidates:
+        try:
+            calibrated = candidate.logits(z)
+        except ContractError:
+            continue
+        loss = _pair_metrics(calibrated, labels, mass)[0]
+        if (candidate.slope != 0 and candidate.input_offset == coordinates.input_offset
+                and candidate.input_scale == coordinates.input_scale):
+            probes.append((loss, abs(candidate.slope)))
+        # Optimization is unconstrained by ratio feasibility. Only the
+        # convergence certificate excludes overflowing comparison ratios;
+        # the final fitted map still undergoes the unchanged ratio audit.
+        if bool(torch.isfinite(calibrated.exp()).all()):
+            comparison = min(comparison, loss)
+    return comparison, min(probes)[1] if probes else 1.
+
+
 def fit_affine(logits, weights, *, original_ids, fold_ids, partitions,
                outer_training_ids, lineage):
+    """Fit within the registered input domain, validating even zero-mass rows."""
+    raw = torch.as_tensor(logits, dtype=torch.float64).detach()
+    require(bool(torch.isfinite(raw).all()), "nonfinite calibration inputs")
+    require(bool((raw.abs() <= CALIBRATION_LOGIT_ABS_MAX).all()),
+            "calibration fitting requires absolute logits <= 1000000")
+    return _fit_affine(logits, weights, original_ids=original_ids, fold_ids=fold_ids,
+        partitions=partitions, outer_training_ids=outer_training_ids, lineage=lineage)
+
+
+def _fit_affine(logits, weights, *, original_ids, fold_ids, partitions,
+                outer_training_ids, lineage):
     """Fit two FP32 parameters; no clipping, sign constraint, or effect input.
 
     The affine map is standardized internally for conditioning. An exactly
@@ -190,28 +233,38 @@ def fit_affine(logits, weights, *, original_ids, fold_ids, partitions,
         maximum = torch.finfo(z.dtype).max
         magnitude = torch.maximum(magnitude, deviations.max() / (maximum / 2))
         magnitude = magnitude.clamp(max=maximum).float()
-        if float(magnitude) == 0:
-            slope, intercept, magnitude = 0., 0., torch.ones_like(magnitude)
-        else:
-            coordinates = AffineCalibration(slope=1., intercept=0., class_prior=.5,
+        constant = float(magnitude) == 0
+        if constant:
+            magnitude = torch.ones_like(magnitude)
+        coordinates = AffineCalibration(slope=1., intercept=0., class_prior=.5,
                 original_ids=ids, partitions=tuple(partitions), lineage=lineage,
                 input_offset=float(offset), input_scale=float(magnitude))
+        comparison, probe = _comparison_loss(coordinates, z, labels, mass)
+        if constant:
+            slope, intercept = 0., 0.
+        else:
             # Fit exactly the normalization used by the public FP32 map,
             # including its overflow-safe subtraction on opposite extremes.
             x = coordinates.logits(z)
             # Line-search dot products and cubic interpolation need wider
             # temporaries than the realized head. Keep a FP64 optimizer work
             # vector, but round every trial coefficient and score to FP32.
-            # Scale a large initial slope score into optimizer coordinates.
-            # Without this, a meaningful logit change may require a raw step
-            # far below LBFGS's step tolerance. A power of two changes units,
-            # preserving the same FP32 head and the registered objective.
-            initial_score = _weighted_score(((.5 - labels).double() * x.double()).mean(1), mass[:, 0])
-            exponent = max(0, math.frexp(abs(initial_score))[1])
+            # Use a weighted central magnitude, not the initial score: a
+            # correctly classified extreme can have an enormous initial score
+            # despite negligible mass and vanish after the first useful step.
+            # Keeping zeros in this statistic prevents a rare row becoming
+            # the entire scaling population when most coordinates are zero.
+            typical = float(_weighted_median(x.abs().flatten(), mass.flatten()))
+            exponent = math.frexp(typical)[1] if typical > 0 else 0
             step_units = torch.tensor([math.ldexp(1., -exponent), 1.],
                                       dtype=torch.float64, device=z.device)
             working = torch.zeros(2, dtype=torch.float64, device=z.device, requires_grad=True)
-            optimizer = torch.optim.LBFGS([working], lr=1., max_iter=100,
+            # A finite loss probe chooses the initial line-search distance. This
+            # is not a fixed score-based change of units: a negligible tail
+            # can shorten a trial only when the full weighted objective favors
+            # it. The robust coordinate units above remain unchanged.
+            trial_step = min(1., probe / float(step_units[0]))
+            optimizer = torch.optim.LBFGS([working], lr=trial_step, max_iter=100,
                                          tolerance_grad=1e-7, tolerance_change=1e-9,
                                          line_search_fn="strong_wolfe")
 
@@ -232,7 +285,11 @@ def fit_affine(logits, weights, *, original_ids, fold_ids, partitions,
                 require(bool(torch.isfinite(working.grad).all()), "nonfinite affine gradient")
                 return loss
 
-            optimizer.step(closure)
+            # Restart curvature after a steep, low-mass tail saturates. Its
+            # old secant can otherwise freeze steps on the ordinary rows.
+            for _ in range(3):
+                optimizer.state.clear()
+                optimizer.step(closure)
             parameter = (working.detach() * step_units).float()
             slope = float(parameter[0])
             intercept = float(parameter[1])
@@ -251,7 +308,10 @@ def fit_affine(logits, weights, *, original_ids, fold_ids, partitions,
     result = AffineCalibration(slope=slope, intercept=intercept, class_prior=.5,
         original_ids=ids, partitions=tuple(partitions), lineage=lineage,
         input_offset=float(offset), input_scale=float(magnitude))
-    _pair_metrics(result.logits(z), labels, mass)
+    loss = _pair_metrics(result.logits(z), labels, mass)[0]
+    require(loss <= comparison + CALIBRATION_LOSS_TOLERANCE,
+            f"affine calibration did not converge: weighted loss {loss:.9g} exceeds "
+            f"feasible comparison {comparison:.9g} by more than {CALIBRATION_LOSS_TOLERANCE:g}")
     result.ratios(z)  # Numerical validity includes the actual ratio, not just BCE.
     return result
 

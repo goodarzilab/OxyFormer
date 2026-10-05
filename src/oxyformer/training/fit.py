@@ -53,6 +53,7 @@ from oxyformer.models.treatment_query import TreatmentDesign
 from oxyformer.provenance import ArtifactLineage, Immutable, canonical_json, file_hash, require, write_artifact
 from oxyformer.training.calibration import (
     AffineCalibration, CalibrationPartition, fit_affine, paired_tensors, pair_metrics, transfer_diagnostics,
+    CALIBRATION_LOGIT_ABS_MAX, CALIBRATION_LOSS_TOLERANCE,
 )
 from oxyformer.training.checkpoint import (
     CheckpointArtifact, CheckpointIdentity, CheckpointRequest, capture_rng, load_checkpoint,
@@ -73,6 +74,8 @@ class NuisanceSettings(Immutable):
     gradient_norm: float = 1.
     batch_size: int = 256
     frozen_epochs: int = 150
+    calibration_logit_abs_max: float = CALIBRATION_LOGIT_ABS_MAX
+    calibration_loss_tolerance: float = CALIBRATION_LOSS_TOLERANCE
 
     def __post_init__(self):
         Immutable.__post_init__(self)
@@ -80,6 +83,9 @@ class NuisanceSettings(Immutable):
                 "unregistered nuisance grid")
         require(self.weight_decay == 1e-4 and self.max_epochs == 150 and
                 self.patience == 15 and self.gradient_norm == 1., "unregistered optimization bounds")
+        require(self.calibration_logit_abs_max == CALIBRATION_LOGIT_ABS_MAX and
+                self.calibration_loss_tolerance == CALIBRATION_LOSS_TOLERANCE,
+                "unregistered calibration numerical bounds")
         require(self.batch_size > 0 and 0 < self.frozen_epochs <= self.max_epochs,
                 "invalid batch size or frozen epoch schedule")
 
