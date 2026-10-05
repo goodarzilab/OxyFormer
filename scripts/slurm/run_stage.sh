@@ -5,6 +5,7 @@ set -euo pipefail
 : "${STAGE:?}"
 git clone --depth 1 --branch dev https://github.com/goodarzilab/OxyFormer.git "$SWARM_UNIT_DIR/src"
 git -C "$SWARM_UNIT_DIR/src" rev-parse HEAD > "$SWARM_UNIT_DIR/code_commit.txt"
+export PYTHONDONTWRITEBYTECODE=1
 export PYTHONPATH="$SWARM_UNIT_DIR/src/src"
 if [[ -n "${TASK_MANIFEST:-}" && "$TASK_MANIFEST" != /* ]]; then TASK_MANIFEST="$PWD/$TASK_MANIFEST"; fi
 cd "$SWARM_UNIT_DIR/src"

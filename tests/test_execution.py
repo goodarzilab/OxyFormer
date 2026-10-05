@@ -55,6 +55,7 @@ def commit(repo):
 @pytest.fixture
 def runtime(tmp_path, monkeypatch):
     monkeypatch.delenv('SWARM_UNIT_DIR', raising=False)
+    monkeypatch.setenv('PYTHONDONTWRITEBYTECODE', '1')
     repo = tmp_path / 'repo'
     repo.mkdir()
     (repo / 'configs/execution').mkdir(parents=True)
@@ -556,7 +557,7 @@ def test_safe_tar_dot_prefix_does_not_hide_traversal_or_duplicates(tmp_path):
         assert not (tmp_path / f'unpacked-{index}').exists()
 
 
-def test_cli_import_from_pristine_repo_keeps_bytecode_ignored(runtime, tmp_path):
+def test_cli_import_from_pristine_repo_keeps_code_roots_clean(runtime, tmp_path):
     import inspect
     repo, out = runtime
     original = Path(__file__).parents[1]
@@ -581,7 +582,7 @@ from oxyformer.execution.paths import atomic_json
                                   '--task', str(task)], cwd=tmp_path, env=env, text=True,
                                  stdout=log, stderr=subprocess.STDOUT)
     assert process.returncode == 0, (out / 'run.log').read_text()
-    assert list((repo / 'src/oxyformer/__pycache__').glob('*.pyc'))
+    assert not list((repo / 'src/oxyformer').rglob('*.pyc'))
     assert git(repo, 'status', '--porcelain', '--untracked-files=all') == ''
     from oxyformer.execution.runner import verify_dependency_result
     assert verify_dependency_result(out).status == 'pass'
@@ -636,6 +637,7 @@ def test_single_brace_campaign_templates_rejected(spec, field):
 
 def test_cli_invalid_repo_is_blocked_instead_of_a_traceback(tmp_path, monkeypatch):
     monkeypatch.delenv('SWARM_UNIT_DIR', raising=False)
+    monkeypatch.setenv('PYTHONDONTWRITEBYTECODE', '1')
     repo, out = tmp_path / 'not-a-repo', tmp_path / 'attempt'
     repo.mkdir()
     out.mkdir()
@@ -1676,3 +1678,145 @@ def test_output_inside_transitive_attempt_is_refused_before_writing(runtime, tmp
         run('dummy', nested, repo, deps_env=True, task_file=task)
     assert fingerprint_tree(source) == before
     assert not (nested / '_execution').exists()
+
+
+@pytest.mark.parametrize('relative', ['src/oxyformer/helper.py', 'scripts/helper.py',
+                                      'src/oxyformer/notes.md', 'scripts/notes.md',
+                                      'src/oxyformer/helper.pyc'])
+@pytest.mark.parametrize('derive', ['commit', 'recipe'])
+def test_identity_rejects_every_ignored_file_in_code_roots(runtime, relative, derive):
+    repo, out = runtime
+    path = repo / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('unrecorded code or resource\n')
+    with (repo / '.git/info/exclude').open('a') as stream:
+        stream.write('\n/' + relative + '\n')
+    with pytest.raises(ContractError, match='untracked.*' + relative):
+        code_identity(repo, out) if derive == 'commit' else scientific_fingerprint(repo)
+
+
+@pytest.mark.parametrize('flag', ['--assume-unchanged', '--skip-worktree'])
+@pytest.mark.parametrize('derive', ['commit', 'recipe'])
+def test_identity_checks_disk_bytes_even_when_index_suppresses_status(runtime, flag, derive):
+    repo, out = runtime
+    git(repo, 'update-index', flag, 'src/oxyformer/dummy.py')
+    (repo / 'src/oxyformer/dummy.py').write_text('unrecorded = True\n')
+    assert git(repo, 'status', '--porcelain') == ''
+    with pytest.raises(ContractError, match='tracked modifications.*src/oxyformer/dummy.py'):
+        code_identity(repo, out) if derive == 'commit' else scientific_fingerprint(repo)
+
+
+@pytest.mark.parametrize('relative', ['src/oxyformer/notes.md', 'scripts/notes.md', 'docs/helper.py'])
+def test_recipe_fingerprint_covers_resources_under_import_roots(runtime, relative):
+    repo, out = runtime
+    note = repo / relative
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text('one')
+    commit(repo)
+    before = scientific_fingerprint(repo)
+    note.write_text('two')
+    commit(repo)
+    assert scientific_fingerprint(repo) != before
+
+
+@pytest.mark.parametrize('special', ['fifo', 'socket', 'directory', 'symlink'])
+def test_safe_extract_checks_archive_type_before_open(tmp_path, special):
+    import socket
+    archive = tmp_path / 'payload.tar'
+    sock = None
+    if special == 'fifo':
+        os.mkfifo(archive)
+    elif special == 'socket':
+        sock = socket.socket(socket.AF_UNIX)
+        sock.bind(str(archive))
+    elif special == 'directory':
+        archive.mkdir()
+    else:
+        archive.symlink_to('/dev/null')
+    code = '''import sys
+from oxyformer.execution.paths import safe_extract
+from oxyformer.provenance import ContractError
+try:
+    safe_extract(sys.argv[1], sys.argv[2], 'extracted')
+except ContractError as exc:
+    assert sys.argv[1] in str(exc), str(exc)
+else:
+    raise AssertionError('nonregular archive accepted')
+'''
+    try:
+        process = subprocess.run([sys.executable, '-c', code, str(archive), str(tmp_path)],
+                                 env=dict(os.environ, PYTHONPATH=str(Path(__file__).parents[1] / 'src')),
+                                 capture_output=True, text=True, timeout=3)
+        assert process.returncode == 0, process.stdout + process.stderr
+        assert not (tmp_path / 'extracted').exists()
+    finally:
+        if sock is not None:
+            sock.close()
+
+
+def test_output_containing_transitive_attempt_is_refused_before_writing(runtime, tmp_path, monkeypatch):
+    from oxyformer.execution.integrity import fingerprint_tree
+    repo, middle = runtime
+    out = tmp_path / 'consumer'
+    out.mkdir()
+    (out / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    task = task_file(out, needs={'middle': ['value.json']})
+    source = out / 'source'
+    source.mkdir()
+    (source / 'data.json').write_text('{}')
+    (source / 'receipts.json').write_text('{}')
+    publish_source_fixture(repo, source)
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
+    assert run('dummy', middle, repo, deps_env=True,
+               task_file=task_file(middle, needs={'data-unit': ['data.json', 'receipts.json']})).status == 'pass'
+    monkeypatch.setenv('SWARM_DEP_MIDDLE', str(middle))
+    before = fingerprint_tree(out)
+    with pytest.raises(ContractError, match='overlap.*' + str(source)):
+        run('dummy', out, repo, deps_env=True, task_file=task)
+    assert fingerprint_tree(out) == before
+
+
+def test_builder_alternate_approval_fifo_is_nonblocking(tmp_path):
+    approval = tmp_path / 'approval.yaml'
+    os.mkfifo(approval)
+    process = subprocess.run([sys.executable, str(Path(__file__).parents[1] / 'scripts/build_tasks.py'),
+                              '--spec', str(tmp_path / 'unused.json'), '--approvals', str(approval),
+                              '--out', str(tmp_path / 'out')], capture_output=True, text=True,
+                             env=dict(os.environ, PYTHONPATH=str(Path(__file__).parents[1] / 'src')),
+                             timeout=3)
+    assert process.returncode != 0
+    assert str(approval) in process.stderr and 'regular' in process.stderr
+    assert not (tmp_path / 'out').exists()
+
+
+def test_module_namespace_cannot_extend_beyond_checked_checkout(runtime, tmp_path):
+    from oxyformer.execution.identity import verify_module_origins
+    repo, _ = runtime
+    namespace = SimpleNamespace(__path__=[str(repo / 'src/oxyformer'), str(tmp_path)])
+    with pytest.raises(ContractError, match='outside --repo'):
+        verify_module_origins(repo, [namespace])
+
+
+def test_locked_recipe_checks_scientific_identity_of_transitive_attempts(runtime, tmp_path, monkeypatch):
+    repo, ancestor = runtime
+    old_task = locked_task(repo, ancestor, tmp_path / 'old-lock', monkeypatch)
+    assert run('dummy', ancestor, repo, deps_env=True, task_file=old_task).status == 'pass'
+    middle = tmp_path / 'middle'
+    middle.mkdir()
+    (middle / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    monkeypatch.setenv('SWARM_DEP_ANCESTOR', str(ancestor))
+    assert run('dummy', middle, repo, deps_env=True,
+               task_file=task_file(middle, needs={'ancestor': ['value.json']})).status == 'pass'
+    (repo / 'src/science.py').write_text('new_science = 2\n')
+    head = commit(repo)
+    consumer = tmp_path / 'consumer'
+    consumer.mkdir()
+    (consumer / 'code_commit.txt').write_text(head)
+    path = locked_task(repo, consumer, tmp_path / 'new-lock', monkeypatch)
+    task = json.loads(path.read_text())
+    task['needs']['middle'] = ['value.json']
+    path.write_text(json.dumps(task))
+    monkeypatch.setenv('SWARM_DEP_MIDDLE', str(middle))
+    with pytest.raises(ContractError, match='dependency scientific code/config drift'):
+        run('dummy', consumer, repo, deps_env=True, task_file=path)
+    assert not (consumer / 'value.json').exists()
