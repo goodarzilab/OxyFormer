@@ -1,9 +1,9 @@
 """Run a CLI stage to process exit before the parent checks and publishes it.
 
 This is a completion boundary, not filesystem confinement. The worker writes
-only its unsealed result. A separate Linux subreaper waits for the scientific
-interpreter to close its descriptors and finish finalizers, then reaps adopted
-descendants before the parent validates and publishes. It confines no writes.
+only its unsealed result. An outer Linux subreaper survives loss of the stage
+parent, waits for interpreter finalizers, and reaps adopted descendants before
+the caller validates and publishes. It confines no writes.
 """
 import atexit
 import ctypes
@@ -56,14 +56,15 @@ def _reap_descendants():
             return
 
 
-def supervise(request_path, repository, module_name):
+def supervise(request_path, repository, module_name, *, stage_parent=False):
     # Adoption is set before any stage work starts. This dedicated process does
     # not import the stage or own its resource-tracker pipes. Waiting here lets
     # the scientific interpreter perform normal shutdown before helper reaping.
-    libc = ctypes.CDLL(None, use_errno=True)
-    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
-        error = ctypes.get_errno()
-        raise OSError(error, 'cannot enable child-subreaper: ' + os.strerror(error))
+    if not stage_parent:
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+            error = ctypes.get_errno()
+            raise OSError(error, 'cannot enable child-subreaper: ' + os.strerror(error))
     stage = None
     interrupted = []
 
@@ -75,13 +76,17 @@ def supervise(request_path, repository, module_name):
     signal.signal(signal.SIGINT, terminate)
     signal.signal(signal.SIGTERM, terminate)
     stage = subprocess.Popen([sys.executable, '-B', '-m', 'oxyformer.execution.worker',
-                              '--stage-process', request_path, repository, module_name], cwd=repository)
+                              '--stage-process' if stage_parent else '--stage-parent',
+                              request_path, repository, module_name], cwd=repository)
     if interrupted:
         stage.send_signal(interrupted[-1])
     code = stage.wait()
     # Only the stage knows its helpers' exit conventions (grep uses 1 for no
     # matches). Reap every helper for completion, without judging its result.
-    _reap_descendants()
+    # Even a killed immediate parent must not release the publication boundary.
+    # The outer reaper adopts the interpreter and detached descendants and waits.
+    if not stage_parent:
+        _reap_descendants()
     return 1 if interrupted or code != 0 else 0
 
 
@@ -117,6 +122,8 @@ def main():
     args = sys.argv[1:]
     if args and args[0] == '--stage-process':
         return stage_main(*args[1:])
+    if args and args[0] == '--stage-parent':
+        return supervise(*args[1:], stage_parent=True)
     return supervise(*args)
 
 

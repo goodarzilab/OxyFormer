@@ -1357,6 +1357,42 @@ def run_stage(request):
     assert str(victim) in result.message
 
 
+@cases("detached", [False, True])
+def test_supervisor_loss_waits_for_scientific_descendants(repo, out, patch, source, detached):
+    patch.setenv("FIXTURE_DETACHED", str(int(detached)))
+    process = run_cli_fixture(repo, out, '''import signal
+import subprocess
+import sys
+import time
+def run_stage(request):
+    result = dummy(request)
+    os.kill(os.getppid(), signal.SIGKILL)
+    code = """import os,time
+from pathlib import Path
+out = Path(os.environ['FIXTURE_ATTEMPT'])
+deadline = time.monotonic() + 2
+while not (out / '_execution/result.json').exists() and time.monotonic() < deadline:
+    time.sleep(.01)
+(Path(os.environ['SWARM_DEP_DATA_UNIT']) / 'data.json').write_text('changed')
+"""
+    os.environ['FIXTURE_ATTEMPT'] = request.output_dir
+    if os.environ['FIXTURE_DETACHED'] == '1':
+        subprocess.Popen([sys.executable, '-c', code], start_new_session=True)
+    else:
+        exec(code)
+    return result
+''', needs=SOURCE_NEEDS)
+    assert_exit(process, 1)
+    assert (source / "data.json").read_text() == "changed"
+    assert_failed(read_stage_result(out), source / "data.json")
+    receipt = dependency_check(out)["attempts"][str(source)]
+    assert receipt["status"] == "tainted" and receipt["changed_paths"] == ["data.json"]
+    with raises(Invalid, match="fingerprint|pass"):
+        verify_dependency_result(out)
+    with raises(Invalid, match="fingerprint"):
+        verify_dependency_result(source)
+
+
 def test_worker_allows_normal_resource_tracker_shutdown(repo, out):
     process = run_cli_fixture(repo, out, '''from multiprocessing.shared_memory import SharedMemory
 def run_stage(request):
