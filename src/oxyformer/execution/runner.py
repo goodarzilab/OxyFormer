@@ -414,13 +414,14 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
             message=str(exc).strip() or type(exc).__name__)
     changed = []
     try:
-        check = post_execution_check(dependency_trees)
+        check = post_execution_check(dependency_trees, observed_changes=changed)
         # Another consumer may have observed a write that was restored before
         # this final snapshot. Such observed taints remain permanent.
         for root, detail in check['attempts'].items():
             marker = Path(str(publication_receipt(root)) + '.tainted')
             if os.path.lexists(marker):
                 observed = json.loads(read_regular(marker))
+                changed.extend(str(Path(root) / name) for name in observed)
                 detail['changed_paths'] = sorted(set(detail['changed_paths']) | set(observed))
                 detail['status'] = 'tainted'
                 check['status'] = 'fail'
