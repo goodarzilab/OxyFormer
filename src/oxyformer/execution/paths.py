@@ -109,13 +109,17 @@ def isolated_caches(root):
     names = ('HF_HOME', 'TORCH_HOME', 'XDG_CACHE_HOME', 'MPLCONFIGDIR',
              'NUMBA_CACHE_DIR', 'TRITON_CACHE_DIR', 'TMPDIR')
     previous = {name: os.environ.get(name) for name in names}
+    previous_tempdir = tempfile.tempdir
     try:
         for name in names:
             path = output_path(root, '_execution/cache/' + name.lower())
             path.mkdir(parents=True, exist_ok=True)
             os.environ[name] = str(path)
+        # tempfile caches its first chosen directory independently of TMPDIR.
+        tempfile.tempdir = os.environ['TMPDIR']
         yield
     finally:
+        tempfile.tempdir = previous_tempdir
         for name, value in previous.items():
             if value is None:
                 os.environ.pop(name, None)
