@@ -3,7 +3,7 @@
   "verifiers": [
     {
       "name": "merge-precondition",
-      "sha256": "08abc4de34ea3cebe9727d4d24010bdf0257960363fb677ec49a0ebfe4d39666",
+      "sha256": "5638c69a819f0d9cb61c52df0a5631f3b162cec5bd984dc818e68fac131c7e75",
       "claims": [
         "integration-tests"
       ]
