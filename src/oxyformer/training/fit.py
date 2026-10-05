@@ -17,8 +17,10 @@ pooled inner evaluation scores; transfer diagnostics audit that refitted model.
 
 A new output_dir is required on each invocation/continuation. Interruption saves
 nested controller, optimizer, scheduler, sampler, RNG, current and best model
-states together. Only complete fold artifacts can predict. Training is FP32;
-Python float outputs preserve that precision for downstream FP64 arithmetic.
+states together. Only complete fold artifacts can predict. Model forwards,
+parameters, calibration and ratios are FP32; weighted loss/offset reductions
+use FP64 to preserve finite objectives across target-weight scales. Python
+float outputs preserve prediction precision for downstream FP64 arithmetic.
 """
 from __future__ import annotations
 
@@ -285,7 +287,10 @@ def _predict(model, view, inputs, policy, *, outcome_mean=False, base_only=False
 
 
 def _outcome_loss(config, prediction, ids, *, reduction="sum"):
-    weights = torch.tensor(_inputs(config, ids).origin_weights, dtype=torch.float32)
+    # Accumulate target-weighted losses before normalization in FP64. Model
+    # predictions and target validity remain governed by their FP32 contract.
+    prediction = prediction.double()
+    weights = torch.tensor(_inputs(config, ids).origin_weights, dtype=torch.float64)
     target = torch.tensor(_values(config, config.data.manifest.outcome_field, ids), dtype=torch.float32)
     population = (torch.tensor(_values(config, config.population_field, ids), dtype=torch.float32)
                   if config.population_field else None)
@@ -300,8 +305,8 @@ def _profile(model, config, view, inputs):
             base = _predict(model, view, inputs, config.policy, base_only=True)[:, 0]
             target = torch.tensor(_values(config, config.data.manifest.outcome_field, view.original_ids),
                                   dtype=torch.float32)
-            model.group_offsets.update_identity(view.original_ids, target, base,
-                                                 torch.tensor(inputs.origin_weights, dtype=torch.float32))
+            model.group_offsets.update_identity(view.original_ids, target.double(), base.double(),
+                                                 torch.tensor(inputs.origin_weights, dtype=torch.float64))
 
 
 class _Budget:
@@ -367,7 +372,10 @@ def _train_one(config, bundle, encoder_state, view, stopping, epochs, seed, budg
             else:
                 pairs = paired_records(config.policy.apply(metadata.a_mmhg, metadata.policy_covariates),
                                        metadata.origin_weights, weight_id=config.data.manifest.spec.weight_id)
-                loss = paired_origin_loss(predicted, pairs, reduction="sum")
+                # Keep original pair weights, but widen the weighted reduction
+                # before it can overflow or lose tiny target masses. Gradients
+                # return to the FP32 model only after global normalization.
+                loss = paired_origin_loss(predicted.double(), pairs, reduction="sum")
                 mass = 2 * sum(inputs.origin_weights)
             # Uniform sampling of ORIGINALS estimates the global weighted loss.
             # Dividing each batch by its own mass would optimize a different law.

@@ -169,6 +169,10 @@ def fit_affine(logits, weights, *, original_ids, fold_ids, partitions,
         varying = deviations > 0
         magnitude = (_weighted_median(deviations[varying], mass[varying])
                      if bool(varying.any()) else z.new_zeros(()))
+        # Keep all positive-weight normalized inputs representable, even when
+        # their spread greatly exceeds the typical conditioning scale. This
+        # machine-range bound changes coordinates only, never clips logits.
+        magnitude = torch.maximum(magnitude, deviations.max() / (torch.finfo(z.dtype).max / 2))
         if float(magnitude) == 0:
             slope, intercept, magnitude = 0., 0., torch.ones_like(magnitude)
         else:

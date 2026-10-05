@@ -267,3 +267,18 @@ def test_finite_weights_with_overflowing_sum_preserve_weighted_work(weights):
     reference = transfer_diagnostics(baseline, logits, logits + 2., reference_weights,
                                      lineage=values["lineage"])
     assert actual.metrics == reference.metrics
+
+
+def test_mixed_scale_conditioning_keeps_normalized_inputs_finite():
+    logits, values = with_zero_weight_original()
+    logits[:6] *= 1e-20
+    logits[-1] = -1e20
+    weights = [1.] * 6 + [1e-38]
+    base, base_values = nonseparable_case()
+    feasible = replace(fit_affine(base, [1.] * 6, **base_values),
+                       slope=4e-22, intercept=0., input_offset=0., input_scale=1.)
+    assert torch.isfinite(feasible.ratios(logits)).all()
+    fitted = fit_affine(logits, weights, **values)
+    assert torch.isfinite(fitted.ratios(logits)).all()
+    assert pair_metrics(fitted.logits(logits), weights)[0] <= pair_metrics(
+        torch.zeros_like(logits), weights)[0]
