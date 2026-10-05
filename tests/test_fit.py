@@ -389,3 +389,40 @@ def test_calibration_grid_choice_excludes_its_evaluation_metrics(completed, monk
         selected.append(int(reverse) if row == [-2., 2.] else 1 - int(reverse)
                         if row == [1., -1.] else 2)
     assert selected[0] == selected[1]
+
+
+@pytest.mark.parametrize("weight,raw_logit,error", [
+    (0., 1000., None),
+    (1., 1000., "nonfinite calibrated ratio"),
+    (0., float("nan"), "nonfinite"),
+])
+def test_final_refit_ratio_audit_uses_validated_positive_weight_rows(
+        completed, tmp_path, monkeypatch, weight, raw_logit, error):
+    from copy import deepcopy
+    from types import SimpleNamespace
+    from oxyformer.training.calibration import TransferDiagnostics
+
+    case, artifact = completed
+    controller = deepcopy(state(artifact))
+    calibration = AffineCalibration.from_json(controller["calibration"])
+    calibration = replace(calibration, slope=1., intercept=0., input_offset=0., input_scale=1.)
+    controller["calibration"] = calibration.to_json()
+    ids = calibration.original_ids
+    config = case[-1]
+    rows = tuple((*row[:-1], weight) if row[0] == ids[-1] else row for row in config.data.rows)
+    config = replace(config, data=replace(config.data, rows=rows))
+    refit = torch.zeros(len(ids), 2)
+    refit[-1] = raw_logit
+    monkeypatch.setattr(fitting, "_predict", lambda *args, **kwargs: refit)
+    def audit():
+        return fitting._fit_controller(config, case[1], case[2], artifact.checkpoint.identity,
+            controller, tmp_path, SimpleNamespace(reason=lambda: None))
+    if error:
+        with pytest.raises(ContractError, match=error):
+            audit()
+    else:
+        result, complete, _ = audit()
+        assert complete
+        diagnostics = TransferDiagnostics.from_json(result["transfer_diagnostics"])
+        assert diagnostics.original_ids == ids
+        assert diagnostics.lineage.unit_ids == ids
