@@ -102,12 +102,16 @@ def case(tmp_path):
         output = upstream / 'out'
         output.mkdir()
         result_file = output / 'result.json'
-        result_file.write_text('{"synthetic":true}')
+        if gate == 'coverage':
+            write_artifact(result_file, coverage)
+        else:
+            result_file.write_text('{"synthetic":true}')
         request = StageRequest(stage=gate, config_path=str(config), config_hash=file_hash(config),
                                task_path=str(task), task_hash=file_hash(task), dependency_paths=(), dependency_hashes=(),
                                output_dir=str(output), code_identity='a'*40)
         result = StageResult(request_hash=request.content_hash, status='pass', message='synthetic task passed',
-                             artifacts=(ArtifactRecord(path='result.json', sha256=file_hash(result_file), lineage=lineage, kind='synthetic'),))
+                             artifacts=(ArtifactRecord(path='result.json', sha256=file_hash(result_file), lineage=lineage,
+                                                       kind='coverage_scenario' if gate == 'coverage' else 'synthetic'),))
         task_id = f'{gate}-{i}'
         tasks.append(ExpectedTask(task_id=task_id, gate=gate, request_hash=request.content_hash))
         receipts.append(TaskReceipt(task_id=task_id, request=request, result=result))
@@ -119,6 +123,21 @@ def case(tmp_path):
 def evaluate_case(case, approvals=None):
     b, m, r = case
     return evaluate(b, m, r, approve(b, m, r) if approvals is None else approvals, file_hash(CONFIG))
+
+
+def publish_coverage(receipts, scenario, *, only_task_id=None):
+    """Model an upstream summary publication; never silently change bundle metrics."""
+    items = []
+    for item in receipts.items:
+        if item.request.stage == 'coverage' and (only_task_id is None or item.task_id == only_task_id):
+            artifact = item.result.artifacts[0]
+            path = Path(item.request.output_dir) / artifact.path
+            path.unlink()
+            digest = write_artifact(path, scenario)
+            item = replace(item, result=replace(item.result, artifacts=(
+                replace(artifact, sha256=digest, kind='coverage_scenario'),)))
+        items.append(item)
+    return replace(receipts, items=tuple(items))
 
 
 def test_complete_scoped_release_keeps_both_estimators_and_every_spatial_bandwidth(case):
@@ -257,16 +276,20 @@ def test_concentrated_estimator_blocks_and_keeps_diagnostic_estimates(case, whic
 def test_each_coverage_failure_blocks_even_with_external_approval(case, field, value):
     b, m, r = case
     b = replace(b, coverage=(replace(b.coverage[0], **{field: value}),))
+    r = publish_coverage(r, b.coverage[0])
     report = evaluate_case((b, m, r))
     assert report['state'] == 'failed'
     assert report['evidence_label'] == 'diagnostic-only'
+    assert any(g['gate'] == 'coverage:null' and g['status'] == 'failed' for g in report['gates'])
 
 
 def test_bias_is_target_and_large_bias_requires_investigation(case):
     b, m, r = case
     b = replace(b, coverage=(replace(b.coverage[0], abs_bias_over_empirical_sd=.15),))
+    r = publish_coverage(r, b.coverage[0])
     assert evaluate_case((b, m, r))['state'] == 'released'
     b = replace(b, coverage=(replace(b.coverage[0], abs_bias_over_empirical_sd=.21),))
+    r = publish_coverage(r, b.coverage[0])
     approvals = approve(b, m, r)
     approvals['owner_decisions']['reporting_approvals'] = [a for a in approvals['owner_decisions']['reporting_approvals'] if a['gate'] != 'bias_investigation']
     assert evaluate_case((b, m, r), approvals)['state'] == 'blocked'
@@ -695,3 +718,57 @@ def test_recovery_task_json_requires_object(case, tmp_path, monkeypatch, payload
 @pytest.mark.parametrize('approvals', [{}, {'owner_decisions': {}}])
 def test_recovery_absent_optional_approval_containers_remain_blocked(case, approvals):
     assert evaluate_case(case, approvals)['state'] == 'blocked'
+
+
+def test_review_stale_passing_coverage_cannot_override_verified_bad_metrics(case):
+    b, m, r = case
+    bad = replace(b.coverage[0], repetitions=850, coverage_one_sided_95_lower_bound=.8)
+    r = publish_coverage(r, bad)
+    for receipt in r.items:
+        receipt.result.verify(receipt.request)
+    report = evaluate_case((b, m, r))  # fresh scoped approvals cannot waive a contradiction
+    assert report['state'] == 'failed' and not report['releasable']
+    assert len(report['estimators']) == 2
+    assert any('coverage metrics differ' in g['reason'] for g in report['gates'])
+
+
+def test_review_coverage_tasks_cannot_publish_conflicting_summaries(case):
+    b, m, r = case
+    other = replace(b.coverage[0], repetitions=850)
+    r = publish_coverage(r, other, only_task_id=r.items[-1].task_id)
+    report = evaluate_case((b, m, r))
+    assert report['state'] == 'failed'
+    assert any('contradictory coverage artifacts' in g['reason'] for g in report['gates'])
+
+
+def test_review_each_coverage_task_requires_summary_artifacts(case):
+    b, m, r = case
+    last = r.items[-1]
+    last = replace(last, result=replace(last.result, artifacts=(replace(last.result.artifacts[0], kind='unrelated'),)))
+    report = evaluate_case((b, m, replace(r, items=r.items[:-1] + (last,))))
+    assert report['state'] == 'missing' and not report['releasable']
+    assert any(g['gate'] == 'coverage_evidence' and g['task_id'] == last.task_id for g in report['gates'])
+
+
+def test_review_coverage_report_discloses_verified_task_and_artifact_identities(case):
+    report = evaluate_case(case)
+    assert report['state'] == 'released'
+    _, _, receipts = case
+    coverage = [r for r in receipts.items if r.request.stage == 'coverage']
+    assert {x['task_id'] for x in report['coverage_evidence']} == {r.task_id for r in coverage}
+    assert {x['artifact_hash'] for x in report['coverage_evidence']} == {case[0].coverage[0].content_hash}
+    assert {x['request_hash'] for x in report['coverage_evidence']} == {r.request.content_hash for r in coverage}
+
+
+def test_review_state_qualified_county_identities_remain_distinct(case):
+    with pytest.raises(ContractError, match='county crosses states'):
+        concentration([.1, -.1], ['Benton', 'Benton'], ['AR', 'MO'])
+    # The merged covariance API groups by county key, also used for its centroid.
+    # Distinct physical counties need distinct keys even with the same display name.
+    b, m, r = case
+    counties = ('AR:Benton', 'MO:Benton') + b.counties[2:]
+    locations = tuple((key, xy) for key, (_, xy) in zip(counties, b.county_locations))
+    b = replace(b, counties=counties, states=('AR', 'MO') + b.states[2:], county_locations=locations)
+    report = evaluate_case((b, m, r))
+    assert report['state'] == 'released'
+    assert report['diagnostics']['cluster_covariance']['dependence_units'] == 40

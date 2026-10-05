@@ -7,10 +7,11 @@ hashes nor a StageResult pass authenticate a human or prove identification.
 """
 from dataclasses import asdict
 import math
+from pathlib import Path
 
-from oxyformer.provenance import ContractError, require
+from oxyformer.provenance import ContractError, read_artifact, require
 from oxyformer.reporting.diagnostics import summarize
-from oxyformer.reporting.records import CV_TMLE_METHODS, STAGE_GATES
+from oxyformer.reporting.records import CoverageScenario, CV_TMLE_METHODS, STAGE_GATES
 
 LIMITATIONS = (
     "Altitude bundles environmental and social exposures; predictive fit does not identify an oxygen-specific causal effect.",
@@ -96,6 +97,34 @@ def external_approval(approvals, gate, scope):
                 matches[0].get("reviewer") and matches[0].get("reference"))
 
 
+def coverage_evidence(bundle, manifest, verified_receipts):
+    """Bind reported metrics to the canonical outputs of expected coverage tasks."""
+    gates, evidence, scenarios = [], [], {}
+    for receipt in verified_receipts:
+        artifacts = [a for a in receipt.result.artifacts if a.kind == "coverage_scenario"]
+        if not artifacts:
+            gates.append({"gate": "coverage_evidence", "task_id": receipt.task_id,
+                          "status": "missing", "reason": "coverage task has no CoverageScenario artifact"})
+        for artifact in artifacts:
+            scenario = read_artifact(Path(receipt.request.output_dir) / artifact.path,
+                                     CoverageScenario, artifact.sha256)
+            require(scenario.scenario_id in manifest.coverage_scenarios, "unregistered coverage artifact")
+            previous = scenarios.setdefault(scenario.scenario_id, scenario)
+            require(previous == scenario, f"contradictory coverage artifacts: {scenario.scenario_id}")
+            evidence.append({"scenario_id": scenario.scenario_id, "task_id": receipt.task_id,
+                             "request_hash": receipt.request.content_hash,
+                             "artifact_path": artifact.path, "artifact_hash": artifact.sha256})
+    for scenario in bundle.coverage:
+        verified = scenarios.get(scenario.scenario_id)
+        if verified is None:
+            gates.append({"gate": f"coverage_evidence:{scenario.scenario_id}", "status": "missing",
+                          "reason": "reported coverage has no verified expected-task artifact"})
+        else:
+            require(verified == scenario,
+                    f"coverage metrics differ from verified task artifact: {scenario.scenario_id}")
+    return gates, evidence
+
+
 def coverage_decisions(bundle, manifest, approved):
     gates, warnings = [], []
     required = ("min_repetitions_per_scenario", "coverage_one_sided_95_lower_bound_min",
@@ -155,6 +184,7 @@ def evaluate(bundle, manifest, receipts, approvals, config_hash):
         gates.append({"gate": "paired_estimators", "status": "pass" if paired else "missing", "reason": "one-step and CV-TMLE both required"})
         received = {t.task_id: t for t in receipts.items}
         expected = {t.task_id: t for t in manifest.tasks}
+        verified_coverage = []
         require(set(received) <= set(expected), "unexpected task receipt")
         required_gates = STAGE_GATES[manifest.stage]
         for gate in required_gates:
@@ -170,9 +200,13 @@ def evaluate(bundle, manifest, receipts, approvals, config_hash):
                 receipt.result.verify(receipt.request)
                 status = {"pass": "pass", "fail": "failed", "blocked": "blocked"}[receipt.result.status]
                 reason = receipt.result.message
+                if task.gate == "coverage":
+                    verified_coverage.append(receipt)
             except FileNotFoundError:
                 status, reason = "missing", "upstream input or artifact file absent"
             gates.append({"gate": task.gate, "task_id": task.task_id, "status": status, "reason": reason})
+        evidence_gates, report["coverage_evidence"] = coverage_evidence(bundle, manifest, verified_coverage)
+        gates.extend(evidence_gates)
         coverage, warnings, investigate = coverage_decisions(bundle, manifest, owner.get("release_gates"))
         gates.extend(coverage)
         report["warnings"].extend(warnings)
