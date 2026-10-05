@@ -184,6 +184,8 @@ def fingerprint_tree(root, *, exclude=()):
                 entry['changed'] = True
             if isinstance(exc, FileNotFoundError):
                 entry['missing'] = True
+                if relative != '.' or 'type' in entry:
+                    entry['changed'] = True
             entry['error'] = f'{type(exc).__name__}: {exc}'
 
     while pending:
@@ -202,6 +204,7 @@ def fingerprint_tree(root, *, exclude=()):
                     entries[relative]['changed'] = True
                 if isinstance(exc, FileNotFoundError):
                     entries[relative]['missing'] = True
+                    entries[relative]['changed'] = True
                 entries[relative]['error'] = f'{type(exc).__name__}: {exc}'
     return entries
 

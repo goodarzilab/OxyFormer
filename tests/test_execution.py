@@ -2634,3 +2634,29 @@ def test_acquisition_snapshot_io_failure_refuses_without_taint(runtime, acquisit
     with raises(ContractError, match='unreadable'):
         runner.verify_acquisition(acquisition, 'receipts.json')
     assert not Path(str(integrity.publication_receipt(acquisition)) + '.tainted').exists()
+
+
+def test_new_unreadable_acquisition_entry_stays_tainted_after_restore(runtime, acquisition, tmp_path, monkeypatch):
+    from oxyformer.execution import runner
+    repo, producer = runtime
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']}
+    assert_pass(run_task(repo, producer, needs=needs))
+    added = acquisition / 'new-unreadable-file'
+    def worker(request):
+        added.write_text('faulty new entry')
+        def unreadable(root):
+            tree = fingerprint_tree(root)
+            tree[added.name].update(sha256=None, error='PermissionError: synthetic unreadable file')
+            return tree
+        with monkeypatch.context() as observer:
+            observer.setattr(runner, 'fingerprint_tree', unreadable)
+            with raises(ContractError):
+                runner.verify_acquisition(acquisition, 'receipts.json')
+        added.unlink()
+        return dummy(request)
+    install_stage(monkeypatch, repo, worker)
+    active = new_attempt(repo, tmp_path / 'active')
+    assert_failed(run_task(repo, active, needs=needs), added)
+    assert added.name in read_check(active)['attempts'][str(acquisition)]['changed_paths']
+    with raises(ContractError, match='tainted'):
+        verify_dependency_result(producer)
