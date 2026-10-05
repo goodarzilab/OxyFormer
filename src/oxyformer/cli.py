@@ -19,7 +19,7 @@ def main(argv=None):
     args.pop('command')
     from oxyformer.execution.runner import run
     try:
-        result = run(**args, report=lambda value: print(f'{value.status}: {value.message}', flush=True))
+        result = run(**args, report=lambda value: print(f'stage returned {value.status}: {value.message}', flush=True))
     except (ValueError, OSError, KeyError, TypeError, subprocess.CalledProcessError) as exc:
         print(f'blocked: {exc}', file=sys.stderr)
         return 2
