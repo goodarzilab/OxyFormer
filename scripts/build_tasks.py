@@ -4,6 +4,7 @@ from pathlib import Path
 
 from oxyformer.execution.campaign import expand_campaign
 from oxyformer.execution.paths import atomic_json
+from oxyformer.execution.integrity import read_regular
 from oxyformer.execution.runner import read_mapping
 from oxyformer.provenance import require
 
@@ -18,7 +19,7 @@ def main():
     # not from an alternate mapping selected alongside a campaign specification.
     authoritative = Path(__file__).resolve().parents[1] / 'configs/approvals.yaml'
     if args.approvals is not None:
-        require(Path(args.approvals).read_bytes() == authoritative.read_bytes(),
+        require(read_regular(args.approvals) == read_regular(authoritative),
                 'supplied approvals differ from authoritative owner approvals')
     plan = expand_campaign(read_mapping(args.spec), read_mapping(authoritative))
     out = Path(args.out)

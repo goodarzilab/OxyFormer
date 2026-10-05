@@ -76,6 +76,7 @@ def stage_command(task):
         ': "${SWARM_UNIT_DIR:?}"',
         f'git clone --depth 1 --branch dev {REMOTE} "$SWARM_UNIT_DIR/src"',
         'git -C "$SWARM_UNIT_DIR/src" rev-parse HEAD > "$SWARM_UNIT_DIR/code_commit.txt"',
+        'export PYTHONDONTWRITEBYTECODE=1',
         'export PYTHONPATH="$SWARM_UNIT_DIR/src/src"',
         'cd "$SWARM_UNIT_DIR/src"',
         f'printf %s {encoded} > "$SWARM_UNIT_DIR/task.json"',
@@ -253,7 +254,7 @@ UNIT_SCHEMA = {
     'concrete_strings': 'String fields may not contain curly braces or template markers; nested JSON values must be mappings/lists.',
     'locked_stages': 'Registry requires_recipe or a campaign field makes recipe_lock mandatory.',
     'merge_barrier': 'code prerequisite needs are satisfied only by coordinator merged receipts',
-    'fingerprint': 'tracked-science-v1: all tracked paths except non-plan docs/** and *.md',
+    'fingerprint': 'tracked-science-v2: every src/ and scripts/ file; other tracked paths except *.md outside docs/plan/; disk checked against HEAD',
     'attempt_fingerprint': 'entries, file types, mode bits, sizes, content hashes, symlink targets; timestamps and inode numbers excluded; compares input states, not write history',
     'validation': 'oxyformer.execution.campaign.validate_plan(expansion, owner_approvals)',
 }
