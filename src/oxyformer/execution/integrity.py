@@ -1,4 +1,9 @@
-"""Read-only fingerprints of complete attempt trees, without following links."""
+"""Read-only fingerprints of attempt states, without following links.
+
+Identity binds entries, types, modes, sizes, content hashes and symlink targets.
+Timestamps and inode numbers are deliberately excluded: an identical state is
+an identical consumer input, even after a rewrite. This is not a write log.
+"""
 from dataclasses import replace
 from hashlib import sha256
 import json
@@ -16,14 +21,11 @@ from .paths import atomic_json, atomic_write, output_path
 FINGERPRINT = "_execution/fingerprint.json"
 RESULT = "_execution/result.json"
 PUBLICATION_EXCLUSIONS = (FINGERPRINT, RESULT)
-# The publisher sets this on its OWN late records before atomic replacement.
-# Consumers check the fixed convention, never adopt a current upstream mtime.
-CONTROL_MTIME_NS = 0
 
 
 def _stable(metadata):
-    # Identity/times detect changes during the read. Persisted mtime/ctime also
-    # expose restored writes; atime is excluded because ordinary reads change it.
+    # Identity/times guard consistency during one read only. They are never
+    # persisted or compared between fingerprint snapshots; atime is ignored.
     return (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_size,
             metadata.st_mtime_ns, metadata.st_ctime_ns)
 
@@ -49,8 +51,7 @@ def fingerprint_tree(root, *, exclude=()):
             before = path.lstat()
             kind = stat.S_IFMT(before.st_mode)
             entry.update(type=kind, mode=stat.S_IMODE(before.st_mode),
-                         size=before.st_size, sha256=None, target=None,
-                         mtime_ns=before.st_mtime_ns, ctime_ns=before.st_ctime_ns)
+                         size=before.st_size, sha256=None, target=None)
             if stat.S_ISLNK(kind):
                 entry['target'] = os.readlink(path)
             elif stat.S_ISREG(kind):
@@ -102,10 +103,10 @@ def post_execution_check(before):
 
 
 def publication_view(entries):
-    # Publishing the two control records necessarily changes their parent
-    # directory's timestamps. Its entries, type, mode and size remain bound.
-    return {name: (dict(entry, mtime_ns=None, ctime_ns=None) if name == '_execution' else entry)
-            for name, entry in entries.items() if name not in PUBLICATION_EXCLUSIONS}
+    # Late control records are bound separately by their producer's published
+    # digest, canonical result contents and recorded modes, avoiding self-hashes.
+    return {name: entry for name, entry in entries.items()
+            if name not in PUBLICATION_EXCLUSIONS}
 
 
 def publication_tree(root):
@@ -123,7 +124,6 @@ def _replace_control(root, relative, text):
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
-        os.utime(temporary, ns=(CONTROL_MTIME_NS, CONTROL_MTIME_NS))
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):
@@ -209,8 +209,7 @@ def verify_published_tree(root, result, expected_hash=None):
     for name in PUBLICATION_EXCLUSIONS:
         entry = actual.get(name, {})
         if ('error' in entry or entry.get('type') != stat.S_IFREG or
-                entry.get('mode') != value['control_modes'].get(name) or
-                entry.get('mtime_ns') != CONTROL_MTIME_NS):
+                entry.get('mode') != value['control_modes'].get(name)):
             changed.append(name)
     require(actual.get(FINGERPRINT, {}).get('sha256') == records[0].sha256,
             'dependency fingerprint changed during verification')
