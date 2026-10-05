@@ -120,9 +120,9 @@ class ReportBundle(Immutable):
     balance_observed: tuple[tuple[float, ...], ...]  # original ID x frozen function
     balance_shifted: tuple[tuple[float, ...], ...]
     estimates: tuple[Estimate, ...]
-    counties: tuple[str, ...]
+    counties: tuple[str, ...]  # globally unique dependence-unit IDs, not display names
     states: tuple[str, ...]
-    county_locations: tuple[tuple[str, tuple[float, float]], ...]
+    county_locations: tuple[tuple[str, tuple[float, float]], ...]  # same county IDs
     coverage: tuple[CoverageScenario, ...]
     sensitivities: tuple[Sensitivity, ...] = ()
     p_values: tuple[tuple[str, float], ...] = ()

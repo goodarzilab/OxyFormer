@@ -25,6 +25,12 @@ functional balance arrays are original ID by frozen function. Attrition contains
 sequential remaining counts ending at the frozen target count. Changed-target
 sensitivities retain their own entire Estimate and require an explicit disclosure.
 
+`counties` contains globally unique dependence-unit identifiers, such as full
+county FIPS or state-qualified names (`AR:Benton`, `MO:Benton`), with the same
+keys in `county_locations`. These are group identities for the merged covariance
+API, not display names. A county ID cannot identify two states; silently merging
+different counties would corrupt both covariance and concentration diagnostics.
+
 The expected-task manifest is frozen externally. Every task binds an upstream
 StageRequest hash and a gate role. Collection verifies the actual StageResult,
 its inputs, declared artifacts, hashes and status. All expected tasks must be
@@ -33,6 +39,15 @@ roles are in `STAGE_GATES`; production task builders may add repetitions, folds,
 scenarios and other tasks but cannot remove the required roles. Coverage must
 contain every scenario in `coverage_scenarios`. Bounds and production-procedure
 metadata come from the validated simulation producer, not reporting itself.
+Each expected task with role `coverage` must publish canonical `CoverageScenario`
+artifacts with kind `coverage_scenario`, serialized through `write_artifact` and
+listed in its verified `StageResult`. Scenario-level summaries belong to this
+role; raw repetition tasks can use a separate role in the complete manifest.
+Every reported coverage record must exactly match its verified artifact.
+Missing summaries block release, and contradictory summaries fail it even when
+the task status and external approvals say pass. Reports disclose the task,
+request and artifact identities used for coverage decisions. This uses the
+existing reporting record and merged artifact API; no numerical threshold changes.
 
 Scientific parameters are read at runtime from
 `owner_decisions.release_gates` and `owner_decisions.influence_concentration_gate`.
