@@ -557,3 +557,143 @@ def test_identity_refit_accepts_extreme_finite_logits_with_its_fitted_calibratio
         controller, tmp_path, SimpleNamespace(reason=lambda: None))
     assert complete
     assert torch.equal(calibration.ratios(extreme), torch.ones_like(extreme))
+
+
+def _overflow_training_case(completed):
+    case, artifact = completed
+    config = case[-1]
+    local, ids, _ = _partition(config, config.inner.split, 0)
+    assert len(ids) == 16 and {"o08", "o09"} <= set(ids)
+    rows = tuple((row[0], 2e38 if row[0] == "o09" else 0., *row[2:-1],
+                  1. if row[0] in ("o08", "o09") else 0.) if row[0] in ids else row
+                 for row in config.data.rows)
+    changed = replace(config, data=replace(config.data, rows=rows),
+                      settings=replace(config.settings, batch_size=1))
+    initialization = fitting.CheckpointArtifact.from_json(state(artifact)["initializations"][0])
+    bundle, encoder = _bundle(changed, local, ids, initialization, "outcome", changed.settings.grid[1])
+    view = subset(changed.data.covariates(("x",)), ids)
+    return changed, bundle, encoder, view
+
+
+def test_finite_loss_survives_backward_overflow_before_clipping(completed, monkeypatch):
+    config, bundle, encoder, view = _overflow_training_case(completed)
+    norms = []
+    original_step = torch.optim.AdamW.step
+
+    def capped_step(optimizer, *args, **kwargs):
+        gradients = [p.grad for group in optimizer.param_groups for p in group['params']
+                     if p.grad is not None]
+        assert all(torch.isfinite(g).all() for g in gradients)
+        norm = float(sum(g.double().square().sum() for g in gradients).sqrt())
+        norms.append(norm)
+        assert 0 < norm <= config.settings.gradient_norm + 1e-6
+        return original_step(optimizer, *args, **kwargs)
+
+    monkeypatch.setattr(torch.optim.AdamW, "step", capped_step)
+    model, _, complete, _ = _train_one(config, bundle, encoder, view, (), 1, 1103,
+                                      _Budget(config, CheckpointRequest()))
+    assert complete and len(norms) == 2
+    assert all(torch.isfinite(p).all() for p in model.parameters())
+
+
+def test_pooled_selection_preserves_tiny_positive_fold_mass(completed, tmp_path):
+    from copy import deepcopy
+    from fractions import Fraction
+    from types import SimpleNamespace
+
+    case, artifact = completed
+    controller = deepcopy(state(artifact))
+    controller['position'] = 27
+    # Real controller selection, with controlled finite candidate scores.
+    # Heavy folds tie; the small fold strictly favors grid 1. The score gap
+    # is below FP64 range, so rounded reporting scores cannot choose the grid.
+    for result in controller['results']:
+        mass = Fraction(1e-300 if result['fold'] == 1 else 1e300)
+        result.update(mass=float(mass / Fraction(1e300)), mass_unit=1e300,
+                      mass_ratio=(mass.numerator, mass.denominator))
+        if result['kind'] == 'outcome':
+            grid, fold = result['grid'], result['fold']
+            result['metrics'] = ((2. if grid == 0 else 1.) if fold == 1 else
+                                 (0. if grid < 2 else 1.),)
+    calls = iter((None, 'requested'))
+    selected, complete, reason = fitting._fit_controller(case[-1], case[1], case[2],
+        artifact.checkpoint.identity, controller, tmp_path,
+        SimpleNamespace(reason=lambda: next(calls)))
+    assert not complete and reason == 'requested'
+    assert selected['selection']['outcome']['grid'] == 1
+
+
+@pytest.mark.parametrize('magnitude', [1., 1e39])
+def test_backward_scaling_preserves_direction_cap_and_rng(magnitude):
+    parameter = torch.nn.Parameter(torch.tensor([1., 1.], dtype=torch.float32))
+    derivative = torch.tensor([magnitude, -2 * magnitude], dtype=torch.float64)
+    loss = (parameter.double() * derivative).sum()
+    rng = torch.get_rng_state().clone()
+    scale = fitting._backward_and_clip(loss, (parameter,), 1.)
+    expected = (derivative * min(1., 1. / (derivative.norm().item() + 1e-6))).float()
+    torch.testing.assert_close(parameter.grad, expected)
+    assert (scale < 1.) == (magnitude > torch.finfo(torch.float32).max)
+    assert torch.equal(torch.get_rng_state(), rng)
+
+
+def test_scaled_backward_continuation_commits_one_batch(completed, monkeypatch):
+    config, bundle, encoder, view = _overflow_training_case(completed)
+    assert bundle['dropout'] == .1
+    original_backward = fitting._backward_and_clip
+    scales = []
+    request = CheckpointRequest()
+
+    def interrupt_after_backward(loss, parameters, maximum):
+        rng = torch.get_rng_state().clone()
+        scale = original_backward(loss, parameters, maximum)
+        assert torch.equal(torch.get_rng_state(), rng)
+        scales.append(scale)
+        request.request()
+        return scale
+
+    _, expected, complete, _ = _train_one(config, bundle, encoder, view, (), 1, 1103,
+                                          _Budget(config, CheckpointRequest()))
+    assert complete
+    monkeypatch.setattr(fitting, '_backward_and_clip', interrupt_after_backward)
+    budget = _Budget(config, request)
+    _, partial, complete, reason = _train_one(config, bundle, encoder, view, (), 1, 1103, budget)
+    assert not complete and reason == 'requested'
+    assert len(scales) == 1 and scales[0] < 1.
+    assert partial['progress']['step'] == budget.batches == partial['sampler']['cursor']
+    assert {int(s['step']) for s in partial['optimizer']['state'].values()} == {1}
+    monkeypatch.setattr(fitting, '_backward_and_clip', original_backward)
+    _, resumed, complete, _ = _train_one(config, bundle, encoder, view, (), 1, 1103,
+        _Budget(config, CheckpointRequest()), saved=partial)
+    assert complete
+
+    def same(actual, reference):
+        if isinstance(reference, torch.Tensor):
+            assert torch.equal(actual, reference)
+        elif isinstance(reference, dict):
+            assert actual.keys() == reference.keys()
+            for key in reference:
+                same(actual[key], reference[key])
+        elif isinstance(reference, (list, tuple)):
+            assert len(actual) == len(reference)
+            for a, b in zip(actual, reference):
+                same(a, b)
+        else:
+            assert actual == reference
+    same(resumed, expected)
+
+
+def test_exact_mass_survives_checkpoint_and_score_ties(completed):
+    from fractions import Fraction
+
+    case, artifact = completed
+    for result in state(artifact)['results']:
+        raw_mass = sum(map(Fraction, _inputs(case[-1], result['ids']).origin_weights), Fraction())
+        assert Fraction(*result['mass_ratio']) == raw_mass
+    # A Brier difference resolves tied log loss, and an exact two-metric tie
+    # still resolves by grid index. A zero-mass fold contributes neither.
+    candidates = []
+    for grid, brier in enumerate((.2, .1, .1)):
+        values = [dict(mass_ratio=(1, 1), metrics=(.5, brier)),
+                  dict(mass_ratio=(0, 1), metrics=(1e300, 1e300))]
+        candidates.append((fitting._pooled_metrics(values), grid))
+    assert min(candidates)[1] == 1
