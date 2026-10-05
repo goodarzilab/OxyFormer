@@ -1294,3 +1294,66 @@ def run_stage(request):
     assert result.status == 'fail' and str(victim) in result.message
     check = json.loads((out / '_execution/dependency_check.json').read_text())
     assert check['attempts'][str(source)]['status'] == 'tainted'
+
+
+@pytest.mark.parametrize('operation', ['rewrite_restore_mtime', 'copy2'])
+@pytest.mark.parametrize('control', ['result.json', 'fingerprint.json'])
+def test_restored_control_metadata_cannot_be_accepted_later(runtime, tmp_path, monkeypatch, operation, control):
+    repo, out = runtime
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'data.json').write_text('{}')
+    (source / 'receipts.json').write_text('{}')
+    publish_source_fixture(repo, source)
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
+    needs = {'data-unit': ['data.json', 'receipts.json']}
+    victim = source / '_execution' / control
+    before = victim.stat()
+    def faulty(request):
+        result = dummy(request)
+        if operation == 'copy2':
+            backup = Path(request.output_dir) / 'control-backup'
+            shutil.copy2(victim, backup)
+            shutil.copy2(backup, victim)
+        else:
+            victim.write_bytes(victim.read_bytes())
+            os.utime(victim, ns=(before.st_atime_ns, before.st_mtime_ns))
+        return result
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    result = run('dummy', out, repo, deps_env=True, task_file=task_file(out, needs=needs))
+    assert result.status == 'fail' and str(victim) in result.message
+    assert victim.stat().st_mtime_ns == before.st_mtime_ns
+    assert victim.stat().st_ctime_ns != before.st_ctime_ns
+    later = tmp_path / 'later'
+    later.mkdir()
+    (later / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=dummy, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    with pytest.raises(ContractError, match='fingerprint|control'):
+        run('dummy', later, repo, deps_env=True, task_file=task_file(later, needs=needs))
+
+
+def test_nested_worker_mutation_cannot_outlive_publication(runtime, tmp_path, monkeypatch):
+    repo, out = runtime
+    source = tmp_path / 'source'
+    source.mkdir()
+    victim = source / 'data.json'
+    victim.write_text('{}')
+    (source / 'receipts.json').write_text('{}')
+    publish_source_fixture(repo, source)
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
+    # The helper exits without joining its child. The inherited capture pipe
+    # makes this test wait for the finite grandchild before inspecting evidence.
+    body = '''import subprocess
+import sys
+def run_stage(request):
+    result = dummy(request)
+    grandchild = "import os,time; from pathlib import Path; time.sleep(5); (Path(os.environ['SWARM_DEP_DATA_UNIT'])/'data.json').write_text('[]')"
+    helper = 'import subprocess,sys; subprocess.Popen([sys.executable, "-c", ' + repr(grandchild) + '])'
+    subprocess.Popen([sys.executable, '-c', helper])
+    return result
+'''
+    process = run_cli_fixture(repo, out, body, needs={'data-unit': ['data.json', 'receipts.json']})
+    assert victim.read_text() == '[]', process.stdout + process.stderr
+    result = StageResult.from_json((out / '_execution/result.json').read_text())
+    assert process.returncode == 1 and result.status == 'fail', result.to_json()
+    assert str(victim) in result.message
