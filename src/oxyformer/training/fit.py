@@ -10,6 +10,10 @@ prespecified frozen_epochs (default 150), or explicit stopping IDs contained in
 that inner fitting partition. Outer refits use the median selected inner epoch
 count, frozen before refitting, and every outer-training original. The grid is
 ranked by factual loss (origin log loss then Brier), never an estimated effect.
+Each calibration fold chooses its own origin grid using only its stopping IDs,
+or its fitting loss when epochs were independently frozen. Its evaluation IDs
+cannot choose the grid supplying their logits. The final refit grid uses the
+pooled inner evaluation scores; transfer diagnostics audit that refitted model.
 
 A new output_dir is required on each invocation/continuation. Interruption saves
 nested controller, optimizer, scheduler, sampler, RNG, current and best model
@@ -629,8 +633,13 @@ def _fit_controller(config, outer, manifest, identity, controller, root, budget)
                 chosen = min(candidates)[1]
                 values = [r for r in controller["results"] if r["kind"] == model_kind and r["grid"] == chosen]
                 selected[model_kind] = dict(grid=chosen, epochs=int(statistics.median(r["epochs"] for r in values)))
-            origin = [r for r in controller["results"] if r["kind"] == "origin" and
-                      r["grid"] == selected["origin"]["grid"]]
+            # Each OOF classifier is chosen without consulting its own
+            # evaluation scores, including indirectly through other folds.
+            origin = [min((r for r in controller["results"]
+                           if r["kind"] == "origin" and r["fold"] == fold),
+                          key=lambda r: (r["selection_metrics"], r["grid"]))
+                      for fold in range(3)]
+            selected["origin"]["calibration_grids"] = tuple(r["grid"] for r in origin)
             ids = tuple(oid for r in origin for oid in r["ids"])
             logits = [z for r in origin for z in r["predictions"]]
             weights = _inputs(config, ids).origin_weights
@@ -678,9 +687,23 @@ def _fit_controller(config, outer, manifest, identity, controller, root, budget)
                     metrics = ((float(_outcome_loss(config, predicted[:, 0], held, reduction="mean")),)
                                if kind == "outcome" else pair_metrics(predicted, metadata.origin_weights))
                 require(all(math.isfinite(m) for m in metrics), "nonfinite held-out factual loss")
-                controller["results"].append(dict(kind=kind, fold=fold, grid=grid, ids=held,
+                result = dict(kind=kind, fold=fold, grid=grid, ids=held,
                     predictions=predicted.tolist(), metrics=metrics, mass=sum(metadata.origin_weights),
-                    epochs=state["progress"]["best_epoch"], ownership=audits[fold].to_json()))
+                    epochs=state["progress"]["best_epoch"], ownership=audits[fold].to_json())
+                if kind == "origin":
+                    # With frozen epochs, an in-sample fitting score may choose
+                    # a grid, but never a calibration evaluation score. Explicit
+                    # stopping partitions provide an independent tuning score.
+                    selection_ids = stopping or fitting
+                    require(set(selection_ids).isdisjoint(held),
+                            "calibration records entered grid selection")
+                    selection_inputs = _inputs(config, selection_ids)
+                    with torch.no_grad():
+                        selection_logits = _predict(model, subset(all_view, selection_ids),
+                                                    selection_inputs, config.policy)
+                    result.update(selection_ids=selection_ids,
+                        selection_metrics=pair_metrics(selection_logits, selection_inputs.origin_weights))
+                controller["results"].append(result)
         controller["position"] += 1
     calibration = AffineCalibration.from_json(controller["calibration"])
     model = _build(controller["final"]["origin"]).eval()

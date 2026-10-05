@@ -119,3 +119,18 @@ def test_zero_mass_extreme_records_cannot_change_calibration():
     logits[-1] = [1e38, -1e38]
     other = fit_affine(logits, weights, **inputs())
     assert baseline.slope == other.slope and baseline.intercept == other.intercept
+
+
+@pytest.mark.parametrize("scale", [1e20, 1e-25])
+def test_nonconstant_extreme_logits_preserve_finite_calibration(scale):
+    ids = tuple("abcdef")
+    values = dict(original_ids=ids, fold_ids=(0, 0, 1, 1, 2, 2),
+        partitions=tuple(CalibrationPartition(fold=fold, evaluation_ids=ids[2*fold:2*fold+2],
+            fitting_ids=tuple(oid for oid in ids if oid not in ids[2*fold:2*fold+2]),
+            checkpoint_ids=(), frozen_epochs=1) for fold in range(3)),
+        outer_training_ids=ids, lineage=lineage(ids))
+    logits = torch.tensor([[-1., 1.], [-1., 1.], [-1., 1.], [1., -1.], [0., 0.], [0., 0.]])
+    baseline = fit_affine(logits, [1.] * 6, **values)
+    scaled = fit_affine(logits * scale, [1.] * 6, **values)
+    assert scaled.slope != 0
+    torch.testing.assert_close(scaled.ratios(logits * scale), baseline.ratios(logits))
