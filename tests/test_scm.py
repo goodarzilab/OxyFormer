@@ -1189,3 +1189,170 @@ def test_count_atoms_retain_exact_boundary_and_expected_design_rejection(error):
     assert any(a not in boundaries for a in sample.observations.a)
     assert sample.observed_law_truth.status == sample.structural_causal_truth.status == "design_rejected"
     assert sample.observed_law_truth.value is sample.structural_causal_truth.value is None
+
+
+@pytest.mark.parametrize("error", [np.nextafter(1., 0.), np.nextafter(np.nextafter(1., 0.), 0.)])
+def test_round3_denominator_factors_stay_exact_inside_open_bounds(error):
+    from fractions import Fraction
+    from oxyformer.validation.scm import latent_states
+    c = config("null", denominator_error=float(error))
+    expected = {1-Fraction(float(error)), 1+Fraction(float(error))}
+    assert all(0 < factor < 2 for factor in expected)
+    assert {state.denominator_factor for state, _ in latent_states(c)} == expected
+    sample = generate_suite_a(frame(8, 1), c, policy(), seed=0)
+    assert sample.observed_law_truth.value == sample.structural_causal_truth.value == 0.
+    assert set(sample.observations.observed_denominator) == {float(100*factor) for factor in expected}
+    for value, count, denominator in zip(sample.observations.y, sample.observations.registered_events,
+                                         sample.observations.observed_denominator):
+        assert value == count/denominator
+
+
+def test_local_membership_does_not_round_exact_bound_onto_a_node():
+    from fractions import Fraction
+    from oxyformer.validation.scm import LocalCoordinates
+    one = np.longdouble(1)
+    nodes = np.array([np.nextafter(one, -np.inf), one, np.nextafter(one, np.inf)])
+    points = LocalCoordinates(Fraction(0), Fraction(1), nodes)
+    tiny = Fraction(1, 2**100)
+    assert points.inside(1+tiny, 2).tolist() == [False, False, True]
+    assert points.inside(0, 1-tiny).tolist() == [True, False, False]
+
+
+def test_recorded_support_membership_does_not_round_error_preimage():
+    from fractions import Fraction
+    c = config(exposure_error=.2)
+    law = AssignmentLaw(frame(1, 1), 0, LatentState(error=-.2), c, ((-20., -10.),))
+    boundary = float(Fraction(-10)-Fraction(.2))
+    values = np.array([np.nextafter(boundary, -np.inf), boundary, np.nextafter(boundary, np.inf)])
+    expected = [Fraction(-20) <= Fraction(float(v))+Fraction(.2) <= Fraction(-10) for v in values]
+    assert law.contains(values).tolist() == expected
+    assert np.isfinite(law.log_density(values)).tolist() == expected
+
+
+from oxyformer.validation.scm import NUMERIC_DOMAIN as _DOMAIN_EDGES
+
+
+@pytest.mark.parametrize("kind", tuple(_DOMAIN_EDGES))
+@pytest.mark.parametrize("edge_index", [0, 1])
+@pytest.mark.parametrize("direction", [-1, 0, 1])
+def test_every_declared_numeric_domain_edge_and_nextafter(kind, edge_index, direction):
+    from oxyformer.validation.scm import validate_numeric
+    lower, upper = _DOMAIN_EDGES[kind]
+    edge = (lower, upper)[edge_index]
+    value = edge if direction == 0 else float(np.nextafter(edge, direction*np.inf))
+    if lower <= value <= upper:
+        validate_numeric(value, kind, kind)
+    else:
+        with pytest.raises(ContractError, match="outside supported numeric domain"):
+            validate_numeric(value, kind, kind)
+
+
+@pytest.mark.parametrize("name,edge", [
+    ("denominator_error", 0.), ("denominator_error", .002), ("denominator_error", 1.),
+    ("registration_probability", _DOMAIN_EDGES["registration_probability"][0]),
+    ("registration_probability", 1.),
+    ("near_scale", _DOMAIN_EDGES["near_scale"][0]), ("near_scale", 1000.),
+    ("exposure_error", 0.), ("exposure_error", .004), ("exposure_error", 40.),
+    ("migration", 0.), ("migration", .02), ("migration", 200.),
+    ("noise_sd", 0.), ("noise_sd", .01), ("noise_sd", 100.),
+    ("beta", -200.), ("beta", 0.), ("beta", 200.),
+    ("local_strength", -200.), ("local_strength", 200.),
+    ("regional_strength", -200.), ("regional_strength", 200.),
+])
+@pytest.mark.parametrize("direction", [-1, 0, 1])
+def test_mechanism_domain_edges_reach_latent_and_assignment_checks(name, edge, direction):
+    from fractions import Fraction
+    from oxyformer.validation.scm import latent_states
+    value = float(edge if direction == 0 else np.nextafter(edge, direction*np.inf))
+    kind = "coefficient" if name in ("beta", "local_strength", "regional_strength") else name
+    lower, upper = _DOMAIN_EDGES[kind]
+    valid = lower <= value <= upper or (value == 0 and name not in ("near_scale", "registration_probability"))
+    valid &= name != "denominator_error" or value < 1
+    valid &= name != "registration_probability" or value <= 1
+    if not valid:
+        with pytest.raises(ContractError):
+            config("null", **{name:value})
+        return
+    c = config("null", **{name:value})
+    states = list(latent_states(c))
+    assert sum(probability for _, probability in states) == 1
+    for state, _ in states:
+        assert 0 < state.denominator_factor < 2
+        assert state.denominator_factor in {1-Fraction(c.denominator_error), 1+Fraction(c.denominator_error)}
+        law = AssignmentLaw(frame(1, 1), 0, state, c, ((0., 10.),))
+        assert np.isfinite(law.probabilities).all()
+        assert sum(law.probabilities) == pytest.approx(1.)
+
+
+@pytest.mark.parametrize("edge", [-10010., 10010.])
+@pytest.mark.parametrize("direction", [-1, 0, 1])
+def test_support_domain_edges_before_derived_geometry(edge, direction):
+    from oxyformer.validation.scm import exact_shift_intervals
+    value = float(edge if direction == 0 else np.nextafter(edge, direction*np.inf))
+    components = ((value, value+1),) if edge < 0 else ((value-1, value),)
+    if not -10010 <= value <= 10010:
+        with pytest.raises(ContractError, match="supported numeric domain"):
+            exact_shift_intervals(components, .02)
+        return
+    c = config("null", assignment="near_deterministic", near_scale=5e-324)
+    result = generate_suite_a(frame(1, 1), c, policy(components, delta=.02))
+    assert result.observed_law_truth.value == result.structural_causal_truth.value == 0.
+
+
+@pytest.mark.parametrize("edge", [0., .02, 200.])
+@pytest.mark.parametrize("direction", [-1, 0, 1])
+def test_shift_domain_edges_before_exact_width_and_cutoff(edge, direction):
+    from fractions import Fraction
+    from oxyformer.validation.scm import exact_shift_intervals
+    value = float(edge if direction == 0 else np.nextafter(edge, direction*np.inf))
+    if value != 0 and not .02 <= value <= 200:
+        with pytest.raises(ContractError, match="supported numeric domain"):
+            exact_shift_intervals(((0., 200.),), value)
+    else:
+        expected = () if value == 0 else ((Fraction(0), Fraction(200)-Fraction(value)),)
+        assert exact_shift_intervals(((0., 200.),), value) == expected
+
+
+@pytest.mark.parametrize("edge", [0., 2.])
+@pytest.mark.parametrize("direction", [-1, 0, 1])
+def test_latent_denominator_open_bound_and_nextafter(edge, direction):
+    value = float(edge if direction == 0 else np.nextafter(edge, direction*np.inf))
+    if 0 < value < 2:
+        assert LatentState(denominator_factor=value).denominator_factor == value
+    else:
+        with pytest.raises(ContractError, match="invalid latent denominator factor"):
+            LatentState(denominator_factor=value)
+
+
+@pytest.mark.parametrize("rate", [-4., 0., 4.])
+def test_inverse_transform_domain_endpoints_stay_in_exact_support(rate):
+    from fractions import Fraction
+    from oxyformer.validation.scm import _ExponentialPiece, exact
+    c = config()
+    law = AssignmentLaw(frame(1, 1), 0, LatentState(), c, ((-10010., 10010.),))
+    law.pieces = (_ExponentialPiece(Fraction(-10010), Fraction(10010), Fraction(rate)),)
+    # The RNG's actual domain is [0, 1); these are both represented edges and
+    # their in-domain neighbours, including the smallest positive float64.
+    for u in (0., np.nextafter(0., 1.), np.nextafter(np.nextafter(1., 0.), 0.), np.nextafter(1., 0.)):
+        at = law.quantile_coordinates(0, u)
+        dose = at.anchor+at.unit*exact(np.longdouble(at.values))
+        assert Fraction(-10010) <= dose <= Fraction(10010)
+
+
+@pytest.mark.parametrize("local,regional,illness", [(-1., 0., 1.), (1., -1., 1.), (0., -1., 1.)])
+def test_assignment_affine_rate_is_exact_before_slope_sign(local, regional, illness):
+    from fractions import Fraction
+    state = LatentState(local=local, regional=regional, illness=illness)
+    law = AssignmentLaw(frame(1, 1), 0, state, config(), ((0., 10.),))
+    assert law.rate == Fraction(.3)*Fraction(local)+Fraction(.2)*Fraction(regional)-Fraction(.25)*Fraction(illness)
+
+
+@pytest.mark.parametrize("direction", [-1, 0, 1])
+def test_assignment_combined_slope_crosses_zero_exactly(direction):
+    from fractions import Fraction
+    scale = float(.25 if direction == 0 else np.nextafter(.25, direction*np.inf))
+    c = config(assignment="near_deterministic", near_scale=scale, extreme_ratios=True)
+    law = AssignmentLaw(frame(1, 1), 0, LatentState(), c, ((0., 10.),))
+    slope = Fraction(-4)+1/Fraction(scale)
+    assert law.pieces[0].rate == slope
+    assert (slope > 0)-(slope < 0) == -direction
