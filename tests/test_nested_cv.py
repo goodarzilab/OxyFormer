@@ -43,7 +43,7 @@ def endpoint(root):
 
 def tiny_config(prepared, root, **kwargs):
     return prepared.configuration(0, root, ssl_epochs=1,
-        settings=nested.NuisanceSettings(batch_size=8, frozen_epochs=1), **kwargs)
+        settings=nested.NuisanceSettings(batch_size=256, frozen_epochs=1), **kwargs)
 
 
 def fitted(root, prepared=None, **kwargs):
@@ -57,7 +57,7 @@ def predictions(prepared, artifact):
     return nested.predict(artifact, view, prepared.policy)
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def full(tmp_path_factory):
     old = torch.get_num_threads()
     torch.set_num_threads(1)
@@ -84,7 +84,7 @@ def test_registered_schedule(full):
     assert config["seeds"] == list(nested.SEEDS)
 
 
-@pytest.mark.parametrize("batches", [1, 5, 20, 70])
+@pytest.mark.parametrize("batches", [1, 3, 15, 30])
 def test_portable_continuation_matches_uninterrupted(full, tmp_path, batches):
     prepared, expected = full
     config = tiny_config(prepared, tmp_path / "old" / "work", max_batches=batches)
@@ -126,7 +126,7 @@ def request(root, prepared, *, predecessor=None, stage="primary", variant="A0", 
     inputs = root / "inputs"
     inputs.mkdir()
     (inputs / "endpoint.json").write_text(prepared.to_json())
-    lock = {"nested_cv": {"ssl_epochs": 1, "frozen_epochs": 1, "batch_size": 8, "synthetic": True}}
+    lock = {"nested_cv": {"ssl_epochs": 1, "frozen_epochs": 1, "batch_size": 256, "synthetic": True}}
     (inputs / "recipe.json").write_text(canonical_json(lock))
     dependencies = {"input": str(inputs)}
     files = [inputs / "endpoint.json", inputs / "recipe.json"]

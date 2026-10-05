@@ -45,7 +45,7 @@ from oxyformer.training.checkpoint import (CheckpointArtifact, CheckpointRequest
     restore_rng, load_checkpoint, save_checkpoint, model_state_hash)
 from oxyformer.training.fit import (FitConfig, FoldArtifacts, NuisanceSettings,
     subset, _inputs, _values, _partition, _weight_unit, _outcome_loss, _origin_loss,
-    _backward_and_clip, _pooled_metrics, _bundle, _lineage)
+    _backward_and_clip, _pooled_metrics, _bundle, _lineage, _tensor_state)
 from oxyformer.training.pretrain import (StatefulSampler, SSLSettings, environment_identity,
     fit_preprocessing)
 
