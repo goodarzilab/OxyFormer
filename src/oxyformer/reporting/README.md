@@ -154,3 +154,9 @@ changed task/bundle bytes provide no authenticated estimates to display. Complet
 request verification, the fixed owner-registry path, every scientific gate and
 a second input verification still precede release. Output isolation and immutable
 publication remain required even for refusal reports.
+
+Finite inputs can still overflow during derived diagnostic arithmetic. The
+complete derived record is checked for finite JSON values before attachment to
+an evaluation or refusal report. A nonfinite derived value fails the scientific
+report instead of reaching publication as released evidence; authenticated
+estimates and sensitivities remain publishable with the failure reason.

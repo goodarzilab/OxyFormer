@@ -1168,3 +1168,43 @@ def test_refusal_never_displays_unauthenticated_estimates(case, tmp_path, monkey
     report = json.loads((Path(request.output_dir) / 'report.json').read_text())
     assert result.status != 'pass'
     assert not report['releasable'] and report['estimators'] == []
+
+
+def overflowing_balance_case(case, mismatch=False):
+    b, m, r = case
+    b = replace(b, balance_basis_id='f(A)=1e308*(A-2)', balance_names=('large signed exposure',),
+                balance_observed=((-1e308,),) * len(b.original_ids),
+                balance_shifted=((1e308,),) * len(b.original_ids))
+    if mismatch:
+        one, confirmation = b.estimates
+        parents = ('0' * 64,) + confirmation.lineage.parent_hashes[1:]
+        b = replace(b, estimates=(one, replace(confirmation,
+                    lineage=replace(confirmation.lineage, parent_hashes=parents))))
+    return b, m, r
+
+
+def test_nonfinite_balance_difference_cannot_release(case):
+    b, m, r = overflowing_balance_case(case)
+    report = evaluate_case((b, m, r))
+    assert not report['releasable']
+    assert report['state'] == 'failed'
+    assert report['estimators'] == [e.to_dict()['payload'] for e in b.estimates]
+    canonical_json(report)
+
+
+@pytest.mark.parametrize('mismatch', [False, True])
+def test_nonfinite_balance_difference_keeps_authenticated_estimates(case, tmp_path, monkeypatch, mismatch):
+    b, m, r = overflowing_balance_case(case, mismatch)
+    request = make_request(tmp_path, (b, m, r), monkeypatch)
+    result = run_stage(request)
+    assert result.status == 'fail'
+    assert {a.path for a in result.artifacts} == {'report.json', 'report.html', 'estimators.svg'}
+    result.verify(request)
+    root = Path(request.output_dir)
+    report = json.loads((root / 'report.json').read_text())
+    assert report['state'] == 'failed' and not report['releasable']
+    assert report['evidence_label'] == 'diagnostic-only'
+    assert report['estimators'] == [e.to_dict()['payload'] for e in b.estimates]
+    assert any('nonfinite' in gate['reason'] for gate in report['gates'])
+    for name in ('report.html', 'estimators.svg'):
+        assert all(e.method in (root / name).read_text() for e in b.estimates)
