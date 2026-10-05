@@ -282,3 +282,64 @@ def test_mixed_scale_conditioning_keeps_normalized_inputs_finite():
     assert torch.isfinite(fitted.ratios(logits)).all()
     assert pair_metrics(fitted.logits(logits), weights)[0] <= pair_metrics(
         torch.zeros_like(logits), weights)[0]
+
+
+def test_opposite_extreme_logits_do_not_erase_weighted_contrasts():
+    logits, values = with_zero_weight_original()
+    c, e = float(2 ** 126), float(2 ** 103)
+    logits[:] = torch.tensor([[c, c+e], [c, c+e], [c, c+e], [c+e, c],
+                              [c, c], [c, c], [-3*c, -3*c]])
+    weights = [1.] * 6 + [1e-38]
+    fitted = fit_affine(logits, weights, **values)
+    feasible = replace(fitted, slope=float(torch.log(torch.tensor(5.))),
+                       intercept=float(torch.log(torch.tensor(.6))),
+                       input_offset=c, input_scale=e)
+    assert torch.isfinite(feasible.ratios(logits)).all()
+    # A strictly better finite FP32 map rules out the false constant fit.
+    assert pair_metrics(fitted.logits(logits), weights)[0] <= (
+        pair_metrics(feasible.logits(logits), weights)[0] + 1e-6)
+
+
+@pytest.mark.parametrize("large,small", [(1e38, 1e-20), (1e300, 1e-300)])
+def test_transfer_preserves_positive_mass_before_normalization(large, small):
+    logits, values = with_zero_weight_original()
+    logits.zero_()
+    weights = [large] * 6 + [small]
+    fitted = fit_affine(logits, weights, **values)
+    refit = logits.clone()
+    refit[-1] = -1e38
+    result = transfer_diagnostics(fitted, logits, refit, weights, lineage=values['lineage'])
+    # Take square roots before the division in this independent reference:
+    # the normalized mass itself need not be representable even in FP64.
+    expected = abs(float(refit[-1, 0])) * (small ** .5 / large ** .5) / 6 ** .5
+    assert expected > 0
+    assert dict(result.metrics)['weighted_logit_rmse'] == pytest.approx(expected, rel=1e-6, abs=0.)
+
+
+@pytest.mark.parametrize("weight", [1e39, 1e-50])
+def test_raw_finite_weight_scale_preserves_the_fit(weight):
+    logits, values = nonseparable_case()
+    baseline = fit_affine(logits, [1.] * 6, **values)
+    fitted = fit_affine(logits, [weight] * 6, **values)
+    torch.testing.assert_close(fitted.ratios(logits), baseline.ratios(logits))
+    assert pair_metrics(logits, [weight] * 6) == pair_metrics(logits, [1.] * 6)
+
+
+def test_raw_negative_weight_cannot_round_to_zero_before_validation():
+    logits, values = with_zero_weight_original()
+    weights = [1.] * 6 + [-1e-50]
+    calibration = fit_affine(logits, [1.] * 7, **values)
+    with pytest.raises(ContractError, match="target weights"):
+        fit_affine(logits, weights, **values)
+    with pytest.raises(ContractError, match="target weights"):
+        pair_metrics(logits, weights)
+    with pytest.raises(ContractError, match="target weights"):
+        transfer_diagnostics(calibration, logits, logits, weights, lineage=values['lineage'])
+
+
+def test_raw_positive_weight_retains_its_ratio_audit():
+    logits, values = with_zero_weight_original()
+    logits[-1] = 1e20
+    # This raw positive row has negligible loss but an overflowing ratio.
+    with pytest.raises(ContractError, match="nonfinite calibrated ratio"):
+        fit_affine(logits, [1.] * 6 + [1e-50], **values)
