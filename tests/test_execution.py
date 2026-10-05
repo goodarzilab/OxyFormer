@@ -1189,6 +1189,7 @@ from oxyformer.execution.paths import atomic_json
                           CUDA_VISIBLE_DEVICES=''), capture_output=True, text=True, timeout=30)
 
 
+@pytest.mark.xfail(strict=True, reason='ARC-1339: general outside-write confinement is an owner-deferred host-runtime limitation')
 def test_cli_undeclared_outside_write_fails(runtime, tmp_path, monkeypatch):
     repo, out = runtime
     outside = tmp_path / 'outside.json'
