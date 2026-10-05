@@ -28,6 +28,7 @@ from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from hashlib import sha256
+from fractions import Fraction
 import importlib.metadata
 import json
 import math
@@ -229,7 +230,8 @@ def family_mask(batch: FeatureBatch, families: tuple[tuple[int, ...], ...], rate
     draws = torch.rand((batch.numeric_values.shape[0], len(families)), generator=generator) < rate
     masked = torch.zeros_like(batch.missing)
     for j, members in enumerate(families):
-        masked[:, list(members)] = draws[:, j:j + 1].to(masked.device)
+        columns = torch.isin(batch.feature_ids, batch.feature_ids.new_tensor(members))
+        masked[:, columns] = draws[:, j:j + 1].to(masked.device)
     return replace(batch, masked=masked & ~batch.padding)
 
 
@@ -243,41 +245,91 @@ class MaskedReconstructor(nn.Module):
         require(sum(p.numel() for p in self.parameters()) <= 1_000_000,
                 "SSL network exceeds parameter cap")
 
-    def forward(self, batch: FeatureBatch) -> list[torch.Tensor]:
+    def forward(self, batch: FeatureBatch) -> list[torch.Tensor | None]:
+        """Return column-aligned predictions; anonymous padding has no head."""
         hidden, _ = self.encoder(batch)
-        return [head(hidden[:, j]) for j, head in enumerate(self.heads)]
+        return [self.heads[feature_id](hidden[:, column]) if feature_id >= 0 else None
+                for column, feature_id in enumerate(batch.feature_ids.tolist())]
 
 
-def reconstruction_totals(predictions, batch: FeatureBatch, features):
-    # Keep elementwise objectives in the training dtype, but accumulate before
-    # averaging in float64: a representable mean can have an overflowing sum.
-    sums, counts = [], []
-    for j, feature in enumerate(features):
-        valid = batch.masked[:, j] & ~batch.missing[:, j] & ~batch.padding[:, j]
-        count = float(valid.sum().item())
-        counts.append(count)
-        if not count:
-            sums.append(predictions[j][:0].sum(dtype=torch.float64))
-        elif feature.kind == "numeric":
-            sums.append(F.huber_loss(predictions[j][valid, 0], batch.numeric_values[valid, j],
-                                     reduction="none", delta=1.0).sum(dtype=torch.float64))
+def reconstruction_losses(predictions, batch: FeatureBatch, features):
+    """Return unreduced observed losses in canonical feature-ID order.
+
+    Heads/predictions follow batch columns; metadata, families and checkpoint
+    statistics follow schema IDs. Absent features and padding have no targets.
+    """
+    ids = batch.feature_ids.tolist()
+    require(len(predictions) == len(ids), "prediction column mismatch")
+    require(all(-1 <= index < len(features) for index in ids), "unknown reconstruction feature ID")
+    unique(tuple(index for index in ids if index >= 0), "reconstruction feature IDs")
+    losses = [batch.numeric_values.new_empty(0) for _ in features]
+    for column, feature_id in enumerate(ids):
+        if feature_id == -1:
+            require(bool(batch.padding[:, column].all()), "anonymous feature must be padding")
+            continue
+        feature, prediction = features[feature_id], predictions[column]
+        valid = batch.masked[:, column] & ~batch.missing[:, column] & ~batch.padding[:, column]
+        if not bool(valid.any()):
+            continue
+        if feature.kind == "numeric":
+            losses[feature_id] = F.huber_loss(prediction[valid, 0], batch.numeric_values[valid, column],
+                                             reduction="none", delta=1.0)
         else:
-            sums.append(F.cross_entropy(predictions[j][valid], batch.categorical_values[valid, j],
-                                        reduction="none").sum(dtype=torch.float64))
-    return sums, counts
+            losses[feature_id] = F.cross_entropy(prediction[valid], batch.categorical_values[valid, column],
+                                                reduction="none")
+    return losses
 
 
-def balanced_loss(sums, counts, families):
-    # Python floats (checkpointed validation totals) are already binary64.
-    # Retain that precision through both feature and family averaging.
-    sums = [value.to(torch.float64) if isinstance(value, torch.Tensor) else float(value)
-            for value in sums]
+def _loss_units(values: torch.Tensor) -> int:
+    """Exact sum in units of 2**-1074, the binary64 subnormal quantum.
+
+    Python integers cannot overflow. All float32/64 losses are exact multiples
+    of this quantum; no floating-point total is materialized or checkpointed.
+    """
+    total = 0
+    for value in values.detach().reshape(-1).cpu().tolist():
+        require(math.isfinite(value) and value >= 0, "nonfinite/negative reconstruction loss")
+        numerator, denominator = value.as_integer_ratio()
+        total += numerator << (1075 - denominator.bit_length())
+    return total
+
+
+class _Mean(torch.autograd.Function):
+    """Binary64 mean with an exact overflow fallback and the usual derivative."""
+
+    @staticmethod
+    def forward(ctx, values):
+        ctx.shape, ctx.count, ctx.dtype = values.shape, values.numel(), values.dtype
+        total = values.sum(dtype=torch.float64)
+        if bool(torch.isfinite(total)):
+            return total / ctx.count
+        mean = float(Fraction(_loss_units(values), ctx.count << 1074))
+        return values.new_tensor(mean, dtype=torch.float64)
+
+    @staticmethod
+    def backward(ctx, gradient):
+        return (gradient.expand(ctx.shape) / ctx.count).to(ctx.dtype)
+
+
+def balanced_loss(losses, families):
+    """Equal observed-family means of observed-feature means; never raw totals."""
     contributions = []
     for family in families:
-        observed = [sums[j] / counts[j] for j in family if counts[j]]
+        observed = [_Mean.apply(losses[j]) for j in family if losses[j].numel()]
+        if observed:
+            contributions.append(_Mean.apply(torch.stack(observed)))
+    return _Mean.apply(torch.stack(contributions)) if contributions else None
+
+
+def _validation_score(units, counts, families):
+    # Preserve exact sums/counts across batches and checkpoints, then average
+    # both hierarchy levels as rationals before the single final rounding.
+    contributions = []
+    for family in families:
+        observed = [Fraction(units[j], counts[j] << 1074) for j in family if counts[j]]
         if observed:
             contributions.append(sum(observed) / len(observed))
-    return sum(contributions) / len(contributions) if contributions else None
+    return float(sum(contributions) / len(contributions)) if contributions else None
 
 
 def _batch(batch: FeatureBatch, indices) -> FeatureBatch:
@@ -459,7 +511,7 @@ def _run(view, settings, config, seed, features, preprocessing, identity,
     require(bool((~train_batch.missing).any()), "no observed fitting targets")
     require(bool((~validation_batch.missing).any()), "no observed stopping targets")
     progress = {"epoch": 0, "step": 0, "phase": "train", "validation_cursor": 0,
-                "validation_sums": [0.0] * len(features), "validation_counts": [0.0] * len(features),
+                "validation_units": [0] * len(features), "validation_counts": [0] * len(features),
                 "best_loss": None, "bad_epochs": 0, "history": []}
     best_model = None
     controller = _controller_state(config.controller_state)
@@ -490,8 +542,8 @@ def _run(view, settings, config, seed, features, preprocessing, identity,
             masked = family_mask(_batch(train_batch, indices), family_indices, settings.mask_rate)
             model.train()
             optimizer.zero_grad(set_to_none=True)
-            sums, counts = reconstruction_totals(model(masked), masked, features)
-            loss = balanced_loss(sums, counts, family_indices)
+            losses = reconstruction_losses(model(masked), masked, features)
+            loss = balanced_loss(losses, family_indices)
             if loss is not None:
                 loss = loss.to(train_batch.numeric_values.dtype)
                 require(bool(torch.isfinite(loss)), "nonfinite SSL loss")
@@ -507,13 +559,13 @@ def _run(view, settings, config, seed, features, preprocessing, identity,
             batch = _batch(validation_batch, slice(start, end))
             model.eval()
             with torch.no_grad():
-                sums, counts = reconstruction_totals(model(batch), batch, features)
-            for j in range(len(features)):
-                progress["validation_sums"][j] += float(sums[j])
-                progress["validation_counts"][j] += counts[j]
+                losses = reconstruction_losses(model(batch), batch, features)
+            for j, values in enumerate(losses):
+                progress["validation_units"][j] += _loss_units(values)
+                progress["validation_counts"][j] += values.numel()
             progress["validation_cursor"] = end
             if end == len(stopping.original_ids):
-                score = balanced_loss(progress["validation_sums"], progress["validation_counts"], family_indices)
+                score = _validation_score(progress["validation_units"], progress["validation_counts"], family_indices)
                 require(score is not None and math.isfinite(score), "nonfinite/empty stopping loss")
                 progress["history"].append(score)
                 if progress["best_loss"] is None or score < progress["best_loss"]:
@@ -529,7 +581,7 @@ def _run(view, settings, config, seed, features, preprocessing, identity,
                 else:
                     sampler.finish_epoch()
                     progress.update(phase="train", validation_cursor=0,
-                                    validation_sums=[0.0] * len(features), validation_counts=[0.0] * len(features))
+                                    validation_units=[0] * len(features), validation_counts=[0] * len(features))
         slice_batches += 1
     state = {"model": model.state_dict(), "best_model": best_model,
              "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),

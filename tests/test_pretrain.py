@@ -15,7 +15,7 @@ from oxyformer.provenance import ArtifactLineage, ContractError
 from oxyformer.training.checkpoint import load_checkpoint
 from oxyformer.training.pretrain import (
     PretrainConfig, SSLSettings, balanced_loss, family_mask, fit_preprocessing,
-    pretrain, reconstruction_totals,
+    pretrain, reconstruction_losses,
 )
 
 H = "a" * 64
@@ -129,13 +129,13 @@ def test_families_mask_jointly_and_missing_is_not_a_reconstruction_target(tmp_pa
     assert torch.equal(masked.missing, batch.missing) and masked.missing[0, 0]
     all_masked = family_mask(batch, ((0, 1), (2,)), 1.0)
     predictions = [torch.zeros(10, 1), torch.zeros(10, 1), torch.zeros(10, 3)]
-    sums, counts = reconstruction_totals(predictions, all_masked, features)
-    assert counts == [9, 10, 10]
+    losses = reconstruction_losses(predictions, all_masked, features)
+    assert [x.numel() for x in losses] == [9, 10, 10]
     changed = all_masked.numeric_values.clone()
     changed[0, 0] = float("nan")
-    changed_sums, changed_counts = reconstruction_totals(predictions, replace(all_masked, numeric_values=changed), features)
-    assert changed_counts == counts
-    for x, y in zip(sums, changed_sums):
+    changed_losses = reconstruction_losses(predictions, replace(all_masked, numeric_values=changed), features)
+    assert [x.numel() for x in changed_losses] == [x.numel() for x in losses]
+    for x, y in zip(losses, changed_losses):
         torch.testing.assert_close(x, y, rtol=0, atol=0)
 
 
@@ -146,9 +146,9 @@ def test_huber_cross_entropy_and_equal_family_contributions():
     zeros = torch.zeros((1, 3), dtype=torch.bool)
     batch = FeatureBatch(torch.arange(3), torch.tensor([[2., 4., 0.]]),
                          torch.zeros((1, 3), dtype=torch.long), zeros, ~zeros, zeros)
-    sums, counts = reconstruction_totals([torch.zeros(1, 1), torch.zeros(1, 1), torch.zeros(1, 3)], batch, features)
-    assert [float(x) for x in sums] == pytest.approx([1.5, 3.5, math_log_three()])
-    assert float(balanced_loss(sums, counts, ((0, 1), (2,)))) == pytest.approx((2.5 + math_log_three()) / 2)
+    losses = reconstruction_losses([torch.zeros(1, 1), torch.zeros(1, 1), torch.zeros(1, 3)], batch, features)
+    assert [float(x) for x in losses] == pytest.approx([1.5, 3.5, math_log_three()])
+    assert float(balanced_loss(losses, ((0, 1), (2,)))) == pytest.approx((2.5 + math_log_three()) / 2)
 
 
 def math_log_three():
@@ -262,7 +262,7 @@ def test_finite_large_stopping_loss_does_not_overflow_before_averaging(tmp_path)
 
 
 @pytest.mark.parametrize("kind", ["numeric", "categorical"])
-def test_reconstruction_totals_preserve_large_finite_mean_and_gradients(kind):
+def test_reconstruction_losses_preserve_large_finite_mean_and_gradients(kind):
     from oxyformer.models.tokens import FeatureBatch
     feature = FeatureSpec(name="x", kind=kind, categories=("a",) if kind == "categorical" else ())
     zeros = torch.zeros((4, 1), dtype=torch.bool)
@@ -270,8 +270,8 @@ def test_reconstruction_totals_preserve_large_finite_mean_and_gradients(kind):
                          torch.zeros((4, 1), dtype=torch.long), zeros, ~zeros, zeros)
     prediction = (torch.zeros(4, 1) if kind == "numeric" else
                   torch.tensor([[-1e38, 0.]] * 4)).requires_grad_()
-    sums, counts = reconstruction_totals([prediction], batch, (feature,))
-    loss = balanced_loss(sums, counts, ((0,),)).to(prediction.dtype)
+    losses = reconstruction_losses([prediction], batch, (feature,))
+    loss = balanced_loss(losses, ((0,),)).to(prediction.dtype)
     assert torch.isfinite(loss)
     assert loss.item() == pytest.approx(1e38)
     loss.backward()
@@ -283,6 +283,107 @@ def test_reconstruction_totals_preserve_large_finite_mean_and_gradients(kind):
 @pytest.mark.parametrize("families", [((0, 1),), ((0,), (1,))])
 def test_family_balancing_avoids_overflow_between_finite_means(families):
     sums = [torch.tensor(3e38), torch.tensor(3e38)]
-    loss = balanced_loss(sums, [1, 1], families).float()
+    loss = balanced_loss(sums, families).float()
     assert torch.isfinite(loss)
     assert loss.item() == pytest.approx(3e38)
+
+
+@pytest.mark.parametrize("families", [((0, 1),), ((0,), (1,))])
+def test_float64_family_means_at_dtype_limit(families):
+    maximum = torch.finfo(torch.float64).max
+    sums = [torch.tensor(maximum, dtype=torch.float64)] * 2
+    loss = balanced_loss(sums, families)
+    assert loss.item() == maximum
+
+
+def test_reconstruction_follows_feature_ids_with_mixed_heads_and_padding():
+    from oxyformer.models.tokens import FeatureBatch
+    from oxyformer.training.pretrain import MaskedReconstructor
+    features = (FeatureSpec(name="x", kind="numeric"),
+                FeatureSpec(name="y", kind="categorical", categories=("a", "b")),
+                FeatureSpec(name="z", kind="categorical", categories=("a", "b", "c")))
+    zeros = torch.zeros((3, 3), dtype=torch.bool)
+    missing = zeros.clone()
+    missing[0, 0] = True
+    padding = zeros.clone()
+    padding[1, 2] = True
+    batch = FeatureBatch(torch.arange(3), torch.tensor([[0., 0., 0.], [1., 0., 0.], [2., 0., 0.]]),
+                         torch.tensor([[0, 1, 2], [0, 0, 1], [0, 1, 0]]), missing, ~zeros, padding)
+    model = MaskedReconstructor(features, 0.).eval()
+    predictions = model(batch)
+    permutation = torch.tensor([2, 0, 1])
+    permuted = FeatureBatch(batch.feature_ids[permutation], *(value[:, permutation] for value in (
+        batch.numeric_values, batch.categorical_values, batch.missing, batch.masked, batch.padding)))
+    reordered = model(permuted)
+    for column, feature_id in enumerate(permutation.tolist()):
+        torch.testing.assert_close(reordered[column], predictions[feature_id], rtol=1e-5, atol=1e-6)
+    original = reconstruction_losses(predictions, batch, features)
+    changed = reconstruction_losses(reordered, permuted, features)
+    assert [x.numel() for x in original] == [x.numel() for x in changed]
+    for left, right in zip(original, changed):
+        torch.testing.assert_close(left, right, rtol=1e-5, atol=1e-6)
+    original_loss = balanced_loss(original, ((0, 1), (2,)))
+    changed_loss = balanced_loss(changed, ((0, 1), (2,)))
+    torch.testing.assert_close(original_loss, changed_loss, rtol=1e-5, atol=1e-6)
+    original_gradients = torch.autograd.grad(original_loss, tuple(model.parameters()))
+    changed_gradients = torch.autograd.grad(changed_loss, tuple(model.parameters()))
+    for left, right in zip(original_gradients, changed_gradients):
+        torch.testing.assert_close(left, right, rtol=1e-4, atol=1e-6)
+    subset = FeatureBatch(torch.tensor([2, -1, 0]), *(value[:, [2, 1, 0]].clone() for value in (
+        batch.numeric_values, batch.categorical_values, batch.missing, batch.masked, batch.padding)))
+    subset.padding[:, 1] = True
+    subset_predictions = model(subset)
+    assert subset_predictions[1] is None
+    subset_losses = reconstruction_losses(subset_predictions, subset, features)
+    assert [x.numel() for x in subset_losses] == [2, 0, 2]
+
+
+def test_family_masks_follow_ids_after_joint_permutation():
+    from oxyformer.models.tokens import FeatureBatch
+    zeros = torch.zeros((30, 3), dtype=torch.bool)
+    batch = FeatureBatch(torch.arange(3), torch.zeros(30, 3), torch.zeros(30, 3, dtype=torch.long),
+                         zeros, zeros, zeros)
+    permutation = torch.tensor([2, 0, 1])
+    permuted = FeatureBatch(batch.feature_ids[permutation], *(value[:, permutation] for value in (
+        batch.numeric_values, batch.categorical_values, batch.missing, batch.masked, batch.padding)))
+    original = family_mask(batch, ((0, 1), (2,)), .5, generator=torch.Generator().manual_seed(3))
+    changed = family_mask(permuted, ((0, 1), (2,)), .5, generator=torch.Generator().manual_seed(3))
+    assert torch.equal(original.masked[:, permutation], changed.masked)
+
+
+@pytest.mark.parametrize("kind", ["numeric", "categorical"])
+def test_float64_reconstruction_mean_at_maximum_keeps_gradient(kind):
+    from oxyformer.models.tokens import FeatureBatch
+    maximum = torch.finfo(torch.float64).max
+    feature = FeatureSpec(name="x", kind=kind, categories=("a",) if kind == "categorical" else ())
+    zeros = torch.zeros((3, 1), dtype=torch.bool)
+    batch = FeatureBatch(torch.arange(1), torch.full((3, 1), maximum, dtype=torch.float64),
+                         torch.zeros((3, 1), dtype=torch.long), zeros, ~zeros, zeros)
+    prediction = (torch.zeros(3, 1, dtype=torch.float64) if kind == "numeric" else
+                  torch.tensor([[-maximum, 0.]] * 3, dtype=torch.float64)).requires_grad_()
+    loss = balanced_loss(reconstruction_losses([prediction], batch, (feature,)), ((0,),))
+    assert loss.item() == maximum
+    loss.backward()
+    expected = (torch.full((3, 1), -1 / 3, dtype=torch.float64) if kind == "numeric" else
+                torch.tensor([[-1 / 3, 1 / 3]] * 3, dtype=torch.float64))
+    torch.testing.assert_close(prediction.grad, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("values", [
+    [torch.finfo(torch.float64).max] * 3,
+    [0., float.fromhex('0x0.0000000000001p-1022'), float.fromhex('0x0.0000000000001p-1022')],
+    [1e308, 1e-308, 1e308],
+])
+def test_loss_means_and_persistent_totals_match_exact_reference(values):
+    from fractions import Fraction
+    from oxyformer.training.pretrain import _loss_units, _validation_score
+    losses = torch.tensor(values, dtype=torch.float64, requires_grad=True)
+    expected = float(sum(Fraction(value) for value in values) / len(values))
+    actual = balanced_loss([losses], ((0,),))
+    assert actual.item() == expected
+    actual.backward()
+    torch.testing.assert_close(losses.grad, torch.full_like(losses, 1 / len(values)), rtol=0, atol=0)
+    units = sum(_loss_units(losses[i:i + 1]) for i in range(len(values)))
+    assert units == _loss_units(losses)
+    assert _validation_score([units, units], [len(values), len(values)], ((0, 1),)) == expected
+    assert _validation_score([units, units], [len(values), len(values)], ((0,), (1,))) == expected
