@@ -1,5 +1,5 @@
 """Fingerprint entries, types, modes, sizes, bytes and symlink targets.
-Ignore timestamps/inodes and restored transient changes; compare states.
+Ignore timestamps/inodes across snapshots; retain observed acquisition changes.
 """
 from contextlib import contextmanager
 from dataclasses import replace
@@ -58,6 +58,81 @@ def record_taints(check):
                 pass  # Taint is permanent; a later observer cannot clear it.
 
 
+def _acquisition_binding(path):
+    """Find a durable acquisition ancestor, without resolving the observed path.
+
+    Both successful and refused reads consult the same immutable authority.
+    The authority lives outside acquisitions and cannot recursively bind itself.
+    """
+    path = Path(os.path.abspath(path))
+    store = Path(os.environ.get('OXYFORMER_PUBLICATION_STORE',
+        Path.home() / 'oxyformer-swarm/state/publications'))
+    if not store.is_absolute() or path.is_relative_to(store):
+        return None
+    for root in (path, *path.parents):
+        if store.is_relative_to(root):
+            continue
+        baseline = store / (sha256(str(root).encode()).hexdigest() + '.acquisition')
+        if os.path.lexists(baseline):
+            value = json.loads(read_regular(baseline))
+            require(value['attempt'] == str(root), 'acquisition baseline identity mismatch')
+            return root, str(path.relative_to(root)), value['entries']
+    return None
+
+
+def _taint_observation(binding):
+    root, relative, _ = binding
+    record_taints({'attempts': {str(root): {'changed_paths': [relative]}}})
+
+
+def observe_acquisition(path, *, metadata=None, digest=None):
+    """Compare known fields from a successful read with its durable binding."""
+    binding = _acquisition_binding(path)
+    if binding is None:
+        return
+    old = binding[2].get(binding[1])
+    known = {} if metadata is None else dict(type=stat.S_IFMT(metadata.st_mode),
+        mode=stat.S_IMODE(metadata.st_mode), size=metadata.st_size)
+    if digest is not None:
+        known['sha256'] = digest
+    if old is None or any(old.get(key) != value for key, value in known.items()):
+        _taint_observation(binding)
+        raise InputChanged(path, 'input hash mismatch' if digest is not None
+            else 'input metadata differs from acquisition baseline')
+
+
+class InputTypeError(ContractError):
+    """A path did not have the type required by the read operation."""
+
+
+@contextmanager
+def acquisition_read(path, *, kind=stat.S_IFREG):
+    """Preserve namespace/type observations at every reader, including workers.
+
+    A prior durable binding distinguishes changed inputs from an invalid first
+    use. Resource/transport errors do not establish mutation. Never rescan an
+    observed absence: restoration before that rescan would erase the evidence.
+    """
+    try:
+        yield
+    except (OSError, InputTypeError, InputChanged) as exc:
+        if (isinstance(exc, (InputTypeError, InputChanged))
+                or exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.EISDIR)):
+            binding = _acquisition_binding(path)
+            if binding is not None and binding[2].get(binding[1], {}).get('type') == kind:
+                _taint_observation(binding)
+        raise
+
+
+def verify_input_hash(path, expected, *, hash_file=None):
+    """A wrong request digest is not evidence that the acquisition changed."""
+    with acquisition_read(path):
+        actual = (regular_file_hash if hash_file is None else hash_file)(path)
+    observe_acquisition(path, digest=actual)
+    require(actual == expected, f'input hash mismatch: {path}')
+    return actual
+
+
 class InputChanged(ContractError):
     """A reader observed a change, as distinct from invalid input or I/O failure."""
 
@@ -74,18 +149,24 @@ def _stable(metadata):
 def directory_path(path):
     """Check directory components before resolving; never erase a symlink."""
     path = temporary_path(path)
-    for component in (*reversed(path.parents), path):
-        require(stat.S_ISDIR(component.lstat().st_mode),
-            f'input directory is a symlink or special file: {component}')
-    return path.resolve(strict=True)
+    with acquisition_read(path, kind=stat.S_IFDIR):
+        for component in (*reversed(path.parents), path):
+            metadata = component.lstat()
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise InputTypeError(f'input directory is a symlink or special file: {component}')
+            observe_acquisition(component, metadata=metadata)
+        return path.resolve(strict=True)
 
 
 def regular_file_stat(path):
     path = temporary_path(path)
-    directory_path(path.parent)
-    metadata = path.lstat()
-    require(stat.S_ISREG(metadata.st_mode), f'input is not a regular file: {path}')
-    return metadata
+    with acquisition_read(path):
+        directory_path(path.parent)
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode):
+            raise InputTypeError(f'input is not a regular file: {path}')
+        observe_acquisition(path, metadata=metadata)
+        return metadata
 
 
 def _open_observed_regular(path):
@@ -102,27 +183,30 @@ def _open_observed_regular(path):
 def open_regular(path):
     """Open one stable regular file without following links or blocking on FIFOs."""
     path = temporary_path(path)
-    before = regular_file_stat(path)
-    fd = _open_observed_regular(path)
-    with os.fdopen(fd, 'rb') as stream:
-        opened = os.fstat(stream.fileno())
-        if not stat.S_ISREG(opened.st_mode) or _stable(opened) != _stable(before):
-            raise InputChanged(path, 'input changed before reading')
-        yield stream
-        try:
-            after = regular_file_stat(path)
-        except ContractError as exc:
-            raise InputChanged(path, 'input type or directory changed while reading') from exc
-        except FileNotFoundError as exc:
-            raise InputChanged(path, 'input removed while reading') from exc
-        if (_stable(os.fstat(stream.fileno())) != _stable(before)
-                or _stable(after) != _stable(before)):
-            raise InputChanged(path, 'input changed while reading')
+    with acquisition_read(path):
+        before = regular_file_stat(path)
+        fd = _open_observed_regular(path)
+        with os.fdopen(fd, 'rb') as stream:
+            opened = os.fstat(stream.fileno())
+            if not stat.S_ISREG(opened.st_mode) or _stable(opened) != _stable(before):
+                raise InputChanged(path, 'input changed before reading')
+            yield stream
+            try:
+                after = regular_file_stat(path)
+            except ContractError as exc:
+                raise InputChanged(path, 'input type or directory changed while reading') from exc
+            except FileNotFoundError as exc:
+                raise InputChanged(path, 'input removed while reading') from exc
+            if (_stable(os.fstat(stream.fileno())) != _stable(before)
+                    or _stable(after) != _stable(before)):
+                raise InputChanged(path, 'input changed while reading')
 
 
 def read_regular(path):
     with open_regular(path) as stream:
-        return stream.read()
+        raw = stream.read()
+    observe_acquisition(path, digest=sha256(raw).hexdigest())
+    return raw
 
 
 def regular_file_hash(path):
@@ -130,14 +214,16 @@ def regular_file_hash(path):
     with open_regular(path) as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b''):
             digest.update(chunk)
-    return digest.hexdigest()
+    value = digest.hexdigest()
+    observe_acquisition(path, digest=value)
+    return value
 
 
 def verify_inputs(request):
     """StageRequest.verify_inputs checks using nonblocking regular-file reads."""
     for path, digest in zip((request.config_path, request.task_path) + request.dependency_paths,
         (request.config_hash, request.task_hash) + request.dependency_hashes):
-        require(regular_file_hash(path) == digest, f'input hash mismatch: {path}')
+        verify_input_hash(path, digest)
 
 
 def verify_result(result, request):
@@ -197,7 +283,7 @@ def fingerprint_tree(root, *, exclude=()):
         except (OSError, InputChanged) as exc:
             if isinstance(exc, InputChanged):
                 entry['changed'] = True
-            if isinstance(exc, FileNotFoundError):
+            if isinstance(exc, OSError) and exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
                 entry['missing'] = True
                 if relative != '.' or 'type' in entry:
                     entry['changed'] = True
@@ -217,7 +303,7 @@ def fingerprint_tree(root, *, exclude=()):
             except (OSError, InputChanged) as exc:
                 if isinstance(exc, InputChanged):
                     entries[relative]['changed'] = True
-                if isinstance(exc, FileNotFoundError):
+                if isinstance(exc, OSError) and exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
                     entries[relative]['missing'] = True
                     entries[relative]['changed'] = True
                 entries[relative]['error'] = f'{type(exc).__name__}: {exc}'
@@ -230,15 +316,37 @@ def changed_paths(before, after):
         if before.get(name) != after.get(name) or 'error' in after.get(name, {}))
 
 
+def acquisition_changed_paths(before, after):
+    """Return positive differences; an unreadable subtree is not a deletion."""
+    changed = []
+    for name in before.keys() | after.keys():
+        old, new = before.get(name), after.get(name)
+        if new is None:
+            parents = ('.', *(str(p) for p in Path(name).parents if str(p) != '.'))
+            if not any('error' in after.get(parent, {}) for parent in parents):
+                changed.append(name)
+        elif 'error' in new:
+            known = {key: new[key] for key in ('type', 'mode', 'size', 'target', 'sha256')
+                if key in new and (key not in ('target', 'sha256') or new[key] is not None)}
+            if (old is None or new.get('changed') or new.get('missing')
+                    or any(old.get(key) != value for key, value in known.items())):
+                changed.append(name)
+        elif old != new:
+            changed.append(name)
+    return sorted(changed)
+
+
 def post_execution_check(before):
     """Recompute every dependency, including after an unsuccessful stage."""
     attempts = {}
     for root, expected in before.items():
         actual = fingerprint_tree(root)
-        changed = changed_paths(expected, actual)
-        attempts[root] = {'status': 'tainted' if changed else 'unchanged',
+        acquisition = _acquisition_binding(root) is not None
+        changed = (acquisition_changed_paths if acquisition else changed_paths)(expected, actual)
+        unreadable = any('error' in entry for entry in actual.values())
+        attempts[root] = {'status': 'tainted' if changed else 'unreadable' if unreadable else 'unchanged',
             'changed_paths': changed, 'fingerprint': actual}
-    return {'status': 'fail' if any(a['changed_paths'] for a in attempts.values()) else 'pass',
+    return {'status': 'fail' if any(a['status'] != 'unchanged' for a in attempts.values()) else 'pass',
         'attempts': attempts}
 
 
