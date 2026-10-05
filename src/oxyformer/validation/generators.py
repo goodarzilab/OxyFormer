@@ -19,7 +19,7 @@ from oxyformer.provenance import Immutable, ContractError, require, write_artifa
 from oxyformer.validation.analytic_truth import UniformShiftTruth
 from oxyformer.validation.scm import (
     AssignmentLaw, CovariateFrame, LatentState, SCMConfig, adjustment_key,
-    latent_states, observation_probabilities, observation_log_probability, structural_mean, validate_count_rates, count_event_rate,
+    denominator_components, latent_states, observation_probabilities, observation_log_probability, structural_mean, validate_count_rates, count_event_rate,
     LocalCoordinates, exact, exact_shift_intervals, wide, observation_transition_points,
     validate_numeric, validate_policy_domain, validate_seed, REGISTERED_NUMERIC_BOX, NUMERIC_DOMAIN, NUMERIC_MARGIN,
 )
@@ -155,7 +155,7 @@ def _sample_observations(frame, config, policy, seed):
         state, dose, true_dose, flag, survey, geo_noise = geographies[geo]
         if cluster not in clusters:
             clusters[cluster] = rng.normal()
-        factor = 1 + config.denominator_error * float(rng.choice([-1, 1]))
+        denominator_exact, factor = denominator_components(config.denominator_error, int(rng.choice([-1, 1])))
         state = replace(state, denominator_factor=factor)
         _, _, pbio = observation_probabilities(dose, state, config)
         flag = flag and frame.outcome_available[i]
@@ -168,7 +168,8 @@ def _sample_observations(frame, config, policy, seed):
             intensity = count_event_rate(true_dose, frame, i, state, config, poisson_intensity=True)
             true_events = rng.poisson(intensity)
             count = int(rng.binomial(true_events, config.registration_probability))
-            denominator = 100 * factor
+            # Round the exact scaled factor once at the observation boundary.
+            denominator = float(100 * denominator_exact)
             outcome = count / denominator
         else:
             mean = float(structural_mean(dose-state.error, frame, i, state, config))

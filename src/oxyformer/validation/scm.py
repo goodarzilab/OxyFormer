@@ -235,13 +235,32 @@ class LatentState:
                 "invalid latent denominator factor")
 
 
+def denominator_components(error, sign):
+    """One exact source for the internal factor and its recorded denominator.
+
+    Supported positive binary64 errors are at least .002 and below 1, so
+    1±error needs at most 62 significant bits. The supported extended host
+    retains it exactly; check this before applying strict latent-state bounds.
+    The Fraction also permits one final rounding of the scaled observation.
+    """
+    validate_numeric(error, "denominator_error", "denominator error", allow_zero=True)
+    require(type(error) in (int, float) and 0 <= error < 1, "invalid denominator error")
+    require(type(sign) is int and sign in (-1, 1), "invalid denominator sign")
+    exact_factor = 1+sign*exact(error)
+    factor = wide(exact_factor)
+    require(Fraction(*factor.as_integer_ratio()) == exact_factor,
+            "denominator factor is not exactly representable on this host")
+    return exact_factor, factor
+
+
 def latent_states(config: SCMConfig):
     """Marginal states for one row; sampling separately shares causes by unit."""
     local = [(-1., .5), (1., .5)] if config.local_confounding != "none" else [(0., 1.)]
     regional = [(-1., .5), (1., .5)] if config.regional_confounding != "none" else [(0., 1.)]
     illness = [(0., .7), (1., .3)] if config.has_illness else [(0., 1.)]
     error = [(-config.exposure_error, .5), (config.exposure_error, .5)] if config.exposure_error else [(0., 1.)]
-    denom = [(1-config.denominator_error, .5), (1+config.denominator_error, .5)] if config.denominator_error else [(1., 1.)]
+    denom = ([(denominator_components(config.denominator_error, sign)[1], .5) for sign in (-1, 1)]
+             if config.denominator_error else [(denominator_components(0., 1)[1], 1.)])
     for states in product(local, regional, illness, error, denom):
         yield LatentState(*(s[0] for s in states)), float(np.prod([s[1] for s in states]))
 

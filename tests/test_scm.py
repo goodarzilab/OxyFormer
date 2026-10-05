@@ -1189,3 +1189,155 @@ def test_count_atoms_retain_exact_boundary_and_expected_design_rejection(error):
     assert any(a not in boundaries for a in sample.observations.a)
     assert sample.observed_law_truth.status == sample.structural_causal_truth.status == "design_rejected"
     assert sample.observed_law_truth.value is sample.structural_causal_truth.value is None
+
+
+@pytest.mark.parametrize("seed", [0, 7, 42])
+def test_supported_denominator_boundary_null_generates_and_roundtrips(seed, tmp_path):
+    from fractions import Fraction
+    error = float(np.nextafter(1., 0.))
+    sample = generate_suite_a(frame(16, 1), config("null", denominator_error=error), policy(), seed=seed)
+    assert sample.observed_law_truth.value == sample.structural_causal_truth.value == 0.
+    obs = sample.observations
+    expected = {float(100*(1+sign*Fraction(error))) for sign in (-1, 1)}
+    assert set(obs.observed_denominator) == expected
+    for y, count, denominator in zip(obs.y, obs.registered_events, obs.observed_denominator):
+        assert type(denominator) is float
+        assert np.isfinite(y) and y == count/denominator
+    write_sample(sample, observations_dir=tmp_path/"observed", truth_dir=tmp_path/"truth")
+    restored = read_artifact(tmp_path/"observed/observations.json", ObservedRecords, obs.content_hash)
+    assert restored == obs
+
+
+@pytest.mark.parametrize("error", [0., .002, float(np.nextafter(.002, 1.)),
+    float(np.nextafter(2**-8, 0.)), 2**-8, float(np.nextafter(2**-8, 1.)), .2, .3,
+    float(np.nextafter(.5, 0.)), .5, float(np.nextafter(.5, 1.)), .9, .998,
+    float(np.nextafter(float(np.nextafter(1., 0.)), 0.)), float(np.nextafter(1., 0.))])
+def test_generated_denominator_factors_equal_exact_stored_expressions(error):
+    from fractions import Fraction
+    from oxyformer.validation.scm import denominator_components, latent_states
+    assert np.finfo(np.longdouble).nmant+1 >= 62
+    expected = {1+sign*Fraction(error) for sign in (-1, 1)}
+    states = list(latent_states(config("null", denominator_error=error)))
+    assert {Fraction(*state.denominator_factor.as_integer_ratio()) for state, _ in states} == expected
+    assert sum(probability for _, probability in states) == 1.
+    for sign in (-1, 1):
+        exact_factor, retained = denominator_components(error, sign)
+        assert exact_factor == Fraction(*retained.as_integer_ratio()) == 1+sign*Fraction(error)
+        assert 0 < retained < 2
+
+
+def test_denominator_exactness_across_fixed_seed_binary64_errors():
+    from fractions import Fraction
+    from oxyformer.validation.scm import denominator_components
+    for value in np.random.default_rng(177).uniform(.002, 1., 128):
+        error = float(value)
+        for sign in (-1, 1):
+            exact_factor, retained = denominator_components(error, sign)
+            assert exact_factor == Fraction(*retained.as_integer_ratio()) == 1+sign*Fraction(error)
+
+
+@pytest.mark.parametrize("factor", [0., 2., np.longdouble(2), -.1, float("nan"), float("inf")])
+def test_latent_denominator_bounds_stay_strict(factor):
+    with pytest.raises(ContractError, match="invalid latent denominator factor"):
+        LatentState(denominator_factor=factor)
+
+
+@pytest.mark.parametrize("error,sign", [(1., 1), (-.2, 1), (.001, 1), (.2, 0), (.2, 2)])
+def test_denominator_constructor_refuses_invalid_primitives(error, sign):
+    from oxyformer.validation.scm import denominator_components
+    with pytest.raises(ContractError):
+        denominator_components(error, sign)
+
+
+def test_denominator_conversion_guard_detects_lost_precision(monkeypatch):
+    import oxyformer.validation.scm as scm
+    monkeypatch.setattr(scm, "wide", lambda value: np.longdouble(float(value)))
+    with pytest.raises(ContractError, match="not exactly representable"):
+        scm.denominator_components(float(np.nextafter(1., 0.)), 1)
+
+
+@pytest.mark.parametrize("sign", [-1, 1])
+@pytest.mark.parametrize("error", [.2, float(np.nextafter(1., 0.)),
+    (2**52+2**48+11305)/2**61])
+def test_sampler_denominator_rounds_exact_product_once_and_records_its_ratio(error, sign, monkeypatch):
+    from fractions import Fraction
+    import oxyformer.validation.generators as generators
+    original_rng = np.random.default_rng
+    class FixedCountRNG:
+        def __init__(self, seed):
+            self.delegate = original_rng(seed)
+        def __getattr__(self, name):
+            return getattr(self.delegate, name)
+        def choice(self, values, *args, **kwargs):
+            return sign if isinstance(values, list) and values == [-1, 1] else self.delegate.choice(values, *args, **kwargs)
+        def poisson(self, intensity):
+            return 3
+    monkeypatch.setattr(generators.np.random, "default_rng", FixedCountRNG)
+    sample = generate_suite_a(frame(1, 1), config("null", denominator_error=error), policy())
+    observed = sample.observations
+    expected = float(100*(1+sign*Fraction(error)))
+    assert observed.observed_denominator == (expected,)
+    assert type(observed.observed_denominator[0]) is float
+    assert observed.registered_events == (3,)
+    assert observed.y == (3/expected,)
+    assert ObservedRecords.from_json(observed.to_json()) == observed
+
+
+@pytest.mark.parametrize("error", [0., .2, float(np.nextafter(1., 0.))])
+def test_retained_denominator_states_preserve_grouping_and_mass(error):
+    from oxyformer.validation.generators import _groups
+    f = replace(frame(2, 1), coordinates=((0., 0.),)*2)
+    groups = _groups(f, config("null", denominator_error=error), policy())
+    assert len(groups) == 1
+    terms = next(iter(groups.values()))
+    assert len(terms) == (2 if error else 1)
+    assert sum(np.exp(t.log_weight) for t in terms) == pytest.approx(2., abs=1e-15)
+
+
+def _uniform_denominator_truth_reference(effect, beta, error):
+    from decimal import Decimal, localcontext
+    # Independent 140-digit closed-form uniform integrals. The quadratic
+    # positive/negative integrand cancels exactly; it must not use relative error.
+    with localcontext() as context:
+        context.prec = 140
+        def cosine(value):
+            x = Decimal(value)
+            term = total = Decimal(1)
+            for k in range(1, 160):
+                term *= -x*x/Decimal((2*k-1)*(2*k))
+                total += term
+            return total
+        b, e = Decimal.from_float(beta), Decimal.from_float(error)
+        unscaled = {"null": Decimal(0), "linear": 8*b/5,
+                    "nonlinear": b*(cosine(4)-cosine(5)+cosine(1)-1)/5,
+                    "sign_changing": Decimal(0)}[effect]
+        return float(unscaled/(1-e*e))
+
+
+@pytest.mark.parametrize("error", [.002, .2, .9, .998, 1-1e-3, 1-1e-6,
+                                       1-1e-9, 1-1e-12, float(np.nextafter(1., 0.))])
+@pytest.mark.parametrize("effect", ["null", "linear", "nonlinear", "sign_changing"])
+@pytest.mark.parametrize("beta", [1.7, 200.])
+def test_denominator_reference_grid_preserves_accuracy_and_explicit_nonconvergence(error, effect, beta):
+    from fractions import Fraction
+    f = replace(frame(1, 1), columns=tuple(f"x{i}" for i in range(10)), x=((100.,)*10,))
+    c = config(effect, beta=beta, denominator_error=error)
+    expected = _uniform_denominator_truth_reference(effect, beta, error)
+    tolerance = 1e-8
+    try:
+        result = generate_suite_a(f, c, policy())
+    except ContractError as exc:
+        # Numerical failure is permitted only in the unchanged accuracy check,
+        # after factors, rates, observations and their serialization succeeded.
+        assert "truth integration did not converge" in str(exc)
+        # A declared absolute accuracy on the scale of this cancelling integrand;
+        # this changes neither the default nor the production convergence rule.
+        tolerance = float(max(1e-8, 64*np.finfo(float).eps*float(2*Fraction(beta)/(1-Fraction(error)))))
+        result = generate_suite_a(f, c, policy(), tolerance=tolerance)
+    for truth in (result.observed_law_truth, result.structural_causal_truth):
+        assert truth.value == pytest.approx(expected, rel=0, abs=tolerance)
+        if effect == "null":
+            assert truth.value == 0.
+    assert result.integration_uncertainty.converged
+    assert result.integration_uncertainty.observed_absolute_difference <= tolerance
+    assert result.integration_uncertainty.causal_absolute_difference <= tolerance
