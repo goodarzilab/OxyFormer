@@ -4,7 +4,10 @@ This is an execution contract, not a sandbox for hostile Python modules. Stage
 implementations must use output_dir for all writes and treat dependency_paths as
 read-only. The runner never modifies upstream files or their permissions; input
 trees are fingerprinted before execution and rechecked after the stage worker
-exits. Archives are extracted only via execution.paths.safe_extract into the
+exits. Fingerprints bind directory entries, types, modes, sizes, content hashes
+and symlink targets; timestamps and inode numbers are deliberately excluded.
+An identical rewrite or restored input state is accepted, not tracked as an
+event. Archives are extracted only via execution.paths.safe_extract into the
 consuming attempt. Runner-managed writes, receipts and declared artifacts are
 confined to output_dir, and caches are redirected there. General confinement of
 faulty stage code writing outside every attempt tree is the explicitly deferred
