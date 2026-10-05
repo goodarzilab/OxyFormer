@@ -716,3 +716,132 @@ def test_executed_stage_exception_always_publishes_failure(runtime, monkeypatch,
     assert result.message
     receipt = StageResult.from_json((out / '_execution/result.json').read_text())
     assert receipt == result
+
+
+@pytest.mark.parametrize('mutation', ['bytes', 'chmod', 'added', 'removed', 'symlink'])
+@pytest.mark.parametrize('exit_kind', ['pass', 'exception', 'system-exit'])
+def test_upstream_tree_mutation_fails_and_blocks_later_consumer(
+        runtime, tmp_path, monkeypatch, mutation, exit_kind):
+    repo, out = runtime
+    upstream = tmp_path / 'upstream'
+    upstream.mkdir()
+    (upstream / 'data.json').write_text('{}')
+    (upstream / 'receipts.json').write_text('{}')
+    # Mutate an undeclared path: StageRequest's selected file hashes alone
+    # cannot detect any of these changes. All fixtures are disposable.
+    extra = upstream / 'extra'
+    extra.mkdir()
+    victim = extra / 'victim'
+    victim.write_text('original')
+    link = extra / 'link'
+    link.symlink_to('victim')
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(upstream))
+    needs = {'data-unit': ['data.json', 'receipts.json']}
+    changed = {'bytes': 'extra/victim', 'chmod': 'extra/victim',
+               'added': 'extra/new', 'removed': 'extra/victim',
+               'symlink': 'extra/link'}[mutation]
+    def faulty(request):
+        result = dummy(request)
+        if mutation == 'bytes':
+            victim.write_text('modified')
+        elif mutation == 'chmod':
+            victim.chmod(victim.stat().st_mode ^ 0o100)
+        elif mutation == 'added':
+            (extra / 'new').write_text('new')
+        elif mutation == 'removed':
+            victim.unlink()
+        else:
+            link.unlink()
+            link.symlink_to('../data.json')
+        if exit_kind == 'exception':
+            raise RuntimeError('synthetic stage failure')
+        if exit_kind == 'system-exit':
+            raise SystemExit(7)
+        return result
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty))
+    result = run('dummy', out, repo, deps_env=True, task_file=task_file(out, needs=needs))
+    assert result.status == 'fail'
+    assert str(upstream / changed) in result.message
+    assert StageResult.from_json((out / '_execution/result.json').read_text()) == result
+    receipt = json.loads((out / '_execution/dependency_check.json').read_text())
+    assert receipt['status'] == 'fail'
+    assert changed in receipt['attempts'][str(upstream)]['changed_paths']
+    # The runner must not repair upstream data or modes while reporting failure.
+    if mutation == 'bytes':
+        assert victim.read_text() == 'modified'
+    elif mutation == 'chmod':
+        assert victim.stat().st_mode & 0o100
+    elif mutation == 'added':
+        assert (extra / 'new').is_file()
+    elif mutation == 'removed':
+        assert not victim.exists()
+    else:
+        assert os.readlink(link) == '../data.json'
+    later = tmp_path / 'later'
+    later.mkdir()
+    (later / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=dummy))
+    with pytest.raises(ContractError, match='tainted|fingerprint'):
+        run('dummy', later, repo, deps_env=True, task_file=task_file(later, needs=needs))
+    assert not (later / 'value.json').exists()
+
+
+def test_read_only_upstream_tree_remains_usable(runtime, tmp_path, monkeypatch):
+    repo, out = runtime
+    upstream = tmp_path / 'source'
+    upstream.mkdir()
+    (upstream / 'data.json').write_text('{}')
+    (upstream / 'receipts.json').write_text('{}')
+    (upstream / 'link').symlink_to('data.json')
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(upstream))
+    needs = {'data-unit': ['data.json', 'receipts.json']}
+    before = {p.name: (p.lstat().st_mode, p.lstat().st_size,
+                      os.readlink(p) if p.is_symlink() else p.read_bytes())
+              for p in upstream.iterdir()}
+    for attempt in [out, tmp_path / 'later']:
+        attempt.mkdir(exist_ok=True)
+        (attempt / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+        assert run('dummy', attempt, repo, deps_env=True,
+                   task_file=task_file(attempt, needs=needs)).status == 'pass'
+    after = {p.name: (p.lstat().st_mode, p.lstat().st_size,
+                     os.readlink(p) if p.is_symlink() else p.read_bytes())
+             for p in upstream.iterdir()}
+    assert after == before
+
+
+def test_tree_fingerprint_binds_types_modes_bytes_links_and_all_entries(tmp_path):
+    from oxyformer.execution.integrity import fingerprint_tree, changed_paths
+    import stat
+    root = tmp_path / 'tree'
+    root.mkdir()
+    (root / 'empty').mkdir()
+    file = root / 'file'
+    file.write_bytes(b'abcd')
+    (root / 'link').symlink_to('file')
+    os.mkfifo(root / 'pipe')
+    before = fingerprint_tree(root)
+    assert set(before) == {'.', 'empty', 'file', 'link', 'pipe'}
+    assert before['file'] == {'type': stat.S_IFREG, 'mode': stat.S_IMODE(file.stat().st_mode),
+                              'size': 4, 'sha256': sha256(b'abcd').hexdigest(), 'target': None}
+    assert before['empty']['type'] == stat.S_IFDIR
+    assert before['link']['type'] == stat.S_IFLNK and before['link']['target'] == 'file'
+    assert before['pipe']['type'] == stat.S_IFIFO
+    assert fingerprint_tree(root) == before
+    file.unlink()
+    file.mkdir()
+    assert 'file' in changed_paths(before, fingerprint_tree(root))
+
+
+def test_tree_fingerprint_errors_are_explicit_and_path_specific(tmp_path, monkeypatch):
+    from oxyformer.execution.integrity import fingerprint_tree, changed_paths
+    (tmp_path / 'file').write_text('content')
+    before = fingerprint_tree(tmp_path)
+    original = os.open
+    def denied(path, flags, *args, **kwargs):
+        if Path(path) == tmp_path / 'file':
+            raise PermissionError('synthetic unreadable entry')
+        return original(path, flags, *args, **kwargs)
+    monkeypatch.setattr(os, 'open', denied)
+    after = fingerprint_tree(tmp_path)
+    assert 'synthetic unreadable entry' in after['file']['error']
+    assert changed_paths(before, after) == ['file']
