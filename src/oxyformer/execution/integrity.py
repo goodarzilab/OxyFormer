@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from hashlib import sha256
 import errno
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -34,15 +35,46 @@ def publication_receipt(root, *, create=False):
     return directory_path(store) / sha256(str(root).encode()).hexdigest()
 
 
-def record_publication(root, result):
+def authority_exists(path):
+    """Only ENOENT means absent; resource and transport errors must propagate."""
+    try:
+        Path(path).lstat()
+    except FileNotFoundError:
+        return False
+    return True
+
+
+@contextmanager
+def publication_lock(receipt):
+    """Serialize durable taints with the publication authority's commit point."""
+    fd = os.open(receipt.parent / '.publication.lock',
+        os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        require(stat.S_ISREG(os.fstat(fd).st_mode), 'publication lock is not a regular file')
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def record_publication(root, result, *, dependency_roots=()):
     receipt = publication_receipt(root, create=True)
-    atomic_json(receipt.parent, receipt.name, {'attempt': str(root),
-        'result_sha256': sha256(result.to_json().encode()).hexdigest()})
+    with publication_lock(receipt):
+        # The authoritative release and permanent taints share one ordering.
+        # A recorded upstream taint cannot slip between this check and commit.
+        for dependency in dependency_roots:
+            marker = Path(str(publication_receipt(dependency)) + '.tainted')
+            if authority_exists(marker):
+                paths = json.loads(read_regular(marker))
+                require(False, 'upstream attempt tainted; changed paths: ' +
+                    ', '.join(str(Path(dependency) / name) for name in paths))
+        atomic_json(receipt.parent, receipt.name, {'attempt': str(root),
+            'result_sha256': sha256(result.to_json().encode()).hexdigest()})
 
 
 def verify_publication(root, result):
     receipt = publication_receipt(root)
-    require(not os.path.lexists(str(receipt) + '.tainted'), f'tainted upstream fingerprint: {root}')
+    require(not authority_exists(str(receipt) + '.tainted'), f'tainted upstream fingerprint: {root}')
     require(json.loads(read_regular(receipt)) == {'attempt': str(root),
         'result_sha256': sha256(result.to_json().encode()).hexdigest()},
         f'dependency publication fingerprint authority mismatch: {root}')
@@ -52,10 +84,11 @@ def record_taints(check):
     for root, detail in check['attempts'].items():
         if detail['changed_paths']:
             receipt = publication_receipt(root)
-            try:
-                atomic_json(receipt.parent, receipt.name + '.tainted', detail['changed_paths'])
-            except FileExistsError:
-                pass  # Taint is permanent; a later observer cannot clear it.
+            with publication_lock(receipt):
+                try:
+                    atomic_json(receipt.parent, receipt.name + '.tainted', detail['changed_paths'])
+                except FileExistsError:
+                    pass  # Taint is permanent; a later observer cannot clear it.
 
 
 def _acquisition_binding(path):
@@ -73,7 +106,7 @@ def _acquisition_binding(path):
         if store.is_relative_to(root):
             continue
         baseline = store / (sha256(str(root).encode()).hexdigest() + '.acquisition')
-        if os.path.lexists(baseline):
+        if authority_exists(baseline):
             value = json.loads(read_regular(baseline))
             require(value['attempt'] == str(root), 'acquisition baseline identity mismatch')
             return root, str(path.relative_to(root)), value['entries']
@@ -461,7 +494,7 @@ def _replace_control(root, relative, text):
             os.unlink(temporary)
 
 
-def publish_result(root, result, *, owned_controls=False):
+def publish_result(root, result, *, owned_controls=False, dependency_roots=()):
     """Seal a producer's own completed tree; a consumer never calls this."""
     root = directory_path(root)
     collisions = [str(root / name) for name in PUBLICATION_EXCLUSIONS
@@ -496,7 +529,7 @@ def publish_result(root, result, *, owned_controls=False):
         published = replace(result, artifacts=(*result.artifacts, fingerprint))
         _replace_control(root, RESULT, published.to_json())
         require(_settled_publication_tree(root) == entries, 'attempt changed during result publication')
-        record_publication(root, published)
+        record_publication(root, published, dependency_roots=dependency_roots)
         return published
     except BaseException as exc:
         failed = replace(result, status='fail', artifacts=(),
