@@ -4,6 +4,7 @@ Ignore timestamps/inodes and restored transient changes; compare states.
 from contextlib import contextmanager
 from dataclasses import replace
 from hashlib import sha256
+import errno
 import json
 import os
 from pathlib import Path
@@ -87,12 +88,22 @@ def regular_file_stat(path):
     return metadata
 
 
+def _open_observed_regular(path):
+    """Open after a successful regular-file stat, retaining namespace evidence."""
+    try:
+        return os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+            raise InputChanged(path, 'input removed or replaced before reading') from exc
+        raise  # Transport/resource failures alone do not establish a mutation.
+
+
 @contextmanager
 def open_regular(path):
     """Open one stable regular file without following links or blocking on FIFOs."""
     path = temporary_path(path)
     before = regular_file_stat(path)
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    fd = _open_observed_regular(path)
     with os.fdopen(fd, 'rb') as stream:
         opened = os.fstat(stream.fileno())
         if not stat.S_ISREG(opened.st_mode) or _stable(opened) != _stable(before):
@@ -142,7 +153,11 @@ def verify_result(result, request):
 
 
 def fingerprint_tree(root, *, exclude=()):
-    """Return every entry, including '.', and explicit errors on unreadable paths."""
+    """Return every entry, including '.', and explicit errors on unreadable paths.
+
+    Entries omit timestamps and inodes. Those are used only for within-read
+    stability checks; the stored view binds types, modes, sizes, bytes and links.
+    """
     root = Path(root)
     entries = {}
     pending = [(root, '.', None)]
@@ -161,7 +176,7 @@ def fingerprint_tree(root, *, exclude=()):
                 entry['target'] = os.readlink(path)
             elif stat.S_ISREG(kind):
                 digest = sha256()
-                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                fd = _open_observed_regular(path)
                 with os.fdopen(fd, 'rb') as stream:
                     if _stable(os.fstat(stream.fileno())) != _stable(before):
                         raise InputChanged(path, 'entry changed before hashing')
