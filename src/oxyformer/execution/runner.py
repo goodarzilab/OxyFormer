@@ -100,9 +100,10 @@ def verify_acquisition(root, receipt_name, *, expected_tree=None):
                 # An unreadable hash is unknown, not proof of different bytes.
                 # Keep positive evidence (missing entry, changed stat, or a
                 # reader's explicit observation) separate from I/O failures.
-                if after.get('changed') or (before is not None and
-                        (after.get('missing') or any(before.get(key) != after[key]
-                            for key in ('type', 'mode', 'size', 'target') if key in after))):
+                known = {key: after[key] for key in ('type', 'mode', 'size', 'target', 'sha256')
+                    if key in after and (key not in ('target', 'sha256') or after[key] is not None)}
+                if (before is None or after.get('changed') or after.get('missing')
+                        or any(before.get(key) != value for key, value in known.items())):
                     changed.append(name)
             elif before != after:
                 changed.append(name)
