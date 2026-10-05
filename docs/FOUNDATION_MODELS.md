@@ -36,7 +36,12 @@ versions and a lock; after a synthetic checkpoint smoke test it must record
 and threading information. A consumer constructs `Checkpoint` using that saved
 fingerprint, not a new observation substituted for the expected environment.
 `Checkpoint.verify()` compares Python, torch, numpy, scipy, scikit-learn and the
-comparator package exactly and hashes local checkpoint bytes. Missing packages,
+comparator package exactly and hashes local checkpoint bytes. The descriptor's
+package, version, repository, revision, filename and SHA-256 must also match one
+of the four shipped registered identities, synchronized with the YAML registry
+by tests. A caller's self-consistent alternative descriptor is refused. Local
+provisioning paths and saved runtime versions are deployment-specific; neither
+changes the selected checkpoint identity. Missing packages,
 files, floating revisions or mismatched fingerprints block that comparator.
 The expected runtime manifest and model registry are trusted configuration.
 
@@ -169,6 +174,9 @@ raw X. A3 injects the frozen treatment basis before the feature encoder's blocks
 independently per query. A4 predicts unconstrained coefficients of an intercept
 and the frozen seven-value treatment basis from encoded X, context and raw X.
 A5 uses the merged signed Riesz head/loss without a positivity transform.
+Its merged forward API has no origin-offset argument, so the factory refuses
+`origin_offsets` for A5 instead of storing an unused module; owned PMA remains
+available. Outcome offsets are still supported for A5's outcome transformer.
 
 A6/F0 use TabICLv2/TabPFN outcomes with the primary transformer origin nuisance.
 A7/F1 use compatible foundation outcomes and origin probabilities. Both roles
