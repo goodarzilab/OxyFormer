@@ -1820,3 +1820,99 @@ def test_locked_recipe_checks_scientific_identity_of_transitive_attempts(runtime
     with pytest.raises(ContractError, match='dependency scientific code/config drift'):
         run('dummy', consumer, repo, deps_env=True, task_file=path)
     assert not (consumer / 'value.json').exists()
+
+
+@pytest.mark.parametrize('kind', ['final-coverage', 'anchor', 'refit-audit'])
+def test_builder_refuses_modified_checkout_approvals(runtime, tmp_path, spec, kind):
+    repo, _ = runtime
+    original = Path(__file__).parents[1]
+    (repo / 'scripts').mkdir()
+    shutil.copyfile(original / 'scripts/build_tasks.py', repo / 'scripts/build_tasks.py')
+    commit(repo)
+    spec.update(id='unapproved', kind=kind)
+    spec_file = tmp_path / 'spec.json'
+    spec_file.write_text(json.dumps(spec))
+    # Only this synthetic checkout's approvals are modified, never owner data.
+    (repo / 'configs/approvals.yaml').write_text(yaml.safe_dump({
+        'schema_version': 1, 'approved_by': 'fixture', 'owner_decisions': {
+            'campaign_allocations': {'unapproved': {'kind': kind, 'gpu_hours': 9}}}}))
+    process = subprocess.run([sys.executable, str(repo / 'scripts/build_tasks.py'),
+                              '--spec', str(spec_file), '--out', str(tmp_path / 'plan')],
+                             env=dict(os.environ, PYTHONPATH=str(original / 'src')),
+                             capture_output=True, text=True, timeout=10)
+    assert process.returncode != 0, 'builder accepted modified owner allocations'
+    assert 'approvals' in process.stderr and 'HEAD' in process.stderr
+    assert not (tmp_path / 'plan').exists()
+
+
+@pytest.mark.parametrize('overlap', [False, True])
+def test_code_identity_does_not_refresh_upstream_git_index(runtime, tmp_path, monkeypatch, overlap):
+    from oxyformer.execution.integrity import fingerprint_tree
+    repo, out = runtime
+    source = tmp_path / 'source'
+    source.mkdir()
+    clone = source / 'src'
+    shutil.move(repo, clone)
+    if overlap:
+        out = source / 'handoff'
+        out.mkdir()
+        (out / 'code_commit.txt').write_text(git(clone, 'rev-parse', 'HEAD'))
+    task = task_file(out, needs={'data-unit': ['data.json', 'receipts.json']})
+    (source / 'data.json').write_text('{}')
+    (source / 'receipts.json').write_text('{}')
+    git(clone, 'status', '--porcelain')
+    publish_source_fixture(clone, source)
+    victim = clone / 'src/science.py'
+    meta = victim.stat()
+    os.utime(victim, ns=(meta.st_atime_ns, meta.st_mtime_ns + 1000000000))
+    before = fingerprint_tree(source)
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
+    if overlap:
+        with pytest.raises(ContractError, match='overlaps an upstream'):
+            run('dummy', out, clone, deps_env=True, task_file=task)
+    else:
+        assert run('dummy', out, clone, deps_env=True, task_file=task).status == 'pass'
+    assert fingerprint_tree(source) == before
+
+
+def test_stage_cannot_publish_in_attempt_symlink_as_regular_artifact(runtime, monkeypatch):
+    repo, out = runtime
+    def faulty(request):
+        result = dummy(request)
+        (out / 'value.json').rename(out / 'stored.json')
+        (out / 'value.json').symlink_to('stored.json')
+        return result
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty))
+    result = run('dummy', out, repo, task_file=task_file(out))
+    assert result.status == 'fail' and str(out / 'value.json') in result.message
+
+
+@pytest.mark.parametrize('directory_link', [False, True])
+def test_dependency_file_rejects_symlink_before_resolving(tmp_path, directory_link):
+    from oxyformer.execution.runner import dependency_file
+    (tmp_path / 'stored').mkdir()
+    (tmp_path / 'stored/value.json').write_text('{}')
+    if directory_link:
+        (tmp_path / 'link').symlink_to('stored', target_is_directory=True)
+        relative = 'link/value.json'
+    else:
+        (tmp_path / 'value.json').symlink_to('stored/value.json')
+        relative = 'value.json'
+    with pytest.raises(ContractError, match='regular|symlink'):
+        dependency_file(tmp_path, relative)
+
+
+def test_dependency_root_symlink_is_not_a_directory_input(tmp_path):
+    (tmp_path / 'attempt').mkdir()
+    (tmp_path / 'alias').symlink_to('attempt', target_is_directory=True)
+    with pytest.raises(ContractError, match='symlink|directory'):
+        resolve_dependencies(['source'], {'SWARM_DEP_SOURCE': str(tmp_path / 'alias')})
+
+
+def test_regular_reader_rejects_symlink_ancestor(tmp_path):
+    from oxyformer.execution.integrity import read_regular
+    (tmp_path / 'stored').mkdir()
+    (tmp_path / 'stored/data.json').write_text('{}')
+    (tmp_path / 'alias').symlink_to('stored', target_is_directory=True)
+    with pytest.raises(ContractError, match='symlink|directory'):
+        read_regular(tmp_path / 'alias/data.json')

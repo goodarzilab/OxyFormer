@@ -31,12 +31,28 @@ def _stable(metadata):
             metadata.st_mtime_ns, metadata.st_ctime_ns)
 
 
+def directory_path(path):
+    """Check directory components before resolving; never erase a symlink."""
+    path = Path(path).absolute()
+    for component in (*reversed(path.parents), path):
+        require(stat.S_ISDIR(component.lstat().st_mode),
+                f'input directory is a symlink or special file: {component}')
+    return path.resolve(strict=True)
+
+
+def regular_file_stat(path):
+    path = Path(path)
+    directory_path(path.parent)
+    metadata = path.lstat()
+    require(stat.S_ISREG(metadata.st_mode), f'input is not a regular file: {path}')
+    return metadata
+
+
 @contextmanager
 def open_regular(path):
     """Open one stable regular file without following links or blocking on FIFOs."""
     path = Path(path)
-    before = path.lstat()
-    require(stat.S_ISREG(before.st_mode), f'input is not a regular file: {path}')
+    before = regular_file_stat(path)
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, 'rb') as stream:
         opened = os.fstat(stream.fileno())
@@ -44,7 +60,7 @@ def open_regular(path):
                 f'input changed before reading: {path}')
         yield stream
         require(_stable(os.fstat(stream.fileno())) == _stable(before)
-                and _stable(path.lstat()) == _stable(before),
+                and _stable(regular_file_stat(path)) == _stable(before),
                 f'input changed while reading: {path}')
 
 
@@ -72,11 +88,13 @@ def verify_result(result, request):
     """StageResult.verify checks using the same race-safe reader as preflight."""
     require(result.request_hash == request.content_hash, 'stage request mismatch')
     verify_inputs(request)
-    root = Path(request.output_dir).resolve(strict=True)
+    root = directory_path(request.output_dir)
     for artifact in result.artifacts:
         path = (root / artifact.path).resolve(strict=True)
         require(path.is_relative_to(root), 'artifact escapes output directory')
-        require(regular_file_hash(path) == artifact.sha256,
+        # Keep the declared spelling for the type check; resolution above is
+        # only a confinement check and must not hide an in-attempt symlink.
+        require(regular_file_hash(root / artifact.path) == artifact.sha256,
                 f'artifact hash mismatch: {artifact.path}')
 
 
@@ -187,7 +205,7 @@ def publish_result(root, result):
     receipt remains blocked until the fingerprint is complete and stable. Only
     the producer's own two reserved records are replaced, atomically.
     """
-    root = Path(root).resolve(strict=True)
+    root = directory_path(root)
     if result.status != 'pass':
         atomic_write(root, RESULT, result.to_json())
         return result
@@ -229,7 +247,7 @@ def verify_published_tree(root, result, expected_hash=None):
     from hashing current data to establish a replacement baseline. The caller
     also carries this record and its expected digest into StageRequest.
     """
-    root = Path(root)
+    root = directory_path(root)
     records = [record for record in result.artifacts if record.path == FINGERPRINT]
     require(len(records) == 1 and records[0].kind == 'attempt_fingerprint',
             'dependency publication fingerprint missing')
