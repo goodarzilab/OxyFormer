@@ -87,6 +87,16 @@ INTEGRATION_TOLERANCE_DOMAIN = MappingProxyType({"minimum": "1e-5000", "register
 REAL_SCALAR_TYPES = frozenset((int, float, np.byte, np.ubyte, np.short, np.ushort,
     np.intc, np.uintc, np.int_, np.uint, np.longlong, np.ulonglong,
     np.half, np.single, np.double, np.longdouble))
+_SEQUENCE_TYPES = (list, tuple, range, np.ndarray)
+
+
+def _record_sequence(value, name):
+    """Capture a concrete record container once, before iterating its fields."""
+    require(type(value) in _SEQUENCE_TYPES, f"{name} must be a concrete sequence")
+    if type(value) is np.ndarray:
+        require(value.ndim > 0, f"{name} must be a sequence")
+        value = value.tolist()
+    return tuple(value)
 
 
 def numeric_scalar(value, name):
@@ -104,7 +114,7 @@ def numeric_array(values, name, *, allow_fraction=False):
     def capture(value):
         if type(value) is np.ndarray:
             return capture(value.tolist())
-        if type(value) in (list, tuple, range):
+        if type(value) in _SEQUENCE_TYPES:
             return [capture(item) for item in value]
         if not (allow_fraction and type(value) is Fraction):
             numeric_scalar(value, name)
@@ -154,7 +164,7 @@ def normalize_record_numbers(record):
             return integer_scalar(value, name)
         args = get_args(annotation)
         if get_origin(annotation) is tuple:
-            require(isinstance(value, (tuple, list, np.ndarray)), f"{name} must be a sequence")
+            value = _record_sequence(value, name)
             if len(args) == 2 and args[1] is Ellipsis:
                 return tuple(convert(v, args[0], name) for v in value)
             require(len(value) == len(args), f"{name} has wrong tuple length")
@@ -230,6 +240,9 @@ class CovariateFrame(Immutable):
     biomarker_available: tuple[bool, ...]
 
     def __post_init__(self):
+        # Retain exactly the rows that are checked, including missing entries.
+        object.__setattr__(self, "x", tuple(_record_sequence(row, "X row")
+            for row in _record_sequence(self.x, "X")))
         validate_numeric(self.coordinates, "coordinate", "coordinates")
         validate_numeric([v for row in self.x for v in row if v is not None], "covariate", "X")
         validate_numeric(self.weights, "weight", "origin weights", allow_zero=True)
@@ -837,14 +850,14 @@ class AssignmentLaw:
                 +piece.peak_kernel-self.kernel_reference)
 
     def contains(self, a_observed):
-        a = numeric_array(a_observed, "recorded dose")
+        a = validate_numeric(a_observed, "recorded_exposure", "recorded dose")
         return np.array([any(p.lower+self.error <= exact(value) <= p.upper+self.error
                              for p in self.pieces) for value in a.ravel()]).reshape(a.shape)
 
     def log_density(self, a_observed):
         # Convenience for ordinary recorded exposures. Truth posterior evaluation
         # instead uses kernel_at and LocalCoordinates before relative conversion.
-        a = numeric_array(a_observed, "recorded dose")
+        a = validate_numeric(a_observed, "recorded_exposure", "recorded dose")
         flat = []
         for value in a.ravel():
             at = exact(value)

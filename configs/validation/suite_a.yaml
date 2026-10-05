@@ -234,3 +234,8 @@ scenarios:
 # in both integration paths, in addition to density and policy resolution.
 # Exact rational denominator factors remain in (0,2); structural responses
 # combine numerator and scale before output rounding, including sine enclosures.
+# Record normalization uses the same concrete sequence families, including ranges.
+# X rows are captured before flattening, so stored covariates are the values checked.
+# AssignmentLaw contains/log_density/density queries use recorded_exposure too:
+# outside an individual support but inside that envelope they return false/-inf/0;
+# beyond the global envelope they refuse the query before density computation.

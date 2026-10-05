@@ -2386,3 +2386,62 @@ def test_continuation_round1_raw_validation_precedes_array_hooks(container):
             pytest.fail("unsupported object executed an array conversion hook")
     with pytest.raises(ContractError, match="numeric"):
         numeric_array(container(NonNumeric()), "raw input")
+
+
+@pytest.mark.parametrize("field", ["exposure", "weights", "x", "paired"])
+def test_continuation_round2_range_containers_normalize_consistently(field):
+    from oxyformer.validation.generators import PairedWorld
+    f = frame(1, 1)
+    if field == "weights":
+        assert replace(f, weights=range(1, 2)).weights == (1.,)
+    elif field == "x":
+        assert replace(f, x=(range(0, 2),)).x == ((0., 1.),)
+    elif field == "paired":
+        world = PairedWorld(structural_effect=1., factual_location_effect=1.,
+            baseline=range(1), h_s=range(2, 3), epsilon=range(1), factual_y=range(2, 3))
+        assert world.intervene([3.]).tolist() == [3.]
+    else:
+        records = ObservedRecords(frame=f, measured_columns=(), measured_x=((),),
+            a=range(10040, 10041), y=(50.,), flag_available=(True,),
+            survey_included=(True,), biomarker_available=(True,),
+            registered_events=(None,), observed_denominator=(None,))
+        assert records.a == (10040.,)
+
+
+@pytest.mark.parametrize("outer", [False, True])
+def test_continuation_round2_frame_rejects_iterator_subclasses_before_reading(outer):
+    class Flip(list):
+        calls = 0
+        def __iter__(self):
+            self.calls += 1
+            row = (0. if self.calls == 1 else 1000., None)
+            return iter([row] if outer else row)
+    value = Flip()
+    with pytest.raises(ContractError, match="sequence|numeric"):
+        replace(frame(1, 1), x=value if outer else (value,))
+    assert value.calls == 0
+
+
+@pytest.mark.parametrize("method", ["contains", "log_density", "density"])
+@pytest.mark.parametrize("value", [-10051., 10051., np.nextafter(-10050., -np.inf),
+                                    np.nextafter(10050., np.inf)])
+def test_continuation_round2_assignment_queries_enforce_recorded_domain(method, value):
+    law = AssignmentLaw(frame(1, 1), 0, LatentState(), config(), ((0., 10.),))
+    with pytest.raises(ContractError, match="outside supported numeric domain"):
+        getattr(law, method)(value)
+
+
+@pytest.mark.parametrize("sign", [-1, 1])
+def test_continuation_round2_assignment_queries_keep_error_shifted_edges(sign):
+    components = ((9990., 10010.),) if sign == 1 else ((-10010., -9990.),)
+    c = config(exposure_error=40.)
+    law = AssignmentLaw(frame(1, 1), 0, LatentState(error=sign*40.), c, components)
+    values = sign*np.array([10030., 10040., 10050.])
+    assert law.contains(values).all()
+    assert_allclose(law.density(values), .05, rtol=1e-14, atol=0)
+    # The merged pushforward calls only active incoming points. It must remain
+    # compatible with the global recorded-input envelope at both shifted ends.
+    assert_allclose(pushforward_ratio(policy(components), values, ('s',)*3,
+        lambda a, keys: law.density(a), exposure_law='continuous'), 1., rtol=1e-14)
+    assert not law.contains(0.)
+    assert law.density(0.) == 0
