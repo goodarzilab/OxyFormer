@@ -9,6 +9,7 @@ import argparse
 from collections import Counter
 from datetime import datetime, timezone
 from email.message import Message
+import gzip
 import hashlib
 import http.client
 import json
@@ -23,6 +24,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from xml.parsers import expat
 
 import yaml
@@ -36,6 +38,11 @@ DEM_FALLBACK_CELLS = frozenset({
     'n27w080', 'n29w091', 'n40w074', 'n41w072',
     'n43w070', 'n46w083', 'n48w086', 'n49w088',
 })
+ACS_ARCHIVE_POLICY = 'gzip_tar_regular_relative'
+NO_PRODUCT_POLICY = {
+    'elevation': 'missing', 'exposure': 'missing',
+    'fill': False, 'interpolate': False, 'renormalize': False,
+}
 DIVISIONS = {
     'new_england': 'CT ME MA NH RI VT'.split(),
     'middle_atlantic': 'NJ NY PA'.split(),
@@ -142,6 +149,13 @@ def validate_manifest(manifest):
                  'Missing resource availability')
         for key in ('release', 'inspection'):
             _require(isinstance(resource.get(key), str) and resource[key], f'Missing resource {key}')
+        policy = resource.get('archive_validation')
+        _require(policy is None or policy == ACS_ARCHIVE_POLICY and resource['format'] == 'tar_gz',
+                 'Invalid archive validation policy')
+        if manifest['id'] == 'us' and rid == 'acs_tracts':
+            _require(resource['format'] == 'tar_gz' and str(path).endswith('.tar.gz')
+                     and policy == ACS_ARCHIVE_POLICY,
+                     'ACS requires tar_gz and complete stream validation')
         expected_bytes = resource.get('expected_bytes')
         _require(expected_bytes is None or _positive(expected_bytes)
                  and expected_bytes <= resource['max_bytes'], 'Invalid expected_bytes')
@@ -154,14 +168,15 @@ def validate_manifest(manifest):
             _require(expected_bytes is not None and digest is not None,
                      'Local resources require recorded size and SHA-256')
     by_id = {r['id']: r for r in resources}
+    no_product = (_validate_dem_coverage(manifest, by_id) if manifest['id'] == 'dem' else {})
     requirements = manifest.get('requirements')
     _require(isinstance(requirements, list) and requirements, 'Required resource checklist missing')
-    requirement_ids = set()
+    requirement_ids, no_product_requirements = set(), set()
     for item in requirements:
         _require(isinstance(item, dict) and item.get('id') not in requirement_ids and item.get('id'),
                  'Duplicate/missing requirement id')
         requirement_ids.add(item['id'])
-        _require(item.get('status') in ('ready', 'blocked'), 'Invalid requirement status')
+        _require(item.get('status') in ('ready', 'blocked', 'no_product'), 'Invalid requirement status')
         ids = item.get('resource_ids')
         _require(isinstance(ids, list) and all(rid in seen_ids for rid in ids),
                  'Requirement refers to unknown resources')
@@ -169,16 +184,89 @@ def validate_manifest(manifest):
             _require(ids, 'Ready requirement has no resources')
             _require(all(by_id[rid]['availability'] == 'verified' for rid in ids),
                      'Unverified resource blocks requirement')
+        elif item['status'] == 'no_product':
+            cell = item.get('cell')
+            _require(cell in no_product and cell not in no_product_requirements and not ids
+                     and item['id'] == 'fallback_' + cell,
+                     'No-product requirement needs unique evidence and no resource')
+            no_product_requirements.add(cell)
         else:
             _require(item.get('reason'), 'Blocked requirement needs a reason')
+    _require(no_product_requirements == set(no_product), 'No-product checklist and evidence disagree')
     if manifest['status'] == 'ready':
-        _require(resources and all(x['status'] == 'ready' for x in requirements),
+        _require(resources and all(x['status'] in ('ready', 'no_product') for x in requirements),
                  'Unavailable required resource blocks manifest')
         _require(all(r['availability'] == 'verified' for r in resources),
                  'Unverified resource blocks manifest')
         _require({'data', 'dictionary', 'terms'} <= {r['role'] for r in resources},
                  'Ready manifest needs data, dictionary and terms')
     return manifest
+
+
+def _validate_dem_coverage(manifest, resources):
+    """Reconcile inspected tiles, unresolved cells and evidence-backed absences."""
+    coverage = manifest.get('coverage', {})
+    absent = coverage.get('no_product_cells', {})
+    missing = coverage.get('missing_tiles', [])
+    _require(isinstance(absent, dict) and isinstance(missing, list)
+             and len(missing) == len(set(missing)), 'Invalid DEM coverage checklist')
+    tiles = {rid for rid, r in resources.items() if r['format'] == 'tiff' and r['role'] == 'data'}
+    fallback = {rid for rid in tiles if resources[rid].get('product') ==
+                'usgs_3dep_one_arc_second_seamless'}
+    _require(set(absent) <= DEM_FALLBACK_CELLS and set(missing) <= DEM_FALLBACK_CELLS
+             and not set(absent) & set(missing) and not (set(absent) | set(missing)) & tiles,
+             'No-product or missing cell cannot have a tile resource')
+    _require(fallback | set(absent) | set(missing) == DEM_FALLBACK_CELLS,
+             'Approved fallback cells are not fully reconciled')
+    _require(coverage.get('cataloged_tiles') == len(tiles)
+             and coverage.get('primary_tiles') == len(tiles - fallback)
+             and set(coverage.get('fallback_tiles', [])) == fallback
+             and coverage.get('needed_degree_cells') == len(tiles) + len(absent) + len(missing),
+             'DEM coverage counts disagree')
+    _require(coverage.get('no_product_policy') == NO_PRODUCT_POLICY,
+             'No-product samples must retain missing elevation and exposure')
+    for tile in tiles:
+        _require(tile + '_metadata' in resources and
+                 resources[tile + '_metadata']['format'] == 'xml', 'DEM tile needs paired metadata')
+    for cell, evidence in absent.items():
+        _require(cell not in resources and cell + '_metadata' not in resources
+                 and not any('/' + cell + '/' in urllib.parse.urlsplit(r['url']).path
+                             for r in resources.values()),
+                 'No-product cell cannot have a tile resource')
+        _require(isinstance(evidence, dict) and evidence.get('inspected_on') == '2026-10-04',
+                 'No-product cell needs dated inspection evidence')
+        land = evidence.get('land_check', {})
+        boundary = resources.get(land.get('boundary_resource'), {})
+        n, w = int(cell[1:3]), int(cell[4:])
+        _require(land.get('land_intersects') is False and land.get('intersecting_states') == []
+                 and land.get('bounds_wsen') == [-w, n - 1, 1 - w, n]
+                 and land.get('crs') == 'EPSG:4269'
+                 and boundary.get('availability') == 'verified'
+                 and boundary.get('id') == 'shoreline_boundaries_2010'
+                 and land.get('boundary_sha256') == boundary.get('expected_sha256')
+                 and isinstance(land.get('boundary_sha256'), str),
+                 'No-product cell needs inspected shoreline evidence with no land intersection')
+        listings = evidence.get('listings', [])
+        _require(isinstance(listings, list) and len(listings) == 4,
+                 'No-product cell needs all four product listings')
+        pairs = set()
+        for entry in listings:
+            resolution, era = entry.get('resolution'), entry.get('era')
+            pairs.add((resolution, era))
+            prefix = f'StagedProducts/Elevation/{resolution}/TIFF/{era}/{cell}/'
+            url = 'https://prd-tnm.s3.amazonaws.com/?' + urllib.parse.urlencode({'prefix': prefix})
+            _require(entry.get('url') == url and entry.get('status') == 200
+                     and entry.get('is_truncated') is False and entry.get('objects') == 0
+                     and isinstance(entry.get('sha256'), str)
+                     and re.fullmatch('[0-9a-f]{64}', entry['sha256']),
+                     'No-product listing must be an inspected empty untruncated USGS listing')
+        _require(pairs == {(res, era) for res in ('13', '1') for era in ('current', 'historical')},
+                 'No-product evidence must cover both resolutions and eras')
+    expected = 'incomplete' if missing else 'catalog_reconciled_with_no_product_cells'
+    _require(coverage.get('national') == expected, 'DEM coverage status disagrees')
+    if manifest['status'] == 'ready':
+        _require(not missing, 'Uninspected DEM cells block readiness')
+    return absent
 
 
 def validate_shards(atlas, dem=None):
@@ -194,7 +282,10 @@ def validate_shards(atlas, dem=None):
     dem = load_source('dem') if dem is None else validate_manifest(dem)
     resources = {r['id']: r for r in dem['resources']}
     tiles = {r['id'] for r in dem['resources'] if r['role'] == 'data' and r['format'] == 'tiff'}
-    assigned = set()
+    assigned, assigned_absent, assigned_missing = set(), set(), set()
+    _require(atlas.get('status') == dem['status'], 'Atlas and DEM readiness disagree')
+    _require(atlas.get('no_product_policy') == dem['coverage']['no_product_policy'],
+             'Atlas must preserve missing exposure semantics')
     for group in groups:
         _require(set(group['jurisdictions']) == set(DIVISIONS[group['id']]), 'Wrong division membership')
         _require(group.get('status') in ('ready', 'blocked') and
@@ -211,6 +302,13 @@ def validate_shards(atlas, dem=None):
         _require(ids and len(ids) == len(set(ids)) and all(i in tiles for i in ids),
                  'Unknown or repeated DEM tile')
         assigned.update(ids)
+        absent = group.get('no_product_cells', [])
+        missing = group.get('missing_tiles', [])
+        _require(isinstance(absent, list) and len(absent) == len(set(absent))
+                 and set(absent) <= set(dem['coverage']['no_product_cells']),
+                 'Shard has unknown or repeated no-product cells')
+        assigned_absent.update(absent)
+        assigned_missing.update(missing)
         # Border tiles can be read by both neighboring divisions; jurisdictions remain disjoint.
         budget = sum(resources[i]['max_bytes'] + resources[i + '_metadata']['max_bytes'] for i in ids)
         _require(group.get('max_bytes') == budget and _positive(budget), 'Wrong DEM byte ceiling')
@@ -220,6 +318,11 @@ def validate_shards(atlas, dem=None):
         _require(set(group.get('missing_tiles', [])) <= set(dem['coverage']['missing_tiles']),
                  'Shard has an unrecorded missing tile')
     _require(assigned == tiles, 'Tile inventory and shards disagree')
+    _require(assigned_absent == set(dem['coverage']['no_product_cells'])
+             and assigned_missing == set(dem['coverage']['missing_tiles']),
+             'Shard coverage omits unresolved or no-product cells')
+    if atlas['status'] == 'ready':
+        _require(all(g['status'] == 'ready' for g in groups), 'Blocked group blocks atlas')
     _require(atlas.get('national_dem_coverage') == dem['coverage']['national'],
              'Atlas and DEM coverage disagree')
     return atlas
@@ -498,6 +601,52 @@ def _copy_local(resource, path, *, log):
             'attempts': 1, 'retrieved_at': datetime.now(timezone.utc).isoformat()}
 
 
+def _verify_gzip_tar(path):
+    """Read every byte, including gzip trailers and tar end padding; never extract.
+
+    tarfile iteration alone tolerates missing end markers and can stop before the
+    gzip CRC trailer. Parse physical headers to reject hidden links/extensions,
+    and drain gzip through EOF in bounded chunks to verify CRC32 and ISIZE.
+    """
+    members = 0
+    zero = b'\0' * 512
+    try:
+        with gzip.open(path, 'rb') as stream:
+            while True:
+                header = stream.read(512)
+                _require(len(header) == 512, 'Missing tar end-of-archive marker or truncated header')
+                if header == zero:
+                    _require(stream.read(512) == zero, 'Tar requires two end-of-archive blocks')
+                    padding = 0
+                    for block in iter(lambda: stream.read(CHUNK), b''):
+                        _require(not any(block), 'Nonzero data after tar end-of-archive marker')
+                        padding += len(block)
+                    _require(padding % 512 == 0, 'Truncated tar end padding')
+                    _require(members > 0, 'Empty ACS tar archive')
+                    return {'policy': ACS_ARCHIVE_POLICY, 'members': members,
+                            'gzip_crc_and_length': 'verified', 'tar_end_marker': 'verified'}
+                member = tarfile.TarInfo.frombuf(header, 'utf-8', 'surrogateescape')
+                _require(member.type in (tarfile.REGTYPE, tarfile.AREGTYPE, tarfile.DIRTYPE),
+                         'Tar accepts only regular-file and directory members')
+                name = member.name
+                parts = name.rstrip('/').split('/')
+                _require(name and not name.startswith('/') and '\\' not in name and ':' not in name
+                         and all(part not in ('', '..') for part in parts),
+                         'Tar member must remain under a relative prefix')
+                _require(member.size >= 0 and (member.type != tarfile.DIRTYPE or member.size == 0),
+                         'Invalid tar member size')
+                remaining = member.size
+                while remaining:
+                    block = stream.read(min(CHUNK, remaining))
+                    _require(block, 'Truncated tar member data')
+                    remaining -= len(block)
+                size = (-member.size) % 512
+                _require(stream.read(size) == b'\0' * size, 'Invalid tar member padding')
+                members += 1
+    except (OSError, EOFError, zlib.error, tarfile.HeaderError) as exc:
+        raise ManifestError(f'Invalid gzip/tar stream: {exc}') from exc
+
+
 def _hash_file(path):
     digest = hashlib.sha256()
     with path.open('rb') as stream:
@@ -549,6 +698,8 @@ def fetch_manifest(manifest, output_dir, *, attempt_root, attempts=3, timeout=30
                     path = stage / str(index)
                     entry = (_copy_local(resource, path, log=log) if resource.get('transport') == 'local'
                              else _download(resource, path, attempts=attempts, timeout=timeout, log=log))
+                    if resource.get('archive_validation') == ACS_ARCHIVE_POLICY:
+                        entry['archive_integrity'] = _verify_gzip_tar(path)
                     receipt['resources'].append(entry)
                     log.write(f"audited {entry['id']} bytes={entry['bytes']} sha256={entry['sha256']}\n")
                 with tarfile.open(output / 'payload.tar.part', 'w', format=tarfile.PAX_FORMAT) as tar:
