@@ -119,3 +119,11 @@ Publication retries this specific instability in its own `_execution` directory
 at most three times, requiring every recorded entry, byte, mode and size to match
 the original observation. It never replaces the content baseline to obtain a
 pass, and upstream fingerprinting does not use these retries.
+
+Final dependency checks persist each observed difference before checking another
+root, retaining exact paths even if a later authority operation fails. DEM
+inspection uses the same receipt observation helper. Authority lookup I/O errors
+propagate rather than pretending a baseline or taint marker is absent. Taint
+writes and the final publication-authority commit share a short external lock;
+the commit checks every direct and transitive dependency marker under that lock.
+Archive hashing and scientific work run outside the lock.

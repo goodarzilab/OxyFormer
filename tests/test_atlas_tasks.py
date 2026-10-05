@@ -23,6 +23,9 @@ from oxyformer.provenance import ArtifactLineage, ArtifactRecord, ContractError,
 # command too; the complete execution suite remains independently runnable.
 from test_execution import (runtime, acquisition, acquisition_pair, publication_authority,
     test_later_acquisition_error_cannot_erase_observed_mutation,
+    test_taint_recorded_during_publication_refuses_release,
+    test_acquisition_authority_lookup_io_never_becomes_absence,
+    test_authority_marker_io_cannot_hide_existing_taint,
     test_finalization_retains_earlier_changed_path_after_later_error,
     test_partial_acquisition_enumeration_preserves_observed_addition,
     test_successful_acquisition_reader_preserves_positive_difference,
@@ -290,3 +293,31 @@ def test_final_admission_hash_does_not_depend_on_fingerprint_implementation(tmp_
             # content tree but allowing current stat signatures through.
             signature = context.gen.gi_frame.f_locals['signature']
             snapshots[root] = (signature(root), snapshots[root][1])
+
+
+@pytest.mark.parametrize('replacement', ['incomplete', 'invalid-json'])
+def test_dem_inspection_receipt_observation_survives_restore(runtime, acquisition, tmp_path, monkeypatch, replacement):
+    from test_execution import run_task, assert_pass, assert_failed, install_stage, new_attempt, dummy
+    from oxyformer.execution import runner, integrity
+    repo, producer = runtime
+    source, _ = synthetic_dem(acquisition)
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']}
+    assert_pass(run_task(repo, producer, needs=needs))
+    victim = acquisition / 'receipts.json'
+    saved = victim.read_bytes()
+    def worker(request):
+        value = json.loads(saved); value['status'] = 'incomplete'
+        victim.write_text(json.dumps(value) if replacement == 'incomplete' else '{')
+        try:
+            with pytest.raises((ContractError, ValueError)):
+                inspect_dem(acquisition, source)
+        finally:
+            victim.write_bytes(saved)
+        return dummy(request)
+    install_stage(monkeypatch, repo, worker)
+    result = run_task(repo, new_attempt(repo, tmp_path / 'active'), needs=needs)
+    assert_failed(result, victim)
+    marker = Path(str(integrity.publication_receipt(acquisition)) + '.tainted')
+    assert json.loads(marker.read_text()) == ['receipts.json']
+    with pytest.raises(ContractError, match='tainted'):
+        runner.verify_dependency_result(producer)
