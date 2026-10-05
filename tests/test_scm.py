@@ -2646,3 +2646,80 @@ def test_resumed_round1_sampled_dose_preserves_retained_fraction():
     recorded, retained = law.sample_count_dose(Draw())
     assert recorded == 0.  # Binary64 observation rounding is a separate step.
     assert sampled_mean(retained, f, 0, state, c) == pytest.approx(.8639392643942738, rel=2e-15)
+
+
+@pytest.mark.parametrize('sign', [-1, 1])
+def test_resumed_round2_tiny_endpoint_materializes_exactly(sign):
+    bounds = (1e-50, 1e-20) if sign > 0 else (-1e-20, -1e-50)
+    f = replace(frame(1, 1), coordinates=((0., 0.),))
+    law = AssignmentLaw(f, 0, LatentState(local=sign),
+                        config(local_confounding='omitted'), (bounds,))
+    at = law.quantile_coordinates(0, np.array([0., 1.]))
+    expected = np.asarray(bounds[::-1] if sign > 0 else bounds, dtype=np.longdouble)
+    assert np.array_equal(at.rounded(), expected)
+    assert law.contains(at.rounded()).all()
+
+
+def test_resumed_round2_tiny_interior_materializes_before_rounding():
+    from decimal import Decimal, localcontext
+    from oxyformer.validation.scm import exact
+    f = replace(frame(1, 1), coordinates=((1000., 0.),))
+    c = config(assignment='near_deterministic', extreme_ratios=True,
+               near_scale=np.nextafter(.25, 0.))
+    law = AssignmentLaw(f, 0, LatentState(), c, ((1e-300, 1e-5),))
+    u = np.nextafter(np.longdouble(1), np.longdouble(0))
+    at = law.quantile_coordinates(0, np.array([u, np.longdouble(1)]))
+    with localcontext() as context:
+        context.prec = 200
+        def dec(value):
+            value = exact(value)
+            return Decimal(value.numerator)/Decimal(value.denominator)
+        piece = law.pieces[0]
+        extent = piece.rate*(piece.upper-piece.lower)
+        reference = dec(piece.upper)+((1-dec(u))+dec(u)*(-dec(extent)).exp()).ln()/dec(piece.rate)
+    expected = np.array([np.longdouble(str(reference)), np.longdouble(1e-300)])
+    assert np.array_equal(at.rounded(), expected)
+    assert law.contains(at.rounded()).all()
+
+
+@pytest.mark.parametrize('width', [9.5, 10., 11.5, 12., 100.])
+@pytest.mark.parametrize('scalar', [np.float64, np.longdouble])
+def test_resumed_round2_upper_tail_matches_independent_log_sum(width, scalar):
+    from decimal import Decimal, localcontext
+    from oxyformer.validation.scm import exact
+    u = np.nextafter(scalar(1), scalar(0))
+    law = AssignmentLaw(frame(1, 1), 0, LatentState(),
+                        config(extreme_ratios=True), ((0., width),))
+    at = law.quantile_coordinates(0, u)
+    with localcontext() as context:
+        context.prec = 120
+        probability = exact(u)
+        probability = Decimal(probability.numerator)/Decimal(probability.denominator)
+        # The two nonnegative tail masses are added directly; no expm1 mass
+        # is rounded to one before the nearly-one inverse probability acts.
+        reference = -((1-probability)+probability*(-4*Decimal.from_float(width)).exp()).ln()/4
+    assert at.rounded() == np.longdouble(str(reference))
+    assert law.contains(at.rounded())
+
+
+def test_resumed_round2_binary64_subnormal_survives_final_response_rounding():
+    from decimal import Decimal, localcontext
+    from fractions import Fraction
+    from oxyformer.validation.scm import exact, sampled_mean
+    q = np.nextafter(0., 1.)
+    f = replace(frame(1, 1), coordinates=((-1000., 0.),), x=((-100., -100.),))
+    c = config(assignment='near_deterministic', near_scale=1.)
+    # Put the independently referenced response just above a binary64
+    # rounding midpoint. Native inverse rounding used to cross that midpoint.
+    target = Fraction(1)+Fraction(1, 2**53)+Fraction(1, 2**70)
+    with localcontext() as context:
+        context.prec = 200
+        numerator, denominator = q.as_integer_ratio()
+        reference = Decimal(numerator)/Decimal(denominator)*(1-Decimal(-1).exp())
+    state = LatentState(denominator_factor=Fraction(reference)/target)
+    law = AssignmentLaw(f, 0, state, c, ((0., 1.),))
+    at = law.quantile_coordinates(0, q)
+    dose = at.anchor+at.unit*exact(at.values.item())
+    # The omitted O(q**2) inverse-series term is over280 orders smaller than
+    # the distance from the rounding midpoint after denominator scaling.
+    assert sampled_mean(dose, f, 0, state, c) == float(target)
