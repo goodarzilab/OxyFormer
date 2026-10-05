@@ -1607,3 +1607,72 @@ def test_generated_collector_binds_each_expected_producer(runtime, tmp_path, mon
     with pytest.raises(ContractError, match='producer identity'):
         run('dummy', wrong, repo, deps_env=True, task_file=wrong_task)
     assert not (wrong / 'summary.json').exists()
+
+
+def test_ignored_untracked_stage_code_is_refused(runtime):
+    repo, out = runtime
+    git(repo, 'rm', '--cached', 'src/oxyformer/dummy.py')
+    with (repo / '.git/info/exclude').open('a') as stream:
+        stream.write('\n/src/oxyformer/dummy.py\n')
+    process = run_cli_fixture(repo, out, 'run_stage = dummy\n')
+    assert git(repo, 'ls-files', 'src/oxyformer/dummy.py') == ''
+    assert git(repo, 'check-ignore', 'src/oxyformer/dummy.py') == 'src/oxyformer/dummy.py'
+    assert process.returncode == 2, process.stdout + process.stderr
+    assert not (out / 'value.json').exists()
+
+
+def test_archive_fifo_change_cannot_skip_failure_receipt(runtime, tmp_path, monkeypatch):
+    repo, out = runtime
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    def archive_producer(request):
+        result = dummy(request)
+        archive = Path(request.output_dir) / 'payload.tar'
+        with tarfile.open(archive, 'w') as tar:
+            member = tarfile.TarInfo('tiny.txt')
+            member.size = 2
+            tar.addfile(member, io.BytesIO(b'ok'))
+        return replace(result, artifacts=(replace(result.artifacts[0], sha256=file_hash(archive)),))
+    with monkeypatch.context() as patch:
+        patch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=archive_producer, __file__=str(repo / 'src/oxyformer/dummy.py')))
+        assert run('dummy', source, repo,
+                   task_file=task_file(source, outputs=['payload.tar'])).status == 'pass'
+    monkeypatch.setenv('SWARM_DEP_SOURCE', str(source))
+    process = run_cli_fixture(repo, out, '''from oxyformer.execution.paths import safe_extract
+def run_stage(request):
+    result = dummy(request)
+    victim = Path(os.environ['SWARM_DEP_SOURCE']) / 'payload.tar'
+    victim.unlink()
+    os.mkfifo(victim)
+    safe_extract(victim, request.output_dir, 'unpacked')
+    return result
+''', needs={'source': ['payload.tar']}, timeout=5)
+    assert process.returncode == 1, process.stdout + process.stderr
+    result = StageResult.from_json((out / '_execution/result.json').read_text())
+    assert result.status == 'fail' and str(source / 'payload.tar') in result.message
+
+
+def test_output_inside_transitive_attempt_is_refused_before_writing(runtime, tmp_path, monkeypatch):
+    from oxyformer.execution.integrity import fingerprint_tree
+    repo, middle = runtime
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'data.json').write_text('{}')
+    (source / 'receipts.json').write_text('{}')
+    nested = source / 'handoff'
+    nested.mkdir()
+    (nested / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    # Both the proposed output directory and task exist at source publication;
+    # starting the invalid consumer must be the first attempted mutation.
+    task = task_file(nested, needs={'middle': ['value.json']})
+    publish_source_fixture(repo, source)
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
+    assert run('dummy', middle, repo, deps_env=True,
+               task_file=task_file(middle, needs={'data-unit': ['data.json', 'receipts.json']})).status == 'pass'
+    monkeypatch.setenv('SWARM_DEP_MIDDLE', str(middle))
+    before = fingerprint_tree(source)
+    with pytest.raises(ContractError, match='overlap|upstream'):
+        run('dummy', nested, repo, deps_env=True, task_file=task)
+    assert fingerprint_tree(source) == before
+    assert not (nested / '_execution').exists()
