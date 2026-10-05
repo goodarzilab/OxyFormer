@@ -1,0 +1,39 @@
+schema_version: 1
+suite: A
+minimum_final_repetitions: 1000
+# Prospective candidate family. A lock selects explicit cells before screening;
+# changing recipe/family requires a new lock and new independent final draws.
+# The fixed-X adapter uses a reviewed synthetic PreparedEndpoint, all five
+# outer folds, three inner folds, four tuning choices and three neural seeds.
+# Selection and latent measured-X adapters remain prerequisites for their own
+# cells; their truth targets must never be substituted for these cells.
+scenarios:
+  - name: null_effect
+    effect: "null"
+    active_mechanisms: ["null"]
+  - name: linear_reference
+    active_mechanisms: [linear]
+  - name: nonlinear
+    effect: nonlinear
+    active_mechanisms: [nonlinear]
+  - name: sign_changing
+    effect: sign_changing
+    active_mechanisms: [sign_changing]
+smoke_certifies_production_coverage: false
+confidence: 0.95
+interval_nominal_coverage: 0.95
+coverage_lower_min: 0.925
+null_rejection_upper_max: 0.075
+numerical_failure_upper_max: 0.01
+bias_over_sd_target: 0.10
+bias_over_sd_investigate_above: 0.20
+mean_se_over_sd_range: [0.90, 1.10]
+retry_rules:
+  numerical_failure: retain_no_retry
+  eligibility_rejection: retain_no_retry
+  incomplete: retain_no_replacement
+  max_attempts: 1
+profiling:
+  required: complete_production_repetitions_same_recipe_scenario_code_environment
+  backend: cpu
+  note: Merged nested_cv has no GPU device interface; GPU batching is not inferred.
