@@ -1954,3 +1954,95 @@ def test_fifth_attempt_control_edges_retain_exact_numbers():
     for factor in (0, 2, np.nextafter(np.longdouble(2), np.longdouble('inf'))):
         with pytest.raises(ContractError):
             LatentState(denominator_factor=factor)
+
+
+@pytest.mark.parametrize('record_name,field', [('structural_causal_truth', 'value'),
+                                              ('integration_uncertainty', 'observed_absolute_difference')])
+@pytest.mark.parametrize('kind', [int, float, np.int64, np.float16, np.float32, np.float64, np.longdouble])
+def test_fifth_round1_truth_records_share_the_numeric_contract(record_name, field, kind):
+    from oxyformer.validation.generators import observational_equivalence_pair
+    sample = observational_equivalence_pair(n_geographies=1, cluster_size=1).m0
+    record = getattr(sample, record_name)
+    assert replace(record, **{field: kind(0)}).to_json() == record.to_json()
+    for value in (2**53+1, np.longdouble(1)+np.finfo(np.longdouble).eps):
+        with pytest.raises(ContractError, match='without loss'):
+            replace(record, **{field: value})
+
+
+@pytest.mark.parametrize('components,delta,beta,tolerance', [
+    (((0., 10.),), 3., .1, 1e-20),
+    (((-2**-65, 1.),), 1., 1., 1e-45),
+])
+def test_fifth_round1_stored_truth_rounding_must_fit_requested_tolerance(components, delta, beta, tolerance):
+    from fractions import Fraction
+    lo, hi = map(Fraction, components[0])
+    target = Fraction(beta)*Fraction(delta)*(hi-lo-Fraction(delta))/(hi-lo)
+    assert abs(Fraction(float(target))-target) > Fraction(tolerance)
+    with pytest.raises(ContractError, match='truth integration did not converge'):
+        generate_suite_a(frame(1, 1), config(beta=beta), policy(components, delta=delta),
+                         tolerance=tolerance, max_order=32)
+
+
+def _fifth_illness_reference(direction):
+    from decimal import Decimal, localcontext
+    from fractions import Fraction
+    with localcontext() as context:
+        context.prec = 140
+        def dec(value):
+            q = Fraction(value)
+            return Decimal(q.numerator)/Decimal(q.denominator)
+        probability = Fraction(.3)
+        conditional_mean = Decimal(8)/(1-(-Decimal(1)/100).exp())-804
+        migration = float(conditional_mean/dec(probability))
+        if direction:
+            migration = float(np.nextafter(migration, direction*np.inf))
+        mass = ((Decimal(8)/800).exp()-1)/((Decimal(10)/800).exp()-1)
+        error = 1-2**-53
+        reference = float(80*mass*(conditional_mean-dec(probability)*dec(migration))/(1-dec(error)**2))
+    return migration, error, reference
+
+
+@pytest.mark.parametrize('direction', [-1, 0, 1])
+def test_fifth_round1_illness_prior_matches_the_sampled_bernoulli(direction):
+    migration, error, reference = _fifth_illness_reference(direction)
+    f = replace(frame(1, 1), coordinates=((1000., 0.),), columns=(), x=((),))
+    c = config('sign_changing', beta=200, assignment='near_deterministic', near_scale=800,
+               denominator_error=error, migration=migration)
+    result = generate_suite_a(f, c, policy(), tolerance=1e-8, max_order=32)
+    assert result.structural_causal_truth.value == pytest.approx(reference, abs=1e-8, rel=0)
+
+
+def test_fifth_round1_latent_prior_products_and_complements_are_exact():
+    from fractions import Fraction
+    from oxyformer.validation.scm import latent_states
+    c = config(local_confounding='omitted', regional_confounding='omitted', migration=.02,
+               exposure_error=.4, denominator_error=.2)
+    states = tuple(latent_states(c))
+    assert len(states) == 32
+    assert sum((Fraction(p) for _, p in states), Fraction(0)) == 1
+    assert sum((Fraction(p) for state, p in states if state.illness), Fraction(0)) == Fraction(.3)
+    for state, probability in states:
+        assert probability == (Fraction(.3) if state.illness else 1-Fraction(.3))/16
+
+
+@pytest.mark.parametrize('offset,ill', [(-1, True), (0, False)])
+def test_fifth_round1_illness_draw_uses_exact_bernoulli_bits(offset, ill, monkeypatch):
+    from fractions import Fraction
+    from oxyformer.validation.generators import _sample_observations
+    p = Fraction(.3)
+    default_rng = np.random.default_rng
+    class BoundaryRNG:
+        def __init__(self, seed):
+            self.delegate = default_rng(seed)
+        def __getattr__(self, name):
+            return getattr(self.delegate, name)
+        def integers(self, high):
+            assert high == p.denominator
+            return p.numerator+offset
+        def random(self, *args):
+            # A 53-bit floating draw rounds the adjacent lower 54-bit draw
+            # onto the threshold's upper neighbour, losing that Bernoulli bit.
+            return float(np.nextafter(.3, np.inf))
+    monkeypatch.setattr(np.random, 'default_rng', BoundaryRNG)
+    observed = _sample_observations(frame(1, 1), config(migration=1., noise_sd=0.), policy(), 0)
+    assert observed.y[0] == pytest.approx(50+observed.a[0]+int(ill), abs=1e-12)

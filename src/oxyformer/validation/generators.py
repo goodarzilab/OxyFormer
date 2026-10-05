@@ -74,6 +74,10 @@ class TruthArtifact(Immutable):
     status: Literal["integrated", "analytic", "design_rejected", "empty_target"]
     reason: str = ""
 
+    def __post_init__(self):
+        normalize_record_numbers(self)
+        Immutable.__post_init__(self)
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class IntegrationUncertainty(Immutable):
@@ -89,8 +93,14 @@ class IntegrationUncertainty(Immutable):
     quadrature_tail_absolute_bound: float | None = None
     selected_log_mass_fraction: float | None = None
     grouped_mass_relative_error: float | None = None
+    # Upward-rounded display of the exact final truth serialization displacement.
+    truth_serialization_absolute_bound: float | None = None
     # Differences between nested orders are diagnostics, not certified bounds.
     interpretation: str = "Successive-order absolute differences; not sampling SEs or rigorous error bounds."
+
+    def __post_init__(self):
+        normalize_record_numbers(self)
+        Immutable.__post_init__(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,7 +152,10 @@ def _sample_observations(frame, config, policy, seed):
             regions[region] = float(rng.choice([-1, 1])) if config.regional_confounding != "none" else 0.
         if geo not in geographies:
             local = float(rng.choice([-1, 1])) if config.local_confounding != "none" else 0.
-            illness = float(rng.random() < .3) if config.has_illness else 0.
+            # Sample the exact binary64 Bernoulli parameter with integer bits;
+            # a 53-bit random() threshold cannot represent its 54-bit denominator.
+            illness_probability = exact(.3)
+            illness = float(rng.integers(illness_probability.denominator) < illness_probability.numerator) if config.has_illness else 0.
             error = float(rng.choice([-1, 1])) * config.exposure_error
             state = LatentState(local, regions[region], illness, error)
             law = AssignmentLaw(frame, i, state, config, support[frame.support_keys[i]])
@@ -230,7 +243,7 @@ def _groups(frame, config, policy):
             identity = (frame.coordinates[row],state)
             terms = groups.setdefault(key,{})
             # Start in log space, before multiplying even a subnormal weight.
-            log_weight = np.log(wide(frame.weights[row]))+np.log(probability)
+            log_weight = np.log(wide(frame.weights[row]))+np.log(wide(probability))
             if identity in terms:
                 terms[identity].log_weight = np.logaddexp(terms[identity].log_weight,log_weight)
                 terms[identity].prior_weight += exact(frame.weights[row])*exact(probability)
@@ -642,7 +655,9 @@ def _integrate_precise(frame, config, policy, groups, order, boundaries, eligibi
             causal += weight*cause
         origin = sum((exact(w) for w in frame.weights),Fraction(0))
         log_fraction = maximum+mass.ln()-_decimal(origin).ln()
-        values = np.array([wide(Fraction(observed/mass)),wide(Fraction(causal/mass))])
+        # Keep the complete high-precision result until its one artifact
+        # rounding. A longdouble intermediary can hide serialization error.
+        values = np.array([Fraction(observed/mass), Fraction(causal/mass)], dtype=object)
         return values,wide(Fraction(log_fraction)),mass_error
 
 
@@ -753,12 +768,17 @@ def generate_suite_a(frame: CovariateFrame, config: SCMConfig, policy: ShiftOrSt
         order *= 2
         values, log_mass, mass_error = _integrate(frame,config,policy,groups,order,boundaries,eligible_by_key)
         difference = np.abs(values-previous)
+        serialized = [float(v) for v in values]
+        rounding = max(abs(exact(v)-exact(f)) for v, f in zip(values, serialized))
         mass_difference = float(abs(np.expm1(log_mass-previous_log_mass)))
-        converged = bool(exact(np.max(difference))+exact(tail_bound) <= exact(tolerance) and exact(mass_difference) <= exact(tolerance) and mass_error <= 1e-10)
+        converged = bool(exact(np.max(difference))+exact(tail_bound)+rounding <= exact(tolerance) and exact(mass_difference) <= exact(tolerance) and mass_error <= 1e-10)
         if converged:
             break
         previous,previous_log_mass = values,log_mass
-    require(converged, "truth integration did not converge; increase max_order")
+    require(converged, "truth integration did not converge within tolerance including binary64 truth rounding")
+    rounding_bound = float(rounding)
+    if exact(rounding_bound) < rounding:
+        rounding_bound = float(np.nextafter(rounding_bound, np.inf))
     observed = TruthArtifact(kind="observed_law", value=float(values[0]), status="integrated", target=_OBSERVED_TARGET, **common)
     causal = TruthArtifact(kind="structural_causal", value=float(values[1]), status="integrated", target=_CAUSAL_TARGET, **common)
     uncertainty = IntegrationUncertainty(method="exact local panels, bounded exponential tails, unit-mass check, doubled order",
@@ -766,7 +786,7 @@ def generate_suite_a(frame: CovariateFrame, config: SCMConfig, policy: ShiftOrSt
         order=order, converged=True, assignment_mass_error=float(mass_error),
         selected_mass_fraction=float(np.exp(log_mass)), selected_mass_relative_difference=mass_difference,
         selected_log_mass_fraction=float(log_mass), grouped_mass_relative_error=grouped_error,
-        quadrature_tail_absolute_bound=tail_bound)
+        quadrature_tail_absolute_bound=tail_bound, truth_serialization_absolute_bound=rounding_bound)
     return GeneratedSample(observations, observed, causal, uncertainty)
 
 
