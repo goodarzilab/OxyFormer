@@ -16,7 +16,6 @@ def output_path(root, relative):
     root = Path(root).resolve(strict=True)
     path = root / relative
     require(path.resolve().is_relative_to(root), 'output escapes attempt')
-    # Reject even in-tree links: an output must have one unambiguous owner.
     require(not any(p.is_symlink() for p in (path, *path.parents) if p != root.parent),
             'symlink in output path')
     return path
@@ -43,12 +42,7 @@ def atomic_json(root, relative, value):
 
 
 def safe_extract(archive, root, relative, *, members=None, max_bytes=10 * 1024**3):
-    """Extract selected regular files/directories into a NEW attempt directory.
-
-    No links, devices, traversal, duplicates or overwrites. Validate the entire
-    archive's paths/types before writing; never use extract()/extractall().
-    A caller can select members to avoid copying national archives per shard.
-    """
+    """Extract selected regular files/directories into a NEW attempt directory."""
     target = output_path(root, relative)
     require(not target.exists(), 'extraction destination already exists')
     selected = None if members is None else set(members)
@@ -56,7 +50,6 @@ def safe_extract(archive, root, relative, *, members=None, max_bytes=10 * 1024**
         for name in selected:
             relative_artifact_path(name)
     entries = []
-    # Import locally: integrity publication also uses these output helpers.
     from .integrity import open_regular
     with ExitStack() as stack:
         stream = stack.enter_context(open_regular(archive))
@@ -68,8 +61,6 @@ def safe_extract(archive, root, relative, *, members=None, max_bytes=10 * 1024**
         total = 0
         for item in handle.infolist() if is_zip else handle.getmembers():
             name = (item.filename if is_zip else item.name).rstrip('/')
-            # tar -C directory -cf payload.tar . emits a root '.' directory
-            # and './file' names. Strip only leading './', never '..' or '/'.
             while name.startswith('./'):
                 name = name[2:]
             directory = item.is_dir() if is_zip else item.isdir()
@@ -120,7 +111,6 @@ def isolated_caches(root):
             path = output_path(root, '_execution/cache/' + name.lower())
             path.mkdir(parents=True, exist_ok=True)
             os.environ[name] = str(path)
-        # tempfile caches its first chosen directory independently of TMPDIR.
         tempfile.tempdir = os.environ['TMPDIR']
         yield
     finally:

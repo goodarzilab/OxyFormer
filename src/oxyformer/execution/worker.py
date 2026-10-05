@@ -1,10 +1,4 @@
-"""Run a CLI stage to process exit before the parent checks and publishes it.
-
-This is a completion boundary, not filesystem confinement. The worker writes
-only its unsealed result. A separate Linux subreaper waits for the scientific
-interpreter to close its descriptors and finish finalizers, then reaps adopted
-descendants before the parent validates and publishes. It confines no writes.
-"""
+"""Run a CLI stage to process exit before the parent checks and publishes it."""
 import atexit
 import ctypes
 import importlib
@@ -32,8 +26,6 @@ def execute(request, module_name, repo):
     try:
         process.wait()
     except BaseException:
-        # Do not let an interrupted caller publish/check while its worker is
-        # still active. The lifecycle process forwards termination and reaps.
         process.send_signal(signal.SIGTERM)
         while True:
             try:
@@ -57,9 +49,6 @@ def _reap_descendants():
 
 
 def supervise(request_path, repository, module_name):
-    # Adoption is set before any stage work starts. This dedicated process does
-    # not import the stage or own its resource-tracker pipes. Waiting here lets
-    # the scientific interpreter perform normal shutdown before helper reaping.
     libc = ctypes.CDLL(None, use_errno=True)
     if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
         error = ctypes.get_errno()
@@ -79,8 +68,6 @@ def supervise(request_path, repository, module_name):
     if interrupted:
         stage.send_signal(interrupted[-1])
     code = stage.wait()
-    # Only the stage knows its helpers' exit conventions (grep uses 1 for no
-    # matches). Reap every helper for completion, without judging its result.
     _reap_descendants()
     return 1 if interrupted or code != 0 else 0
 

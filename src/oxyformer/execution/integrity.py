@@ -1,5 +1,5 @@
 """Fingerprint entries, types, modes, sizes, bytes and symlink targets.
-Ignore timestamps and inodes; compare states, not transient write history.
+Ignore timestamps/inodes and restored transient changes; compare states.
 """
 from contextlib import contextmanager
 from dataclasses import replace
@@ -14,8 +14,6 @@ from oxyformer.contracts import StageResult
 from oxyformer.provenance import ArtifactRecord, canonical_json, require
 from .paths import atomic_json, atomic_write, output_path
 
-# These two control records are written after the snapshot. The passing
-# StageResult is the publication authority and binds FINGERPRINT by SHA-256.
 FINGERPRINT = "_execution/fingerprint.json"
 RESULT = "_execution/result.json"
 DEPENDENCY_CHECK = "_execution/dependency_check.json"
@@ -23,8 +21,6 @@ PUBLICATION_EXCLUSIONS = (FINGERPRINT, RESULT)
 
 
 def _stable(metadata):
-    # Identity/times guard consistency during one read only. They are never
-    # persisted or compared between fingerprint snapshots; atime is ignored.
     return (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_size,
             metadata.st_mtime_ns, metadata.st_ctime_ns)
 
@@ -90,21 +86,12 @@ def verify_result(result, request):
     for artifact in result.artifacts:
         path = (root / artifact.path).resolve(strict=True)
         require(path.is_relative_to(root), 'artifact escapes output directory')
-        # Keep the declared spelling for the type check; resolution above is
-        # only a confinement check and must not hide an in-attempt symlink.
         require(regular_file_hash(root / artifact.path) == artifact.sha256,
                 f'artifact hash mismatch: {artifact.path}')
 
 
 def fingerprint_tree(root, *, exclude=()):
-    """Return every entry, including '.', and explicit errors on unreadable paths.
-
-    Regular files bind bytes; symlinks bind the literal target (never its
-    referent). Directories bind their names through the complete entry mapping.
-    Special files are described but never opened. A caller must reject a
-    snapshot containing any error, rather than treating missing data as empty.
-    No upstream file is created, chmodded, restored or rewritten.
-    """
+    """Return every entry, including '.', and explicit errors on unreadable paths."""
     root = Path(root)
     entries = {}
     pending = [(root, '.', None)]
@@ -135,8 +122,6 @@ def fingerprint_tree(root, *, exclude=()):
             elif stat.S_ISDIR(kind):
                 with os.scandir(path) as children:
                     names = sorted(child.name for child in children)
-                # Recheck this directory after its children, without consuming
-                # Python call frames for filesystem depth.
                 pending.append((path, relative, before))
                 pending.extend((path / name, name if relative == '.' else relative + '/' + name, None)
                                for name in reversed(names))
@@ -166,12 +151,7 @@ def changed_paths(before, after):
 
 
 def post_execution_check(before):
-    """Recompute every dependency, including after an unsuccessful stage.
-
-    Taint is recorded in the caller's receipt, never by writing to the
-    dependency. Cross-consumer rejection additionally needs the trusted
-    publication fingerprint carried into each consumer request.
-    """
+    """Recompute every dependency, including after an unsuccessful stage."""
     attempts = {}
     for root, expected in before.items():
         actual = fingerprint_tree(root)
@@ -183,8 +163,6 @@ def post_execution_check(before):
 
 
 def publication_view(entries):
-    # Late control records are bound separately by their producer's published
-    # digest, canonical result contents and recorded modes, avoiding self-hashes.
     return {name: entry for name, entry in entries.items()
             if name not in PUBLICATION_EXCLUSIONS}
 
@@ -201,8 +179,6 @@ def _restore_control_permissions(path):
         metadata = path.lstat()
         directory = stat.S_ISDIR(metadata.st_mode)
         if not directory and not (stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1):
-            # Hardlinks may share an upstream inode. Replace receipt entries
-            # atomically instead of changing permissions on shared inodes.
             continue
         mode = stat.S_IMODE(metadata.st_mode)
         restored = mode | (0o700 if directory else 0o600)
@@ -229,12 +205,7 @@ def _repair_control_directory(root):
 
 
 def _replace_control(root, relative, text):
-    """Publish the current runner's control without opening a colliding entry.
-
-    Only these three final receipt names are replaceable. Directory collisions
-    are retained inside this attempt; symlinks/FIFOs are replaced as entries,
-    never opened or followed. The caller owns the once-reserved _execution dir.
-    """
+    """Publish the current runner's control without opening a colliding entry."""
     require(relative in (*PUBLICATION_EXCLUSIONS, DEPENDENCY_CHECK), 'not a publication control file')
     path = directory_path(root) / relative
     directory_path(path.parent)
@@ -257,17 +228,10 @@ def _replace_control(root, relative, text):
 
 
 def publish_result(root, result, *, owned_controls=False):
-    """Seal a producer's own completed tree; a consumer never calls this.
-
-    Reserve both late control filenames before measuring directory sizes. The
-    receipt remains blocked until the fingerprint is complete and stable. Only
-    the producer's own two reserved records are replaced, atomically.
-    """
+    """Seal a producer's own completed tree; a consumer never calls this."""
     root = directory_path(root)
     collisions = [str(root / name) for name in PUBLICATION_EXCLUSIONS
                   if os.path.lexists(root / name)]
-    # Only the runner that reserved this fresh _execution directory may repair
-    # its own receipt slots. Ordinary producer calls retain create-once semantics.
     require(owned_controls or not collisions, 'publication controls already exist')
     if collisions and result.status == 'pass':
         result = replace(result, status='fail', artifacts=(),
@@ -307,12 +271,7 @@ def publish_result(root, result, *, owned_controls=False):
 
 
 def verify_published_tree(root, result, expected_hash=None):
-    """Read the recorded baseline, hash-check it, then compare current entries.
-
-    The expected digest comes from the producer's passing StageResult, never
-    from hashing current data to establish a replacement baseline. The caller
-    also carries this record and its expected digest into StageRequest.
-    """
+    """Read the recorded baseline, hash-check it, then compare current entries."""
     root = directory_path(root)
     records = [record for record in result.artifacts if record.path == FINGERPRINT]
     require(len(records) == 1 and records[0].kind == 'attempt_fingerprint',
@@ -337,9 +296,6 @@ def verify_published_tree(root, result, expected_hash=None):
             'dependency fingerprint artifact lineage changed since publication')
     actual = fingerprint_tree(root)
     changed = changed_paths(value['entries'], publication_view(actual))
-    # The late records cannot hash themselves. Bind the result's canonical
-    # contents through the embedded original StageResult, and bind the manifest
-    # through its published ArtifactRecord. Check type/mode and the same read.
     for name in PUBLICATION_EXCLUSIONS:
         entry = actual.get(name, {})
         if ('error' in entry or entry.get('type') != stat.S_IFREG or
@@ -351,6 +307,4 @@ def verify_published_tree(root, result, expected_hash=None):
             'dependency result record changed during verification')
     require(not changed, 'dependency fingerprint mismatch (tainted): ' +
             ', '.join(str(root / name) for name in sorted(set(changed))))
-    # This is the exact tree that passed publication comparison, including
-    # the late controls, not a second unverified read that can rebase a race.
     return actual

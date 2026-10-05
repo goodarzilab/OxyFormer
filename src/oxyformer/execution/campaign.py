@@ -1,6 +1,4 @@
-"""Expand coordinator units without submission. Retain the spec to rederive
-all slices and collector edges. Code prerequisites in needs are merge barriers.
-"""
+"""Expand coordinator units without submission. Retain the spec to rederive"""
 from copy import deepcopy
 from decimal import Decimal
 from hashlib import sha256
@@ -48,8 +46,6 @@ def outputs_valid(outputs):
 def resources(gpus, seconds):
     require(type(gpus) is int and 0 <= gpus <= 8, 'invalid GPU count')
     require(type(seconds) is int and seconds > 0, 'positive integer wall_seconds required')
-    # Slurm rounds requested time up to whole minutes (sbatch --time).
-    # Bind admission, the emitted limit and accounting to the same allocation.
     seconds = ((seconds + 59) // 60) * 60
     gpu_hours = gpus * seconds / 3600
     require(math.isfinite(gpu_hours) and gpu_hours <= 4, 'GPU leaf exceeds four GPU-hours')
@@ -71,6 +67,7 @@ def stage_command(task):
     return '\n'.join([
         'set -euo pipefail',
         ': "${SWARM_UNIT_DIR:?}"',
+        'export GIT_NO_REPLACE_OBJECTS=1',
         f'git clone --depth 1 --branch dev {REMOTE} "$SWARM_UNIT_DIR/src"',
         'git -C "$SWARM_UNIT_DIR/src" rev-parse HEAD > "$SWARM_UNIT_DIR/code_commit.txt"',
         'export PYTHONDONTWRITEBYTECODE=1',
@@ -220,13 +217,7 @@ def validate_plan(plan, approvals):
 
 
 def expand_campaign(spec, approvals):
-    """Validate a finite, explicit work list; do not infer tuning or repetitions.
-
-    `work[].slices` must come from profiling/the locked scientific controller.
-    Expansion preserves these slices exactly; it never shortens required work.
-    New final/anchor/refit allocations must exist in owner_decisions under
-    campaign_allocations[spec.id] with matching kind and sufficient gpu_hours.
-    """
+    """Validate a finite, explicit work list; do not infer tuning or repetitions."""
     spec = deepcopy(spec)
     _spec_check(spec, approvals)
     units, tasks, leaves = _build(spec)

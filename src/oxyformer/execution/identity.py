@@ -1,6 +1,4 @@
-"""Recipe fingerprint v2 covers tracked files except *.md outside src/,
-scripts/ and docs/plan/. Tasks cannot override this scope.
-"""
+"""Recipe fingerprint v2 covers tracked files except *.md outside src/,"""
 import importlib.metadata
 from hashlib import new as new_hash, sha256
 import os
@@ -17,8 +15,7 @@ FINGERPRINT_VERSION = 'tracked-science-v2'
 
 
 def git_bytes(repo, *args):
-    # Inspection must never refresh a sealed dependency's index on disk.
-    # Recorded IDs attest raw objects, never a mutable replacement-ref view.
+    # Read raw objects without replacement refs or writes to an upstream index.
     return subprocess.check_output(['git', '--no-optional-locks', '--no-replace-objects', '-C', str(repo), *args])
 
 
@@ -31,13 +28,7 @@ def scientific_path(name):
 
 
 def verified_checkout(repo):
-    """Bind the actual importable checkout to HEAD, including ignored files.
-
-    Git status alone misses ignored additions and assume-unchanged/skip-worktree
-    edits. Compare disk blobs directly to HEAD and reject links in code roots:
-    a tracked link cannot attest the code or resources at its referent. Stage
-    launchers disable bytecode writes; no untracked cache is an identity bypass.
-    """
+    """Bind the actual importable checkout to HEAD, including ignored files."""
     repo = Path(repo).resolve(strict=True)
     require(Path(git(repo, 'rev-parse', '--show-toplevel')).resolve() == repo,
             'repo must be repository root')
@@ -81,7 +72,6 @@ def code_identity(repo, out):
 
 
 def scientific_fingerprint(repo):
-    # Use the same checked tree for recipe locks and execution attestations.
     entries = verified_checkout(repo)
     scientific = sorted(e for e in entries if scientific_path(e.split('\t', 1)[1]))
     return {'algorithm': FINGERPRINT_VERSION,

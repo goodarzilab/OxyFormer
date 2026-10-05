@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import zipfile
 
 import pytest
+from pytest import mark, raises
 import yaml
 
 from oxyformer.cli import main
@@ -81,6 +82,7 @@ def run_task(repo, out, path=None, *, deps_env=True, **task):
 
 
 def git(repo, *args):
+    # Synthetic fault injection/control only; intentionally observe replacements.
     return subprocess.check_output(['git', '-C', str(repo), *args], text=True).strip()
 
 
@@ -183,6 +185,10 @@ def read_json(path):
     return json.loads(path.read_text())
 
 
+def read_request(out):
+    return StageRequest.from_json((out / '_execution/request.json').read_text())
+
+
 def read_stage_result(out):
     return StageResult.from_json((out / '_execution/result.json').read_text())
 
@@ -244,13 +250,13 @@ def seal_source_fixture(repo, source):
 def test_dummy_stage_atomic_records_and_cache_isolation(runtime, monkeypatch):
     repo, out = runtime
     monkeypatch.setenv('HF_HOME', '/unrelated/cache')
-    assert run_task(repo, out, deps_env=False).status == 'pass'
+    assert_pass(run_task(repo, out, deps_env=False))
     assert os.environ['HF_HOME'] == '/unrelated/cache'
     result = read_json(out / RESULT)
     assert result['payload']['status'] == 'pass'
     env = read_json(out / '_execution/environment.json')
     assert env['executable'] == sys.executable and env['packages']
-    with pytest.raises(FileExistsError):
+    with raises(FileExistsError):
         atomic_json(out, RESULT, {})
 
 
@@ -260,9 +266,9 @@ def test_dependency_normalization(tmp_path):
     assert dependency_variable('atlas-east.north') == 'SWARM_DEP_ATLAS_EAST_NORTH'
     assert resolve_dependencies(['atlas-east.north'], {'SWARM_DEP_ATLAS_EAST_NORTH': str(upstream)}) == {
         'atlas-east.north': upstream}
-    with pytest.raises(ContractError, match='missing dependency variable'):
+    with raises(ContractError, match='missing dependency variable'):
         resolve_dependencies(['atlas-east.north'], {'SWARM_DEP_atlas-east.north': str(upstream)})
-    with pytest.raises(ContractError, match='normalization collision'):
+    with raises(ContractError, match='normalization collision'):
         resolve_dependencies(['a-b', 'a_b'], {'SWARM_DEP_A_B': str(upstream)})
 
 
@@ -277,24 +283,24 @@ def test_upstream_unchanged_and_output_overlap_rejected(runtime, tmp_path, monke
     publish_source_fixture(repo, upstream)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(upstream))
     task = task_file(out, needs=SOURCE_NEEDS)
-    assert run_task(repo, out, task).status == 'pass'
+    assert_pass(run_task(repo, out, task))
     assert (source.read_bytes(), source.stat().st_mode, source.stat().st_mtime_ns) == before
     nested = initialize_attempt(repo, upstream / 'child')
-    with pytest.raises(ContractError, match='overlaps an upstream'):
+    with raises(ContractError, match='overlaps an upstream'):
         run_task(repo, nested, task)
 
 
-@pytest.mark.parametrize('name', ['../outside', '/tmp/escape', 'nested/../../escape', './value', 'a\\b'])
+@mark.parametrize('name', ['../outside', '/tmp/escape', 'nested/../../escape', './value', 'a\\b'])
 def test_output_escape(runtime, name):
     repo, out = runtime
-    with pytest.raises(ContractError, match='relative path'):
+    with raises(ContractError, match='relative path'):
         run_task(repo, out, deps_env=False, outputs=[name])
 
 
 def test_output_symlink_escape(runtime, tmp_path):
     repo, out = runtime
     (out / 'alias').symlink_to(tmp_path, target_is_directory=True)
-    with pytest.raises(ContractError, match='escapes attempt'):
+    with raises(ContractError, match='escapes attempt'):
         run_task(repo, out, deps_env=False, outputs=['alias/escaped'])
 
 
@@ -316,11 +322,11 @@ def test_result_symlink_escape(runtime, tmp_path, monkeypatch):
 def test_code_commit_and_dirty_repo(runtime):
     repo, out = runtime
     (out / 'code_commit.txt').write_text('0' * 40)
-    with pytest.raises(ContractError, match='HEAD'):
+    with raises(ContractError, match='HEAD'):
         code_identity(repo, out)
     (out / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
     (repo / 'src/science.py').write_text('value = 2\n')
-    with pytest.raises(ContractError, match='tracked modifications'):
+    with raises(ContractError, match='tracked modifications'):
         code_identity(repo, out)
 
 
@@ -352,14 +358,14 @@ def locked_task(repo, out, upstream, monkeypatch):
         return replace(result, artifacts=(replace(result.artifacts[0], sha256=file_hash(lock)),))
     with monkeypatch.context() as patch:
         patch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, producer))
-        assert run_task(repo, upstream, deps_env=False, id='campaign-lock', outputs=['recipe_lock.json']).status == 'pass'
+        assert_pass(run_task(repo, upstream, deps_env=False, id='campaign-lock', outputs=['recipe_lock.json']))
     monkeypatch.setenv('SWARM_DEP_CAMPAIGN_LOCK', str(upstream))
     return task_file(out, needs={'campaign-lock': ['recipe_lock.json']},
                      recipe_lock={'dependency': 'campaign-lock', 'path': 'recipe_lock.json',
                                   'sha256': file_hash(lock)})
 
 
-@pytest.mark.parametrize('change', ['src/science.py', 'configs/new.yaml', 'docs/plan/protocol.md'])
+@mark.parametrize('change', ['src/science.py', 'configs/new.yaml', 'docs/plan/protocol.md'])
 def test_locked_recipe_rejects_scientific_drift(runtime, tmp_path, monkeypatch, change):
     repo, out = runtime
     task = locked_task(repo, out, tmp_path / 'lock', monkeypatch)
@@ -367,7 +373,7 @@ def test_locked_recipe_rejects_scientific_drift(runtime, tmp_path, monkeypatch, 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text('changed\n')
     (out / 'code_commit.txt').write_text(commit(repo))
-    with pytest.raises(ContractError, match='recipe scientific code/config drift'):
+    with raises(ContractError, match='recipe scientific code/config drift'):
         run_task(repo, out, task)
 
 
@@ -376,13 +382,13 @@ def test_locked_recipe_permits_defined_documentation_change(runtime, tmp_path, m
     task = locked_task(repo, out, tmp_path / 'lock', monkeypatch)
     (repo / 'README.md').write_text('documentation update\n')
     (out / 'code_commit.txt').write_text(commit(repo))
-    assert run_task(repo, out, task).status == 'pass'
+    assert_pass(run_task(repo, out, task))
 
 
 def test_continuation_ownership_and_consecutive_steps(runtime, tmp_path, monkeypatch):
     repo, old = runtime
     first_task = task_file(old, id='first', continuation={'owner': 'work-1', 'step': 0, 'predecessor': None})
-    assert run_task(repo, old, first_task, deps_env=False).status == 'pass'
+    assert_pass(run_task(repo, old, first_task, deps_env=False))
     monkeypatch.setenv('SWARM_DEP_FIRST', str(old))
     for owner, step, expected in [('wrong-owner', 1, 'ownership'), ('work-1', 2, 'consecutive'), ('work-1', 1, None)]:
         out = initialize_attempt(repo, tmp_path / f'next-{owner}-{step}')
@@ -390,20 +396,20 @@ def test_continuation_ownership_and_consecutive_steps(runtime, tmp_path, monkeyp
                                                    RESULT, 'value.json']},
                          continuation={'owner': owner, 'step': step, 'predecessor': 'first'})
         if expected:
-            with pytest.raises(ContractError, match=expected):
+            with raises(ContractError, match=expected):
                 run_task(repo, out, task)
         else:
-            assert run_task(repo, out, task).status == 'pass'
+            assert_pass(run_task(repo, out, task))
 
 
 def test_continuation_requires_declared_predecessor(runtime):
     repo, out = runtime
     task = task_file(out, continuation={'owner': 'work', 'step': 1, 'predecessor': 'sibling'})
-    with pytest.raises(ContractError, match='explicit dependency'):
+    with raises(ContractError, match='explicit dependency'):
         run_task(repo, out, task)
 
 
-@pytest.mark.parametrize('attack', ['traversal', 'absolute', 'symlink', 'hardlink', 'device', 'duplicate'])
+@mark.parametrize('attack', ['traversal', 'absolute', 'symlink', 'hardlink', 'device', 'duplicate'])
 def test_safe_tar_rejects_unsafe_members(tmp_path, attack):
     archive = tmp_path / 'fixture.tar'
     with tarfile.open(archive, 'w') as tar:
@@ -417,7 +423,7 @@ def test_safe_tar_rejects_unsafe_members(tmp_path, attack):
         tar.addfile(member)
         if attack == 'duplicate':
             tar.addfile(member)
-    with pytest.raises(ContractError):
+    with raises(ContractError):
         safe_extract(archive, tmp_path, 'unpacked')
     assert not (tmp_path / 'unpacked').exists()
 
@@ -432,7 +438,7 @@ def test_safe_extract_selection_budget_and_upstream_preserved(tmp_path):
     assert (target / 'chosen/data').read_text() == 'tiny'
     assert not (target / 'other').exists()
     assert file_hash(archive) == before
-    with pytest.raises(ContractError, match='byte limit'):
+    with raises(ContractError, match='byte limit'):
         safe_extract(archive, tmp_path, 'oversized', max_bytes=4)
     assert not (tmp_path / 'oversized').exists()
 
@@ -463,7 +469,7 @@ def test_campaign_reproducible_bounded_and_merge_barriers(spec):
         assert {'--partition=standard', '--account=root', '--qos=normal'} <= set(unit['sbatch'])
         assert '--array' not in ' '.join(unit['sbatch'])
         command = unit['command']
-        assert 'git clone --depth 1 --branch dev' in command
+        assert command.index('export GIT_NO_REPLACE_OBJECTS=1') < command.index('git clone --depth 1 --branch dev')
         assert 'PYTHONPATH="$SWARM_UNIT_DIR/src/src"' in command
         assert 'cd "$SWARM_UNIT_DIR/src"' in command
         assert 'envs/oxyformer/bin/python -B -m oxyformer.cli run-stage' in command
@@ -479,7 +485,7 @@ def test_campaign_reproducible_bounded_and_merge_barriers(spec):
 def test_collector_omitted_dependency_is_rejected(spec):
     plan = expand_campaign(spec, {})
     plan['units'][-1]['needs'].remove(plan['expected_leaves'][0])
-    with pytest.raises(ContractError, match='collector omitted required leaf dependency'):
+    with raises(ContractError, match='collector omitted required leaf dependency'):
         validate_plan(plan, {})
 
 
@@ -488,25 +494,25 @@ def test_omitted_leaf_cannot_hide_by_editing_expected_list(spec):
     removed = plan['expected_leaves'].pop()
     plan['units'] = [u for u in plan['units'] if u['id'] != removed]
     plan['units'][-1]['needs'].remove(removed)
-    with pytest.raises(ContractError, match='collector omitted|required campaign leaves'):
+    with raises(ContractError, match='collector omitted|required campaign leaves'):
         validate_plan(plan, {})
 
 
 def test_cycles_rejected(spec):
     plan = expand_campaign(spec, {})
     plan['units'][0]['needs'].append(plan['units'][1]['id'])
-    with pytest.raises(ContractError, match='cycle'):
+    with raises(ContractError, match='cycle'):
         validate_plan(plan, {})
 
 
 def test_continuation_plan_ownership_mutation(spec):
     plan = expand_campaign(spec, {})
     plan['tasks'][1]['continuation']['owner'] = 'different-work'
-    with pytest.raises(ContractError, match='ownership drift'):
+    with raises(ContractError, match='ownership drift'):
         validate_plan(plan, {})
 
 
-@pytest.mark.parametrize('mutation,error', [
+@mark.parametrize('mutation,error', [
     ('too_many', 'forty'), ('too_long', 'four GPU-hours'), ('multi_gpu', 'four GPU-hours'),
     ('template', 'unresolved template'), ('collision', 'normalization collision'), ('escape', 'relative path')])
 def test_invalid_campaigns(spec, mutation, error):
@@ -522,14 +528,14 @@ def test_invalid_campaigns(spec, mutation, error):
         spec['prerequisites'] += ['code-a', 'code_a']
     elif mutation == 'escape':
         spec['work'][0]['outputs'] = ['../escape']
-    with pytest.raises(ContractError, match=error):
+    with raises(ContractError, match=error):
         expand_campaign(spec, {})
 
 
-@pytest.mark.parametrize('kind', ['final-coverage', 'anchor', 'refit-audit'])
+@mark.parametrize('kind', ['final-coverage', 'anchor', 'refit-audit'])
 def test_campaign_allocation_required(spec, kind):
     spec['kind'] = kind
-    with pytest.raises(ContractError, match='missing owner campaign allocation'):
+    with raises(ContractError, match='missing owner campaign allocation'):
         expand_campaign(spec, {})
     approvals = {'owner_decisions': {'campaign_allocations': {spec['id']: {'kind': kind, 'gpu_hours': 9}}}}
     assert expand_campaign(spec, approvals)['units']
@@ -539,7 +545,7 @@ def test_unit_mutation_cannot_inject_scheduler_or_array(spec):
     for field, value in [('command', 'sbatch something'), ('sbatch', ['--array=1-40']), ('gpu_hours', 99)]:
         plan = expand_campaign(spec, {})
         plan['units'][0][field] = value
-        with pytest.raises(ContractError, match='drift'):
+        with raises(ContractError, match='drift'):
             validate_plan(plan, {})
 
 
@@ -551,7 +557,7 @@ def test_failed_upstream_cannot_feed_another_stage(runtime, tmp_path, monkeypatc
     assert run_task(repo, upstream, deps_env=False).status == 'fail'
     out = initialize_attempt(repo, tmp_path / 'consumer')
     monkeypatch.setenv('SWARM_DEP_GATE', str(upstream))
-    with pytest.raises(ContractError, match='did not pass'):
+    with raises(ContractError, match='did not pass'):
         run_task(repo, out, needs={'gate': [RESULT]})
 
 
@@ -561,7 +567,7 @@ def test_stage_required_dependency_cannot_be_removed(runtime):
     registry.write_text(yaml.safe_dump({'schema_version': 1, 'stages': {
         'dummy': {'module': 'oxyformer.dummy', 'needs': {'required': ['data.json']}}}}))
     (out / 'code_commit.txt').write_text(commit(repo))
-    with pytest.raises(ContractError, match='stage-required dependency'):
+    with raises(ContractError, match='stage-required dependency'):
         run_task(repo, out)
 
 
@@ -570,7 +576,7 @@ def test_locked_approvals_cannot_be_replaced(runtime, tmp_path, monkeypatch):
     task = locked_task(repo, out, tmp_path / 'lock', monkeypatch)
     other = tmp_path / 'changed-approvals.yaml'
     other.write_text('schema_version: 1\napproved_by: different\n')
-    with pytest.raises(ContractError, match='locked approvals'):
+    with raises(ContractError, match='locked approvals'):
         run('dummy', out, repo, deps_env=True, task_file=task, approvals=other)
 
 
@@ -580,12 +586,12 @@ def test_stage_dependency_without_receipt_is_rejected(runtime, tmp_path, monkeyp
     upstream.mkdir()
     (upstream / 'data.json').write_text('{}')
     monkeypatch.setenv('SWARM_DEP_INCOMPLETE', str(upstream))
-    with pytest.raises(ContractError, match='stage receipt missing'):
+    with raises(ContractError, match='stage receipt missing'):
         run_task(repo, out, needs={'incomplete': ['data.json']})
 
 
 def test_slurm_minute_rounding_is_included_in_gpu_bound():
-    with pytest.raises(ContractError, match='four GPU-hours'):
+    with raises(ContractError, match='four GPU-hours'):
         resources(7, 2057)  # Slurm grants 35 minutes: 4.0833 GPU-hours.
     flags, gpu_hours = resources(2, 61)
     assert '--time=00:02:00' in flags
@@ -622,9 +628,9 @@ def test_campaign_lock_uses_unit_id_distinct_from_stage_name(runtime, tmp_path, 
         upstream = tmp_path / unit
         upstream.mkdir()
         (upstream / 'code_commit.txt').write_text(head)
-        assert run(stage, upstream, repo).status == 'pass'
+        assert_pass(run(stage, upstream, repo))
         monkeypatch.setenv(dependency_variable(unit), str(upstream))
-    assert run('campaign-lock', out, repo, deps_env=True).status == 'pass'
+    assert_pass(run('campaign-lock', out, repo, deps_env=True))
 
 
 def test_acquisition_exemption_requires_declared_source_receipt(runtime, tmp_path, monkeypatch):
@@ -633,7 +639,7 @@ def test_acquisition_exemption_requires_declared_source_receipt(runtime, tmp_pat
     source.mkdir()
     (source / 'data.json').write_text('{}')
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
-    with pytest.raises(ContractError, match='acquisition receipt must be a declared input'):
+    with raises(ContractError, match='acquisition receipt must be a declared input'):
         run_task(repo, out, needs={'data-unit': ['data.json']})
 
 
@@ -644,7 +650,7 @@ def test_task_cannot_exempt_an_incomplete_stage(runtime, tmp_path, monkeypatch):
     (source / 'data.json').write_text('{}')
     (source / 'receipts.json').write_text('{}')
     monkeypatch.setenv('SWARM_DEP_INCOMPLETE', str(source))
-    with pytest.raises(ContractError, match='stage receipt missing'):
+    with raises(ContractError, match='stage receipt missing'):
         run_task(repo, out, needs={'incomplete': ['data.json', 'receipts.json']}, acquisition_receipts={'incomplete': 'receipts.json'})
 
 
@@ -654,13 +660,13 @@ def test_safe_tar_dot_prefix_does_not_hide_traversal_or_duplicates(tmp_path):
         with tarfile.open(archive, 'w') as tar:
             for name in names:
                 tar.addfile(tarfile.TarInfo(name))
-        with pytest.raises(ContractError):
+        with raises(ContractError):
             safe_extract(archive, tmp_path, f'unpacked-{index}')
         assert not (tmp_path / f'unpacked-{index}').exists()
 
 
-@pytest.mark.parametrize('entrypoint', ['module', 'script', 'builder'])
-@pytest.mark.parametrize('disabled', [True, False])
+@mark.parametrize('entrypoint', ['module', 'script', 'builder'])
+@mark.parametrize('disabled', [True, False])
 def test_cli_import_from_pristine_repo_keeps_code_roots_clean(runtime, tmp_path, spec, entrypoint, disabled):
     repo, out = runtime
     relative = 'scripts/build_tasks.py' if entrypoint == 'builder' else 'scripts/run_stage.py'
@@ -695,7 +701,7 @@ def test_cli_import_from_pristine_repo_keeps_code_roots_clean(runtime, tmp_path,
     assert verify_dependency_result(out).status == 'pass'
     with (out / 'run.log').open('a') as log:
         log.write('unexpected late log write')
-    with pytest.raises(ContractError, match='fingerprint mismatch.*run.log'):
+    with raises(ContractError, match='fingerprint mismatch.*run.log'):
         verify_dependency_result(out)
 
 
@@ -706,11 +712,11 @@ def test_locked_primary_stage_cannot_omit_recipe(runtime):
     (repo / 'configs/execution/stages.yaml').write_text(yaml.safe_dump({
         'schema_version': 1, 'stages': {'primary': settings}}))
     (out / 'code_commit.txt').write_text(commit(repo))
-    with pytest.raises(ContractError, match='requires a recipe lock'):
+    with raises(ContractError, match='requires a recipe lock'):
         run('primary', out, repo, task_file=task_file(out, stage='primary'))
 
 
-@pytest.mark.parametrize('seconds,allocation', [((360, 720, 13320), 4.0), ((360, 720, 1080), 0.6)])
+@mark.parametrize('seconds,allocation', [((360, 720, 13320), 4.0), ((360, 720, 1080), 0.6)])
 def test_exact_campaign_allocation_is_not_rejected_by_float_sum(spec, seconds, allocation):
     spec['kind'] = 'final-coverage'
     spec['work'] = spec['work'][:1]
@@ -718,26 +724,26 @@ def test_exact_campaign_allocation_is_not_rejected_by_float_sum(spec, seconds, a
     approvals = {'owner_decisions': {'campaign_allocations': {spec['id']: {'kind': 'final-coverage', 'gpu_hours': allocation}}}}
     assert expand_campaign(spec, approvals)['units']
     approvals['owner_decisions']['campaign_allocations'][spec['id']]['gpu_hours'] = allocation - 1e-9
-    with pytest.raises(ContractError, match='allocation does not cover'):
+    with raises(ContractError, match='allocation does not cover'):
         expand_campaign(spec, approvals)
 
 
 def test_json_task_preserves_exponent_number_types(runtime):
     repo, out = runtime
     parameters = {'lr': 1e-5, 'large': 1e20, 'numeric_label': '1e-05'}
-    assert run_task(repo, out, deps_env=False, parameters=parameters).status == 'pass'
+    assert_pass(run_task(repo, out, deps_env=False, parameters=parameters))
     actual = read_json(out / '_execution/task.json')['parameters']
     assert actual == parameters
     assert isinstance(actual['lr'], float) and isinstance(actual['large'], float)
 
 
-@pytest.mark.parametrize('field', ['outputs', 'parameters'])
+@mark.parametrize('field', ['outputs', 'parameters'])
 def test_single_brace_campaign_templates_rejected(spec, field):
     if field == 'outputs':
         spec['work'][0]['outputs'] = ['result-{fold}.json']
     else:
         spec['work'][0]['parameters']['fold'] = '{fold:02d}'
-    with pytest.raises(ContractError, match='unresolved template'):
+    with raises(ContractError, match='unresolved template'):
         expand_campaign(spec, {})
 
 
@@ -752,7 +758,7 @@ def test_cli_invalid_repo_is_blocked_instead_of_a_traceback(tmp_path, monkeypatc
 
 def test_campaign_task_requires_lock_even_for_generic_stage(runtime):
     repo, out = runtime
-    with pytest.raises(ContractError, match='requires a recipe lock'):
+    with raises(ContractError, match='requires a recipe lock'):
         run_task(repo, out, deps_env=False, campaign='screen-01')
 
 
@@ -773,11 +779,11 @@ def test_json_content_keeps_types_regardless_of_filename(tmp_path):
 def test_invalid_json_never_falls_back_to_yaml(tmp_path):
     task = tmp_path / 'task.json'
     task.write_text('lr: 1.0e-5\n')
-    with pytest.raises(ContractError, match='invalid JSON'):
+    with raises(ContractError, match='invalid JSON'):
         read_mapping(task)
 
 
-@pytest.mark.parametrize('upstream_locked,change,error', [
+@mark.parametrize('upstream_locked,change,error', [
     (True, 'src/science.py', 'dependency scientific code/config drift'),
     (True, 'README.md', None),
     (False, 'src/science.py', None),
@@ -792,13 +798,11 @@ def test_locked_campaign_checks_upstream_science(runtime, tmp_path, monkeypatch,
         old_task.write_text(json.dumps(value))
     else:
         old_task = task_file(upstream, id='upstream')
-    assert run_task(repo, upstream, old_task).status == 'pass'
+    assert_pass(run_task(repo, upstream, old_task))
     before = {str(p): file_hash(p) for p in upstream.rglob('*') if p.is_file()}
     (repo / change).write_text('changed\n')
     head = commit(repo)
-    consumer = tmp_path / 'consumer'
-    consumer.mkdir()
-    (consumer / 'code_commit.txt').write_text(head)
+    consumer = initialize_attempt(repo, tmp_path / 'consumer')
     lock_task = locked_task(repo, consumer, tmp_path / 'new-lock', monkeypatch)
     lock_ref = read_json(lock_task)['recipe_lock']
     spec = {'schema_version': 1, 'id': 'new-campaign', 'kind': 'screening',
@@ -813,15 +817,15 @@ def test_locked_campaign_checks_upstream_science(runtime, tmp_path, monkeypatch,
     selected.write_text(json.dumps(generated['tasks'][0]))
     monkeypatch.setenv('SWARM_DEP_UPSTREAM', str(upstream))
     if error:
-        with pytest.raises(ContractError, match=error):
+        with raises(ContractError, match=error):
             run_task(repo, consumer, selected)
         assert not (consumer / 'value.json').exists()
     else:
-        assert run_task(repo, consumer, selected).status == 'pass'
+        assert_pass(run_task(repo, consumer, selected))
     assert {str(p): file_hash(p) for p in upstream.rglob('*') if p.is_file()} == before
 
 
-@pytest.mark.parametrize('existing', [False, True])
+@mark.parametrize('existing', [False, True])
 def test_build_tasks_cli_publishes_into_new_or_existing_directory(tmp_path, spec, existing):
     spec_file = tmp_path / 'spec.json'
     approvals_file = tmp_path / 'approvals.yaml'
@@ -842,7 +846,7 @@ def test_build_tasks_cli_publishes_into_new_or_existing_directory(tmp_path, spec
     assert {str(p): file_hash(p) for p in out.iterdir()} == before
 
 
-@pytest.mark.parametrize('kind', ['final-coverage', 'anchor', 'refit-audit'])
+@mark.parametrize('kind', ['final-coverage', 'anchor', 'refit-audit'])
 def test_builder_rejects_unanchored_owner_allocation(tmp_path, spec, kind):
     spec['kind'] = kind
     spec['id'] = 'synthetic-unapproved'
@@ -859,7 +863,7 @@ def test_builder_rejects_unanchored_owner_allocation(tmp_path, spec, kind):
     assert not out.exists()
 
 
-@pytest.mark.parametrize('exception', [RuntimeError(), AssertionError(), FileNotFoundError('stage output')])
+@mark.parametrize('exception', [RuntimeError(), AssertionError(), FileNotFoundError('stage output')])
 def test_executed_stage_exception_always_publishes_failure(runtime, monkeypatch, exception):
     repo, out = runtime
     def failing(request):
@@ -872,8 +876,8 @@ def test_executed_stage_exception_always_publishes_failure(runtime, monkeypatch,
     assert receipt == result
 
 
-@pytest.mark.parametrize('mutation', ['bytes', 'chmod', 'added', 'removed', 'symlink'])
-@pytest.mark.parametrize('exit_kind', ['pass', 'exception', 'system-exit'])
+@mark.parametrize('mutation', ['bytes', 'chmod', 'added', 'removed', 'symlink'])
+@mark.parametrize('exit_kind', ['pass', 'exception', 'system-exit'])
 def test_upstream_tree_mutation_fails_and_blocks_later_consumer(
         runtime, tmp_path, monkeypatch, mutation, exit_kind):
     repo, out = runtime
@@ -931,7 +935,7 @@ def test_upstream_tree_mutation_fails_and_blocks_later_consumer(
         assert os.readlink(link) == '../data.json'
     later = initialize_attempt(repo, tmp_path / 'later')
     install_stage(monkeypatch, repo, dummy)
-    with pytest.raises(ContractError, match='tainted|fingerprint'):
+    with raises(ContractError, match='tainted|fingerprint'):
         run_task(repo, later, needs=SOURCE_NEEDS)
     assert not (later / 'value.json').exists()
 
@@ -951,7 +955,7 @@ def test_read_only_upstream_tree_remains_usable(runtime, tmp_path, monkeypatch):
     for attempt in [out, tmp_path / 'later']:
         attempt.mkdir(exist_ok=True)
         (attempt / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
-        assert run_task(repo, attempt, needs=SOURCE_NEEDS).status == 'pass'
+        assert_pass(run_task(repo, attempt, needs=SOURCE_NEEDS))
     after = {p.name: (p.lstat().st_mode, p.lstat().st_size,
                      os.readlink(p) if p.is_symlink() else (None if p.is_dir() else p.read_bytes()))
              for p in upstream.iterdir()}
@@ -994,7 +998,7 @@ def test_tree_fingerprint_errors_are_explicit_and_path_specific(tmp_path, monkey
     assert changed_paths(before, after) == ['file']
 
 
-@pytest.mark.parametrize('raises', [False, True])
+@mark.parametrize('raises', [False, True])
 def test_post_execution_check_names_proc_fd_chmod(runtime, tmp_path, monkeypatch, raises):
     repo, out = runtime
     upstream = tmp_path / 'source'
@@ -1024,17 +1028,17 @@ def test_post_execution_check_names_proc_fd_chmod(runtime, tmp_path, monkeypatch
     assert not (tmp_path / '.oxyformer-integrity').exists()
 
 
-@pytest.mark.parametrize('when', ['before-consumer', 'during-consumer'])
+@mark.parametrize('when', ['before-consumer', 'during-consumer'])
 def test_transitive_upstream_metadata_cannot_escape_detection(runtime, tmp_path, monkeypatch, when, source):
     repo, middle = runtime
-    assert run_task(repo, middle, id='middle', needs=SOURCE_NEEDS).status == 'pass'
+    assert_pass(run_task(repo, middle, id='middle', needs=SOURCE_NEEDS))
     later = initialize_attempt(repo, tmp_path / 'later')
     monkeypatch.setenv('SWARM_DEP_MIDDLE', str(middle))
     task = task_file(later, needs={'middle': ['value.json']})
     victim = source / 'data.json'
     if when == 'before-consumer':
         victim.chmod(victim.stat().st_mode ^ 0o100)
-        with pytest.raises(ContractError, match='fingerprint'):
+        with raises(ContractError, match='fingerprint'):
             run_task(repo, later, task)
         assert not (later / 'value.json').exists()
     else:
@@ -1057,13 +1061,13 @@ def test_consumer_binds_published_fingerprint_digest(runtime, tmp_path, monkeypa
     published = publish_source_fixture(repo, source)
     expected = next(a.sha256 for a in published.artifacts if a.path == FINGERPRINT)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
-    assert run_task(repo, out, needs=SOURCE_NEEDS).status == 'pass'
-    request = StageRequest.from_json((out / '_execution/request.json').read_text())
+    assert_pass(run_task(repo, out, needs=SOURCE_NEEDS))
+    request = read_request(out)
     assert dict(zip(request.dependency_paths, request.dependency_hashes))[str(source / FINGERPRINT)] == expected
     # Alter the publication record itself; its original result digest must win.
     (source / FINGERPRINT).write_text('{}')
     later = initialize_attempt(repo, tmp_path / 'later')
-    with pytest.raises(ContractError, match='fingerprint hash mismatch'):
+    with raises(ContractError, match='fingerprint hash mismatch'):
         run_task(repo, later, needs=SOURCE_NEEDS)
 
 
@@ -1074,7 +1078,7 @@ def test_unsealed_acquisition_cannot_become_a_new_baseline(runtime, tmp_path, mo
     (source / 'data.json').write_text('{}')
     (source / 'receipts.json').write_text('{}')
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
-    with pytest.raises(ContractError, match='stage receipt missing'):
+    with raises(ContractError, match='stage receipt missing'):
         run_task(repo, out, needs=SOURCE_NEEDS)
     assert not (source / '_execution').exists()
 
@@ -1095,7 +1099,7 @@ def test_restored_upstream_state_is_identical_under_fingerprint_contract(runtime
     assert victim.read_bytes() == b'{}'
 
 
-@pytest.mark.parametrize('mutation', ['chmod', 'undeclared_bytes'])
+@mark.parametrize('mutation', ['chmod', 'undeclared_bytes'])
 def test_preflight_cannot_rebase_a_changed_dependency(runtime, tmp_path, monkeypatch, mutation):
     import oxyformer.execution.runner as runner
     repo, out = runtime
@@ -1123,7 +1127,7 @@ def test_preflight_cannot_rebase_a_changed_dependency(runtime, tmp_path, monkeyp
     assert str(victim if mutation == 'chmod' else extra) in result.message
 
 
-@pytest.mark.parametrize('record_index', [0, -1])
+@mark.parametrize('record_index', [0, -1])
 def test_rewritten_upstream_result_is_rejected_by_later_consumers(runtime, tmp_path, monkeypatch, record_index, source):
     repo, out = runtime
     def faulty(request):
@@ -1142,7 +1146,7 @@ def test_rewritten_upstream_result_is_rejected_by_later_consumers(runtime, tmp_p
     assert str(source / RESULT) in result.message
     later = initialize_attempt(repo, tmp_path / 'later')
     install_stage(monkeypatch, repo, dummy)
-    with pytest.raises(ContractError, match='publication|fingerprint|result record'):
+    with raises(ContractError, match='publication|fingerprint|result record'):
         run_task(repo, later, needs=SOURCE_NEEDS)
 
 
@@ -1155,7 +1159,7 @@ def test_tempfile_cache_does_not_cross_attempts(runtime, tmp_path, monkeypatch):
         assert scratch.is_relative_to(Path(request.output_dir))
         return dummy(request)
     install_stage(monkeypatch, repo, scratch_stage)
-    assert run_task(repo, first, deps_env=False).status == 'pass'
+    assert_pass(run_task(repo, first, deps_env=False))
     shutil.rmtree(first)
     later = initialize_attempt(repo, tmp_path / 'later')
     result = run_task(repo, later, deps_env=False)
@@ -1184,16 +1188,16 @@ def test_forty_leaf_limit_includes_cpu_slices(spec):
     spec['work'][0]['slices'] = [{'gpus': 1, 'wall_seconds': 60}] * 39 + [{'gpus': 0, 'wall_seconds': 60}]
     assert len(expand_campaign(spec, {})['expected_leaves']) == 40
     spec['work'][0]['slices'].append({'gpus': 1, 'wall_seconds': 60})
-    with pytest.raises(ContractError, match='forty leaves'):
+    with raises(ContractError, match='forty leaves'):
         expand_campaign(spec, {})
 
 
-@pytest.mark.parametrize('name', [RESULT, FINGERPRINT])
+@mark.parametrize('name', [RESULT, FINGERPRINT])
 def test_late_publication_control_modes_are_verified(runtime, tmp_path, monkeypatch, name, source):
     repo, out = runtime
     path = source / name
     path.chmod(path.stat().st_mode ^ 0o100)
-    with pytest.raises(ContractError, match='fingerprint mismatch'):
+    with raises(ContractError, match='fingerprint mismatch'):
         run_task(repo, out, needs=SOURCE_NEEDS)
 
 
@@ -1232,7 +1236,7 @@ def run_cli_fixture(repo, out, stage_body, *, needs=None, entrypoint=None, timeo
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
-@pytest.mark.xfail(strict=True, reason='ARC-1339: general outside-write confinement is an owner-deferred host-runtime limitation')
+@mark.xfail(strict=True, reason='ARC-1339: general outside-write confinement is an owner-deferred host-runtime limitation')
 def test_cli_undeclared_outside_write_fails(runtime, tmp_path, monkeypatch):
     repo, out = runtime
     outside = tmp_path / 'outside.json'
@@ -1246,7 +1250,7 @@ def test_cli_undeclared_outside_write_fails(runtime, tmp_path, monkeypatch):
     assert str(outside) in result.message
 
 
-@pytest.mark.parametrize('control', ['result.json', 'fingerprint.json'])
+@mark.parametrize('control', ['result.json', 'fingerprint.json'])
 def test_identical_control_rewrite_accepts_later_consumers(runtime, tmp_path, monkeypatch, control, source):
     repo, out = runtime
     victim = source / '_execution' / control
@@ -1259,7 +1263,7 @@ def test_identical_control_rewrite_accepts_later_consumers(runtime, tmp_path, mo
     assert_pass(result)
     later = initialize_attempt(repo, tmp_path / 'later')
     install_stage(monkeypatch, repo, dummy)
-    assert run_task(repo, later, needs=SOURCE_NEEDS).status == 'pass'
+    assert_pass(run_task(repo, later, needs=SOURCE_NEEDS))
 
 
 def test_cli_finalizes_temporary_directories_before_publication(runtime):
@@ -1276,7 +1280,7 @@ def run_stage(request):
     assert verify_dependency_result(out).status == 'pass'
 
 
-@pytest.mark.parametrize('worker_kind', ['thread', 'subprocess'])
+@mark.parametrize('worker_kind', ['thread', 'subprocess'])
 def test_cli_waits_for_background_mutation_before_post_check(runtime, tmp_path, monkeypatch, worker_kind, source):
     repo, out = runtime
     victim = source / 'data.json'
@@ -1320,8 +1324,8 @@ def run_stage(request):
     assert check['attempts'][str(source)]['status'] == 'tainted'
 
 
-@pytest.mark.parametrize('operation', ['rewrite_restore_mtime', 'copy2'])
-@pytest.mark.parametrize('control', ['result.json', 'fingerprint.json'])
+@mark.parametrize('operation', ['rewrite_restore_mtime', 'copy2'])
+@mark.parametrize('control', ['result.json', 'fingerprint.json'])
 def test_control_rewrites_bind_fingerprinted_properties_only(runtime, tmp_path, monkeypatch, operation, control, source):
     repo, out = runtime
     victim = source / '_execution' / control
@@ -1343,7 +1347,7 @@ def test_control_rewrites_bind_fingerprinted_properties_only(runtime, tmp_path, 
     assert victim.stat().st_ctime_ns != before.st_ctime_ns
     later = initialize_attempt(repo, tmp_path / 'later')
     install_stage(monkeypatch, repo, dummy)
-    assert run_task(repo, later, needs=SOURCE_NEEDS).status == 'pass'
+    assert_pass(run_task(repo, later, needs=SOURCE_NEEDS))
 
     changed = initialize_attempt(repo, tmp_path / 'changed')
     def fingerprinted_change(request):
@@ -1361,7 +1365,7 @@ def test_control_rewrites_bind_fingerprinted_properties_only(runtime, tmp_path, 
     assert '_execution/' + control in check['attempts'][str(source)]['changed_paths']
     refused = initialize_attempt(repo, tmp_path / 'refused')
     install_stage(monkeypatch, repo, dummy)
-    with pytest.raises(ContractError, match='fingerprint|record'):
+    with raises(ContractError, match='fingerprint|record'):
         run_task(repo, refused, needs=SOURCE_NEEDS)
 
 
@@ -1464,7 +1468,7 @@ def test_changing_fingerprint_to_fifo_cannot_skip_post_check(runtime, tmp_path, 
     assert check['attempts'][str(source)]['status'] == 'tainted'
 
 
-@pytest.mark.parametrize('control', ['result.json', 'request.json'])
+@mark.parametrize('control', ['result.json', 'request.json'])
 def test_preflight_control_fifo_swap_is_nonblocking(runtime, tmp_path, control):
     repo, _ = runtime
     source = make_source_fixture(repo, tmp_path / 'source')
@@ -1491,10 +1495,10 @@ else:
     assert control in process.stdout
 
 
-@pytest.mark.parametrize('relative', [FINGERPRINT, 'data.json'])
+@mark.parametrize('relative', [FINGERPRINT, 'data.json'])
 def test_transitive_fifo_is_refused_before_input_hashing(runtime, tmp_path, monkeypatch, relative, source):
     repo, middle = runtime
-    assert run_task(repo, middle, id='middle', needs=SOURCE_NEEDS).status == 'pass'
+    assert_pass(run_task(repo, middle, id='middle', needs=SOURCE_NEEDS))
     victim = source / relative
     victim.unlink()
     os.mkfifo(victim)
@@ -1502,7 +1506,7 @@ def test_transitive_fifo_is_refused_before_input_hashing(runtime, tmp_path, monk
     assert relative in process.stdout
 
 
-@pytest.mark.parametrize('consumer_kind', ['collector', 'leaf'])
+@mark.parametrize('consumer_kind', ['collector', 'leaf'])
 def test_generated_collector_binds_each_expected_producer(runtime, tmp_path, monkeypatch, consumer_kind):
     repo, out = runtime
     lock_task = locked_task(repo, out, tmp_path / 'lock', monkeypatch)
@@ -1520,7 +1524,7 @@ def test_generated_collector_binds_each_expected_producer(runtime, tmp_path, mon
         attempt = initialize_attempt(repo, tmp_path / task['id'])
         task_path = attempt / 'input-task.json'
         task_path.write_text(json.dumps(task))  # exact generated task, unedited
-        assert run_task(repo, attempt, task_path).status == 'pass'
+        assert_pass(run_task(repo, attempt, task_path))
         attempts[task['id']] = attempt
     for unit in plan['expected_leaves']:
         monkeypatch.setenv(dependency_variable(unit), str(attempts[unit]))
@@ -1531,13 +1535,13 @@ def test_generated_collector_binds_each_expected_producer(runtime, tmp_path, mon
         selected = expand_campaign(downstream, {})['tasks'][0]
     good_task = out / 'generated-collector.json'
     good_task.write_text(json.dumps(selected))
-    assert run_task(repo, out, good_task).status == 'pass'
+    assert_pass(run_task(repo, out, good_task))
     wrong = initialize_attempt(repo, tmp_path / 'wrong-collector')
     wrong_task = wrong / 'generated-collector.json'
     wrong_task.write_text(good_task.read_text())
     monkeypatch.setenv(dependency_variable(plan['expected_leaves'][-1]),
                        str(attempts[other['tasks'][0]['id']]))
-    with pytest.raises(ContractError, match='producer identity'):
+    with raises(ContractError, match='producer identity'):
         run_task(repo, wrong, wrong_task)
     assert not (wrong / 'summary.json').exists()
 
@@ -1567,7 +1571,7 @@ def test_archive_fifo_change_cannot_skip_failure_receipt(runtime, tmp_path, monk
         return replace(result, artifacts=(replace(result.artifacts[0], sha256=file_hash(archive)),))
     with monkeypatch.context() as patch:
         patch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, archive_producer))
-        assert run_task(repo, source, deps_env=False, id='source', outputs=['payload.tar']).status == 'pass'
+        assert_pass(run_task(repo, source, deps_env=False, id='source', outputs=['payload.tar']))
     monkeypatch.setenv('SWARM_DEP_SOURCE', str(source))
     process = run_cli_fixture(repo, out, '''from oxyformer.execution.paths import safe_extract
 def run_stage(request):
@@ -1594,19 +1598,19 @@ def test_output_inside_transitive_attempt_is_refused_before_writing(runtime, tmp
     task = task_file(nested, needs={'middle': ['value.json']})
     publish_source_fixture(repo, source)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
-    assert run_task(repo, middle, id='middle', needs=SOURCE_NEEDS).status == 'pass'
+    assert_pass(run_task(repo, middle, id='middle', needs=SOURCE_NEEDS))
     monkeypatch.setenv('SWARM_DEP_MIDDLE', str(middle))
     before = fingerprint_tree(source)
-    with pytest.raises(ContractError, match='overlap|upstream'):
+    with raises(ContractError, match='overlap|upstream'):
         run_task(repo, nested, task)
     assert fingerprint_tree(source) == before
     assert not (nested / '_execution').exists()
 
 
-@pytest.mark.parametrize('relative', ['src/oxyformer/helper.py', 'scripts/helper.py',
+@mark.parametrize('relative', ['src/oxyformer/helper.py', 'scripts/helper.py',
                                       'src/oxyformer/notes.md', 'scripts/notes.md',
                                       'src/oxyformer/helper.pyc'])
-@pytest.mark.parametrize('derive', ['commit', 'recipe'])
+@mark.parametrize('derive', ['commit', 'recipe'])
 def test_identity_rejects_every_ignored_file_in_code_roots(runtime, relative, derive):
     repo, out = runtime
     path = repo / relative
@@ -1614,22 +1618,22 @@ def test_identity_rejects_every_ignored_file_in_code_roots(runtime, relative, de
     path.write_text('unrecorded code or resource\n')
     with (repo / '.git/info/exclude').open('a') as stream:
         stream.write('\n/' + relative + '\n')
-    with pytest.raises(ContractError, match='untracked.*' + relative):
+    with raises(ContractError, match='untracked.*' + relative):
         code_identity(repo, out) if derive == 'commit' else scientific_fingerprint(repo)
 
 
-@pytest.mark.parametrize('flag', ['--assume-unchanged', '--skip-worktree'])
-@pytest.mark.parametrize('derive', ['commit', 'recipe'])
+@mark.parametrize('flag', ['--assume-unchanged', '--skip-worktree'])
+@mark.parametrize('derive', ['commit', 'recipe'])
 def test_identity_checks_disk_bytes_even_when_index_suppresses_status(runtime, flag, derive):
     repo, out = runtime
     git(repo, 'update-index', flag, 'src/oxyformer/dummy.py')
     (repo / 'src/oxyformer/dummy.py').write_text('unrecorded = True\n')
     assert git(repo, 'status', '--porcelain') == ''
-    with pytest.raises(ContractError, match='tracked modifications.*src/oxyformer/dummy.py'):
+    with raises(ContractError, match='tracked modifications.*src/oxyformer/dummy.py'):
         code_identity(repo, out) if derive == 'commit' else scientific_fingerprint(repo)
 
 
-@pytest.mark.parametrize('relative', ['src/oxyformer/notes.md', 'scripts/notes.md', 'docs/helper.py'])
+@mark.parametrize('relative', ['src/oxyformer/notes.md', 'scripts/notes.md', 'docs/helper.py'])
 def test_recipe_fingerprint_covers_resources_under_import_roots(runtime, relative):
     repo, out = runtime
     note = repo / relative
@@ -1642,7 +1646,7 @@ def test_recipe_fingerprint_covers_resources_under_import_roots(runtime, relativ
     assert scientific_fingerprint(repo) != before
 
 
-@pytest.mark.parametrize('special', ['fifo', 'socket', 'directory', 'symlink'])
+@mark.parametrize('special', ['fifo', 'socket', 'directory', 'symlink'])
 def test_safe_extract_checks_archive_type_before_open(tmp_path, special):
     import socket
     archive = tmp_path / 'payload.tar'
@@ -1680,10 +1684,10 @@ def test_output_containing_transitive_attempt_is_refused_before_writing(runtime,
     task = task_file(out, needs={'middle': ['value.json']})
     source = make_source_fixture(repo, out / 'source')
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
-    assert run_task(repo, middle, id='middle', needs=SOURCE_NEEDS).status == 'pass'
+    assert_pass(run_task(repo, middle, id='middle', needs=SOURCE_NEEDS))
     monkeypatch.setenv('SWARM_DEP_MIDDLE', str(middle))
     before = fingerprint_tree(out)
-    with pytest.raises(ContractError, match='overlap.*' + str(source)):
+    with raises(ContractError, match='overlap.*' + str(source)):
         run_task(repo, out, task)
     assert fingerprint_tree(out) == before
 
@@ -1701,7 +1705,7 @@ def test_builder_alternate_approval_fifo_is_nonblocking(tmp_path):
 def test_module_namespace_cannot_extend_beyond_checked_checkout(runtime, tmp_path):
     repo, _ = runtime
     namespace = SimpleNamespace(__path__=[str(repo / 'src/oxyformer'), str(tmp_path)])
-    with pytest.raises(ContractError, match='outside --repo'):
+    with raises(ContractError, match='outside --repo'):
         verify_module_origins(repo, [namespace])
 
 
@@ -1710,26 +1714,24 @@ def test_locked_recipe_checks_scientific_identity_of_transitive_attempts(runtime
     old_task = locked_task(repo, ancestor, tmp_path / 'old-lock', monkeypatch)
     value = read_json(old_task)
     old_task.write_text(json.dumps(dict(value, id='ancestor')))
-    assert run_task(repo, ancestor, old_task).status == 'pass'
+    assert_pass(run_task(repo, ancestor, old_task))
     middle = initialize_attempt(repo, tmp_path / 'middle')
     monkeypatch.setenv('SWARM_DEP_ANCESTOR', str(ancestor))
-    assert run_task(repo, middle, id='middle', needs={'ancestor': ['value.json']}).status == 'pass'
+    assert_pass(run_task(repo, middle, id='middle', needs={'ancestor': ['value.json']}))
     (repo / 'src/science.py').write_text('new_science = 2\n')
     head = commit(repo)
-    consumer = tmp_path / 'consumer'
-    consumer.mkdir()
-    (consumer / 'code_commit.txt').write_text(head)
+    consumer = initialize_attempt(repo, tmp_path / 'consumer')
     path = locked_task(repo, consumer, tmp_path / 'new-lock', monkeypatch)
     task = read_json(path)
     task['needs']['middle'] = ['value.json']
     path.write_text(json.dumps(task))
     monkeypatch.setenv('SWARM_DEP_MIDDLE', str(middle))
-    with pytest.raises(ContractError, match='dependency scientific code/config drift'):
+    with raises(ContractError, match='dependency scientific code/config drift'):
         run_task(repo, consumer, path)
     assert not (consumer / 'value.json').exists()
 
 
-@pytest.mark.parametrize('kind', ['final-coverage', 'anchor', 'refit-audit'])
+@mark.parametrize('kind', ['final-coverage', 'anchor', 'refit-audit'])
 def test_builder_refuses_modified_checkout_approvals(runtime, tmp_path, spec, kind):
     repo, _ = runtime
     (repo / 'scripts').mkdir()
@@ -1747,7 +1749,7 @@ def test_builder_refuses_modified_checkout_approvals(runtime, tmp_path, spec, ki
     assert not (tmp_path / 'plan').exists()
 
 
-@pytest.mark.parametrize('overlap', [False, True])
+@mark.parametrize('overlap', [False, True])
 def test_code_identity_does_not_refresh_upstream_git_index(runtime, tmp_path, monkeypatch, overlap):
     repo, out = runtime
     source = tmp_path / 'source'
@@ -1767,10 +1769,10 @@ def test_code_identity_does_not_refresh_upstream_git_index(runtime, tmp_path, mo
     before = fingerprint_tree(source)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     if overlap:
-        with pytest.raises(ContractError, match='overlaps an upstream'):
+        with raises(ContractError, match='overlaps an upstream'):
             run_task(clone, out, task)
     else:
-        assert run_task(clone, out, task).status == 'pass'
+        assert_pass(run_task(clone, out, task))
     assert fingerprint_tree(source) == before
 
 
@@ -1786,7 +1788,7 @@ def test_stage_cannot_publish_in_attempt_symlink_as_regular_artifact(runtime, mo
     assert result.status == 'fail' and str(out / 'value.json') in result.message
 
 
-@pytest.mark.parametrize('directory_link', [False, True])
+@mark.parametrize('directory_link', [False, True])
 def test_dependency_file_rejects_symlink_before_resolving(tmp_path, directory_link):
     (tmp_path / 'stored').mkdir()
     (tmp_path / 'stored/value.json').write_text('{}')
@@ -1796,14 +1798,14 @@ def test_dependency_file_rejects_symlink_before_resolving(tmp_path, directory_li
     else:
         (tmp_path / 'value.json').symlink_to('stored/value.json')
         relative = 'value.json'
-    with pytest.raises(ContractError, match='regular|symlink'):
+    with raises(ContractError, match='regular|symlink'):
         dependency_file(tmp_path, relative)
 
 
 def test_dependency_root_symlink_is_not_a_directory_input(tmp_path):
     (tmp_path / 'attempt').mkdir()
     (tmp_path / 'alias').symlink_to('attempt', target_is_directory=True)
-    with pytest.raises(ContractError, match='symlink|directory'):
+    with raises(ContractError, match='symlink|directory'):
         resolve_dependencies(['source'], {'SWARM_DEP_SOURCE': str(tmp_path / 'alias')})
 
 
@@ -1811,11 +1813,11 @@ def test_regular_reader_rejects_symlink_ancestor(tmp_path):
     (tmp_path / 'stored').mkdir()
     (tmp_path / 'stored/data.json').write_text('{}')
     (tmp_path / 'alias').symlink_to('stored', target_is_directory=True)
-    with pytest.raises(ContractError, match='symlink|directory'):
+    with raises(ContractError, match='symlink|directory'):
         read_regular(tmp_path / 'alias/data.json')
 
 
-@pytest.mark.parametrize('control', ['request.json', 'environment.json', 'identity.json'])
+@mark.parametrize('control', ['request.json', 'environment.json', 'identity.json'])
 def test_stage_cannot_change_persisted_control_identity(runtime, monkeypatch, control):
     repo, out = runtime
     victim = out / '_execution' / control
@@ -1834,9 +1836,9 @@ def test_stage_cannot_change_persisted_control_identity(runtime, monkeypatch, co
     assert read_stage_result(out).status == 'fail'
 
 
-@pytest.mark.parametrize('control', ['dependency_check.json', 'result.json', 'fingerprint.json', '_execution'])
-@pytest.mark.parametrize('kind', ['file', 'fifo', 'directory', 'symlink'])
-@pytest.mark.parametrize('mutate', [False, True])
+@mark.parametrize('control', ['dependency_check.json', 'result.json', 'fingerprint.json', '_execution'])
+@mark.parametrize('kind', ['file', 'fifo', 'directory', 'symlink'])
+@mark.parametrize('mutate', [False, True])
 def test_reserved_receipt_collision_preserves_upstream_failure(runtime, tmp_path, monkeypatch, control, kind, mutate, source):
     repo, out = runtime
     victim = source / 'data.json'
@@ -1864,7 +1866,7 @@ def test_reserved_receipt_collision_preserves_upstream_failure(runtime, tmp_path
 
 
 def test_pass_without_artifacts_is_rejected_by_merged_contract():
-    with pytest.raises(ContractError, match='passing stage must declare artifacts'):
+    with raises(ContractError, match='passing stage must declare artifacts'):
         StageResult(request_hash='0' * 64, status='pass', artifacts=(), message='validation only')
 
 
@@ -1896,7 +1898,7 @@ def test_unwritable_control_directory_cannot_suppress_upstream_receipts(runtime,
         (out / '_execution').chmod(0o700)
 
 
-@pytest.mark.parametrize('receipt', ['dependency_check.json', 'result.json'])
+@mark.parametrize('receipt', ['dependency_check.json', 'result.json'])
 def test_receipt_write_error_after_execution_is_failed_with_changed_paths(runtime, tmp_path, monkeypatch, receipt, source):
     repo, out = runtime
     entrypoint = """import sys
@@ -1949,7 +1951,7 @@ def test_unwritable_control_file_recovery_never_chmods_upstream(tmp_path):
         nested.chmod(0o700)
 
 
-@pytest.mark.parametrize('kind', ['file', 'directory'])
+@mark.parametrize('kind', ['file', 'directory'])
 def test_read_only_isolated_cache_is_an_honest_passing_stage(runtime, monkeypatch, kind):
     repo, out = runtime
     def cached(request):
@@ -1967,7 +1969,7 @@ def test_read_only_isolated_cache_is_an_honest_passing_stage(runtime, monkeypatc
     assert_pass(result)
 
 
-@pytest.mark.parametrize('location', ['upstream', 'cache'])
+@mark.parametrize('location', ['upstream', 'cache'])
 def test_deep_tree_preserves_detection_and_publication(runtime, tmp_path, monkeypatch, location, source):
     repo, out = runtime
     created = []
@@ -1989,7 +1991,7 @@ def test_deep_tree_preserves_detection_and_publication(runtime, tmp_path, monkey
             assert result.status == 'fail' and str(created[-1]) in result.message
             check = dependency_check(out)
             assert created[-1].relative_to(source).as_posix() in check['attempts'][str(source)]['changed_paths']
-            with pytest.raises(ContractError, match='fingerprint mismatch'):
+            with raises(ContractError, match='fingerprint mismatch'):
                 verify_dependency_result(source)
         else:
             assert_pass(result)
@@ -2008,7 +2010,7 @@ def test_rewritten_upstream_publication_fails_changer_and_transitive_collector(r
     seal_source_fixture(repo, source)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     middle = initialize_attempt(repo, tmp_path / 'middle')
-    assert run_task(repo, middle, id='middle', needs=SOURCE_NEEDS).status == 'pass'
+    assert_pass(run_task(repo, middle, id='middle', needs=SOURCE_NEEDS))
     monkeypatch.setenv('SWARM_DEP_MIDDLE', str(middle))
     def rewritten(request):
         result = dummy(request)
@@ -2036,7 +2038,7 @@ def test_rewritten_upstream_publication_fails_changer_and_transitive_collector(r
     # persisted request binds the ancestor's original publication identity.
     for unit, reason in [('changing', 'did not pass'), ('middle', 'input hash mismatch')]:
         collector = initialize_attempt(repo, tmp_path / ('collector-' + unit))
-        with pytest.raises(ContractError, match=reason):
+        with raises(ContractError, match=reason):
             run_task(repo, collector, needs={unit: ['value.json']})
         assert not (collector / '_execution').exists()
         assert not (collector / 'value.json').exists()
@@ -2056,7 +2058,7 @@ def test_deep_valid_dependency_lineage_does_not_exhaust_python_stack(runtime, tm
     assert verify_dependency_result(parent).status == 'pass'
 
 
-@pytest.mark.parametrize('commit_change', [True, False])
+@mark.parametrize('commit_change', [True, False])
 def test_stage_cannot_replace_recorded_checkout_identity(runtime, monkeypatch, commit_change):
     import runpy
     repo, out = runtime
@@ -2074,7 +2076,7 @@ def test_stage_cannot_replace_recorded_checkout_identity(runtime, monkeypatch, c
     result = run_task(repo, out, deps_env=False)
     assert (git(repo, 'rev-parse', 'HEAD') != original) == commit_change
     assert read_json(out / 'value.json') == {'value': 2}
-    request = StageRequest.from_json((out / '_execution/request.json').read_text())
+    request = read_request(out)
     assert request.code_identity == original
     assert read_json(out / '_execution/identity.json')['head'] == original
     assert result.status == 'fail', 'replacement checkout passed under the original recorded identity'
@@ -2108,18 +2110,18 @@ def test_git_replacement_ref_cannot_rebind_recorded_checkout(runtime, monkeypatc
     assert (out / 'code_commit.txt').read_text().strip() == original
     assert git(repo, 'status', '--porcelain') == ''
     assert read_json(out / 'value.json') == {'value': 2}
-    request = StageRequest.from_json((out / '_execution/request.json').read_text())
+    request = read_request(out)
     assert request.code_identity == original
     assert read_json(out / '_execution/identity.json')['head'] == original
     assert result.status == 'fail', 'Git replacement changed executed code under unchanged recorded HEAD'
     assert read_stage_result(out) == result
     assert 'src/science.py' in result.message
-    with pytest.raises(ContractError, match='did not pass'):
+    with raises(ContractError, match='did not pass'):
         verify_dependency_result(out)
 
 
-@pytest.mark.parametrize('kind', ['commit', 'tree'])
-@pytest.mark.parametrize('derive', ['commit', 'fingerprint', 'recipe'])
+@mark.parametrize('kind', ['commit', 'tree'])
+@mark.parametrize('derive', ['commit', 'fingerprint', 'recipe'])
 def test_replacement_admission(runtime, kind, derive):
     repo, out = runtime
     original = git(repo, 'rev-parse', 'HEAD')
@@ -2129,7 +2131,7 @@ def test_replacement_admission(runtime, kind, derive):
     git(repo, 'reset', '--hard', original)
     substitute(repo, 'src/science.py', 'value = 2\n', kind)
     assert git(repo, 'status', '--porcelain') == ''
-    with pytest.raises(ContractError, match='src/science.py'):
+    with raises(ContractError, match='src/science.py'):
         if derive == 'commit':
             code_identity(repo, out)
         elif derive == 'fingerprint':
@@ -2138,7 +2140,7 @@ def test_replacement_admission(runtime, kind, derive):
             verify_recipe(repo, substituted_lock)
 
 
-@pytest.mark.parametrize('kind', ['commit', 'tree'])
+@mark.parametrize('kind', ['commit', 'tree'])
 def test_replacement_refs_preserve_unchanged_checkout(runtime, kind):
     repo, out = runtime
     baseline = scientific_fingerprint(repo)
@@ -2152,8 +2154,8 @@ def test_replacement_refs_preserve_unchanged_checkout(runtime, kind):
     assert git(repo, 'for-each-ref', 'refs/replace') == refs
 
 
-@pytest.mark.parametrize('kind', ['commit', 'blob'])
-@pytest.mark.parametrize('altered', [False, True])
+@mark.parametrize('kind', ['commit', 'blob'])
+@mark.parametrize('altered', [False, True])
 def test_builder_replacement_approvals(runtime, tmp_path, spec, kind, altered):
     repo, _ = runtime
     (repo / 'scripts').mkdir()
@@ -2198,12 +2200,12 @@ def run_stage(request):
     assert read_json(out / 'value.json') == {'value': 2}
     original = git(repo, 'rev-parse', 'HEAD')
     assert (out / 'code_commit.txt').read_text().strip() == original
-    assert StageRequest.from_json((out / '_execution/request.json').read_text()).code_identity == original
+    assert read_request(out).code_identity == original
     assert read_json(out / '_execution/identity.json')['head'] == original
     assert_exit(process, 1)
     result = read_stage_result(out)
     assert result.status == 'fail' and 'src/science.py' in result.message
-    with pytest.raises(ContractError, match='did not pass'):
+    with raises(ContractError, match='did not pass'):
         verify_dependency_result(out)
 
 

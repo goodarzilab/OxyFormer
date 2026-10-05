@@ -1,9 +1,5 @@
-"""Dispatch with immutable dependency states and attempt-owned outputs.
-
-Compare entries, types, modes, sizes, bytes and symlink targets after worker
-exit; ignore timestamps, inodes and restored transient changes. Failed receipts
-name changed inputs; downstream requests bind publication digests. Never repair
-upstream files. Managed writes stay in output_dir; general confinement is ARC-1339.
+"""Detect upstream state changes after worker exit; never repair upstream.
+Managed outputs are confined; general write prevention is deferred to ARC-1339.
 """
 import json
 import os
@@ -47,8 +43,6 @@ def read_mapping(path, *, expected_bytes=None):
     raw = read_regular(path)
     require(expected_bytes is None or raw == expected_bytes, f'input differs from HEAD: {path}')
     text = raw.decode('utf-8')
-    # JSON is also YAML syntax, but PyYAML's numeric resolver changes 1e-05
-    # into a string. Preserve canonical JSON types before considering YAML.
     try:
         value = json.loads(text)
     except json.JSONDecodeError:
@@ -139,8 +133,6 @@ def verify_dependency_recipe(root, lock):
     task_path = dependency_file(root, '_execution/task.json')
     require(file_hash(task_path) == request.task_hash, 'dependency task hash mismatch')
     task = read_mapping(task_path)
-    # Acquisition/design/lock producers run before the final recipe exists.
-    # Their immutable receipts remain valid across later scientific code merges.
     if not task.get('recipe_lock'):
         return [task_path]
     identity_path = dependency_file(root, '_execution/identity.json')
@@ -213,7 +205,6 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         task = {'id': settings.get('unit_id', stage), 'stage': stage, 'needs': settings.get('needs', {}),
                 'outputs': settings.get('outputs', [])}
     require(task.get('stage') == stage, 'task stage mismatch')
-    # Stage-required inputs cannot be removed by a selected shard/task.
     task.setdefault('needs', settings.get('needs', {}))
     task.setdefault('outputs', settings.get('outputs', []))
     for unit, paths in settings.get('needs', {}).items():
@@ -235,18 +226,12 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         require(isinstance(needs[unit], list) and needs[unit], 'dependency requires explicit files')
         for relative in needs[unit]:
             files.append(dependency_file(root, relative))
-        # Acquisition commands predate the common stage API and publish source
-        # receipts instead. Only the committed registry can declare that format;
-        # a task cannot exempt a failed/incomplete stage by omitting its receipt.
         acquisition_receipt = settings.get('acquisition_receipts', {}).get(unit)
         if acquisition_receipt is not None:
             require(acquisition_receipt in needs[unit], 'acquisition receipt must be a declared input')
-        # Every producer now seals its own attempt. An acquisition receipt
-        # describes source data but cannot replace the publication fingerprint.
         require((root / '_execution/result.json').is_file(), f'stage receipt missing or not regular: {root / "_execution/result.json"}')
         result = verify_dependency_result(root, trees=dependency_trees, verified=verified_dependencies,
                                           output_dir=out)
-        # Environment keys are wiring, never producer identity authority.
         verify_dependency_id(root, unit)
         published_hashes[root / FINGERPRINT] = next(
             a.sha256 for a in result.artifacts if a.path == FINGERPRINT)
@@ -264,7 +249,6 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         path = output_path(out, relative)
         require(not path.is_relative_to(repo), 'output overlaps cloned repository')
         require(not path.exists(), f'output already exists: {relative}')
-    # Execution directory is a once-only reservation; no in-place attempt resume.
     output_path(out, '_execution').mkdir()
     verify_continuation(task, deps)
     lock_ref = task.get('recipe_lock')
@@ -330,9 +314,6 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
                                  message='upstream attempt tainted; changed paths: ' + ', '.join(changed))
         else:
             try:
-                # Compare upstream types before the contract's byte hashing: an
-                # upstream regular file replaced by a FIFO must fail, never block.
-                # Flush our streams before checking any stage-declared log hash.
                 sys.stdout.flush()
                 sys.stderr.flush()
                 require(not collisions, 'reserved execution control collision: ' + ', '.join(collisions))
@@ -353,13 +334,10 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
             except BaseException as exc:
                 result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
                                      message=str(exc).strip() or type(exc).__name__)
-        # No status output after artifact validation: run.log may be an artifact.
         return publish_result(out, result, owned_controls=True)
     except BaseException as exc:
         message = 'stage finalization failed: ' + (str(exc).strip() or type(exc).__name__)
         if changed:
             message += '; upstream attempt tainted; changed paths: ' + ', '.join(changed)
-        # Execution already happened. Receipt I/O cannot turn failure into a
-        # missing-prerequisite status or hide the paths we detected in memory.
         print('failed: ' + message, file=sys.stderr)
         return StageResult(request_hash=request.content_hash, status='fail', artifacts=(), message=message)

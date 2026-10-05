@@ -10,6 +10,7 @@
 #SBATCH --gpus=1
 # Invoked by an already allocated worker; this script never submits work.
 set -euo pipefail
+export GIT_NO_REPLACE_OBJECTS=1
 : "${SWARM_UNIT_DIR:?}"
 : "${STAGE:?}"
 git clone --depth 1 --branch dev https://github.com/goodarzilab/OxyFormer.git "$SWARM_UNIT_DIR/src"
