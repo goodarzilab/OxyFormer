@@ -4,6 +4,7 @@ from dataclasses import replace
 from hashlib import sha256
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -976,3 +977,74 @@ def test_fresh_round2_exact_county_share_boundary_and_neighbors(case, direction)
         assert metric['D'] == 490/65536
         assert metric['s_max'] == .1
         assert metric['G_eff'] == pytest.approx(2450/29)
+
+
+@pytest.mark.parametrize('mode', ['shared', 'mismatched', 'alternate_approval', 'protected_output'])
+def test_installed_reporting_uses_repository_config_binding(produced_primary_case, tmp_path, monkeypatch, mode):
+    same_case, different_fit = produced_primary_case
+    b, m, receipts = same_case
+    if mode == 'mismatched':
+        b = replace(b, estimates=(b.estimates[0], different_fit))
+    request = make_request(tmp_path, (b, m, receipts), monkeypatch)
+    # Model an ordinary non-editable installation: package code is separate from
+    # the repository containing its externally frozen config and owner registry.
+    installed = tmp_path / 'venv/lib/python3.11/site-packages'
+    shutil.copytree(ROOT / 'src/oxyformer', installed / 'oxyformer',
+                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    repository = tmp_path / 'project'
+    config = repository / 'configs/reporting.yaml'
+    config.parent.mkdir(parents=True)
+    config.write_bytes(CONFIG.read_bytes())
+    task = json.loads(Path(request.task_path).read_text())
+    approved = config.with_name('approvals.yaml')
+    approved.write_bytes(Path(task['approvals']).read_bytes())
+    if mode == 'alternate_approval':
+        copied = tmp_path / 'copied-approvals.yaml'
+        copied.write_bytes(approved.read_bytes())
+        task['approvals'] = str(copied)
+    else:
+        task['approvals'] = str(approved)
+    Path(request.task_path).write_text(json.dumps(task))
+    request = replace(request, config_path=str(config), config_hash=file_hash(config),
+                      task_hash=file_hash(request.task_path), dependency_paths=tuple(task.values()),
+                      dependency_hashes=tuple(file_hash(p) for p in task.values()))
+    if mode == 'protected_output':
+        request = replace(request, output_dir=str(repository / 'src/report-output'))
+    request_path = tmp_path / 'installed-request.json'
+    request_path.write_text(request.to_json())
+    script = """
+import sys
+from pathlib import Path
+from oxyformer.contracts import StageRequest
+from oxyformer.reporting import stage
+assert Path(stage.__file__).resolve().is_relative_to(Path(sys.argv[2]).resolve())
+request = StageRequest.from_json(Path(sys.argv[1]).read_text())
+print(stage.run_stage(request).to_json())
+"""
+    completed = subprocess.run([sys.executable, '-c', script, str(request_path), str(installed)],
+                               cwd=tmp_path, env={**os.environ, 'PYTHONPATH': str(installed),
+                                                 'CUDA_VISIBLE_DEVICES': ''},
+                               capture_output=True, text=True, timeout=60)
+    assert completed.returncode == 0, completed.stderr
+    result = StageResult.from_json(completed.stdout)
+    if mode == 'protected_output':
+        assert result.status == 'fail'
+        assert not result.artifacts
+        assert not Path(request.output_dir).exists()
+        return
+    result.verify(request)
+    report = json.loads((Path(request.output_dir) / 'report.json').read_text())
+    if mode == 'alternate_approval':
+        assert result.status == 'fail'
+        assert not report['releasable']
+        assert any('approval path is not owner registry' in g['reason'] for g in report['gates'])
+        return
+    if mode == 'shared':
+        assert result.status == 'pass', report['gates']
+        assert report['state'] == 'released'
+    else:
+        assert result.status == 'fail'
+        assert_primary_input_failure(report, ['mtp_one_step', 'cv_tmle_identity'])
+    assert [e['method'] for e in report['estimators']] == ['mtp_one_step', 'cv_tmle_identity']
+    assert 'aligned_influence' in report['diagnostics']
+    assert 'overlap_by_seed' in report['diagnostics']
