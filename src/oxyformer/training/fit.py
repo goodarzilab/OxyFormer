@@ -28,6 +28,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from hashlib import sha256
+from fractions import Fraction
 import math
 from pathlib import Path
 import statistics
@@ -299,7 +300,7 @@ def _weight_unit(weights):
                        largest > math.sqrt(limits.max)) else 1.
 
 
-def _clip_gradient_norm(parameters, maximum):
+def _clip_gradient_norm(parameters, maximum, *, scale=1.):
     """Apply the registered cap without overflowing an FP32 norm reduction."""
     with torch.no_grad():
         gradients = [p.grad for p in parameters if p.grad is not None]
@@ -307,11 +308,52 @@ def _clip_gradient_norm(parameters, maximum):
             return
         norm = torch.stack([g.double().norm() for g in gradients]).norm()
         require(bool(torch.isfinite(norm)), "nonfinite nuisance gradients")
-        # Match clip_grad_norm_'s L2 rule and stabilizer. Form the products in
-        # FP64 too, then copy back to the original FP32 gradient storage.
-        factor = (maximum / (norm + 1e-6)).clamp(max=1.)
+        if norm == 0:
+            return
+        # For g_scaled = scale * g, this is exactly the registered rule
+        # g * min(1, maximum / (norm(g) + 1e-6)). Do not materialize an
+        # overflowing unscaled FP32 gradient, and scale the stabilizer too.
+        factor = torch.minimum(maximum / (norm + 1e-6 * scale),
+                               norm.new_tensor(scale).reciprocal())
         for gradient in gradients:
             gradient.copy_(gradient.double() * factor)
+
+
+def _backward_and_clip(loss, parameters, maximum):
+    """Retry backward on the same graph before committing a minibatch.
+
+    A finite FP64 loss can have derivatives exceeding FP32 storage before
+    clipping. Power-of-two scaling moves these derivatives into range. Keep
+    the forward graph (including its dropout masks); retries neither consume
+    RNG nor advance optimizer, scheduler, sampler, or checkpoint progress.
+    """
+    parameters = tuple(parameters)
+    # Span the FP64 exponent range in bounded steps. Ordinary batches use
+    # scale=1 and one backward pass; parameters/gradient storage stay FP32.
+    for exponent in range(0, 1025, 32):
+        scale = math.ldexp(1., -exponent)
+        for parameter in parameters:
+            parameter.grad = None
+        loss.backward(gradient=loss.new_tensor(scale), retain_graph=True)
+        if all(p.grad is None or bool(torch.isfinite(p.grad).all()) for p in parameters):
+            _clip_gradient_norm(parameters, maximum, scale=scale)
+            return scale
+    require(False, "nonfinite nuisance gradients after scaled backward")
+
+
+def _pooled_metrics(results):
+    """Order represented fold metrics without rounding away positive mass.
+
+    Reporting floats cannot distinguish every weighted score. Integer ratios
+    retain exact raw mass through checkpoints; Fraction compares the existing
+    finite metric values under the same weighted objective, without a cutoff
+    or tie tolerance. The caller keeps its loss/Brier/grid-index ordering.
+    """
+    masses = [Fraction(*result["mass_ratio"]) for result in results]
+    total = sum(masses)
+    require(total > 0, "inner evaluation pool has no target mass")
+    return tuple(sum(Fraction(r["metrics"][j]) * mass for r, mass in zip(results, masses)) / total
+                 for j in range(len(results[0]["metrics"])))
 
 
 def _outcome_loss(config, prediction, ids, *, reduction="sum", weight_unit=1.):
@@ -423,8 +465,7 @@ def _train_one(config, bundle, encoder_state, view, stopping, epochs, seed, budg
             # Dividing each batch by its own mass would optimize a different law.
             loss = loss * (len(view.original_ids) / (len(ids) * mass))
             require(bool(torch.isfinite(loss)), "nonfinite nuisance loss")
-            loss.backward()
-            _clip_gradient_norm(model.parameters(), config.settings.gradient_norm)
+            _backward_and_clip(loss, model.parameters(), config.settings.gradient_norm)
             optimizer.step()
             require(all(bool(torch.isfinite(p).all()) for p in model.parameters()),
                     "nonfinite nuisance parameters")
@@ -646,9 +687,6 @@ def _fit_controller(config, outer, manifest, identity, controller, root, budget)
     columns = tuple(name for name, _ in config.feature_kinds)
     all_view = config.data.covariates(columns)
     outer_ids = outer.training_ids(config.fold)
-    # All held-out masses use one unit, so pooled selection keeps the same
-    # endpoint law without overflowing totals or checkpoint scalar fields.
-    evaluation_mass_unit = _weight_unit(_inputs(config, outer_ids).origin_weights)
     tasks = []
     partitions = {}
     audits = {}
@@ -677,10 +715,7 @@ def _fit_controller(config, outer, manifest, identity, controller, root, budget)
                 candidates = []
                 for g in range(4):
                     values = [r for r in controller["results"] if r["kind"] == model_kind and r["grid"] == g]
-                    mass = sum(r["mass"] for r in values)
-                    require(mass > 0, "inner evaluation pool has no target mass")
-                    scores = tuple(sum(r["metrics"][j] * r["mass"] for r in values) / mass
-                                   for j in range(len(values[0]["metrics"])))
+                    scores = _pooled_metrics(values)
                     candidates.append((scores, g))
                 chosen = min(candidates)[1]
                 values = [r for r in controller["results"] if r["kind"] == model_kind and r["grid"] == chosen]
@@ -739,10 +774,12 @@ def _fit_controller(config, outer, manifest, identity, controller, root, budget)
                     metrics = ((float(_outcome_loss(config, predicted[:, 0], held, reduction="mean")),)
                                if kind == "outcome" else pair_metrics(predicted, metadata.origin_weights))
                 require(all(math.isfinite(m) for m in metrics), "nonfinite held-out factual loss")
+                mass_unit = _weight_unit(metadata.origin_weights)
+                exact_mass = sum(map(Fraction, metadata.origin_weights), Fraction())
                 result = dict(kind=kind, fold=fold, grid=grid, ids=held,
                     predictions=predicted.tolist(), metrics=metrics,
-                    mass=sum(w / evaluation_mass_unit for w in metadata.origin_weights),
-                    mass_unit=evaluation_mass_unit,
+                    mass=sum(w / mass_unit for w in metadata.origin_weights), mass_unit=mass_unit,
+                    mass_ratio=(exact_mass.numerator, exact_mass.denominator),
                     epochs=state["progress"]["best_epoch"], ownership=audits[fold].to_json())
                 if kind == "origin":
                     # With frozen epochs, an in-sample fitting score may choose
