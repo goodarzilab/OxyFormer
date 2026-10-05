@@ -1503,3 +1503,107 @@ def test_changing_fingerprint_to_fifo_cannot_skip_post_check(runtime, tmp_path, 
     assert result.status == 'fail' and str(source / '_execution/fingerprint.json') in result.message
     check = json.loads((out / '_execution/dependency_check.json').read_text())
     assert check['attempts'][str(source)]['status'] == 'tainted'
+
+
+@pytest.mark.parametrize('control', ['result.json', 'request.json'])
+def test_preflight_control_fifo_swap_is_nonblocking(runtime, tmp_path, control):
+    repo, _ = runtime
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'data.json').write_text('{}')
+    (source / 'receipts.json').write_text('{}')
+    publish_source_fixture(repo, source)
+    code = '''import os,sys
+from pathlib import Path
+from oxyformer.execution import runner
+from oxyformer.provenance import ContractError
+original = runner.dependency_file
+def swap(root, relative):
+    path = original(root, relative)
+    if relative == '_execution/' + sys.argv[2]:
+        path.unlink()
+        os.mkfifo(path)
+    return path
+runner.dependency_file = swap
+try:
+    runner.verify_dependency_result(Path(sys.argv[1]))
+except (ContractError, OSError) as exc:
+    print(exc)
+else:
+    raise AssertionError('FIFO accepted')
+'''
+    process = subprocess.run([sys.executable, '-c', code, str(source), control],
+                             env=dict(os.environ, PYTHONPATH=str(Path(__file__).parents[1] / 'src')),
+                             capture_output=True, text=True, timeout=3)
+    assert process.returncode == 0, process.stdout + process.stderr
+    assert control in process.stdout
+
+
+@pytest.mark.parametrize('relative', ['_execution/fingerprint.json', 'data.json'])
+def test_transitive_fifo_is_refused_before_input_hashing(runtime, tmp_path, monkeypatch, relative):
+    repo, middle = runtime
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'data.json').write_text('{}')
+    (source / 'receipts.json').write_text('{}')
+    publish_source_fixture(repo, source)
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
+    assert run('dummy', middle, repo, deps_env=True,
+               task_file=task_file(middle, needs={'data-unit': ['data.json', 'receipts.json']})).status == 'pass'
+    victim = source / relative
+    victim.unlink()
+    os.mkfifo(victim)
+    code = '''import sys
+from pathlib import Path
+from oxyformer.execution.runner import verify_dependency_result
+from oxyformer.provenance import ContractError
+try:
+    verify_dependency_result(Path(sys.argv[1]))
+except (ContractError, OSError) as exc:
+    print(exc)
+else:
+    raise AssertionError('changed ancestor accepted')
+'''
+    process = subprocess.run([sys.executable, '-c', code, str(middle)],
+                             env=dict(os.environ, PYTHONPATH=str(Path(__file__).parents[1] / 'src')),
+                             capture_output=True, text=True, timeout=3)
+    assert process.returncode == 0, process.stdout + process.stderr
+    assert relative in process.stdout
+
+
+def test_generated_collector_binds_each_expected_producer(runtime, tmp_path, monkeypatch):
+    repo, out = runtime
+    lock_task = locked_task(repo, out, tmp_path / 'lock', monkeypatch)
+    lock_ref = json.loads(lock_task.read_text())['recipe_lock']
+    spec = {'schema_version': 1, 'id': 'campaign-a', 'kind': 'screening',
+            'prerequisites': [], 'inputs': {'campaign-lock': ['recipe_lock.json']},
+            'recipe_lock': lock_ref,
+            'work': [{'id': name, 'stage': 'dummy', 'outputs': ['value.json'],
+                      'slices': [{'gpus': 0, 'wall_seconds': 60}]} for name in ['a', 'b']],
+            'collector': {'stage': 'dummy', 'outputs': ['summary.json'], 'wall_seconds': 60}}
+    plan = expand_campaign(spec, {})
+    other = expand_campaign(dict(spec, id='campaign-b'), {})
+    attempts = {}
+    for task in [*plan['tasks'][:-1], other['tasks'][0]]:
+        attempt = tmp_path / task['id']
+        attempt.mkdir()
+        (attempt / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+        task_path = attempt / 'input-task.json'
+        task_path.write_text(json.dumps(task))  # exact generated task, unedited
+        assert run('dummy', attempt, repo, deps_env=True, task_file=task_path).status == 'pass'
+        attempts[task['id']] = attempt
+    for unit in plan['expected_leaves']:
+        monkeypatch.setenv(dependency_variable(unit), str(attempts[unit]))
+    good_task = out / 'generated-collector.json'
+    good_task.write_text(json.dumps(plan['tasks'][-1]))
+    assert run('dummy', out, repo, deps_env=True, task_file=good_task).status == 'pass'
+    wrong = tmp_path / 'wrong-collector'
+    wrong.mkdir()
+    (wrong / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    wrong_task = wrong / 'generated-collector.json'
+    wrong_task.write_text(good_task.read_text())
+    monkeypatch.setenv(dependency_variable(plan['expected_leaves'][-1]),
+                       str(attempts[other['tasks'][0]['id']]))
+    with pytest.raises(ContractError, match='producer identity'):
+        run('dummy', wrong, repo, deps_env=True, task_file=wrong_task)
+    assert not (wrong / 'summary.json').exists()
