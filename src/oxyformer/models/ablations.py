@@ -152,6 +152,8 @@ def build_variant(variant_id, encoder, *, treatment_design, raw_x_dim, family="i
     """
     require(variant_id in VARIANTS, "unknown registered variant")
     variant = VARIANTS[variant_id]
+    if variant.correction == "signed_riesz":
+        require(origin_offsets is None, "signed Riesz correction does not support origin offsets")
     require(variant.status == "production_comparison", "variant is not a production nuisance configuration")
     needs_transformer = (variant.outcome in ("query", "early", "varying") or
                          variant.correction in ("origin", "early", "varying", "signed_riesz"))

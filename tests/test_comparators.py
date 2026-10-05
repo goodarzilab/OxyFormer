@@ -100,6 +100,13 @@ def backend(request, monkeypatch, tmp_path):
     env = tuple(sorted((name, icl.PACKAGE_PINS[cls.package] if name == cls.package else "fixture")
                        for name in ("python", *icl.RUNTIME_PACKAGES, cls.package)))
     monkeypatch.setattr(icl, "runtime_environment", lambda package: env)
+    # Replace the production registry with exact synthetic identities, never a
+    # public bypass of checkpoint validation or a real model download.
+    identities = frozenset((cls.package, icl.PACKAGE_PINS[cls.package], "fixture/models", "a"*40,
+                           f"{cls.package}-{role}-fixed.ckpt",
+                           sha256(b"synthetic checkpoint bytes only").hexdigest())
+                          for role in ("regressor", "classifier"))
+    monkeypatch.setattr(icl, "REGISTERED_CHECKPOINTS", identities)
     model = SimpleNamespace(weights=[1])
     loader_calls = []
     def load(path, **kwargs):
@@ -391,6 +398,9 @@ def test_configuration_labels_pins_and_nonproduction_registry(architecture):
     config = yaml.safe_load((root/'configs/models/foundations.yaml').read_text())
     assert config['offline_only'] and config['weight_semantics'] == 'unit_only'
     assert len(config['checkpoints']) == 4
+    assert icl.REGISTERED_CHECKPOINTS == frozenset(
+        tuple(item[field] for field in icl.CHECKPOINT_IDENTITY_FIELDS)
+        for item in config['checkpoints'].values())
     for item in config['checkpoints'].values():
         assert item['package_version'] == icl.PACKAGE_PINS[item['package']]
         assert len(item['sha256']) == 64 and len(item['revision']) == 40
@@ -615,3 +625,51 @@ def test_alternative_cap_uses_final_architecture(architecture, variant, expected
         with pytest.raises(ContractError, match='one-million-parameter cap'):
             type(model)(encoder, treatment_design=design, raw_x_dim=over_width,
                         county_context=context, dropout=0.)
+
+
+def test_unregistered_checkpoint_identity_blocks_before_fit(backend, fold, tmp_path):
+    model = backend[0]()
+    alternate = tmp_path / 'alternate-regressor.ckpt'
+    alternate.write_bytes(b'a different synthetic checkpoint')
+    fitted_before = len(MockEstimator.instances)
+    with pytest.raises(ContractError, match='unregistered checkpoint identity'):
+        checkpoint = replace(model.checkpoint, repository='fixture/alternate', revision='b'*40,
+                             filename=alternate.name, path=str(alternate),
+                             sha256=sha256(alternate.read_bytes()).hexdigest())
+        type(model)(checkpoint, task='outcome', family='identity', seed=11).fit_outcome(
+            fold[0], fold[2], 0, np.arange(4.), np.arange(4.),
+            sample_weight=np.ones(4), weight_semantics='unit')
+    assert len(MockEstimator.instances) == fitted_before
+
+
+@pytest.mark.parametrize('field,value', [
+    ('repository', 'fixture/alternate'), ('revision', 'b'*40), ('sha256', 'b'*64),
+    ('filename', 'alternate-regressor.ckpt'),
+])
+def test_checkpoint_registration_binds_each_identity_field(backend, field, value):
+    checkpoint = backend[0]().checkpoint
+    update = {field: value}
+    if field == 'filename':
+        update['path'] = str(Path(checkpoint.path).with_name(value))
+    with pytest.raises(ContractError, match='unregistered checkpoint identity'):
+        replace(checkpoint, **update)
+
+
+def test_signed_riesz_rejects_unused_origin_offsets(architecture, fold):
+    encoder, context, design = architecture
+    offsets = CountyOffsets(fold[2], 0, ('c',)*4, family='bernoulli',
+                            exposure_assignment_level='tract')
+    with pytest.raises(ContractError, match='signed Riesz.*offset'):
+        build_variant('A5', encoder, treatment_design=design, raw_x_dim=2,
+                      county_context=context, origin_offsets=offsets, dropout=0.)
+
+
+def test_selected_checkpoint_identities_accept_local_provisioning_paths(tmp_path):
+    config = yaml.safe_load((Path(__file__).parents[1]/'configs/models/foundations.yaml').read_text())
+    for item in config['checkpoints'].values():
+        environment = tuple((name, item['package_version'] if name == item['package'] else 'fixture')
+                            for name in ('python', *icl.RUNTIME_PACKAGES, item['package']))
+        identity = {field: item[field] for field in icl.CHECKPOINT_IDENTITY_FIELDS}
+        checkpoint = icl.Checkpoint(**identity, path=str(tmp_path/item['filename']), environment=environment)
+        assert checkpoint.path == str(tmp_path/item['filename'])
+        assert checkpoint.package_version == item['package_version']
