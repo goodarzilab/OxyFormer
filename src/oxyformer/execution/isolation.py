@@ -17,6 +17,8 @@ import signal
 import socket
 import stat
 import tempfile
+import time
+from contextlib import contextmanager
 
 from oxyformer.contracts import StageResult
 from oxyformer.provenance import require
@@ -174,27 +176,211 @@ def metadata_allowed(notification, writable_roots):
     return any(target.is_relative_to(root) for root in writable_roots)
 
 
-def service_notification(listener, writable_roots):
+class CleanupIncomplete(BaseException):
+    """Fatal boundary failure: callers must not verify or publish a receipt."""
+
+
+class NotificationTimeout(TimeoutError):
+    pass
+
+
+@contextmanager
+def alarm_budget(seconds):
+    """Bound a potentially blocking ioctl; admission reserves SIGALRM for us."""
+    if seconds is None:
+        yield
+        return
+    def expired(signum, frame):
+        raise NotificationTimeout('notification deadline')
+    previous = signal.signal(signal.SIGALRM, expired)
+    signal.siginterrupt(signal.SIGALRM, True)
+    signal.setitimer(signal.ITIMER_REAL, max(seconds, 0.000001))
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def service_notification(listener, writable_roots, deadline=None):
     libc = C.CDLL(None, use_errno=True)
     event = Notification()
     receive = 0xc0000000 | (C.sizeof(event) << 16) | (ord('!') << 8)
     send = 0xc0000000 | (C.sizeof(Response) << 16) | (ord('!') << 8) | 1
-    if libc.ioctl(listener, receive, C.byref(event)) < 0:
-        if C.get_errno() in (errno.ENOENT, errno.EINTR):
-            return
-        checked(-1)
+    # Readiness may go stale when a notified task exits or cancels its syscall.
+    # Linux does not promise O_NONBLOCK semantics for this ioctl.
+    budget = 0.05 if deadline is None else min(0.05, max(0, deadline - time.monotonic()))
     try:
-        allowed = metadata_allowed(event, writable_roots)
+        with alarm_budget(budget):
+            received = libc.ioctl(listener, receive, C.byref(event))
+        if received < 0:
+            if C.get_errno() in (errno.ENOENT, errno.EINTR):
+                return
+            checked(-1)
+    except NotificationTimeout:
+        if not event.id:
+            return
+        # A signal can arrive just after a valid message was copied. Do not
+        # abandon that message and leave its caller waiting forever.
+    try:
+        remaining = None if deadline is None else max(0, deadline - time.monotonic())
+        with alarm_budget(remaining):
+            allowed = metadata_allowed(event, writable_roots)
     except (OSError, ValueError):
         allowed = False
     response = Response(event.id, 0, 0 if allowed else -errno.EACCES, 1 if allowed else 0)
-    if libc.ioctl(listener, send, C.byref(response)) < 0 and C.get_errno() != errno.ENOENT:
-        checked(-1)
+    with alarm_budget(0.05 if deadline is None else max(0, deadline - time.monotonic())):
+        if libc.ioctl(listener, send, C.byref(response)) < 0 and C.get_errno() != errno.ENOENT:
+            checked(-1)
+
+
+def current_children():
+    return [int(pid) for pid in
+            Path(f'/proc/{os.getpid()}/task/{os.getpid()}/children').read_text().split()]
+
+
+def require_parent_ready():
+    """Read-only admission, before even launching repository-inspection helpers."""
+    require(platform.system() == 'Linux' and platform.machine() == 'x86_64',
+            'stage isolation requires Linux x86_64')
+    require(len(list(Path('/proc/self/task').iterdir())) == 1,
+            'stage supervisor requires a single-threaded parent')
+    require(not current_children(), 'stage supervisor requires a childless parent')
+    require(signal.getsignal(signal.SIGCHLD) == signal.SIG_DFL
+            and signal.getsignal(signal.SIGALRM) == signal.SIG_DFL
+            and signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+            and signal.SIGALRM not in signal.pthread_sigmask(signal.SIG_BLOCK, []),
+            'stage supervisor requires default unblocked signal handling')
+
+
+def supervise(parent, pid, writable_roots):
+    """Own transport and the entire descendant tree through final quiescence."""
+    parent.setblocking(False)
+    poller = select.poll()
+    poller.register(parent, select.POLLIN)
+    listener = None
+    initialized = False
+    socket_closed = False
+    buffer = bytearray()
+    candidate = None
+    worker_status = None
+    cleanup_started = None
+    problem = None
+    listener_active = True
+
+    def begin_cleanup():
+        nonlocal cleanup_started
+        if cleanup_started is None:
+            cleanup_started = time.monotonic()
+
+    try:
+        while True:
+            if cleanup_started is not None and time.monotonic() >= cleanup_started + 10:
+                raise CleanupIncomplete('stage process tree did not quiesce within 10 seconds')
+            # Admission guarantees every child belongs to this worker. ECHILD
+            # after reaping is kernel evidence of an empty adoption tree.
+            empty = False
+            while True:
+                try:
+                    reaped, status = os.waitpid(-1, os.WNOHANG)
+                except ChildProcessError:
+                    empty = True
+                    break
+                if reaped == 0:
+                    break
+                if reaped == pid:
+                    worker_status = status
+                    begin_cleanup()
+            read_data = False
+            if not socket_closed and problem is None:
+                try:
+                    data, controls, flags, _ = parent.recvmsg(65536, socket.CMSG_SPACE(4))
+                    require(not flags & socket.MSG_CTRUNC, 'truncated stage listener transfer')
+                    if not data:
+                        socket_closed = True
+                        poller.unregister(parent)
+                        begin_cleanup()
+                    else:
+                        read_data = True
+                        if not initialized:
+                            header, data = data[:1], data[1:]
+                            require(header in (b'L', b'R'), 'invalid stage protocol header')
+                            descriptors = array.array('i')
+                            for level, kind, value in controls:
+                                if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
+                                    descriptors.frombytes(value)
+                            if header == b'L':
+                                require(len(descriptors) == 1, 'stage listener missing')
+                                listener = descriptors[0]
+                                poller.register(listener, select.POLLIN)
+                            else:
+                                require(not descriptors, 'unexpected stage listener')
+                            initialized = True
+                        buffer.extend(data)
+                        if len(buffer) >= 8:
+                            size = int.from_bytes(buffer[:8], 'big')
+                            require(len(buffer) <= size + 8, 'extra stage protocol bytes')
+                            if len(buffer) == size + 8 and candidate is None:
+                                candidate = StageResult.from_json(bytes(buffer[8:]).decode())
+                                begin_cleanup()
+                except BlockingIOError:
+                    pass
+                except Exception as exc:
+                    problem = exc
+                    begin_cleanup()
+                    if not socket_closed:
+                        poller.unregister(parent)
+                        socket_closed = True
+            if empty and not read_data:
+                require(worker_status is not None, 'worker exit was not observed')
+                if problem is not None:
+                    raise problem
+                require(candidate is not None, 'worker exited with an incomplete result frame')
+                require(os.waitstatus_to_exitcode(worker_status) == 0,
+                        'stage worker terminated abnormally')
+                return candidate
+
+            deadline = None if cleanup_started is None else cleanup_started + 10
+            if cleanup_started is not None:
+                elapsed = time.monotonic() - cleanup_started
+                if elapsed >= 1:
+                    # These unreaped direct-child PIDs cannot be reused before
+                    # this single-threaded parent reaps them. Killing a parent
+                    # adopts its descendants; repeat, including setsid helpers.
+                    for child_pid in current_children():
+                        try:
+                            os.kill(child_pid, signal.SIGKILL if elapsed >= 2 else signal.SIGTERM)
+                        except ProcessLookupError:
+                            pass
+            timeout_ms = 50 if deadline is None else max(
+                0, min(50, int((deadline - time.monotonic()) * 1000)))
+            events = dict(poller.poll(timeout_ms))
+            if listener is not None and listener_active and listener in events:
+                if events[listener] & select.POLLHUP:
+                    poller.unregister(listener)
+                    listener_active = False
+                elif events[listener] & select.POLLIN:
+                    try:
+                        service_notification(listener, writable_roots, deadline)
+                    except Exception as exc:
+                        problem = exc
+                        begin_cleanup()
+                        poller.unregister(listener)
+                        listener_active = False
+    finally:
+        parent.close()
+        if listener is not None:
+            os.close(listener)
 
 
 def isolated_stage(request, invoke, dependency_roots):
     """Run a stage with unchanged request paths; return only a serialized result."""
     out = Path(request.output_dir)
+    try:
+        require_parent_ready()
+    except (OSError, ValueError) as exc:
+        return StageResult(request_hash=request.content_hash, status='blocked', artifacts=(),
+                           message=str(exc).strip() or type(exc).__name__)
     writable_roots = [out]
     # POSIX semaphores/shared memory are transient IPC, not output artifacts or
     # caches. Permit the host's tmpfs only when it cannot contain or hard-link
@@ -211,8 +397,18 @@ def isolated_stage(request, invoke, dependency_roots):
             path = Path(root) / name
             require(path.is_symlink() or path.stat().st_nlink == 1,
                     'hard-linked file in writable attempt')
+    libc = C.CDLL(None, use_errno=True)
+    old_subreaper = C.c_int()
+    checked(libc.prctl(37, C.byref(old_subreaper), 0, 0, 0))
+    checked(libc.prctl(36, 1, 0, 0, 0))
     parent, child = socket.socketpair()
-    pid = os.fork()
+    try:
+        pid = os.fork()
+    except BaseException:
+        parent.close()
+        child.close()
+        checked(libc.prctl(36, old_subreaper.value, 0, 0, 0))
+        raise
     if pid == 0:
         parent.close()
         ready = False
@@ -238,8 +434,6 @@ def isolated_stage(request, invoke, dependency_roots):
                     pass  # pipes and terminals cannot alias upstream files
             os.chdir(out)
             tempfile.tempdir = None  # discard the parent's cached /tmp choice
-            libc = C.CDLL(None, use_errno=True)
-            checked(libc.prctl(36, 1, 0, 0, 0))  # PR_SET_CHILD_SUBREAPER
             listener = restrict_writes(writable_roots)
             child.sendmsg([b'L'], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
                                    array.array('i', [listener]))])
@@ -252,66 +446,23 @@ def isolated_stage(request, invoke, dependency_roots):
                                  status='fail' if ready else 'blocked', artifacts=(),
                                  message=str(exc).strip() or type(exc).__name__)
         try:
-            # Reap ordinary children and orphaned descendants before the result
-            # is returned to the parent for artifact verification/publication.
-            while True:
-                try:
-                    os.waitpid(-1, 0)
-                except ChildProcessError:
-                    break
             if not ready:
                 child.sendall(b'R')
-            child.sendall(result.to_json().encode())
+            payload = result.to_json().encode()
+            child.sendall(len(payload).to_bytes(8, 'big') + payload)
         finally:
             child.close()
             os._exit(0)
     child.close()
-    listener = None
-    chunks = []
     try:
-        header, controls, _, _ = parent.recvmsg(1, socket.CMSG_SPACE(array.array('i').itemsize))
-        if header == b'L':
-            for level, kind, data in controls:
-                if level == socket.SOL_SOCKET and kind == socket.SCM_RIGHTS:
-                    descriptors = array.array('i')
-                    descriptors.frombytes(data)
-                    require(len(descriptors) == 1, 'unexpected worker listener count')
-                    listener = descriptors[0]
-            require(listener is not None, 'stage isolation listener missing')
-        else:
-            require(header == b'R', 'stage worker exited before initialization')
-        poller = select.poll()
-        poller.register(parent, select.POLLIN)
-        if listener is not None:
-            poller.register(listener, select.POLLIN)
-        while True:
-            events = dict(poller.poll())
-            if parent.fileno() in events:
-                data = parent.recv(65536)
-                if not data:
-                    break
-                chunks.append(data)
-            if listener is not None and listener in events:
-                # HUP means every restricted task has exited. RECV would block
-                # forever here: a readable notification fd is not always data.
-                if events[listener] & select.POLLHUP:
-                    poller.unregister(listener)
-                elif events[listener] & select.POLLIN:
-                    service_notification(listener, writable_roots)
-        _, status = os.waitpid(pid, 0)
-        require(os.waitstatus_to_exitcode(status) == 0, 'stage worker terminated abnormally')
-        return StageResult.from_json(b''.join(chunks).decode())
-    except BaseException:
-        try:
-            os.killpg(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        try:
-            os.waitpid(pid, 0)
-        except ChildProcessError:
-            pass
+        result = supervise(parent, pid, writable_roots)
+    except CleanupIncomplete:
+        # No verification or publication while writers may remain.
         raise
-    finally:
-        parent.close()
-        if listener is not None:
-            os.close(listener)
+    except BaseException:
+        if current_children():
+            raise CleanupIncomplete('supervision interrupted with live descendants')
+        checked(libc.prctl(36, old_subreaper.value, 0, 0, 0))
+        raise
+    checked(libc.prctl(36, old_subreaper.value, 0, 0, 0))
+    return result

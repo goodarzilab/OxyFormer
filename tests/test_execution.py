@@ -860,3 +860,285 @@ def test_executed_stage_exception_always_publishes_failure(runtime, monkeypatch,
     assert result.message
     receipt = StageResult.from_json((out / '_execution/result.json').read_text())
     assert receipt == result
+
+
+@pytest.mark.parametrize('name', ['config.json', 'task.json', 'request.json',
+                                  'environment.json', 'identity.json',
+                                  'code_commit.txt', 'result.json'])
+def test_parent_controls_cannot_be_replaced_by_stage(runtime, monkeypatch, name):
+    repo, out = runtime
+    def faulty(request):
+        result = dummy(request)
+        path = out / name if name == 'code_commit.txt' else out / '_execution' / name
+        path.write_text(result.to_json() if name == 'result.json' else 'corrupted control')
+        return result
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty))
+    result = run('dummy', out, repo, task_file=task_file(out))
+    assert result.status == 'fail'
+    assert StageResult.from_json((out / '_execution/result.json').read_text()).status == 'fail'
+    quarantine = list(out.glob('.execution-rejected-*'))
+    assert len(quarantine) == 1
+    preserved = quarantine[0] / (name if name == 'code_commit.txt' else 'entry/' + name)
+    if name == 'result.json':
+        assert StageResult.from_json(preserved.read_text()).status == 'pass'
+    else:
+        assert preserved.read_text() == 'corrupted control'
+    assert (out / 'code_commit.txt').read_text().strip() == git(repo, 'rev-parse', 'HEAD')
+    assert json.loads((out / '_execution/identity.json').read_text())['head'] == git(repo, 'rev-parse', 'HEAD')
+
+
+@pytest.mark.parametrize('operation', ['delete', 'replace', 'hardlink', 'mode',
+                                       'namespace_alias', 'namespace_external'])
+def test_control_namespace_rejection_preserves_external_targets(runtime, tmp_path, monkeypatch, operation):
+    repo, out = runtime
+    external = tmp_path / 'external'
+    external.mkdir()
+    (external / 'sentinel').write_text('unchanged')
+    def faulty(request):
+        result = dummy(request)
+        execution = out / '_execution'
+        path = execution / 'identity.json'
+        if operation == 'delete':
+            path.unlink()
+        elif operation == 'replace':
+            replacement = out / 'replacement'
+            replacement.write_bytes(path.read_bytes())
+            replacement.replace(path)
+        elif operation == 'hardlink':
+            os.link(path, out / 'identity-alias')
+        elif operation == 'mode':
+            path.chmod(0o400)
+        else:
+            execution.rename(out / 'moved-execution')
+            target = external if operation == 'namespace_external' else out / 'moved-execution'
+            execution.symlink_to(target, target_is_directory=True)
+            if operation == 'namespace_alias':
+                (execution / 'result.json').write_text(result.to_json())
+        return result
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty))
+    result = run('dummy', out, repo, task_file=task_file(out))
+    assert result.status == 'fail'
+    assert not (out / '_execution').is_symlink()
+    assert StageResult.from_json((out / '_execution/result.json').read_text()).status == 'fail'
+    assert list(out.glob('.execution-rejected-*'))
+    assert {p.name: p.read_text() for p in external.iterdir()} == {'sentinel': 'unchanged'}
+
+
+def test_forged_identity_producer_fails_and_consumer_rejects(runtime, tmp_path, monkeypatch):
+    repo, upstream = runtime
+    other = tmp_path / 'other-repo'
+    subprocess.run(['git', 'clone', '-q', '--no-hardlinks', str(repo), str(other)], check=True)
+    (other / 'src/science.py').write_text('changed\n')
+    other_head = commit(other)
+    other_fingerprint = scientific_fingerprint(other)
+    task = locked_task(repo, upstream, tmp_path / 'old-lock', monkeypatch)
+    def faulty(request):
+        result = dummy(request)
+        path = upstream / '_execution/identity.json'
+        value = json.loads(path.read_text())
+        value['scientific_fingerprint'] = other_fingerprint
+        path.write_text(json.dumps(value))
+        return result
+    with monkeypatch.context() as patch:
+        patch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty))
+        producer = run('dummy', upstream, repo, deps_env=True, task_file=task)
+    assert producer.status == 'fail'
+    evidence = next(upstream.glob('.execution-rejected-*/entry/identity.json'))
+    assert json.loads(evidence.read_text())['scientific_fingerprint'] == other_fingerprint
+    consumer = tmp_path / 'consumer'
+    consumer.mkdir()
+    (consumer / 'code_commit.txt').write_text(other_head)
+    selected = locked_task(other, consumer, tmp_path / 'new-lock', monkeypatch)
+    document = json.loads(selected.read_text())
+    document['needs']['upstream'] = ['value.json']
+    selected.write_text(json.dumps(document))
+    monkeypatch.setenv('SWARM_DEP_UPSTREAM', str(upstream))
+    with pytest.raises(ContractError, match='dependency stage did not pass'):
+        run('dummy', consumer, other, deps_env=True, task_file=selected)
+
+
+@pytest.mark.parametrize('zombie', [False, True])
+def test_parent_with_unrelated_child_is_rejected_without_reaping(runtime, zombie):
+    import time
+    repo, out = runtime
+    child = subprocess.Popen([sys.executable, '-c', '' if zombie else 'import time; time.sleep(30)'])
+    try:
+        if zombie:
+            deadline = time.monotonic() + 5
+            while Path(f'/proc/{child.pid}/stat').read_text().split(') ', 1)[1][0] != 'Z':
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+        with pytest.raises(ContractError, match='childless'):
+            run('dummy', out, repo, task_file=task_file(out))
+        if zombie:
+            assert os.waitpid(child.pid, os.WNOHANG) == (child.pid, 0)
+            child.returncode = 0
+        else:
+            assert child.poll() is None
+        assert not (out / 'value.json').exists()
+    finally:
+        if child.returncode is None:
+            child.terminate()
+            child.wait(timeout=5)
+
+
+def test_multithreaded_parent_is_rejected(runtime):
+    import threading
+    repo, out = runtime
+    stop = threading.Event()
+    thread = threading.Thread(target=stop.wait)
+    thread.start()
+    try:
+        with pytest.raises(ContractError, match='single-threaded'):
+            run('dummy', out, repo, task_file=task_file(out))
+        assert thread.is_alive()
+        assert not (out / 'value.json').exists()
+    finally:
+        stop.set()
+        thread.join()
+
+
+def test_unproved_cleanup_does_not_publish_receipt(runtime, monkeypatch):
+    from oxyformer.execution import runner
+    from oxyformer.execution.isolation import CleanupIncomplete
+    repo, out = runtime
+    def unproved(*args):
+        raise CleanupIncomplete('synthetic unresolved descendants')
+    monkeypatch.setattr(runner, 'isolated_stage', unproved)
+    with pytest.raises(CleanupIncomplete, match='unresolved descendants'):
+        run('dummy', out, repo, task_file=task_file(out))
+    assert not (out / '_execution/result.json').exists()
+
+
+def _publication_case(mode, root):
+    """Executed in a fresh, externally timed subprocess; all fixtures synthetic."""
+    import signal
+    import time
+    with pytest.MonkeyPatch.context() as patch:
+        repo, out = runtime.__wrapped__(root, patch)
+        notification_times = []
+        if mode == 'notification_timeout':
+            from oxyformer.execution import isolation
+            original_service = isolation.service_notification
+            def empty_receive(*args):
+                original_service(*args)
+                started = time.monotonic()
+                original_service(*args)  # eventually drains the pending queue
+                notification_times.append(time.monotonic() - started)
+            patch.setattr(isolation, 'service_notification', empty_receive)
+        def stage(request):
+            if mode == 'notification_timeout':
+                (out / 'owned').write_text('fixture')
+                (out / 'owned').chmod(0o600)
+                time.sleep(0.4)
+            elif mode == 'shared_memory':
+                from multiprocessing import shared_memory
+                memory = shared_memory.SharedMemory(create=True, size=4)
+                memory.buf[:] = b'test'
+                memory.close()
+                memory.unlink()
+            elif mode == 'spawn':
+                import multiprocessing
+                (out / 'spawn_fixture.py').write_text('def send(queue):\n    queue.put("fixture")\n')
+                sys.path.insert(0, str(out))
+                import spawn_fixture
+                context = multiprocessing.get_context('spawn')
+                queue = context.Queue()
+                child = context.Process(target=spawn_fixture.send, args=(queue,))
+                child.start()
+                assert queue.get(timeout=5) == 'fixture'
+                child.join(timeout=5)
+                assert child.exitcode == 0
+                queue.close()
+                queue.join_thread()
+            elif mode == 'eof_helper':
+                read_fd, write_fd = os.pipe()
+                helper = subprocess.Popen([sys.executable, '-c',
+                    'import os,sys; os.read(int(sys.argv[1]),1)', str(read_fd)], pass_fds=(read_fd,))
+                os.close(read_fd)
+                (out / 'helper-pid').write_text(str(helper.pid))
+                # The worker intentionally retains write_fd until its exit.
+            else:
+                child = os.fork()
+                if child == 0:
+                    try:
+                        if mode == 'detached':
+                            os.setsid()
+                            if os.fork():
+                                os._exit(0)
+                        if mode in ('stubborn', 'detached'):
+                            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                        (out / 'helper-pid').write_text(str(os.getpid()))
+                        if mode == 'late_writer':
+                            time.sleep(0.1)
+                            (out / '_execution/identity.json').write_text('late corruption')
+                        elif mode == 'metadata_helper':
+                            time.sleep(0.1)
+                            (out / 'helper-pid').chmod(0o600)
+                            (out / 'metadata-finished').write_text('yes')
+                        elif mode != 'joined':
+                            time.sleep(60)
+                    finally:
+                        os._exit(0)
+                limit = time.monotonic() + 5
+                while not (out / 'helper-pid').exists():
+                    assert time.monotonic() < limit
+                    time.sleep(0.01)
+                if mode == 'joined':
+                    os.waitpid(child, 0)
+                if mode == 'aborted_worker':
+                    os._exit(3)
+            return dummy(request)
+        patch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=stage))
+        started = time.monotonic()
+        result = run('dummy', out, repo, task_file=task_file(out))
+        elapsed = time.monotonic() - started
+        assert elapsed < 10, (mode, elapsed)
+        expected = 'fail' if mode in ('late_writer', 'aborted_worker') else 'pass'
+        assert result.status == expected, (mode, result.status, result.message)
+        pid_file = out / 'helper-pid'
+        if pid_file.exists():
+            assert not Path('/proc', pid_file.read_text()).exists(), 'helper survived publication'
+        if mode == 'metadata_helper':
+            assert (out / 'metadata-finished').read_text() == 'yes'
+        if mode == 'notification_timeout':
+            assert any(0.02 <= value < 0.25 for value in notification_times), notification_times
+            assert max(notification_times) < 0.25
+        assert not Path(f'/proc/{os.getpid()}/task/{os.getpid()}/children').read_text().strip()
+        print(json.dumps({'mode': mode, 'status': result.status, 'elapsed_seconds': elapsed}), flush=True)
+
+
+@pytest.mark.parametrize('mode', ['shared_memory', 'spawn', 'joined', 'eof_helper',
+                                  'inherited_socket', 'stubborn', 'detached',
+                                  'late_writer', 'metadata_helper', 'aborted_worker',
+                                  'notification_timeout'])
+def test_parent_publication_lifecycle_completes_without_live_helpers(tmp_path, mode):
+    import signal
+    script = ('import runpy,sys; from pathlib import Path; '
+              'runpy.run_path(sys.argv[1])["_publication_case"](sys.argv[2],Path(sys.argv[3]))')
+    process = subprocess.Popen([sys.executable, '-c', script, str(Path(__file__).resolve()),
+                                mode, str(tmp_path)], stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True, start_new_session=True)
+    try:
+        output, _ = process.communicate(timeout=20)
+    except subprocess.TimeoutExpired:
+        # Kill only this fixture's observed process tree, including setsid helpers.
+        descendants = []
+        def collect(pid):
+            try:
+                children = Path(f'/proc/{pid}/task/{pid}/children').read_text().split()
+            except FileNotFoundError:
+                return
+            for child in map(int, children):
+                collect(child)
+                descendants.append(child)
+        collect(process.pid)
+        for pid in [*descendants, process.pid]:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        output, _ = process.communicate(timeout=5)
+        pytest.fail(f'{mode} exceeded external 20-second timeout: {output}')
+    assert process.returncode == 0, output
+    print(output, end='')

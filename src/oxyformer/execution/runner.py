@@ -16,8 +16,9 @@ import yaml
 from oxyformer.contracts import StageRequest, StageResult
 from oxyformer.provenance import ContractError, file_hash, relative_artifact_path, require
 from .identity import code_identity, environment_record, scientific_fingerprint, verify_recipe
-from .isolation import isolated_stage
+from .isolation import isolated_stage, require_parent_ready
 from .paths import atomic_json, atomic_write, isolated_caches, output_path
+from .publication import ControlRecords
 
 
 def dependency_variable(unit_id):
@@ -115,6 +116,7 @@ def verify_continuation(task, deps):
 
 
 def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, approvals=None):
+    require_parent_ready()
     out = Path(out).absolute()
     require(out.is_dir() and not out.is_symlink(), 'output must be an existing attempt directory')
     out = out.resolve(strict=True)
@@ -229,7 +231,9 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     atomic_write(out, '_execution/request.json', request.to_json())
     environment = environment_record()
     atomic_json(out, '_execution/environment.json', environment)
-    atomic_json(out, '_execution/identity.json', {'head': head, 'scientific_fingerprint': scientific_fingerprint(repo)})
+    fingerprint = scientific_fingerprint(repo)
+    atomic_json(out, '_execution/identity.json', {'head': head, 'scientific_fingerprint': fingerprint})
+    controls = ControlRecords(out)
     try:
         request.verify_inputs()
         module_name = settings.get('module')
@@ -246,6 +250,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
 
         with isolated_caches(out):
             result = isolated_stage(request, invoke, tuple(deps.values()))
+        controls.verify()
         require(isinstance(result, StageResult), 'stage did not return StageResult')
         result.verify(request)
         require(all(not (out / a.path).resolve().is_relative_to(repo) for a in result.artifacts),
@@ -256,9 +261,23 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
             require(declared <= {a.path for a in result.artifacts}, 'stage omitted declared outputs')
         for path, digest in sources.items():
             require(file_hash(path) == digest, f'input source changed: {path}')
-        code_identity(repo, out)
+        require(code_identity(repo, out) == head, 'code identity changed during execution')
+        require(scientific_fingerprint(repo) == fingerprint, 'scientific fingerprint changed during execution')
     except Exception as exc:
         result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
                              message=str(exc).strip() or type(exc).__name__)
-    atomic_write(out, '_execution/result.json', result.to_json())
-    return result
+    except BaseException:
+        controls.close()
+        raise
+    try:
+        try:
+            controls.verify()
+        except Exception as exc:
+            message = str(exc).strip() or type(exc).__name__
+            controls.reject(message)
+            result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
+                                 message='rejected execution controls: ' + message)
+        atomic_write(out, '_execution/result.json', result.to_json())
+        return result
+    finally:
+        controls.close()
