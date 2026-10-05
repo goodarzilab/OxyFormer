@@ -27,7 +27,12 @@ publication store, never in the read-only acquisition. Direct and transitive
 consumers check that baseline and retain the normal post-execution change check
 and permanent taint marker. All other dependencies still require a published
 passing StageResult. Observed changes remain tainted even after restoration,
-including when another consumer detects the write during execution. YAML dates
+including when another consumer detects the write during execution. Shared
+readers and request hash checks retain observed namespace or byte differences
+after acquisition admission, including worker-side request verification. A
+transient read error refuses that check but does not permanently taint an
+unchanged acquisition; entries hidden by failed directory enumeration are
+unknown, not evidence of deletion. Request fields and hashes are unchanged. YAML dates
 retain their scalar spelling in the runner's JSON config, recorded as
 `yaml_timestamp_policy: preserve_scalar_text`; original approval bytes and hashes
 remain bound unchanged.

@@ -297,9 +297,12 @@ class StageRequest(Immutable):
                 "code identity must be a full commit hash")
 
     def verify_inputs(self) -> None:
+        # Share acquisition observations with runner/worker preflight without
+        # changing the request schema or the caller's hashing semantics.
+        from oxyformer.execution.integrity import verify_input_hash
         for path, digest in zip((self.config_path, self.task_path) + self.dependency_paths,
                                 (self.config_hash, self.task_hash) + self.dependency_hashes):
-            require(file_hash(path) == digest, f"input hash mismatch: {path}")
+            verify_input_hash(path, digest, hash_file=file_hash)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
