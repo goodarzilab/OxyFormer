@@ -120,19 +120,7 @@ at most three times, requiring every recorded entry, byte, mode and size to matc
 the original observation. It never replaces the content baseline to obtain a
 pass, and upstream fingerprinting does not use these retries.
 
-Final dependency checks persist each observed difference before checking another
-root, retaining exact paths even if a later authority operation fails. DEM
-inspection uses the same receipt observation helper. Authority lookup I/O errors
-propagate rather than pretending a baseline or taint marker is absent. Taint
-writes and the final publication-authority commit share a short external lock;
-the commit checks every direct and transitive dependency marker under that lock.
-Archive hashing and scientific work run outside the lock.
-DEM payload inspection verifies the whole payload digest and keeps one stable
-file observation open across member/header inspection, including validation
-errors. An initial invalid member digest still refuses without claiming a
-mutation; a payload change before or during inspection leaves permanent taint.
-Shared readers prepare their immutable acquisition binding before reading and
-retain it across nested checks, so later authority I/O cannot erase an observed
-change. Byte/digest comparisons run before later stability checks. GDAL reads
-member headers through the verified payload descriptor via /proc/self/fd, never
-through a separately reopened acquisition pathname.
+Readers retain acquisition bindings across I/O. Final checks persist each
+difference immediately. Authority I/O errors propagate; taint and publication
+commits share a lock. DEM inspection checks its payload hash and stable stream
+even on refusal; GDAL reads the verified descriptor.
