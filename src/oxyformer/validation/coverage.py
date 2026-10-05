@@ -383,7 +383,11 @@ def run_stage(request: StageRequest) -> StageResult:
             "lock_hash": digest(lock) if lock else None, "batch_id": parameters.get("batch_id"),
             "scenario": scenario.to_dict()["payload"], "draws": draws, "records": records, "summary": summary,
             "certifies_production_coverage": False}
-        stamps = fingerprint()
+        # Locked execution already verified this fingerprint in load_lock.
+        # Repeating the full checkout/environment scan would add an unprofiled
+        # second scan to every locked leaf.
+        stamps = ({k: lock[k] for k in ("scientific_fingerprint", "environment_hash")}
+                  if lock else fingerprint())
         timing = {"wall_seconds": time.monotonic() - started, "gpu_seconds": 0., "device": "cpu",
             "production_equivalent": production, "recipe_hash": digest(recipe),
             "complete_repetition_seconds": [seconds for r, seconds in zip(records, repetition_seconds) if r["status"] == "success"],

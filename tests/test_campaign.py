@@ -269,3 +269,22 @@ def test_lock_accounts_for_measured_setup_overhead(tmp_path, seconds, status):
     assert result.status == status
     if status == "blocked":
         assert "infeasible batch budget" in result.message
+
+
+def test_locked_leaf_profiles_the_environment_only_once(tmp_path, monkeypatch):
+    root, lock, plans = locked(tmp_path)
+    leaf = plans[1]["tasks"][0]
+    screen_id = plans[0]["tasks"][-1]["id"]
+    screening = tmp_path / "screening"
+    write(screening / "gate.json", {"pass": True, "mode": "screening", "lock_hash": coverage.digest(lock)})
+    req = request(tmp_path / "leaf-request", leaf, {"campaign-lock": root, "inputs": tmp_path / "inputs", screen_id: screening})
+    calls = []
+    def stamp():
+        calls.append(1)
+        return deepcopy(STAMPS)
+    monkeypatch.setattr(campaign, "fingerprint", stamp)
+    monkeypatch.setattr(coverage, "estimate_repetition", lambda *args:
+        {method: {"value": 0., "se": 1.} for method in coverage.METHODS})
+    result = coverage.run_stage(req)
+    assert result.status == "pass", result.message
+    assert calls == [1]  # Same single fingerprint cost as the production profile.
