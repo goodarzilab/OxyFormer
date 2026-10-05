@@ -1,7 +1,12 @@
 """Common stage CLI. Import scientific modules only after validating a request."""
+import sys
+
+if __name__ == '__main__' and not sys.dont_write_bytecode:
+    print('blocked: bytecode-disabled startup required; use python -B with PYTHONDONTWRITEBYTECODE=1', file=sys.stderr)
+    raise SystemExit(2)
+
 import argparse
 import subprocess
-import sys
 
 
 def main(argv=None):

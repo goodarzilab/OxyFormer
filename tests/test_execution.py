@@ -44,6 +44,10 @@ def assert_exit(process, expected):
     assert process.returncode == expected, process.stdout + process.stderr
 
 
+def assert_pass(result):
+    assert result.status == 'pass', result.message
+
+
 def dependency_check(out):
     return read_json(out / '_execution/dependency_check.json')
 
@@ -204,6 +208,11 @@ def make_source_fixture(repo, source, monkeypatch=None):
     if monkeypatch is not None:
         monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     return source
+
+
+@pytest.fixture
+def source(runtime, tmp_path, monkeypatch):
+    return make_source_fixture(runtime[0], tmp_path / 'source', monkeypatch)
 
 
 def seal_source_fixture(repo, source):
@@ -439,7 +448,8 @@ def test_campaign_reproducible_bounded_and_merge_barriers(spec):
         assert 'git clone --depth 1 --branch dev' in command
         assert 'PYTHONPATH="$SWARM_UNIT_DIR/src/src"' in command
         assert 'cd "$SWARM_UNIT_DIR/src"' in command
-        assert 'envs/oxyformer/bin/python -m oxyformer.cli run-stage' in command
+        assert 'envs/oxyformer/bin/python -B -m oxyformer.cli run-stage' in command
+        assert 'export PYTHONDONTWRITEBYTECODE=1' in command
         assert not any(token in command for token in ['sbatch ', 'srun ', 'crontab ', 'systemctl ', 'release_lock'])
     first, second = plan['tasks'][:2]
     assert second['continuation']['predecessor'] == first['id']
@@ -632,16 +642,29 @@ def test_safe_tar_dot_prefix_does_not_hide_traversal_or_duplicates(tmp_path):
         assert not (tmp_path / f'unpacked-{index}').exists()
 
 
-def test_cli_import_from_pristine_repo_keeps_code_roots_clean(runtime, tmp_path):
+@pytest.mark.parametrize('entrypoint', ['module', 'script'])
+@pytest.mark.parametrize('disabled', [True, False])
+def test_cli_import_from_pristine_repo_keeps_code_roots_clean(runtime, tmp_path, entrypoint, disabled):
     repo, out = runtime
+    script = repo / 'scripts/run_stage.py'
+    script.parent.mkdir()
+    shutil.copyfile(ROOT / 'scripts/run_stage.py', script)
     prepare_cli_fixture(repo, out, 'run_stage = dummy\n')
     task = task_file(out)
     env = fixture_env(repo)
+    command = [sys.executable, *(['-B'] if disabled else [])]
+    command += ['-m', 'oxyformer.cli', 'run-stage'] if entrypoint == 'module' else [str(script)]
+    if not disabled:
+        env.pop('PYTHONDONTWRITEBYTECODE', None)
     with (out / 'run.log').open('w') as log:
-        process = subprocess.run([sys.executable, '-m', 'oxyformer.cli', 'run-stage',
-                                  '--stage', 'dummy', '--repo', str(repo), '--out', str(out),
+        process = subprocess.run([*command, '--stage', 'dummy', '--repo', str(repo), '--out', str(out),
                                   '--task', str(task)], cwd=tmp_path, env=env, text=True,
                                  stdout=log, stderr=subprocess.STDOUT)
+    if not disabled:
+        assert process.returncode == 2
+        assert 'bytecode-disabled startup' in (out / 'run.log').read_text()
+        assert not (out / '_execution').exists() and not (out / 'value.json').exists()
+        return
     assert process.returncode == 0, (out / 'run.log').read_text()
     assert not list((repo / 'src/oxyformer').rglob('*.pyc'))
     assert git(repo, 'status', '--porcelain', '--untracked-files=all') == ''
@@ -979,9 +1002,8 @@ def test_post_execution_check_names_proc_fd_chmod(runtime, tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize('when', ['before-consumer', 'during-consumer'])
-def test_transitive_upstream_metadata_cannot_escape_detection(runtime, tmp_path, monkeypatch, when):
+def test_transitive_upstream_metadata_cannot_escape_detection(runtime, tmp_path, monkeypatch, when, source):
     repo, middle = runtime
-    source = make_source_fixture(repo, tmp_path / 'source', monkeypatch)
     assert run_task(repo, middle, id='middle', needs=SOURCE_NEEDS).status == 'pass'
     later = tmp_path / 'later'
     initialize_attempt(repo, later)
@@ -1036,9 +1058,8 @@ def test_unsealed_acquisition_cannot_become_a_new_baseline(runtime, tmp_path, mo
     assert not (source / '_execution').exists()
 
 
-def test_restored_upstream_state_is_identical_under_fingerprint_contract(runtime, tmp_path, monkeypatch):
+def test_restored_upstream_state_is_identical_under_fingerprint_contract(runtime, tmp_path, monkeypatch, source):
     repo, out = runtime
-    source = make_source_fixture(repo, tmp_path / 'source', monkeypatch)
     victim = source / 'data.json'
     def faulty(request):
         original = victim.read_bytes()
@@ -1049,7 +1070,7 @@ def test_restored_upstream_state_is_identical_under_fingerprint_contract(runtime
     install_stage(monkeypatch, repo, faulty)
     result = run_task(repo, out, needs=SOURCE_NEEDS)
     # Fingerprints compare input states, not a history of transient writes.
-    assert result.status == 'pass', result.message
+    assert_pass(result)
     assert victim.read_bytes() == b'{}'
 
 
@@ -1082,9 +1103,8 @@ def test_preflight_cannot_rebase_a_changed_dependency(runtime, tmp_path, monkeyp
 
 
 @pytest.mark.parametrize('record_index', [0, -1])
-def test_rewritten_upstream_result_is_rejected_by_later_consumers(runtime, tmp_path, monkeypatch, record_index):
+def test_rewritten_upstream_result_is_rejected_by_later_consumers(runtime, tmp_path, monkeypatch, record_index, source):
     repo, out = runtime
-    source = make_source_fixture(repo, tmp_path / 'source', monkeypatch)
     def faulty(request):
         result = dummy(request)
         record = source / '_execution/result.json'
@@ -1120,7 +1140,7 @@ def test_tempfile_cache_does_not_cross_attempts(runtime, tmp_path, monkeypatch):
     later = tmp_path / 'later'
     initialize_attempt(repo, later)
     result = run_task(repo, later, deps_env=False)
-    assert result.status == 'pass', result.message
+    assert_pass(result)
 
 
 def test_cli_rejects_modules_imported_from_another_checkout(runtime, tmp_path):
@@ -1150,9 +1170,8 @@ def test_forty_leaf_limit_includes_cpu_slices(spec):
 
 
 @pytest.mark.parametrize('name', ['_execution/result.json', '_execution/fingerprint.json'])
-def test_late_publication_control_modes_are_verified(runtime, tmp_path, monkeypatch, name):
+def test_late_publication_control_modes_are_verified(runtime, tmp_path, monkeypatch, name, source):
     repo, out = runtime
-    source = make_source_fixture(repo, tmp_path / 'source', monkeypatch)
     path = source / name
     path.chmod(path.stat().st_mode ^ 0o100)
     with pytest.raises(ContractError, match='fingerprint mismatch'):
@@ -1209,9 +1228,8 @@ def test_cli_undeclared_outside_write_fails(runtime, tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize('control', ['result.json', 'fingerprint.json'])
-def test_identical_control_rewrite_accepts_later_consumers(runtime, tmp_path, monkeypatch, control):
+def test_identical_control_rewrite_accepts_later_consumers(runtime, tmp_path, monkeypatch, control, source):
     repo, out = runtime
-    source = make_source_fixture(repo, tmp_path / 'source', monkeypatch)
     victim = source / '_execution' / control
     def faulty(request):
         result = dummy(request)
@@ -1219,7 +1237,7 @@ def test_identical_control_rewrite_accepts_later_consumers(runtime, tmp_path, mo
         return result
     install_stage(monkeypatch, repo, faulty)
     result = run_task(repo, out, needs=SOURCE_NEEDS)
-    assert result.status == 'pass', result.message
+    assert_pass(result)
     later = tmp_path / 'later'
     initialize_attempt(repo, later)
     install_stage(monkeypatch, repo, dummy)
@@ -1241,9 +1259,8 @@ def run_stage(request):
 
 
 @pytest.mark.parametrize('worker_kind', ['thread', 'subprocess'])
-def test_cli_waits_for_background_mutation_before_post_check(runtime, tmp_path, monkeypatch, worker_kind):
+def test_cli_waits_for_background_mutation_before_post_check(runtime, tmp_path, monkeypatch, worker_kind, source):
     repo, out = runtime
-    source = make_source_fixture(repo, tmp_path / 'source', monkeypatch)
     victim = source / 'data.json'
     monkeypatch.setenv('FIXTURE_WORKER_KIND', worker_kind)
     # Delay publication outside the stage to expose its unjoined worker.
@@ -1287,9 +1304,8 @@ def run_stage(request):
 
 @pytest.mark.parametrize('operation', ['rewrite_restore_mtime', 'copy2'])
 @pytest.mark.parametrize('control', ['result.json', 'fingerprint.json'])
-def test_control_rewrites_bind_fingerprinted_properties_only(runtime, tmp_path, monkeypatch, operation, control):
+def test_control_rewrites_bind_fingerprinted_properties_only(runtime, tmp_path, monkeypatch, operation, control, source):
     repo, out = runtime
-    source = make_source_fixture(repo, tmp_path / 'source', monkeypatch)
     victim = source / '_execution' / control
     before = victim.stat()
     def faulty(request):
@@ -1304,7 +1320,7 @@ def test_control_rewrites_bind_fingerprinted_properties_only(runtime, tmp_path, 
         return result
     install_stage(monkeypatch, repo, faulty)
     result = run_task(repo, out, needs=SOURCE_NEEDS)
-    assert result.status == 'pass', result.message
+    assert_pass(result)
     assert victim.stat().st_mtime_ns == before.st_mtime_ns
     assert victim.stat().st_ctime_ns != before.st_ctime_ns
     later = tmp_path / 'later'
@@ -1334,11 +1350,9 @@ def test_control_rewrites_bind_fingerprinted_properties_only(runtime, tmp_path, 
         run_task(repo, refused, needs=SOURCE_NEEDS)
 
 
-def test_nested_worker_mutation_cannot_outlive_publication(runtime, tmp_path, monkeypatch):
+def test_nested_worker_mutation_cannot_outlive_publication(runtime, tmp_path, monkeypatch, source):
     repo, out = runtime
-    source = make_source_fixture(repo, tmp_path / 'source', monkeypatch)
     victim = source / 'data.json'
-    # Capture waits for the finite grandchild after its parent exits.
     body = '''import subprocess
 import sys
 def run_stage(request):
@@ -1368,9 +1382,8 @@ def run_stage(request):
     assert verify_dependency_result(out).status == 'pass'
 
 
-def test_changed_fingerprint_fifo_is_refused_without_blocking(runtime, tmp_path, monkeypatch):
+def test_changed_fingerprint_fifo_is_refused_without_blocking(runtime, tmp_path, monkeypatch, source):
     repo, out = runtime
-    source = make_source_fixture(repo, tmp_path / 'source', monkeypatch)
     victim = source / '_execution/fingerprint.json'
     def faulty(request):
         result = dummy(request)
@@ -1420,9 +1433,8 @@ def run_stage(request):
     assert verify_dependency_result(out).status == 'pass'
 
 
-def test_changing_fingerprint_to_fifo_cannot_skip_post_check(runtime, tmp_path, monkeypatch):
+def test_changing_fingerprint_to_fifo_cannot_skip_post_check(runtime, tmp_path, monkeypatch, source):
     repo, out = runtime
-    source = make_source_fixture(repo, tmp_path / 'source', monkeypatch)
     process = run_cli_fixture(repo, out, """def run_stage(request):
     result = dummy(request)
     victim = Path(os.environ['SWARM_DEP_DATA_UNIT']) / '_execution/fingerprint.json'
@@ -1465,9 +1477,8 @@ else:
 
 
 @pytest.mark.parametrize('relative', ['_execution/fingerprint.json', 'data.json'])
-def test_transitive_fifo_is_refused_before_input_hashing(runtime, tmp_path, monkeypatch, relative):
+def test_transitive_fifo_is_refused_before_input_hashing(runtime, tmp_path, monkeypatch, relative, source):
     repo, middle = runtime
-    source = make_source_fixture(repo, tmp_path / 'source', monkeypatch)
     assert run_task(repo, middle, id='middle', needs=SOURCE_NEEDS).status == 'pass'
     victim = source / relative
     victim.unlink()
@@ -1718,7 +1729,6 @@ def test_builder_refuses_modified_checkout_approvals(runtime, tmp_path, spec, ki
     spec.update(id='unapproved', kind=kind)
     spec_file = tmp_path / 'spec.json'
     spec_file.write_text(json.dumps(spec))
-    # Only this synthetic checkout's approvals are modified, never owner data.
     (repo / 'configs/approvals.yaml').write_text(yaml.safe_dump({
         'schema_version': 1, 'approved_by': 'fixture', 'owner_decisions': {
             'campaign_allocations': {'unapproved': {'kind': kind, 'gpu_hours': 9}}}}))
@@ -1819,9 +1829,8 @@ def test_stage_cannot_change_persisted_control_identity(runtime, monkeypatch, co
 @pytest.mark.parametrize('control', ['dependency_check.json', 'result.json', 'fingerprint.json', '_execution'])
 @pytest.mark.parametrize('kind', ['file', 'fifo', 'directory', 'symlink'])
 @pytest.mark.parametrize('mutate', [False, True])
-def test_reserved_receipt_collision_preserves_upstream_failure(runtime, tmp_path, monkeypatch, control, kind, mutate):
+def test_reserved_receipt_collision_preserves_upstream_failure(runtime, tmp_path, monkeypatch, control, kind, mutate, source):
     repo, out = runtime
-    source = make_source_fixture(repo, tmp_path / 'source', monkeypatch)
     victim = source / 'data.json'
     def faulty(request):
         result = dummy(request)
@@ -1880,9 +1889,8 @@ def test_unwritable_control_directory_cannot_suppress_upstream_receipts(runtime,
 
 
 @pytest.mark.parametrize('receipt', ['dependency_check.json', 'result.json'])
-def test_receipt_write_error_after_execution_is_failed_with_changed_paths(runtime, tmp_path, monkeypatch, receipt):
+def test_receipt_write_error_after_execution_is_failed_with_changed_paths(runtime, tmp_path, monkeypatch, receipt, source):
     repo, out = runtime
-    source = make_source_fixture(repo, tmp_path / 'source', monkeypatch)
     entrypoint = """import sys
 from oxyformer.execution import runner, integrity
 from oxyformer.cli import main
@@ -1948,13 +1956,12 @@ def test_read_only_isolated_cache_is_an_honest_passing_stage(runtime, monkeypatc
         return result
     install_stage(monkeypatch, repo, cached)
     result = run_task(repo, out, deps_env=False)
-    assert result.status == 'pass', result.message
+    assert_pass(result)
 
 
 @pytest.mark.parametrize('location', ['upstream', 'cache'])
-def test_deep_tree_preserves_detection_and_publication(runtime, tmp_path, monkeypatch, location):
+def test_deep_tree_preserves_detection_and_publication(runtime, tmp_path, monkeypatch, location, source):
     repo, out = runtime
-    source = make_source_fixture(repo, tmp_path / 'source', monkeypatch)
     created = []
     def stage(request):
         result = dummy(request)
@@ -1977,7 +1984,7 @@ def test_deep_tree_preserves_detection_and_publication(runtime, tmp_path, monkey
             with pytest.raises(ContractError, match='fingerprint mismatch'):
                 verify_dependency_result(source)
         else:
-            assert result.status == 'pass', result.message
+            assert_pass(result)
             assert verify_dependency_result(out) == result
     finally:
         for path in reversed(created):

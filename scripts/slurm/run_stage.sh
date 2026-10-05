@@ -13,4 +13,4 @@ args=(--stage "$STAGE" --repo "$SWARM_UNIT_DIR/src" --out "$SWARM_UNIT_DIR" --de
       --approvals "$SWARM_UNIT_DIR/src/configs/approvals.yaml")
 if [[ -n "${TASK_MANIFEST:-}" ]]; then args+=(--task "$TASK_MANIFEST"); fi
 if [[ -n "${TASK_ID:-}" ]]; then args+=(--task-id "$TASK_ID"); fi
-exec /mnt/weka/home/hgoodarzi/envs/oxyformer/bin/python -m oxyformer.cli run-stage "${args[@]}" > "$SWARM_UNIT_DIR/run.log" 2>&1
+exec /mnt/weka/home/hgoodarzi/envs/oxyformer/bin/python -B -m oxyformer.cli run-stage "${args[@]}" > "$SWARM_UNIT_DIR/run.log" 2>&1

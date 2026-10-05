@@ -77,7 +77,7 @@ def stage_command(task):
         'export PYTHONPATH="$SWARM_UNIT_DIR/src/src"',
         'cd "$SWARM_UNIT_DIR/src"',
         f'printf %s {encoded} > "$SWARM_UNIT_DIR/task.json"',
-        f'exec {PYTHON} -m oxyformer.cli run-stage --stage {shlex.quote(task["stage"])} '
+        f'exec {PYTHON} -B -m oxyformer.cli run-stage --stage {shlex.quote(task["stage"])} '
         '--repo "$SWARM_UNIT_DIR/src" --out "$SWARM_UNIT_DIR" --deps-env '
         f'--task "$SWARM_UNIT_DIR/task.json" --task-id {shlex.quote(task["id"])} '
         '--approvals "$SWARM_UNIT_DIR/src/configs/approvals.yaml" > "$SWARM_UNIT_DIR/run.log" 2>&1',
