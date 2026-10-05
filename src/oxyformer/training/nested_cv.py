@@ -29,7 +29,7 @@ from oxyformer.data.entity_graph import EntityGraph
 from oxyformer.data.loaders import LoadedData, validate_split
 from oxyformer.design.eligibility import GeographyTable
 from oxyformer.design.policies import PolicyCovariates, ShiftOrStayPolicy, paired_records
-from oxyformer.design.splits import InnerSplit, tract_count
+from oxyformer.design.splits import InnerSplit, dependence_groups, tract_count
 from oxyformer.execution.paths import atomic_json, output_path
 from oxyformer.models.ablations import VARIANTS, build_variant
 from oxyformer.models.county_context import CountyContext
@@ -48,7 +48,7 @@ from oxyformer.training.checkpoint import (CheckpointArtifact, CheckpointRequest
 from oxyformer.training.fit import (FitConfig, FoldArtifacts, NuisanceSettings,
     subset, _inputs, _values, _partition, _weight_unit, _outcome_loss, _origin_loss,
     _backward_and_clip, _pooled_metrics, _bundle, _lineage, _tensor_state)
-from oxyformer.training.pretrain import (StatefulSampler, SSLSettings, environment_identity,
+from oxyformer.training.pretrain import (StatefulSampler, SSLSettings, PretrainConfig, pretrain, environment_identity,
     fit_preprocessing)
 
 SEEDS = (1103, 2207, 3301)
@@ -83,43 +83,12 @@ class PreparedEndpoint(Immutable):
     population_field: str | None = None
 
     def validate(self, fold):
-        manifest = self.data.manifest
-        validate_split(self.outer, manifest, self.entity_graph)
-        require(self.outer.level == "outer" and set(self.outer.fold_ids) == set(range(5)),
-                "five outer geographic folds required")
-        require(self.outer.seed_ids == SEEDS, "registered seeds required")
-        require(type(fold) is int and fold in range(5), "invalid outer fold")
-        require(self.geography.data_manifest_hash == manifest.content_hash,
-                "geographic data identity mismatch")
-        rows = {row.original_id: row for row in self.geography.rows}
-        require(set(rows) == set(manifest.original_ids), "geographic coverage mismatch")
-        routes = dict(zip(manifest.original_ids, self.data.county_routing(self.county_field)))
-        require(all(routes[i] == r.county for i, r in rows.items()), "county route mismatch")
         require(len({i.outer_fold for i in self.inner}) == len(self.inner), "duplicate inner parent")
         inners = {i.outer_fold: i for i in self.inner}
         require(fold in inners, "missing inner split")
-        counties = {rows[i].county for i in self.outer.original_ids}
-        for county in counties:
-            require({f for i, f in zip(self.outer.original_ids, self.outer.fold_ids)
-                     if rows[i].county == county} == set(range(5)), "outer folds must be within counties")
-        for oid in self.outer.original_ids:
-            require(rows[oid].label_available and rows[oid].outcome_flag == 1,
-                    "modeled or unavailable labels forbidden")
         inner = inners[fold]
-        validate_split(inner.split, inner.data_manifest, inner.entity_graph)
-        require(inner.split.seed_ids == SEEDS and set(inner.split.fold_ids) == {0, 1, 2},
-                "three inner geographic folds required")
-        training = self.outer.training_ids(fold)
-        require(set(inner.data_manifest.original_ids) == set(training), "inner escapes outer training")
-        for county in counties:
-            require(tract_count([rows[i] for i in training], county) >= 8,
-                    "fewer than eight outer-training tracts")
-            for f in range(3):
-                require(tract_count([rows[i] for i in inner.split.training_ids(f)], county) >= 4,
-                        "fewer than four inner-fitting tracts")
-                require(any(rows[i].county == county and g == f
-                            for i, g in zip(inner.split.original_ids, inner.split.fold_ids)),
-                        "inner folds must be within counties")
+        _validate_geography(self.data, self.entity_graph, self.outer, inner,
+                            self.geography, self.county_field, fold)
         return inner
 
     def configuration(self, fold, output_dir, **kwargs):
@@ -133,27 +102,81 @@ class PreparedEndpoint(Immutable):
         return config
 
 
-def _check_fitting_minima(config, outer, geography):
-    """Apply the frozen minima to the records actually used after stopping."""
-    manifest = config.data.manifest
+def _whole_groups(groups, assignments):
+    for group in groups:
+        present = set(group).intersection(assignments)
+        if present:
+            require(present == set(group) and len({assignments[i] for i in group}) == 1,
+                    "geographic component crosses fitting partitions")
+
+
+def _split_assignments(split):
+    assignments = dict(zip(split.original_ids, split.fold_ids))
+    assignments.update((oid, "design") for oid in split.design_ids)
+    assignments.update((oid, "excluded") for oid in split.excluded_ids)
+    return assignments
+
+
+def _validate_geography(data, graph, outer, inner, geography, county_field, fold, stopping_ids=()):
+    """One geographic contract for adapters, direct calls, and stopping.
+
+    Use the design producer's transitive closure over entity links, tract,
+    assignment geography and subblock. EntityGraph alone is not that closure.
+    """
+    manifest = data.manifest
+    validate_split(outer, manifest, graph)
+    require(outer.level == "outer" and set(outer.fold_ids) == set(range(5)),
+            "five outer geographic folds required")
+    require(outer.seed_ids == SEEDS, "registered seeds required")
+    require(type(fold) is int and fold in range(5), "invalid outer fold")
+    require(inner.outer_fold == fold, "wrong inner parent fold")
+    validate_split(inner.split, inner.data_manifest, inner.entity_graph)
+    manifest.spec.assert_compatible(inner.split.spec)
+    require(inner.split.level == "inner" and inner.split.seed_ids == SEEDS and
+            set(inner.split.fold_ids) == {0, 1, 2}, "three inner geographic folds required")
+    training = outer.training_ids(fold)
+    require(set(inner.data_manifest.original_ids) == set(training), "inner escapes outer training")
+    for field in ("schema", "registry", "sources", "id_field", "outcome_field", "exposure_field", "weight_field"):
+        require(getattr(inner.data_manifest, field) == getattr(manifest, field), "inner data identity mismatch")
     require(type(geography) is GeographyTable and geography.data_manifest_hash == manifest.content_hash,
             "geography must bind the fitting manifest")
     rows = {row.original_id: row for row in geography.rows}
     require(set(rows) == set(manifest.original_ids), "geographic coverage mismatch")
-    routes = dict(zip(manifest.original_ids, config.data.county_routing(config.county_field)))
+    routes = dict(zip(manifest.original_ids, data.county_routing(county_field)))
     require(all(rows[i].county == routes[i] for i in rows), "county route mismatch")
     require(all(rows[i].outcome_flag == 1 and rows[i].label_available for i in outer.original_ids),
             "modeled or unavailable labels forbidden")
+    groups = dependence_groups(geography.rows, graph)
+    _whole_groups(groups, _split_assignments(outer))
+    _whole_groups(groups, _split_assignments(inner.split))
     counties = {rows[i].county for i in outer.original_ids}
     for county in counties:
-        require(tract_count([rows[i] for i in outer.training_ids(config.fold)], county) >= 8,
+        require({f for i, f in zip(outer.original_ids, outer.fold_ids) if rows[i].county == county}
+                == set(range(5)), "outer folds must be within counties")
+        require(tract_count([rows[i] for i in training], county) >= 8,
                 "fewer than eight outer-training tracts")
-    for fold in range(3):
-        _, ids, _ = _partition(config, config.inner.split, fold,
-                                 stopping=dict(config.stopping_ids).get(fold, ()))
+        require({f for i, f in zip(inner.split.original_ids, inner.split.fold_ids) if rows[i].county == county}
+                == {0, 1, 2}, "inner folds must be within counties")
+    stops = dict(stopping_ids)
+    require(len(stops) == len(stopping_ids) and set(stops) <= {0, 1, 2}, "invalid stopping folds")
+    for inner_fold in range(3):
+        allowed = set(inner.split.training_ids(inner_fold))
+        stopping = tuple(stops.get(inner_fold, ()))
+        require(len(set(stopping)) == len(stopping) and set(stopping) < allowed,
+                "stopping records must be inside the fitting partition")
+        ids = allowed - set(stopping)
+        assignments = _split_assignments(inner.split)
+        assignments.update((i, "fit" if i in ids else "stop") for i in allowed)
+        _whole_groups(groups, assignments)
         for county in counties:
             require(tract_count([rows[i] for i in ids], county) >= 4,
                     "fewer than four inner-fitting tracts after stopping reservation")
+    return groups
+
+
+def _check_fitting_minima(config, outer, geography):
+    return _validate_geography(config.data, config.entity_graph, outer, config.inner,
+                               geography, config.county_field, config.fold, config.stopping_ids)
 
 
 def _build(bundle, *, encoder_state=None):
@@ -342,10 +365,39 @@ def _train_transaction(config, bundle, encoder_state, view, stopping, epochs, se
     return model, state, complete, reason
 
 
-# Keep the merged SSL numerical and checkpoint contract.
-fitting_module_ssl = fitting._ssl
+# Merged SSL numerical/checkpoint algorithm with design-owned stopping groups.
+def _grouped_ssl(config, split, fitting, view, root, seed, budget, predecessor, geographic_groups):
+    groups = [g for g in geographic_groups if set(g) <= set(fitting)]
+    require(len(groups) >= 2, "SSL needs two independent fitting components")
+    # A deterministic component draw, shared by all later transformed copies.
+    stop = min(groups, key=lambda group: digest([seed, group, "ssl-stopping"]))
+    settings = SSLSettings(fold=0, feature_kinds=config.feature_kinds, families=config.families,
+                          max_epochs=config.ssl_epochs, stopping_ids=stop)
+    remaining = (None if config.max_batches is None else config.max_batches - budget.batches)
+    seconds = max(.01, config.slice_seconds - (time.monotonic() - budget.started))
+    ssl_config = PretrainConfig(settings=settings, output_dir=str(root),
+        predecessor=predecessor, stop_request=budget.request, max_batches=remaining,
+        slice_seconds=seconds, checkpoint_margin_seconds=min(config.checkpoint_margin_seconds, seconds / 2))
+    artifact = pretrain(subset(view, fitting, use="ssl"), split, ssl_config, seed)
+    # SSL validation transactions are also charged to the enclosing slice.
+    state = load_checkpoint(artifact, artifact.identity)
+    before = load_checkpoint(predecessor, predecessor.identity) if predecessor else None
+    def transactions(saved):
+        if saved is None:
+            return 0
+        progress = saved["progress"]
+        size = len(saved["stopping_ids"])
+        count = progress["step"] + progress["epoch"] * math.ceil(size / settings.batch_size)
+        if progress["phase"] == "validation" and progress["validation_cursor"] < size:
+            count += math.ceil(progress["validation_cursor"] / settings.batch_size)
+        return count
+    budget.batches += transactions(state) - transactions(before)
+    return artifact
 
-def _advance(config, outer, manifest, identity, controller, root, budget, variant):
+
+fitting_module_ssl = _grouped_ssl
+
+def _advance(config, outer, manifest, identity, controller, root, budget, variant, groups):
     columns = tuple(name for name, _ in config.feature_kinds)
     all_view = config.data.covariates(columns)
     outer_ids = outer.training_ids(config.fold)
@@ -404,7 +456,7 @@ def _advance(config, outer, manifest, identity, controller, root, budget, varian
                 controller["counts"]["ssl_fits"] += 1
             artifact = (_scratch(config, local, fitting, all_view, root / f"preprocess-{fold}", identity.seed)
                         if variant == "A1" else fitting_module_ssl(config, local, fitting, all_view,
-                            root / f"ssl-{fold}", identity.seed, budget, pending))
+                            root / f"ssl-{fold}", identity.seed, budget, pending, groups))
             if not artifact.complete:
                 controller["ssl_pending"] = artifact.to_json()
                 return controller, False, artifact.reason
@@ -487,13 +539,13 @@ def run_fold(config, outer, seed, *, geography, variant="A0"):
     require(variant in TRANSFORMER_VARIANTS, "variant needs a compatible resumable nuisance adapter")
     manifest = config.data.manifest
     allowed = fitting._validate(manifest.spec, outer, manifest, config, seed)
-    _check_fitting_minima(config, outer, geography)
+    groups = _check_fitting_minima(config, outer, geography)
     destination = Path(config.output_dir)
     require(not any(p.is_symlink() for p in (destination, *destination.parents)),
             "symlink in fitting output path")
     with fitting._numerics():
         identity = fitting._science_identity(config, outer, manifest, seed, allowed)
-        identity = replace(identity, config_hash=digest([identity.config_hash, variant]))
+        identity = replace(identity, config_hash=digest([identity.config_hash, variant, geography.content_hash]))
         controller = dict(position=0, initializations={}, ssl_pending=None, active=None,
             results=[], final={}, selection=None, calibration=None,
             counts={"ssl_fits": 0, "nuisance_fits": 0, "batches": 0},
@@ -511,7 +563,7 @@ def run_fold(config, outer, seed, *, geography, variant="A0"):
         cpu_started = time.process_time()
         with request.signals():
             controller, complete, reason = _advance(config, outer, manifest, identity,
-                controller, root, budget, variant)
+                controller, root, budget, variant, groups)
         controller["counts"]["batches"] += budget.batches
         controller["compute"]["wall_seconds"] += time.monotonic() - budget.started
         controller["compute"]["cpu_seconds"] += time.process_time() - cpu_started

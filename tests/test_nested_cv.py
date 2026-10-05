@@ -307,3 +307,66 @@ def test_controller_preserves_frozen_split_identity(tmp_path):
     artifact = nested.run_fold(tiny_config(prepared, tmp_path / "work", max_batches=1),
         outer, 1103, geography=prepared.geography)
     assert artifact.split.content_hash == outer.content_hash
+
+
+@pytest.mark.parametrize("level", ["outer", "inner"])
+def test_repeated_tract_cannot_cross_folds(tmp_path, level):
+    prepared = endpoint(tmp_path)
+    source_id, repeated_id = (("o00", "o06") if level == "outer" else ("o06", "o08"))
+    original = next(r for r in prepared.geography.rows if r.original_id == source_id)
+    geography = replace(prepared.geography, rows=tuple(
+        replace(original, original_id=repeated_id) if row.original_id == repeated_id else row
+        for row in prepared.geography.rows))
+    changed = replace(prepared, geography=geography)
+    with pytest.raises(ContractError, match="geographic component"):
+        tiny_config(changed, tmp_path / "work")
+
+
+def test_direct_controller_rejects_global_county_partition(tmp_path):
+    prepared = endpoint(tmp_path)
+    routes = {oid: "A" if j < 18 else "B" for j, oid in enumerate(prepared.data.manifest.original_ids)}
+    data = replace(prepared.data, rows=tuple(row[:4] + (routes[row[0]],) + row[5:] for row in prepared.data.rows))
+    geography = replace(prepared.geography, rows=tuple(replace(row, county=routes[row.original_id])
+        for row in prepared.geography.rows))
+    # Bypass PreparedEndpoint.configuration exactly as in the reported direct API case.
+    config = replace(make_case(tmp_path / "work")[-1], data=data, max_batches=1)
+    with pytest.raises(ContractError, match="within counties"):
+        nested.run_fold(config, prepared.outer, 1103, geography=geography)
+    assert not (tmp_path / "work").exists()
+
+
+def geographic_stopping_endpoint(root):
+    """A valid split whose geographic groups are larger than entity links."""
+    prepared = endpoint(root)
+    inner = prepared.inner[0]
+    ids = inner.split.training_ids(0)
+    groups = [g for g in prepared.entity_graph.components() if set(g) <= set(ids)]
+    stop = min(groups, key=lambda group: nested.digest([1103, group, "ssl-stopping"]))
+    outer_folds = dict(zip(prepared.outer.original_ids, prepared.outer.fold_ids))
+    other = next(g for g in groups if g != stop and outer_folds[g[0]] == outer_folds[stop[0]])
+    inner_folds = dict(zip(inner.split.original_ids, inner.split.fold_ids))
+    split = replace(inner.split, fold_ids=tuple(inner_folds[stop[0]] if i in other else inner_folds[i]
+                                               for i in inner.split.original_ids))
+    row = next(r for r in prepared.geography.rows if r.original_id == stop[0])
+    geography = replace(prepared.geography, rows=tuple(
+        replace(row, original_id=other[0]) if r.original_id == other[0] else r
+        for r in prepared.geography.rows))
+    return replace(prepared, inner=(replace(inner, split=split),), geography=geography), stop
+
+
+def test_ssl_stopping_preserves_geographic_components(tmp_path):
+    from oxyformer.design.splits import dependence_groups
+    prepared, _ = geographic_stopping_endpoint(tmp_path)
+    artifact = nested.run_fold(tiny_config(prepared, tmp_path / "work", max_batches=1),
+        prepared.outer, 1103, geography=prepared.geography)
+    pending = CheckpointArtifact.from_json(state(artifact)["ssl_pending"])
+    saved = load_checkpoint(pending, pending.identity)
+    for group in dependence_groups(prepared.geography.rows, prepared.entity_graph):
+        assert not (set(group).intersection(saved["fitting_ids"]) and
+                    set(group).intersection(saved["stopping_ids"])), "SSL splits a geographic component"
+
+
+def test_nuisance_stopping_preserves_geographic_components(tmp_path):
+    prepared, stop = geographic_stopping_endpoint(tmp_path)
+    with pytest.raises(ContractError, match="geographic component"):
+        tiny_config(prepared, tmp_path / "work", stopping_ids=((0, stop),))
