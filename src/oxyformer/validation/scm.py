@@ -36,18 +36,33 @@ REGISTERED_NUMERIC_BOX = MappingProxyType({
 SIGNED_QUANTITIES = frozenset({"dose", "coefficient", "coordinate", "covariate",
                                "paired_c", "paired_tau", "intervention_dose"})
 NUMERIC_MARGIN = 100.
-_expanded_numeric_box = {
-    name: ((-NUMERIC_MARGIN*max(abs(lo), abs(hi)), NUMERIC_MARGIN*max(abs(lo), abs(hi)))
-           if name in SIGNED_QUANTITIES else (lo/NUMERIC_MARGIN, hi*NUMERIC_MARGIN))
-    for name, (lo, hi) in REGISTERED_NUMERIC_BOX.items()
-}
+def _expanded_bounds(name, bounds):
+    # The margin is mathematical, not a nearest-rounded approximation to 100x.
+    # Direct both endpoints outward so the declared binary bounds contain it.
+    lo, hi = map(Fraction, bounds)
+    margin = Fraction(NUMERIC_MARGIN)
+    if name in SIGNED_QUANTITIES:
+        radius = margin*max(abs(lo), abs(hi))
+        lo, hi = -radius, radius
+    else:
+        lo, hi = lo/margin, hi*margin
+    lower, upper = float(lo), float(hi)
+    if Fraction(lower) > lo:
+        lower = float(np.nextafter(lower, -np.inf))
+    if Fraction(upper) < hi:
+        upper = float(np.nextafter(upper, np.inf))
+    return lower, upper
+
+
+_expanded_numeric_box = {name: _expanded_bounds(name, bounds)
+                         for name, bounds in REGISTERED_NUMERIC_BOX.items()}
 # Wider, independently exercised axes retain the inherited stress regressions.
 # They do NOT widen beta/confounding coefficients or the positive shift floor.
 # Pair coefficients/doses use exact rational intervention arithmetic, unlike
 # nonlinear SCM responses. No attempt to support every float64 box is made.
 _expanded_numeric_box.update({
     "dose": (-10010., 10010.),
-    # Recorded dose includes the maximum signed exposure error of 40.
+    # Binary64 recorded endpoints include the outward-rounded error bound near 40.
     "recorded_exposure": (-10050., 10050.),
     "near_scale": (float(np.nextafter(0., 1.)), 1000.),
     "weight": (float(np.nextafter(0., 1.)), 1.7e308),
@@ -315,6 +330,7 @@ class LatentState:
             object.__setattr__(self, name, binary64_scalar(getattr(self, name), name))
         require(self.local in (-1., 0., 1.) and self.regional in (-1., 0., 1.)
                 and self.illness in (0., 1.), "invalid latent causes")
+        numeric_scalar(self.error, "latent exposure error")
         validate_numeric(abs(self.error), "exposure_error", "latent exposure error", allow_zero=True)
         factor = self.denominator_factor
         if not isinstance(factor, Fraction):

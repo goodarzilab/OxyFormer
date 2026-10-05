@@ -21,7 +21,7 @@
 # Fixed numeric input domain; no clipping, rescaling, or computation outside it.
 # Start with the smallest per-quantity box for the 14 registered recipes plus
 # the exact-location pair and shared reference inputs. Widen every magnitude
-# bound by AT LEAST 100x. Zero remains valid for signed quantities and disabled
+# bound by AT LEAST 100x using exact expansion and outward binary rounding. Zero remains valid for signed quantities and disabled
 # mechanisms, zero weights and identity shifts. Probability constraints still
 # apply. Wider axes retain the inherited successful numerical stress tests:
 # tiny near scales/weights use scaled/log arithmetic; paired interventions use
@@ -118,7 +118,7 @@ numeric_domain:
     - -10010.0
     - 10010.0
     delta:
-    - 0.02
+    - 0.019999999999999997
     - 200.0
     near_scale:
     - 5.0e-324
@@ -127,20 +127,20 @@ numeric_domain:
     - -200.0
     - 200.0
     noise_sd:
-    - 0.01
+    - 0.009999999999999998
     - 100.0
     exposure_error:
     - 0.004
-    - 40.0
+    - 40.00000000000001
     migration:
-    - 0.02
+    - 0.019999999999999997
     - 200.0
     registration_probability:
-    - 0.006500000000000001
+    - 0.0065
     - 100.0
     denominator_error:
     - 0.002
-    - 20.0
+    - 20.000000000000004
     coordinate:
     - -1000.0
     - 1000.0

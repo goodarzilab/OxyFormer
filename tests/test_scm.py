@@ -2198,3 +2198,29 @@ def test_sixth_tail_floor_and_binary64_display_are_separate():
     assert sample.observed_law_truth.value == sample.structural_causal_truth.value == 0.
     assert sample.integration_uncertainty.quadrature_tail_absolute_bound == np.nextafter(0., 1.)
     assert sample.integration_uncertainty.converged
+
+
+@pytest.mark.parametrize('value', [True, False, 1j, np.complex64(1j)])
+def test_sixth_round1_latent_error_type_is_checked_before_absolute_value(value):
+    with pytest.raises(ContractError, match='latent exposure error.*numeric'):
+        LatentState(error=value)
+
+
+@pytest.mark.parametrize('kind', ['delta', 'noise_sd', 'migration', 'registration_probability',
+                                  'exposure_error', 'denominator_error'])
+def test_sixth_round1_magnitude_expansion_rounds_outward(kind):
+    from fractions import Fraction
+    from oxyformer.validation.scm import NUMERIC_DOMAIN, REGISTERED_NUMERIC_BOX, validate_numeric
+    lower, upper = NUMERIC_DOMAIN[kind]
+    registered_lower, registered_upper = map(Fraction, REGISTERED_NUMERIC_BOX[kind])
+    assert Fraction(lower) <= registered_lower/100
+    assert Fraction(upper) >= registered_upper*100
+    nearest = float(registered_lower/100)
+    admitted = np.nextafter(nearest, 0.) if Fraction(nearest) > registered_lower/100 else nearest
+    validate_numeric(admitted, kind, kind)
+    if kind == 'exposure_error':
+        assert float(Fraction(NUMERIC_DOMAIN['dose'][1])+Fraction(upper)) == 10050.
+    if kind == 'delta':
+        config().validate_policy(policy(delta=float(admitted)), frame(1, 1))
+    else:
+        config(**{kind: admitted})
