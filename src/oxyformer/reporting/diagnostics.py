@@ -7,7 +7,7 @@ import numpy as np
 
 from oxyformer.contracts import source_lineage_hash
 from oxyformer.estimation.covariance import AlignedInfluence, align_estimates, cluster_covariance, spatial_sensitivities
-from oxyformer.provenance import nonempty, require
+from oxyformer.provenance import ContractError, canonical_json, nonempty, require
 from oxyformer.reporting.records import CV_TMLE_METHODS
 from oxyformer.validation.overlap import overlap_report
 
@@ -127,7 +127,7 @@ def summarize(bundle, manifest):
     one = estimates.get("mtp_one_step")
     confirmations = [e for name, e in estimates.items() if name in CV_TMLE_METHODS]
     differences = {e.method: e.value - one.value for e in confirmations} if one else {}
-    return {"sources": [asdict(s) for s in bundle.sources], "target": asdict(bundle.spec),
+    result = {"sources": [asdict(s) for s in bundle.sources], "target": asdict(bundle.spec),
             "attrition": [{"step": name, "remaining": count} for name, count in bundle.attrition],
             "seed_ids": list(bundle.seed_ids), "seed_interpretation": "Scores and influence averaged by original observation; seeds are not replications.",
             "balance_basis_id": bundle.balance_basis_id, "overlap_by_seed": overlap,
@@ -136,3 +136,12 @@ def summarize(bundle, manifest):
             "information_formula": CONCENTRATION_FORMULA, "information": information,
             "sensitivities": sensitivities, "cv_tmle_minus_one_step": differences,
             "agreement_rule": "External agreement review required; material disagreement triggers investigation, never favorable-result selection."}
+
+    # Finite inputs do not ensure finite derived differences. Validate the
+    # complete diagnostic record before attaching it to a release decision or
+    # a refusal report, whose authenticated estimates must remain publishable.
+    try:
+        canonical_json(result)
+    except (ValueError, OverflowError) as exc:
+        raise ContractError("nonfinite derived reporting diagnostic") from exc
+    return result
