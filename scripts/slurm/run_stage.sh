@@ -10,8 +10,8 @@ if [[ "${1:-}" != --prepared ]]; then
 fi
 export PYTHONDONTWRITEBYTECODE=1
 export PYTHONPATH="$SWARM_UNIT_DIR/src/src"
-if [[ -n "${TASK_MANIFEST:-}" && "$TASK_MANIFEST" != /* ]]; then TASK_MANIFEST="$PWD/$TASK_MANIFEST"; fi
 cd "$SWARM_UNIT_DIR/src"
+if [[ -n "${TASK_MANIFEST:-}" && "$TASK_MANIFEST" != /* ]]; then TASK_MANIFEST="$PWD/$TASK_MANIFEST"; fi
 args=(--stage "$STAGE" --repo "$SWARM_UNIT_DIR/src" --out "$SWARM_UNIT_DIR" --deps-env
       --approvals "$SWARM_UNIT_DIR/src/configs/approvals.yaml")
 if [[ -n "${TASK_MANIFEST:-}" ]]; then args+=(--task "$TASK_MANIFEST"); fi
