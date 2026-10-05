@@ -130,3 +130,16 @@ def test_paired_intervention_refuses_unsupported_dose_even_in_null_world():
     for world in (pair.world0, pair.worldtau):
         with pytest.raises(ContractError, match="intervention doses outside supported numeric domain"):
             world.intervene([1.1e308])
+
+
+@pytest.mark.parametrize("direction", [-1, 1])
+def test_continuation_paired_intervention_retains_extended_precision(direction):
+    from fractions import Fraction
+    pair = observational_equivalence_pair(n_geographies=1, cluster_size=1, tau=1e20, seed=0)
+    world = pair.worldtau
+    center = np.longdouble(world.h_s[0])
+    for dose in (center+direction*np.longdouble(2)**-60,
+                 np.nextafter(center, np.longdouble(direction*np.inf))):
+        expected = float(Fraction(world.factual_y[0])+Fraction(world.structural_effect)
+                         *(Fraction(*dose.as_integer_ratio())-Fraction(world.h_s[0])))
+        assert world.intervene(np.array([dose]))[0] == expected
