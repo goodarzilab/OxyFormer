@@ -79,7 +79,11 @@ def validate_owner_approval(*, use_fallback=False):
 def pressure_mmhg(elevation_m):
     """P0*(1-L*z/T0)**(g*M/(R*L)); no tensors or gradients accepted."""
     require(not hasattr(elevation_m, 'detach'), 'model tensors cannot enter exposure')
-    z = np.asarray(elevation_m, dtype=np.float64)
+    values = np.asarray(elevation_m)
+    require(not np.iscomplexobj(values) and
+            (values.dtype.kind != 'O' or not any(np.iscomplexobj(v) for v in values.flat)),
+            'elevation must be real')
+    z = np.asarray(values, dtype=np.float64)
     p = PHYSICS
     require(np.all(np.isfinite(z)) and np.all((z >= p.minimum_elevation_m) &
             (z <= p.maximum_elevation_m)), 'elevation outside physical validity domain')

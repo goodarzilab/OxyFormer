@@ -1242,3 +1242,85 @@ def test_real_dem_scalar_types_remain_accepted(tmp_path, dtype):
     assert frame.missing_population.eq(0).all()
     assert frame.pressure_mmhg.eq(float(pressure_mmhg(100))).all()
     assert qc['population'] == 1
+
+
+@pytest.mark.parametrize('transform', [pressure_mmhg, inspired_oxygen_mmhg, oxygen_deficit_mmhg])
+@pytest.mark.parametrize('dtype', ['complex64', 'complex128', object])
+@pytest.mark.parametrize('imaginary', [float('nan'), 2.0])
+def test_physics_rejects_complex_elevation_before_cast(transform, dtype, imaginary):
+    values = np.array([np.complex128(complex(0, imaginary))], dtype=dtype)
+    with pytest.raises(ContractError, match='elevation must be real'):
+        transform(values)
+
+
+@pytest.mark.parametrize('decimal', [False, True])
+def test_physics_preserves_real_object_numeric_inputs(decimal):
+    from decimal import Decimal
+    values = [Decimal('0'), Decimal('1000.5')] if decimal else [0, 1000.5]
+    actual = pressure_mmhg(np.array(values, dtype=object))
+    np.testing.assert_array_equal(actual, pressure_mmhg([0, 1000.5]))
+
+
+@pytest.mark.parametrize('name', ['dem.payload', 'dem', 'dem.TAR', 'archive space/dem.payload',
+                                  'parent.tar/dem.payload', 'closing}name', 'opening{name', 'both{}.payload'])
+def test_verified_dem_archive_name_does_not_change_exposure(tmp_path, shard_fixture, name):
+    inventory, paths = shard_fixture
+    old = tmp_path / 'dem.tar'
+    renamed = tmp_path / name
+    renamed.parent.mkdir(parents=True, exist_ok=True)
+    old.rename(renamed)
+    task = json.loads((tmp_path / 'shard-AL/task.json').read_text())
+    dependencies = [inventory, tmp_path / 'census-receipt.json', tmp_path / 'census.tar',
+                    tmp_path / 'dem-receipt.json', renamed]
+    req = request(tmp_path / 'renamed-archive', 'exposure-atlas', task, dependencies)
+    result = run_stage(req)
+    assert result.status == 'pass', result.message
+    result.verify(req)
+    for name, expected in [('exposure.parquet', paths[1]), ('quality.json', paths[2])]:
+        assert file_hash(Path(req.output_dir) / name) == file_hash(expected)
+
+
+def test_listed_fallback_requires_approval_even_if_primary_covers(tmp_path, monkeypatch):
+    primary = replace(write_raster(tmp_path / 'primary.tif', [0, 0]), resource_id='a-primary')
+    fallback = replace(write_raster(tmp_path / 'fallback.tif', [3000, 3000]), resource_id='n43w070',
+                       product=FALLBACK, fallback_reason='reviewed missing primary cell')
+    mixed = replace(sources(primary), dem_tiles=(primary, fallback))
+    expected, _ = build_exposure(sources(primary), blocks(), SPEC)
+    actual, _ = build_exposure(mixed, blocks(), SPEC)
+    pd.testing.assert_frame_equal(actual, expected)  # fallback contributes no placement
+    approval = yaml.safe_load((ROOT / 'configs/approvals.yaml').read_text())
+    del approval['owner_decisions']['exposure']['dem_fallback']
+    path = tmp_path / 'without-fallback-approval.yaml'
+    path.write_text(yaml.safe_dump(approval))
+    monkeypatch.setattr('oxyformer.exposure.physics._APPROVAL_PATH', path)
+    actual, _ = build_exposure(sources(primary), blocks(), SPEC)
+    pd.testing.assert_frame_equal(actual, expected)
+    with pytest.raises(ContractError, match='approval missing or changed: dem_fallback'):
+        build_exposure(mixed, blocks(), SPEC)
+
+
+@pytest.mark.parametrize('name', ['blocks.payload', 'blocks', 'closing}name', 'opening{name'])
+def test_census_zip_filename_does_not_change_population(tmp_path, name):
+    blocks_path, sf1_path = write_census_archives(tmp_path / 'source')
+    expected = read_census_blocks(blocks_path, sf1_path, state_abbreviation='AL', state_fips='01')
+    renamed = tmp_path / name
+    blocks_path.rename(renamed)
+    actual = read_census_blocks(renamed, sf1_path, state_abbreviation='AL', state_fips='01')
+    pd.testing.assert_frame_equal(actual, expected)
+
+
+def test_archive_address_does_not_reuse_another_payload_index(tmp_path):
+    import os
+    from oxyformer.exposure.archives import gdal_archive_uri
+    sizes = []
+    for index in range(5):
+        tile = write_raster(tmp_path / f'{index}.tif', [index*1000])
+        archive = tmp_path / f'closing}}{index} & %.payload'
+        member = f'dem/{index}.tif'
+        with tarfile.open(archive, 'w') as out:
+            out.add(tile.path, arcname=member)
+        os.utime(archive, (1000000000, 1000000000))
+        sizes.append(archive.stat().st_size)
+        with rasterio.open(gdal_archive_uri(archive, 'tar') + '/' + member) as ds:
+            assert ds.read(1)[0, 0] == index*1000
+    assert len(set(sizes)) == 1

@@ -133,7 +133,9 @@ def read_census_blocks(block_archive, sf1_archive, *, state_abbreviation, state_
     with zipfile.ZipFile(block_archive) as archive:
         require(all(archive.namelist().count(stem + suffix) == 1
                     for suffix in ('.shp', '.shx', '.dbf', '.prj')), 'required block ZIP members missing')
-    geo = gpd.read_file(f'zip://{Path(block_archive).resolve()}!{stem}.shp')
+    from oxyformer.exposure.archives import gdal_archive_uri
+    uri = gdal_archive_uri(block_archive, 'zip')
+    geo = gpd.read_file(f'{uri}/{stem}.shp')
     columns = {'BLOCKID10', 'STATEFP10', 'COUNTYFP10', 'TRACTCE10', 'POP10'}
     require(columns <= set(geo.columns), '2010 block attribute layout mismatch')
     require((geo.STATEFP10 == state_fips).all(), 'block state mismatch')

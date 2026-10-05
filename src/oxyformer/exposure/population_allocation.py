@@ -114,15 +114,19 @@ class RasterSampler:
                                                  GDAL_PAM_ENABLED=False))
             require(self.tiles and len({t.resource_id for t in self.tiles}) == len(self.tiles),
                     'empty or duplicate DEM resources')
+            archive_uris = {}
             for tile in self.tiles:
                 check_hash(tile.sha256)
                 require(Path(tile.path).is_file(), 'DEM payload missing')
                 if tile.archive_member is None:
                     digest, raster_path = file_hash(tile.path), tile.path
                 else:
-                    from oxyformer.exposure.archives import member_hash
+                    from oxyformer.exposure.archives import member_hash, gdal_archive_uri
                     digest = member_hash(tile.path, tile.archive_member)
-                    raster_path = f'/vsitar/{Path(tile.path).resolve()}/{tile.archive_member}'
+                    archive = str(Path(tile.path).resolve())
+                    if archive not in archive_uris:
+                        archive_uris[archive] = gdal_archive_uri(archive, 'tar')
+                    raster_path = archive_uris[archive] + '/' + tile.archive_member
                 require(digest == tile.sha256, 'DEM hash mismatch')
                 require(tile.vertical_unit == 'm' and tile.vertical_datum == 'NAVD88',
                         'DEM requires explicit metres and NAVD88 vertical datum')
