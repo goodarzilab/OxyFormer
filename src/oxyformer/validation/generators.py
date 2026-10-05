@@ -25,6 +25,7 @@ from oxyformer.validation.scm import (
     AssignmentLaw, CovariateFrame, LatentState, SCMConfig, adjustment_key,
     latent_states, observation_probabilities, observation_log_probability, structural_mean, validate_count_rates, count_event_rate,
     sampled_mean, effect_fraction, LocalCoordinates, exact, exact_shift_intervals, wide, observation_transition_points, _count_baseline, _sine_bounds,
+    numeric_scalar, binary64_scalar, integer_scalar, normalize_record_numbers,
     validate_numeric, validate_policy_domain, validate_seed, REGISTERED_NUMERIC_BOX, NUMERIC_DOMAIN, NUMERIC_MARGIN,
 )
 
@@ -49,6 +50,7 @@ class ObservedRecords(Immutable):
     observed_denominator: tuple[float | None, ...]
 
     def __post_init__(self):
+        normalize_record_numbers(self)
         Immutable.__post_init__(self)
         n = len(self.frame.original_ids)
         require(all(len(v) == n for v in (self.measured_x, self.a, self.y,
@@ -128,7 +130,7 @@ def write_sample(sample: GeneratedSample, *, observations_dir: Path, truth_dir: 
 
 
 def _sample_observations(frame, config, policy, seed):
-    validate_seed(seed)
+    seed = validate_seed(seed)
     validate_policy_domain(policy)
     rng = np.random.default_rng(seed)
     regions, geographies, clusters = {}, {}, {}
@@ -503,6 +505,7 @@ def _quadrature_tail_budget(frame, config, policy, groups, tolerance):
     normalizing the retained measure changes its mean by at most 2*C*r/(1-r).
     This tail bound supplements, rather than replaces, doubled-order diagnostics.
     """
+    tolerance = exact(tolerance)
     terms = [t for group in groups.values() for t in group]
     penalty = exact(0)
     response = exact(0)
@@ -533,13 +536,13 @@ def _quadrature_tail_budget(frame, config, policy, groups, tolerance):
     contrast = max(2*response, exact(1))
     # Integer ceilings with generous slack keep the cutoff conservative despite
     # rounding in logarithms. No exponentiation of tiny selection probabilities.
-    budget_log = min(math.log(tolerance)-np.log(wide(contrast))-np.log(wide(16)),
+    budget_log = min((math.log(tolerance.numerator)-math.log(tolerance.denominator))-np.log(wide(contrast))-np.log(wide(16)),
                      np.log(wide(1e-12)))
     extra = int(np.ceil(-budget_log))+4
     cutoff = penalty+extra
     # Use higher precision only where amplification can erase a requested
     # absolute contrast at ordinary longdouble precision.
-    digits = max(0., (np.log(wide(contrast))-math.log(tolerance))/np.log(wide(10)))
+    digits = max(0., (np.log(wide(contrast))-(math.log(tolerance.numerator)-math.log(tolerance.denominator)))/np.log(wide(10)))
     precision = int(np.ceil(digits))+40 if digits > np.finfo(np.longdouble).precision-3 else 0
     for term in terms:
         term.law.tail_decay = cutoff
@@ -716,16 +719,11 @@ def generate_suite_a(frame: CovariateFrame, config: SCMConfig, policy: ShiftOrSt
     Integration marginalizes assignment, confounders and observation mechanisms,
     conditional on the supplied fixed covariate frame. No estimator fits enter.
     """
-    validate_seed(seed)
+    seed = validate_seed(seed)
     validate_policy_domain(policy)
-    if isinstance(tolerance, np.integer):
-        tolerance = int(tolerance)
-    elif isinstance(tolerance, np.floating) and tolerance.dtype.itemsize <= 8:
-        tolerance = float(tolerance)
-    if isinstance(max_order, np.integer):
-        max_order = int(max_order)
-    require(type(tolerance) in (int, float) and (type(tolerance) is int or np.isfinite(tolerance)) and tolerance > 0
-            and type(max_order) is int and max_order >= 32, "invalid integration controls")
+    tolerance = numeric_scalar(tolerance, "integration tolerance")
+    max_order = integer_scalar(max_order, "max_order")
+    require(tolerance > 0 and max_order >= 32, "invalid integration controls")
     eligible_by_key = {key:exact_shift_intervals(c,policy.delta_mmhg) for key,c in policy.components_by_key}
     config.validate_policy(policy, frame, eligible_by_key=eligible_by_key)
     validate_count_rates(frame, config, policy, eligible_by_key=eligible_by_key)
@@ -789,6 +787,7 @@ class PairedWorld(Immutable):
     factual_y: tuple[float, ...]
 
     def __post_init__(self):
+        normalize_record_numbers(self)
         Immutable.__post_init__(self)
         validate_numeric(self.structural_effect, "paired_tau", "paired tau")
         validate_numeric(self.factual_location_effect, "paired_c", "paired c")
@@ -797,8 +796,7 @@ class PairedWorld(Immutable):
                 "paired structural world alignment")
 
     def intervene(self, a):
-        validate_numeric(a, "intervention_dose", "intervention doses")
-        dose = np.asarray(a)
+        dose = validate_numeric(a, "intervention_dose", "intervention doses")
         require(dose.shape == (len(self.h_s),), "intervention alignment")
         tau = exact(self.structural_effect)
         try:
@@ -829,9 +827,13 @@ def observational_equivalence_pair(*, n_geographies=100, cluster_size=3, seed=0,
     validate_numeric(c, "paired_c", "paired c")
     validate_numeric(tau, "paired_tau", "paired tau")
     validate_numeric(noise_sd, "noise_sd", "noise_sd", allow_zero=True)
-    validate_seed(seed)
-    require(type(n_geographies) is int and type(cluster_size) is int
-            and n_geographies > 0 and cluster_size > 0 and tau != 0, "invalid pair controls")
+    seed = validate_seed(seed)
+    c = binary64_scalar(c, "paired c")
+    tau = binary64_scalar(tau, "paired tau")
+    noise_sd = binary64_scalar(noise_sd, "noise_sd")
+    n_geographies = integer_scalar(n_geographies, "n_geographies")
+    cluster_size = integer_scalar(cluster_size, "cluster_size")
+    require(n_geographies > 0 and cluster_size > 0 and tau != 0, "invalid pair controls")
     rng = np.random.default_rng(seed)
     n = n_geographies*cluster_size
     s = np.repeat(rng.uniform(0, 10, n_geographies), cluster_size)
