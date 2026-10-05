@@ -135,12 +135,15 @@ class RasterSampler:
                 _validate_vertical_crs(embedded)
                 _validate_vertical_crs(declared)
                 require(embedded.to_2d() == declared.to_2d(), 'DEM CRS mismatch')
-                require(all(math.isfinite(v) for v in ds.transform) and not ds.transform.is_degenerate,
+                require(all(math.isfinite(v) for v in ds.transform),
                         'DEM requires a finite invertible affine transform')
                 require(not (ds.transform.is_identity and (ds.gcps[0] or ds.rpcs)),
                         'DEM requires affine rather than GCP/RPC-only georeferencing')
-                inverse = ~ds.transform
-                require(all(math.isfinite(v) for v in inverse), 'DEM affine inverse is nonfinite')
+                a, b, c, d, e, f = (Fraction(v) for v in tuple(ds.transform)[:6])
+                determinant = a * e - b * d
+                require(determinant != 0, 'DEM requires a finite invertible affine transform')
+                inverse = (e / determinant, -b / determinant, (b*f - c*e) / determinant,
+                           -d / determinant, a / determinant, (c*d - a*f) / determinant)
                 require(ds.nodata == tile.nodata or (ds.nodata is not None and tile.nodata is not None
                         and math.isnan(ds.nodata) and math.isnan(tile.nodata)), 'DEM nodata mismatch')
                 require(ds.units[0] in (None, 'm', 'metre', 'meter') and ds.scales == (1.0,) and
@@ -161,18 +164,23 @@ class RasterSampler:
         reason = np.full(len(xy), 'outside_coverage', dtype=object)
         for ds, transform, inverse in self.datasets:
             xx, yy = transform.transform(xy[:, 0], xy[:, 1])
-            # One inverse-affine calculation controls both footprint and pixel.
+            # Pixel membership is discontinuous. Preserve the stored affine and
+            # represented transformed coordinates exactly until integer flooring:
+            # even 0.1*x can otherwise round an interior point into adjacent nodata.
             # https://gdal.org/en/stable/tutorials/geotransforms_tut.html
             finite = np.isfinite(xx) & np.isfinite(yy)
-            columns, rows = np.full(len(xy), np.nan), np.full(len(xy), np.nan)
-            columns[finite] = inverse.a * xx[finite] + inverse.b * yy[finite] + inverse.c
-            rows[finite] = inverse.d * xx[finite] + inverse.e * yy[finite] + inverse.f
-            indices = np.flatnonzero(np.isnan(z) & (columns >= 0) & (columns < ds.width) &
-                                     (rows >= 0) & (rows < ds.height))
-            if not len(indices):
+            indices, pixels = [], []
+            a, b, c, d, e, f = inverse
+            for index in np.flatnonzero(np.isnan(z) & finite):
+                x, y = Fraction(float(xx[index])), Fraction(float(yy[index]))
+                col, row = math.floor(a*x + b*y + c), math.floor(d*x + e*y + f)
+                if 0 <= col < ds.width and 0 <= row < ds.height:
+                    indices.append(index)
+                    pixels.append((row, col))
+            if not indices:
                 continue
+            indices = np.asarray(indices)
             # Dispersed locations must not create an unbounded bounding window.
-            pixels = zip(np.floor(rows[indices]).astype(int), np.floor(columns[indices]).astype(int))
             values = np.ma.concatenate([ds.read(1, window=Window(col, row, 1, 1), masked=True).reshape(-1)
                                         for row, col in pixels])
             data = values.astype(float).filled(np.nan)

@@ -717,3 +717,21 @@ def test_translated_grid_does_not_omit_positive_area_strip(tmp_path, thin):
         assert result.missing_population.iloc[0] > 0
         assert result.pressure_mmhg.isna().all()
         assert qc['blocks'][0]['outside_coverage'] > 0
+
+
+@pytest.mark.parametrize('nodata_pixel', [False, True])
+def test_non_dyadic_pixel_scale_preserves_boundary_membership(tmp_path, nodata_pixel):
+    tile = write_raster(tmp_path / 'reciprocal.tif', [0, 0, -9999, 0] if nodata_pixel else [0, 0, 0])
+    with rasterio.open(tile.path, 'r+') as ds:
+        ds.transform = rasterio.Affine(10, 0, 0, 0, -10, 10)
+    tile = replace(tile, sha256=file_hash(tile.path))
+    geography = blocks(pop=(1, 0)).iloc[:1].copy()
+    geography.loc[0, 'geometry'] = Polygon([(30, 0), (30, 8/3), (30 - 3*2**-48, 0)])
+    assert geography.geometry.iloc[0].centroid.x == 30 - 2**-48
+    result, qc = build_exposure(sources(tile), geography, replace(SPEC, scenarios=('centroid',)))
+    if nodata_pixel:
+        assert result.missing_population.iloc[0] == qc['blocks'][0]['nodata'] == 1
+        assert result.pressure_mmhg.isna().all()
+    else:
+        assert result.missing_population.iloc[0] == 0
+        assert result.pressure_mmhg.iloc[0] == 760
