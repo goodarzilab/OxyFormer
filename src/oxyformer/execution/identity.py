@@ -18,7 +18,8 @@ FINGERPRINT_VERSION = 'tracked-science-v2'
 
 def git_bytes(repo, *args):
     # Inspection must never refresh a sealed dependency's index on disk.
-    return subprocess.check_output(['git', '--no-optional-locks', '-C', str(repo), *args])
+    # Recorded IDs attest raw objects, never a mutable replacement-ref view.
+    return subprocess.check_output(['git', '--no-optional-locks', '--no-replace-objects', '-C', str(repo), *args])
 
 
 def git(repo, *args):
