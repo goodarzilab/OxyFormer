@@ -371,7 +371,17 @@ def test_profile_measures_final_publication_and_verification(tmp_path, monkeypat
     req = request(tmp_path / "request", task, {"input": inputs})
     clock = [0.]
     monkeypatch.setattr(coverage.time, "monotonic", lambda: clock[0])
+    deadlines = []
+    original_verify = coverage.StageRequest.verify_inputs
+    preflight_calls = []
+    def delayed_preflight(self):
+        if not preflight_calls:
+            clock[0] += 5.
+        preflight_calls.append(1)
+        return original_verify(self)
+    monkeypatch.setattr(coverage.StageRequest, "verify_inputs", delayed_preflight)
     def estimate(*args):
+        deadlines.append(args[-1])
         clock[0] += 10.
         return {method: {"value": 0., "se": 1.} for method in coverage.METHODS}
     def stamp():
@@ -388,5 +398,6 @@ def test_profile_measures_final_publication_and_verification(tmp_path, monkeypat
     assert result.status == "pass", result.message
     result.verify(req)
     timing = json.loads((Path(req.output_dir) / "timing.json").read_text())
-    assert timing["wall_seconds"] == 72.  # Includes the normal leaf's final publish and verify.
+    assert deadlines == [1000., 1000.]  # Public-entry preflight consumes the same budget.
+    assert timing["wall_seconds"] == 77.  # Includes preflight and normal leaf publication/verification.
     assert timing["complete_repetition_seconds"] == [10., 10.]
