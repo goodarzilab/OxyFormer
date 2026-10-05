@@ -706,7 +706,7 @@ def _integrate_precise(frame, config, policy, groups, order, boundaries, eligibi
         # Keep the complete high-precision result until its one artifact
         # rounding. A longdouble intermediary can hide serialization error.
         values = np.array([Fraction(observed/mass), Fraction(causal/mass)], dtype=object)
-        return values,wide(Fraction(log_fraction)),mass_error
+        return values,Fraction(log_fraction),mass_error
 
 
 def _integrate(frame, config, policy, groups, order, boundaries_by_key, eligible_by_key):
@@ -775,6 +775,15 @@ def _unavailable_truth(observations, common, status, reason):
     return GeneratedSample(observations, observed, causal, uncertainty)
 
 
+def _relative_mass_difference(current, previous, precision):
+    # Subtract retained log masses exactly before expm1. A wide or binary64
+    # conversion can erase either a tiny mass change or one near a finite log.
+    delta = exact(current)-exact(previous)
+    with localcontext() as context:
+        context.prec = max(80, precision)
+        return Fraction(abs(_decimal_expm1(_decimal(delta))))
+
+
 def generate_suite_a(frame: CovariateFrame, config: SCMConfig, policy: ShiftOrStayPolicy, *,
                      seed: int = 0, tolerance: float = 1e-8, max_order: int = 256) -> GeneratedSample:
     """Generate observations and *population*, not realized-sample, truths.
@@ -820,7 +829,8 @@ def generate_suite_a(frame: CovariateFrame, config: SCMConfig, policy: ShiftOrSt
         difference = np.abs(values-previous)
         serialized = [float(v) for v in values]
         rounding = max(abs(exact(v)-exact(f)) for v, f in zip(values, serialized))
-        mass_difference = float(abs(np.expm1(log_mass-previous_log_mass)))
+        mass_difference = _relative_mass_difference(
+            log_mass, previous_log_mass, next(iter(groups.values()))[0].precision)
         converged = bool(exact(np.max(difference))+exact(tail_bound)+rounding <= exact(tolerance) and exact(mass_difference) <= exact(tolerance) and mass_error <= 1e-10)
         if converged:
             break
@@ -831,6 +841,9 @@ def generate_suite_a(frame: CovariateFrame, config: SCMConfig, policy: ShiftOrSt
     tail_display = float(tail_bound)
     if exact(tail_display) < tail_bound:
         tail_display = float(np.nextafter(tail_display, np.inf))
+    mass_display = float(mass_difference)
+    if exact(mass_display) < mass_difference:
+        mass_display = float(np.nextafter(mass_display, np.inf))
     rounding_bound = float(rounding)
     if exact(rounding_bound) < rounding:
         rounding_bound = float(np.nextafter(rounding_bound, np.inf))
@@ -839,7 +852,7 @@ def generate_suite_a(frame: CovariateFrame, config: SCMConfig, policy: ShiftOrSt
     uncertainty = IntegrationUncertainty(method="exact local panels, bounded exponential tails, unit-mass check, doubled order",
         observed_absolute_difference=float(difference[0]), causal_absolute_difference=float(difference[1]),
         order=order, converged=True, assignment_mass_error=float(mass_error),
-        selected_mass_fraction=float(np.exp(log_mass)), selected_mass_relative_difference=mass_difference,
+        selected_mass_fraction=float(np.exp(wide(log_mass))), selected_mass_relative_difference=mass_display,
         selected_log_mass_fraction=float(log_mass), grouped_mass_relative_error=grouped_error,
         quadrature_tail_absolute_bound=tail_display, truth_serialization_absolute_bound=rounding_bound)
     return GeneratedSample(observations, observed, causal, uncertainty)
