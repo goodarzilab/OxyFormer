@@ -347,7 +347,9 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
                     require(declared <= {a.path for a in result.artifacts}, 'stage omitted declared outputs')
                 for path, digest in sources.items():
                     require(file_hash(path) == digest, f'input source changed: {path}')
-                code_identity(repo, out)
+                observed_head = code_identity(repo, out)
+                require(observed_head == request.code_identity,
+                        f'code identity changed: recorded {request.code_identity}, observed {observed_head}')
             except BaseException as exc:
                 result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
                                      message=str(exc).strip() or type(exc).__name__)

@@ -1,9 +1,10 @@
 """Expand a reviewed finite campaign spec; output only, never dispatch."""
 import argparse
+import os
 from pathlib import Path
 
 from oxyformer.execution.campaign import expand_campaign
-from oxyformer.execution.paths import atomic_json
+from oxyformer.execution.paths import atomic_json, output_path
 from oxyformer.execution.integrity import read_regular
 from oxyformer.execution.identity import git_bytes
 from oxyformer.execution.runner import read_mapping
@@ -28,8 +29,14 @@ def main():
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     out = out.resolve(strict=True)
-    atomic_json(out, 'task_manifest.json', {'schema_version': 1, 'tasks': plan['tasks']})
-    atomic_json(out, 'expanded_units.json', plan)
+    outputs = {'task_manifest.json': {'schema_version': 1, 'tasks': plan['tasks']},
+               'expanded_units.json': plan}
+    # Admit the complete reserved set before exposing either final manifest.
+    # Individual publications remain create-once; this is not a transaction.
+    for name in outputs:
+        require(not os.path.lexists(output_path(out, name)), f'output already exists: {name}')
+    for name, value in outputs.items():
+        atomic_json(out, name, value)
 
 
 if __name__ == '__main__':
