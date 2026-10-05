@@ -118,6 +118,13 @@ complete suite below ten minutes. Record failures and build-specific skips;
 do not relax tolerances to hide CPU float32 differences. The focused files are
 `tests/test_end_to_end.py` and `tests/test_plan_integrity.py`.
 
+The ten-minute bound is currently unsatisfied. On 2026-10-05, the unchanged
+recorded base above timed out at 600 seconds with 41% of the suite completed
+in the oxyformer environment; the integration attempt also timed out in both
+environments. Focused checks do not replace full-suite validation. Resolve the
+baseline runtime or obtain an explicit runtime exception before review; no
+scientific settings or required tests may be dropped to meet the deadline.
+
 For the required mutation, use an isolated copy of
 `test_final_coverage_collector_dependencies` with its repository root preserved.
 Remove a leaf from the expanded final collector's `needs`, run that test, and require the
