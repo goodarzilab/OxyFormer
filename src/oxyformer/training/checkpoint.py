@@ -2,6 +2,9 @@
 
 A caller supplies a trusted CheckpointArtifact (or its expected hash when reading
 its JSON descriptor). Hashes establish identity, not authenticity on their own.
+The trusted descriptor also binds the archive byte length. Loading checks that
+length before allocating one bounded snapshot, then hashes and decodes the same
+snapshot, so replacement or growth cannot trigger an unbounded payload read.
 The archive codec accepts only JSON primitives, containers and numeric tensors;
 it never imports classes or executes checkpoint-provided code. The writer and
 reader require uncompressed ZIP members, so loading cannot expand compressed data.
@@ -57,6 +60,7 @@ class CheckpointIdentity(Immutable):
 class CheckpointArtifact(Immutable):
     path: str
     sha256: str
+    byte_size: int
     identity: CheckpointIdentity
     lineage: ArtifactLineage
     complete: bool
@@ -69,6 +73,7 @@ class CheckpointArtifact(Immutable):
         Immutable.__post_init__(self)
         require(Path(self.path).is_absolute(), "checkpoint path must be absolute")
         check_hash(self.sha256)
+        require(self.byte_size > 0, "invalid checkpoint byte size")
         if self.predecessor_hash is not None:
             check_hash(self.predecessor_hash)
         require(self.complete == (self.reason in ("max_epochs", "patience")),
@@ -244,7 +249,7 @@ def save_checkpoint(output_dir: Path, *, identity: CheckpointIdentity,
     digest = sha256(data).hexdigest()
     output_dir = Path(output_dir).resolve(strict=True)
     path = output_dir / f"checkpoint-{digest}.ofc"
-    artifact = CheckpointArtifact(path=str(path), sha256=digest, identity=identity,
+    artifact = CheckpointArtifact(path=str(path), sha256=digest, byte_size=len(data), identity=identity,
                                   lineage=lineage, complete=complete, reason=reason,
                                   epoch=progress["epoch"], step=progress["step"],
                                   predecessor_hash=metadata["predecessor_hash"])
@@ -257,7 +262,13 @@ def load_checkpoint(artifact: CheckpointArtifact, expected_identity: CheckpointI
     """Verify the trusted descriptor and exact science identity before decoding."""
     require(type(artifact) is CheckpointArtifact, "trusted CheckpointArtifact required")
     require(artifact.identity == expected_identity, "incompatible checkpoint identity")
-    data = Path(artifact.path).read_bytes()
+    with Path(artifact.path).open("rb") as stream:
+        require(os.fstat(stream.fileno()).st_size == artifact.byte_size,
+                "checkpoint file size/hash mismatch")
+        # Keep the allocation bounded by trusted metadata even if the opened
+        # file grows after fstat. Hash and decode this single immutable snapshot.
+        data = stream.read(artifact.byte_size + 1)
+    require(len(data) == artifact.byte_size, "checkpoint file size/hash mismatch")
     require(sha256(data).hexdigest() == artifact.sha256, "checkpoint file hash mismatch")
     require(zipfile.is_zipfile(BytesIO(data)), "untrusted checkpoint serialization")
     with zipfile.ZipFile(BytesIO(data)) as archive:
