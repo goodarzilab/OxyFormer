@@ -296,10 +296,13 @@ def _integration_breakpoints(terms, components, delta, config, shift_intervals):
                                 value = root+sign*distance/abs(slope)
                                 if lo < value < hi:
                                     boundaries.add(value)
-    # A zero/small assignment slope does not bound nonlinear response
-    # oscillations. Partition each recorded component into exact spans <= 16
-    # (sine phase span <= 8) before either ordinary or precise quadrature.
-    if config.effect == "nonlinear" and config.beta != 0:
+    # Resolve every varying factor of the selected measure, including when
+    # assignment is uniform and selection's transition lies outside support.
+    # Spans <=16 bound sine phase variation by8 and the sum of the three
+    # selection log-probability variations by(.2+.12+.1)*16 < 7.
+    # Both numerical backends consume the same exact partition.
+    varying_selection = config.selected_outcome or config.survey_inclusion or config.missing_biomarkers
+    if (config.effect == "nonlinear" and config.beta != 0) or varying_selection:
         for term in terms:
             for piece in term.law.pieces:
                 left, right = piece.lower+term.law.error, piece.upper+term.law.error

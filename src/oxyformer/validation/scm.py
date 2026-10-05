@@ -246,10 +246,13 @@ class CovariateFrame(Immutable):
     biomarker_available: tuple[bool, ...]
 
     def __post_init__(self):
+        # Capture every field through its schema before any raw iteration,
+        # flattening or domain check. Computation below sees owned tuples and
+        # losslessly admitted scalars, including optional X leaves.
+        normalize_record_numbers(self)
         validate_numeric(self.coordinates, "coordinate", "coordinates")
         validate_numeric([v for row in self.x for v in row if v is not None], "covariate", "X")
         validate_numeric(self.weights, "weight", "origin weights", allow_zero=True)
-        normalize_record_numbers(self)
         Immutable.__post_init__(self)
         n = len(self.original_ids)
         require(n > 0, "empty covariate frame")
@@ -926,9 +929,14 @@ class AssignmentLaw:
         exact_extent = abs(p.rate)*(p.upper-p.lower)
         with np.errstate(over="ignore", under="ignore"):
             extent = wide(exact_extent)
-        if extent == 0:
-            # The normalized quantile rounds to its uniform limit when the
-            # entire physical decay span underflows. Retain the local draw.
+        if exact_extent < exact(np.finfo(np.longdouble).eps)/4:
+            # For decay E>0, the normalized inverse satisfies
+            # u*exp(-E) <= s <= u, hence 0 <= u-s < u*E.
+            # E < eps/4 puts this below half the gap to u's predecessor,
+            # including subnormals. Thus s rounds to u; retaining it in a
+            # width-scaled coordinate is justified, not clipping a dose.
+            # Testing E exactly also covers nonzero subnormal spans whose
+            # rounded physical extent can have arbitrarily large error.
             return LocalCoordinates(p.peak+self.error, p.upper-p.lower,
                                     -u if p.rate > 0 else u)
         t = -np.log1p(-u*(-np.expm1(-extent)))
