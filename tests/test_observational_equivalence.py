@@ -143,3 +143,24 @@ def test_continuation_paired_intervention_retains_extended_precision(direction):
         expected = float(Fraction(world.factual_y[0])+Fraction(world.structural_effect)
                          *(Fraction(*dose.as_integer_ratio())-Fraction(world.h_s[0])))
         assert world.intervene(np.array([dose]))[0] == expected
+
+
+@pytest.mark.parametrize("dose", [2**64-1,2**64,2**64+1,10**100])
+def test_continuation_round2_integer_intervention(dose):
+    from fractions import Fraction
+    pair = observational_equivalence_pair(n_geographies=1,cluster_size=1,seed=0)
+    for world in (pair.world0,pair.worldtau):
+        expected = float(Fraction(world.factual_y[0])+Fraction(world.structural_effect)
+                         *(Fraction(dose)-Fraction(world.h_s[0])))
+        assert world.intervene([dose])[0] == expected
+
+
+def test_continuation_round2_integer_intervention_domain_edge():
+    from oxyformer.provenance import ContractError
+    pair = observational_equivalence_pair(n_geographies=1,cluster_size=1)
+    edge = int(1e308)
+    for sign in (-1,1):
+        for dose in (sign*(edge-1),sign*edge):
+            assert pair.world0.intervene([dose])[0] == pair.world0.factual_y[0]
+        with pytest.raises(ContractError,match='outside supported numeric domain'):
+            pair.world0.intervene([sign*(edge+1)])

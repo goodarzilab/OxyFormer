@@ -65,8 +65,14 @@ def validate_numeric(values, kind, name, *, allow_zero=False):
     """
     lower, upper = NUMERIC_DOMAIN[kind]
     array = np.asarray(values)
-    require(array.dtype.kind in "fiu", f"{name} must be numeric")
-    valid = np.isfinite(array) & (array >= lower) & (array <= upper)
+    if array.dtype.kind == "O":
+        require(all(isinstance(v, (int, float, np.integer, np.floating))
+                    and not isinstance(v, (bool, np.bool_)) for v in array.flat), f"{name} must be numeric")
+        valid = np.array([(isinstance(v, (int, np.integer)) or np.isfinite(v))
+                          and exact(lower) <= exact(v) <= exact(upper) for v in array.flat]).reshape(array.shape)
+    else:
+        require(array.dtype.kind in "fiu", f"{name} must be numeric")
+        valid = np.isfinite(array) & (array >= lower) & (array <= upper)
     if allow_zero:
         valid |= array == 0
     require(bool(valid.all()),
@@ -333,6 +339,8 @@ def _sine_bounds(value, bits):
     alternating remainders, then double angles. Extra working bits limit width;
     correctness does not depend on a platform's libm or extended precision.
     """
+    if value == 0:
+        return Fraction(0), Fraction(0)
     halves = 0
     reduced = value
     while abs(reduced) > Fraction(1, 2):
@@ -470,6 +478,8 @@ def exact(value):
     """Exact geometry of a declared float, not a decimal reinterpretation."""
     if isinstance(value, Fraction):
         return value
+    if isinstance(value, (int, np.integer)):
+        return Fraction(int(value))
     if hasattr(value, "as_integer_ratio"):
         return Fraction(*value.as_integer_ratio())
     return Fraction(value)
