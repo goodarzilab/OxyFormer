@@ -608,6 +608,7 @@ class AssignmentLaw:
     def __init__(self, frame, row, state, config, components):
         validate_components(components)
         require(type(row) is int and 0 <= row < len(frame.original_ids), "invalid frame row")
+        self.tail_decay = Fraction(128)
         self.components = components
         self.error = exact(state.error)
         self.scale = exact(config.near_scale)
@@ -698,41 +699,46 @@ class AssignmentLaw:
         return float(true_dose+self.error), true_dose
 
     def quadrature(self, order, breakpoints):
-        """Full conditional piece measures, with log masses and local nodes.
+        """Exact panel geometry, bounded decay spans, and accounted tails.
 
-        Even tiny pieces remain represented. Panels resolve decay in units of
-        the piece rate, and exact breakpoints retain local crossing offsets.
-        The independent assignment mass certificate checks the returned measure.
+        Each breakpoint interval gets its own rational anchor and unit, so no
+        positive interval disappears when its endpoints round to the same float.
+        Exponential panels are resolved from their own peak in spans <= 4 decay
+        units. Only the remainder beyond tail_decay is omitted; the harness sets
+        that cutoff from a response bound, selection lower bound and tolerance.
         """
-        nodes,weights = leggauss(order)
+        nodes, weights = leggauss(order)
+        values = (nodes.astype(np.longdouble)+1)/2
         rules = []
         for p in self.pieces:
-            coordinates,log_weights = [],[]
-            if p.rate == 0:
-                unit = p.upper-p.lower
-                anchor = p.lower+self.error
-                edges = sorted({Fraction(0),Fraction(1)} | {
-                    (exact(v)-anchor)/unit for v in breakpoints if anchor < v < p.upper+self.error})
-                for lo,hi in zip(edges[:-1],edges[1:]):
-                    coordinates.append(wide(lo)+wide(hi-lo)/2*(nodes+1))
-                    log_weights.append(np.log(wide(hi-lo)/2)+np.log(weights)+p.log_probability)
-            else:
-                unit = 1/abs(p.rate)
-                anchor = p.peak+self.error
+            lower, upper = p.lower+self.error, p.upper+self.error
+            edges = sorted({lower, upper} | {exact(v) for v in breakpoints if lower < v < upper})
+            for left, right in zip(edges[:-1], edges[1:]):
+                if p.rate == 0:
+                    coordinates = LocalCoordinates(left, right-left, values)
+                    log_weights = (np.log(wide((right-left)/(p.upper-p.lower))/2)
+                                   +np.log(weights)+p.log_probability)
+                    rules.append(QuadraturePiece(coordinates, log_weights))
+                    continue
+                peak = right if p.rate > 0 else left
                 direction = -1 if p.rate > 0 else 1
-                extent = wide((p.upper-p.lower)/unit)
-                edges = {wide(0),extent}
-                edges.update(wide(v) for v in (1,2,4,8,16,32,64) if v < extent)
-                edges.update(wide(direction*(exact(v)-anchor)/unit) for v in breakpoints
-                             if p.lower+self.error < v < p.upper+self.error)
-                edges = sorted(edges)
-                log_normalizer = np.log(-np.expm1(-extent))
-                for lo,hi in zip(edges[:-1],edges[1:]):
-                    t = lo+(hi-lo)/2*(nodes+1)
-                    coordinates.append(direction*t)
-                    log_weights.append(np.log((hi-lo)/2)+np.log(weights)-t-log_normalizer+p.log_probability)
-            rules.append(QuadraturePiece(LocalCoordinates(anchor,unit,np.concatenate(coordinates)),
-                                         np.concatenate(log_weights)))
+                extent = abs(p.rate)*(right-left)
+                stop = min(extent, self.tail_decay)
+                offset = Fraction(0)
+                while offset < stop:
+                    width = min(Fraction(4), stop-offset)
+                    # Positive units keep membership predicates ordered. The
+                    # density offset remains exact even far from the piece peak.
+                    a = peak+direction*offset/abs(p.rate)
+                    b = peak+direction*(offset+width)/abs(p.rate)
+                    anchor = min(a, b)
+                    unit = abs(b-a)
+                    coordinates = LocalCoordinates(anchor, unit, values)
+                    base = self.kernel_at(p, anchor)
+                    log_weights = (wide(base)+wide(p.rate*unit)*values
+                                   +np.log(wide(unit)/2)+np.log(weights)-self.log_normalizer)
+                    rules.append(QuadraturePiece(coordinates, log_weights))
+                    offset += width
         return tuple(rules)
 
 
