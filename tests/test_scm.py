@@ -2557,3 +2557,16 @@ def test_resumed_selected_tail_default_matches_independent_exponential_bound():
     assert sample.integration_uncertainty.selected_log_mass_fraction == pytest.approx(reference_log_mass, abs=4e-13)
     assert sample.structural_causal_truth.value == 0.
     assert abs(sample.observed_law_truth.value) < 1e-12
+
+
+def test_resumed_saturated_selection_uses_its_log_slope_bound():
+    from oxyformer.validation.generators import _groups, _integration_breakpoints
+    f = frame(1, 1)
+    c = config('null', survey_inclusion=True, noise_sd=0.)
+    p = policy(((-10000., -9000.),), delta=0.)
+    terms = next(iter(_groups(f, c, p).values()))
+    boundaries = _integration_breakpoints(terms, ((-10000., -9000.),), 0., c,
+                                           ((-10000., -9000.),))
+    # All logits exceed 1000, so the entire log-selection variation is <1.
+    # No response oscillation, assignment decay or eligibility boundary exists.
+    assert not any(-10000 < v < -9000 for v in boundaries)

@@ -262,6 +262,28 @@ def _groups(frame, config, policy):
     return {key:list(terms.values()) for key,terms in groups.items()}
 
 
+def _selection_log_slope_bound(upper, state, config):
+    """Exact upper bound for |d log(selection)/da| over a <= upper.
+
+    Each gate is sigmoid(intercept-slope*a). Its log derivative has magnitude
+    slope*sigmoid(-z), bounded by slope*2**(-floor(z)) for z>=0 and slope
+    otherwise. This avoids underflow while recognizing saturated gates.
+    """
+    gates = []
+    if config.selected_outcome:
+        gates.append((exact(1)-exact(1.2)*exact(state.illness), exact(.2)))
+    if config.survey_inclusion:
+        gates.append((exact(.7)+exact(.5)*exact(state.local), exact(.12)))
+    if config.missing_biomarkers:
+        gates.append((exact(1)-exact(.8)*exact(state.illness), exact(.1)))
+    bound = Fraction(0)
+    for intercept, slope in gates:
+        logit = intercept-slope*upper
+        exponent = max(0, logit.numerator//logit.denominator)
+        bound += slope/Fraction(2)**exponent
+    return bound
+
+
 def _integration_breakpoints(terms, components, delta, config, shift_intervals):
     delta = exact(delta)
     boundaries = {v for term in terms for v in term.law.breakpoints}
@@ -296,17 +318,21 @@ def _integration_breakpoints(terms, components, delta, config, shift_intervals):
                                 value = root+sign*distance/abs(slope)
                                 if lo < value < hi:
                                     boundaries.add(value)
-    # Resolve every varying factor of the selected measure, including when
-    # assignment is uniform and selection's transition lies outside support.
-    # Spans <=16 bound sine phase variation by8 and the sum of the three
-    # selection log-probability variations by(.2+.12+.1)*16 < 7.
-    # Both numerical backends consume the same exact partition.
+    # Bound variation of both response and selected measure. Selection's
+    # transition can lie outside support; its derivative bound still applies.
+    # Native assignment quadrature already limits spans to4/abs(rate), so
+    # extra cuts are needed only when that would exceed a factor's resolution.
     varying_selection = config.selected_outcome or config.survey_inclusion or config.missing_biomarkers
     if (config.effect == "nonlinear" and config.beta != 0) or varying_selection:
         for term in terms:
             for piece in term.law.pieces:
                 left, right = piece.lower+term.law.error, piece.upper+term.law.error
-                panels = max(1, math.ceil((right-left)/16))
+                resolution = Fraction(1, 16) if config.effect == "nonlinear" and config.beta != 0 else Fraction(0)
+                if varying_selection:
+                    resolution = max(resolution, _selection_log_slope_bound(right, term.state, config)/8)
+                if abs(piece.rate) >= 4*resolution:
+                    continue
+                panels = max(1, math.ceil((right-left)*resolution))
                 boundaries.update(left+(right-left)*i/panels for i in range(1, panels))
     boundaries.update(v-delta for v in tuple(boundaries))
     return boundaries
