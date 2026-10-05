@@ -479,3 +479,58 @@ def test_real_floating_query_representations(backend, fold, dtype):
     model = fitted(backend, fold)
     result = query(model, fold[1], torch.ones(2, 1, 1, dtype=dtype))
     assert result.dtype == dtype and torch.isfinite(result).all()
+
+
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float64, torch.bfloat16])
+def test_origin_near_boundary_logits_before_query_cast(backend, fold, monkeypatch, dtype):
+    train, held, split = fold
+    model = backend[0](task='origin', family='bernoulli').fit_origin(
+        train, split, 0, make_pairs(train), weight_semantics='unit')
+    held = replace(held, original_ids=('h0',), values=((10., 11.),),
+                   lineage=replace(held.lineage, unit_ids=('h0',)))
+    predict_proba = model._estimator.predict_proba
+    monkeypatch.setattr(model._estimator, 'predict_proba',
+                        lambda row: predict_proba(row).astype(np.float32))
+    p = model._estimator.predict_proba(np.array([[100., 10., 11.]]))[0, 0]
+    assert float(p) == 0.9993788599967957
+    args = (torch.full((1, 1, 1), 100., dtype=dtype), held,
+            torch.tensor(held.values, dtype=dtype), None, None)
+    probability = model.probability(*args)
+    assert probability.dtype == dtype
+    if dtype == torch.bfloat16:
+        assert probability.item() == 1.  # Reporting may round; logit must not.
+    actual = model.logits(*args)
+    expected = torch.tensor([[np.log(np.float64(p)) - np.log1p(-np.float64(p))]], dtype=dtype)
+    assert actual.dtype == dtype and torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize('backend_dtype', [np.float32, np.float64, np.longdouble])
+@pytest.mark.parametrize('near', [0., 1.])
+def test_origin_preserves_backend_precision_before_logit(backend, fold, monkeypatch, backend_dtype, near):
+    train, held, split = fold
+    model = backend[0](task='origin', family='bernoulli').fit_origin(
+        train, split, 0, make_pairs(train), weight_semantics='unit')
+    p = np.nextafter(backend_dtype(near), backend_dtype(1. - near))
+    probs = np.array([[p, 1 - p]], dtype=backend_dtype)  # Mock classes are [1, 0].
+    monkeypatch.setattr(model._estimator, 'predict_proba', lambda row: probs.copy())
+    a = torch.ones(2, 1, 1, dtype=torch.float64)
+    actual = model.logits(a, held, torch.tensor(held.values), None, None)
+    wide = np.asarray(p, dtype=np.result_type(backend_dtype, np.float64))
+    expected = float(np.log(wide) - np.log1p(-wide))
+    assert actual.dtype == a.dtype and torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, torch.full((2, 1), expected, dtype=a.dtype), rtol=1e-14, atol=0)
+
+
+@pytest.mark.parametrize('boundary', [0., 1.])
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float64, torch.bfloat16])
+def test_origin_genuine_boundary_probability_still_blocks(backend, fold, monkeypatch, boundary, dtype):
+    train, held, split = fold
+    model = backend[0](task='origin', family='bernoulli').fit_origin(
+        train, split, 0, make_pairs(train), weight_semantics='unit')
+    monkeypatch.setattr(model._estimator, 'predict_proba',
+                        lambda row: np.array([[boundary, 1 - boundary]]))
+    args = (torch.ones(2, 1, 1, dtype=dtype), held, torch.tensor(held.values), None, None)
+    assert (model.probability(*args) == boundary).all()
+    with pytest.raises(ContractError, match='boundary probability; no implicit clipping'):
+        model.logits(*args)
