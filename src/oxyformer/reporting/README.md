@@ -8,7 +8,10 @@ Config is `configs/reporting.yaml`. Approvals must resolve to the repository's
 read-only `configs/approvals.yaml`. Source checkouts bind this registry to the
 code's repository. A non-editable installation uses the repository
 `configs/reporting.yaml` at the hash-bound `StageRequest.config_path`; its
-adjacent `approvals.yaml` is the only accepted registry. Installed code never
+adjacent `approvals.yaml` is the only accepted registry. The frozen config path's
+repository prefix is retained before resolving its leaf: a symlinked `configs/`
+directory cannot move the repository anchor. Each protected leaf and approval
+identity is then resolved separately. Installed code never
 looks for owner approvals beside `site-packages`. Output protection uses that
 same repository. Results are created once in `output_dir`:
 `report.json`, self-contained `report.html`, and `estimators.svg`. Existing
@@ -185,3 +188,5 @@ exact normalized products, retaining relative concentration even when a displaye
 absolute mass rounds to zero. These calculations keep the same formulas and
 warning thresholds. Aggregate dependency-list mismatches refuse release only
 after an individually hash-bound bundle has been retained for diagnostic display.
+
+Atomic publication requires a filesystem supporting same-directory hard links.

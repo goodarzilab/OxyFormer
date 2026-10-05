@@ -49,7 +49,10 @@ OWNER_APPROVALS = (_SOURCE_ROOT / "configs" / "approvals.yaml"
 def _owner_registry(request):
     if OWNER_APPROVALS is not None:
         return OWNER_APPROVALS
-    config = _realpath(request.config_path)
+    # The frozen config spelling declares the repository. Resolving the config
+    # leaf first would move that anchor when configs/ is a storage symlink.
+    # Resolve individual leaves only when comparing their filesystem identity.
+    config = Path(request.config_path)
     require(config.name == "reporting.yaml" and config.parent.name == "configs",
             "installed reporting requires repository configs/reporting.yaml")
     return config.with_name("approvals.yaml")

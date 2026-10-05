@@ -1420,3 +1420,46 @@ def test_dependency_list_mismatch_keeps_authenticated_estimates(case, tmp_path, 
     assert not report['releasable'] and report['evidence_label'] == 'diagnostic-only'
     assert report['estimators'] == [e.to_dict()['payload'] for e in b.estimates]
     assert report['bundle_hash'] == b.content_hash
+
+
+@pytest.mark.parametrize('config_target', ['shared/configs', 'shared/config-store'])
+@pytest.mark.parametrize('destination', ['outputs', 'report', 'src', 'configs', 'shared/src'])
+def test_installed_config_symlink_keeps_declared_repository(
+        case, tmp_path, monkeypatch, config_target, destination):
+    repository, request = isolated_repository_request(case, tmp_path, monkeypatch)
+    target = repository / config_target
+    target.parent.mkdir(parents=True)
+    (repository / 'configs').rename(target)
+    (repository / 'configs').symlink_to(target, target_is_directory=True)
+    request = replace(request, output_dir=str(repository / destination / 'attempt'))
+    request.verify_inputs()
+    installed = tmp_path / 'venv/lib/python3.11/site-packages'
+    shutil.copytree(ROOT / 'src/oxyformer', installed / 'oxyformer',
+                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    request_path = tmp_path / 'installed-request.json'
+    request_path.write_text(request.to_json())
+    script = """
+import sys
+from pathlib import Path
+from oxyformer.contracts import StageRequest
+from oxyformer.reporting import stage
+assert stage.OWNER_APPROVALS is None
+request = StageRequest.from_json(Path(sys.argv[1]).read_text())
+print(stage.run_stage(request).to_json())
+"""
+    completed = subprocess.run([sys.executable, '-c', script, str(request_path)], cwd=tmp_path,
+                               env={**os.environ, 'PYTHONPATH': str(installed), 'CUDA_VISIBLE_DEVICES': ''},
+                               capture_output=True, text=True, timeout=60)
+    assert completed.returncode == 0, completed.stderr
+    result = StageResult.from_json(completed.stdout)
+    root = Path(request.output_dir)
+    if destination == 'shared/src':
+        assert result.status == 'pass', result.message
+        result.verify(request)
+        report = json.loads((root / 'report.json').read_text())
+        assert report['releasable']
+        assert len(report['estimators']) == 2
+    else:
+        assert result.status == 'fail' and not result.artifacts
+        assert 'overlaps protected repository path' in result.message
+        assert not root.exists()
