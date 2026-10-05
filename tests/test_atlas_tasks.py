@@ -216,3 +216,54 @@ def test_admission_hash_cache_refuses_changed_payload(tmp_path):
             payload.write_bytes(b'mutation')
             os.utime(payload, ns=(before.st_atime_ns, before.st_mtime_ns))
             integrity.regular_file_hash(payload)
+
+
+def test_inspection_rejects_stale_member_digest_with_current_payload_hash(tmp_path):
+    source, rid = synthetic_dem(tmp_path)
+    payload = tmp_path / 'payload.tar'
+    with tarfile.open(payload, 'r:') as archive:
+        member = archive.getmember('dem/' + rid + '.tif')
+    raster = tmp_path / 'fixture.tif'
+    with rasterio.open(raster, 'r+') as ds:
+        values = ds.read(1)
+        values[0, 0] = 1234
+        ds.write(values, 1)
+    changed = raster.read_bytes()
+    assert len(changed) == member.size
+    with payload.open('r+b') as stream:
+        stream.seek(member.offset_data)
+        stream.write(changed)
+    receipt = json.loads((tmp_path / 'receipts.json').read_text())
+    receipt['payload_sha256'] = file_hash(payload)
+    (tmp_path / 'receipts.json').write_text(json.dumps(receipt))
+    with pytest.raises(ContractError, match='resource digest mismatch'):
+        inspect_dem(tmp_path, source)
+
+
+@pytest.mark.parametrize('use_helper', [False, True])
+def test_final_admission_hash_does_not_depend_on_fingerprint_implementation(tmp_path, monkeypatch, use_helper):
+    """Exercise the reviewer-specified helper-backed fingerprint implementation.
+
+    The current implementation hashes directly; both implementations have the
+    same public contract and must receive an unpatched final verification.
+    """
+    import runpy
+    from oxyformer.execution import integrity
+    original = integrity.fingerprint_tree
+    root = tmp_path / 'source'; root.mkdir()
+    payload = root / 'payload.tar'; payload.write_bytes(b'original')
+    def helper_backed_tree(path, **kwargs):
+        tree = original(path, **kwargs)
+        tree['payload.tar']['sha256'] = integrity.regular_file_hash(Path(path) / 'payload.tar')
+        return tree
+    if use_helper:
+        monkeypatch.setattr(integrity, 'fingerprint_tree', helper_backed_tree)
+    frozen = runpy.run_path(str(ROOT / 'scripts/build_atlas_tasks.py'))['frozen_acquisitions']
+    context = frozen([root])
+    with pytest.raises(ContractError, match='frozen acquisition changed'):
+        with context as snapshots:
+            payload.write_bytes(b'mutation')
+            # Simulate a stat-invisible storage change, retaining the original
+            # content tree but allowing current stat signatures through.
+            signature = context.gen.gi_frame.f_locals['signature']
+            snapshots[root] = (signature(root), snapshots[root][1])

@@ -8,8 +8,8 @@ not an executable task manifest.
 The new `atlas-inputs` stage verifies the real DEM headers and paired XML against
 `dem.json` and the committed tasks, then publishes `atlas_shards.json` and
 `raster_metadata.json` in its own runner attempt. It inspects 957 TIFFs by their
-member offsets in the uncompressed tar, without reading pixels or extracting the
-archive. The 954 primary and three approved fallback tiles use their actual CRS
+member offsets in the uncompressed tar. It also streams every member to verify
+its receipt digest, without decoding pixels or extracting the archive. The 954 primary and three approved fallback tiles use their actual CRS
 and nodata. Vertical units/datum are corroborated by paired XML when omitted from
 TIFF tags. The five no-product cells remain explicit inventory entries, never
 fabricated rasters. Their missing-exposure policy is unchanged.
@@ -88,7 +88,7 @@ python -B scripts/build_atlas_tasks.py --admit --snapshot-cache \
   --out "$ADMISSION_OUTPUT"
 ```
 
-Generation reads bounded headers/XML only. The admission probe runs every task
+Generation reads metadata from bounded headers/XML and streams member checksums. The admission probe runs every task
 through the runner using real dependency paths. Only exposure calculation is
 replaced with explicitly marked synthetic products, which must never enter the
 scientific plan. The optional snapshot cache computes complete acquisition tree

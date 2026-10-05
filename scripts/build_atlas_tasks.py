@@ -105,10 +105,12 @@ def frozen_acquisitions(roots):
                              (provenance, 'file_hash'), (contracts, 'file_hash')]:
             stack.enter_context(patch.object(module, name, digest))
         yield snapshots
-        for root in snapshots:
-            check(root)
-            require(original_tree(root) == snapshots[root][1], 'frozen acquisition changed during admission')
-            print(str(root) + ': final full tree verified', flush=True)
+    # Restore every helper before the independent final check, including for
+    # fingerprint implementations that delegate hashing to module globals.
+    for root in snapshots:
+        check(root)
+        require(original_tree(root) == snapshots[root][1], 'frozen acquisition changed during admission')
+        print(str(root) + ': final full tree verified', flush=True)
 
 
 def admit(repo, out, census, dem, *, finalize=True):
@@ -160,6 +162,8 @@ def main():
         write_tasks(args.out, build_tasks(inspect_dem(args.dem_acquisition)))
         return
     require(args.census_acquisition is not None, '--admit requires --census-acquisition')
+    from oxyformer.execution.identity import verified_checkout
+    verified_checkout(args.repo)  # Refuse dirty code before large snapshot reads.
     if args.snapshot_cache:
         with frozen_acquisitions([args.census_acquisition, args.dem_acquisition]) as snapshots:
             admit(args.repo, args.out, args.census_acquisition, args.dem_acquisition, finalize=False)
