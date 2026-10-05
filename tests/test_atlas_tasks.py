@@ -23,6 +23,8 @@ from oxyformer.provenance import ArtifactLineage, ArtifactRecord, ContractError,
 # command too; the complete execution suite remains independently runnable.
 from test_execution import (runtime, acquisition, publication_authority,
     test_complete_acquisition_without_stage_result_is_accepted,
+    test_observed_acquisition_change_stays_tainted_after_restore,
+    test_run_serializes_real_owner_approvals_with_original_binding,
     test_acquisition_rejects_tampering_and_incomplete_receipt,
     test_acquisition_mutation_taints_direct_and_transitive_consumers,
     test_acquisition_cannot_be_rebaselined_after_receipt_and_payload_change,
@@ -189,6 +191,8 @@ def test_all_eleven_tasks_admit_through_runner(tmp_path, monkeypatch):
     results = admit(repo, tmp_path / 'admission', *roots)
     assert len(results) == 11
     assert all(r['status'] == 'pass' for r in results)
+    assert all(r['approvals'] == dict(approved_on='2026-10-04',
+        sha256=file_hash(ROOT / 'configs/approvals.yaml'), yaml_timestamp_policy='preserve_scalar_text') for r in results)
 
 
 def test_yaml_owner_dates_remain_json_serializable(tmp_path):

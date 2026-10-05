@@ -26,7 +26,11 @@ match that receipt. A create-once tree baseline lives in the independent
 publication store, never in the read-only acquisition. Direct and transitive
 consumers check that baseline and retain the normal post-execution change check
 and permanent taint marker. All other dependencies still require a published
-passing StageResult. YAML dates retain their spelling in the runner's JSON config.
+passing StageResult. Observed changes remain tainted even after restoration,
+including when another consumer detects the write during execution. YAML dates
+retain their scalar spelling in the runner's JSON config, recorded as
+`yaml_timestamp_policy: preserve_scalar_text`; original approval bytes and hashes
+remain bound unchanged.
 
 ## Orchestrator wiring
 
