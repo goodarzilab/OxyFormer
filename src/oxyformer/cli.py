@@ -21,7 +21,9 @@ def main(argv=None):
     from oxyformer.execution.identity import verify_module_origins
     try:
         verify_module_origins(args['repo'])
-        result = run(**args, report=lambda value: print(f'stage returned {value.status}: {value.message}', flush=True))
+        # Status lives in the receipt and exit code. Appending a status line
+        # would change a run.log that the stage may already have hashed.
+        result = run(**args)
     except (ValueError, OSError, KeyError, TypeError, subprocess.CalledProcessError) as exc:
         print(f'blocked: {exc}', file=sys.stderr)
         return 2
