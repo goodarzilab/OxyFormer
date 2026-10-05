@@ -299,6 +299,21 @@ def _weight_unit(weights):
                        largest > math.sqrt(limits.max)) else 1.
 
 
+def _clip_gradient_norm(parameters, maximum):
+    """Apply the registered cap without overflowing an FP32 norm reduction."""
+    with torch.no_grad():
+        gradients = [p.grad for p in parameters if p.grad is not None]
+        if not gradients:
+            return
+        norm = torch.stack([g.double().norm() for g in gradients]).norm()
+        require(bool(torch.isfinite(norm)), "nonfinite nuisance gradients")
+        # Match clip_grad_norm_'s L2 rule and stabilizer. Form the products in
+        # FP64 too, then copy back to the original FP32 gradient storage.
+        factor = (maximum / (norm + 1e-6)).clamp(max=1.)
+        for gradient in gradients:
+            gradient.copy_(gradient.double() * factor)
+
+
 def _outcome_loss(config, prediction, ids, *, reduction="sum", weight_unit=1.):
     # Accumulate target-weighted losses before normalization in FP64. Model
     # predictions and target validity remain governed by their FP32 contract.
@@ -409,8 +424,7 @@ def _train_one(config, bundle, encoder_state, view, stopping, epochs, seed, budg
             loss = loss * (len(view.original_ids) / (len(ids) * mass))
             require(bool(torch.isfinite(loss)), "nonfinite nuisance loss")
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), config.settings.gradient_norm,
-                                           error_if_nonfinite=True)
+            _clip_gradient_norm(model.parameters(), config.settings.gradient_norm)
             optimizer.step()
             require(all(bool(torch.isfinite(p).all()) for p in model.parameters()),
                     "nonfinite nuisance parameters")

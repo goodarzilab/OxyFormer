@@ -506,3 +506,54 @@ def test_identity_offsets_keep_positive_counties_at_different_weight_scales(comp
                                  for county in inputs.counties], dtype=torch.float32)
         fitting._profile(model, changed, view, inputs)
     torch.testing.assert_close(model.group_offsets(inputs.counties), expected)
+
+
+def test_finite_large_gradients_receive_registered_norm_cap(completed, monkeypatch):
+    case, artifact = completed
+    config = case[-1]
+    local, ids, _ = _partition(config, config.inner.split, 0)
+    rows = tuple((row[0], 2e30 if int(row[0][1:]) % 2 else 0., *row[2:-1], 1.)
+                 if row[0] in ids else row for row in config.data.rows)
+    changed = replace(config, data=replace(config.data, rows=rows),
+                      settings=replace(config.settings, batch_size=1))
+    initialization = fitting.CheckpointArtifact.from_json(state(artifact)["initializations"][0])
+    bundle, encoder = _bundle(changed, local, ids, initialization, "outcome", changed.settings.grid[0])
+    norms = []
+    original_step = torch.optim.AdamW.step
+
+    def capped_step(optimizer, *args, **kwargs):
+        gradients = [p.grad for group in optimizer.param_groups for p in group['params']
+                     if p.grad is not None]
+        assert all(torch.isfinite(g).all() for g in gradients)
+        norm = float(sum(g.double().square().sum() for g in gradients).sqrt())
+        norms.append(norm)
+        assert 0 < norm <= changed.settings.gradient_norm + 1e-6
+        return original_step(optimizer, *args, **kwargs)
+
+    monkeypatch.setattr(torch.optim.AdamW, "step", capped_step)
+    view = subset(changed.data.covariates(("x",)), ids)
+    model, _, complete, _ = _train_one(changed, bundle, encoder, view, (), 1, 1103,
+                                       _Budget(changed, CheckpointRequest()))
+    assert complete and len(norms) == len(ids)
+    assert all(torch.isfinite(p).all() for p in model.parameters())
+
+
+def test_identity_refit_accepts_extreme_finite_logits_with_its_fitted_calibration(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    case = make_case(tmp_path / "identity-fit", identity=True)
+    artifact = run(case)
+    controller = state(artifact)
+    calibration = AffineCalibration.from_json(controller['calibration'])
+    for result in controller['results']:
+        if result['kind'] == 'origin':
+            pairs = torch.tensor(result['predictions'])
+            assert torch.equal(pairs[:, 0], pairs[:, 1])
+    # Identical queries have a balanced pair at each logit. Its two scores
+    # cancel exactly at the zero-parameter initialization, so slope is zero.
+    assert calibration.slope == calibration.intercept == 0.
+    extreme = torch.full((len(calibration.original_ids), 2), 1000.)
+    monkeypatch.setattr(fitting, '_predict', lambda *args, **kwargs: extreme)
+    _, complete, _ = fitting._fit_controller(case[-1], case[1], case[2], artifact.checkpoint.identity,
+        controller, tmp_path, SimpleNamespace(reason=lambda: None))
+    assert complete
+    assert torch.equal(calibration.ratios(extreme), torch.ones_like(extreme))
