@@ -254,5 +254,6 @@ UNIT_SCHEMA = {
     'locked_stages': 'Registry requires_recipe or a campaign field makes recipe_lock mandatory.',
     'merge_barrier': 'code prerequisite needs are satisfied only by coordinator merged receipts',
     'fingerprint': 'tracked-science-v1: all tracked paths except non-plan docs/** and *.md',
+    'attempt_fingerprint': 'entries, file types, mode bits, sizes, content hashes, symlink targets; timestamps and inode numbers excluded; compares input states, not write history',
     'validation': 'oxyformer.execution.campaign.validate_plan(expansion, owner_approvals)',
 }
