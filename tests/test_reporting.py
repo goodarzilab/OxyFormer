@@ -955,3 +955,35 @@ def test_fresh_round1_bad_sensitivity_disclosure_retains_every_diagnostic(case, 
     html = (Path(request.output_dir)/'report.html').read_text()
     assert all(s.name in html for s in sensitivities)
     assert 'shift3' in html
+
+
+@pytest.mark.parametrize('direction', [-1, 0, 1])
+def test_fresh_round2_exact_county_share_boundary_and_neighbors(case, direction):
+    from math import fsum
+    b, m, r = case
+    ids = tuple(f'boundary-{i}' for i in range(512))
+    u = [7/256 if i == 215 else -1/256 if i <= 224 else 1/256 if i <= 441 else 0. for i in range(512)]
+    if direction:
+        shifted = float(np.nextafter(u[215], np.inf if direction > 0 else -np.inf))
+        delta = shifted-u[215]
+        u[215] = shifted
+        u[225] -= delta
+    assert fsum(u) == 0.
+    estimates = tuple(replace(e, value=.5, original_ids=ids, influence=tuple(u),
+                             scores=tuple(.5+512*v for v in u),
+                             lineage=replace(e.lineage, unit_ids=ids)) for e in b.estimates)
+    b = replace(b, original_ids=ids, estimates=estimates, attrition=(('source', 512), ('target', 512)),
+                weights=(1.,)*512, observed_exposure=(1.,)*512, shifted_exposure=(3.,)*512,
+                ratios=((1.,)*512,)*3, balance_observed=((1., 1.),)*512, balance_shifted=((1., 3.),)*512,
+                counties=tuple(f'c{i}' for i in range(442))+('c0',)*70, states=('state',)*512,
+                county_locations=tuple((f'c{i}', (30.+i*.01, -110.)) for i in range(442)))
+    report = evaluate_case((b, m, r))
+    assert report['state'] == ('failed' if direction > 0 else 'released')
+    gates = [g for g in report['gates'] if g['gate'].startswith('influence_concentration:')]
+    assert len(gates) == 2
+    assert all(g['status'] == ('failed' if direction > 0 else 'pass') for g in gates)
+    if direction == 0:
+        metric = report['diagnostics']['information']['mtp_one_step']
+        assert metric['D'] == 490/65536
+        assert metric['s_max'] == .1
+        assert metric['G_eff'] == pytest.approx(2450/29)
