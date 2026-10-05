@@ -45,12 +45,32 @@ class AffineCalibration(Immutable):
     original_ids: tuple[str, ...]
     partitions: tuple[CalibrationPartition, ...]
     lineage: ArtifactLineage
+    # Store the optimized affine map in normalized coordinates. Expanding it
+    # into raw-logit coefficients can overflow or erase small contrasts.
+    input_offset: float = 0.
+    input_scale: float = 1.
+
+    def __post_init__(self):
+        Immutable.__post_init__(self)
+        require(self.input_scale > 0, "invalid calibration input scale")
 
     def logits(self, values):
         values = torch.as_tensor(values, dtype=torch.float32)
         require(bool(torch.isfinite(values).all()), "nonfinite calibration logits")
         with torch.autocast(values.device.type, enabled=False):
-            result = values * self.slope + self.intercept
+            if self.slope == 0:
+                result = torch.full_like(values, self.intercept)
+            else:
+                centered = values - self.input_offset
+                normalized = centered / self.input_scale
+                overflow = ~torch.isfinite(centered)
+                if bool(overflow.any()):
+                    # Opposite extreme signs can overflow subtraction even
+                    # when the difference in normalized units is finite.
+                    normalized = torch.where(overflow,
+                        values / self.input_scale - self.input_offset / self.input_scale,
+                        normalized)
+                result = normalized * self.slope + self.intercept
         require(bool(torch.isfinite(result).all()), "nonfinite calibrated logits")
         return result
 
@@ -111,18 +131,16 @@ def fit_affine(logits, weights, *, original_ids, fold_ids, partitions,
                 "calibration predictions do not match held-out partition")
     z, labels, mass = paired_tensors(logits, weights)
     with torch.inference_mode(False), torch.enable_grad(), torch.autocast(z.device.type, enabled=False):
-        # Normalize magnitude before squaring: valid FP32 logits can have a
-        # representable standard deviation but unrepresentable squared values.
-        magnitude = z.abs().max()
-        magnitude = torch.where(magnitude > 0, magnitude, torch.ones_like(magnitude))
-        normalized = z / magnitude
-        center = (mass * normalized).sum()
-        scale = ((normalized - center).square() * mass).sum().sqrt()
-        require(bool(torch.isfinite(scale)), "nonfinite calibration scale")
-        if float(scale) == 0:
-            slope, intercept = 0., 0.
+        active = mass > 0
+        fitting = z[active]
+        # Midrange centering preserves representable small differences around
+        # a large offset. Halve before adding to avoid endpoint overflow.
+        offset = fitting.min() / 2 + fitting.max() / 2
+        magnitude = (fitting - offset).abs().max()
+        if float(magnitude) == 0:
+            slope, intercept, magnitude = 0., 0., torch.ones_like(magnitude)
         else:
-            x = (normalized - center) / scale
+            x = ((z - offset) / magnitude).masked_fill(~active, 0)
             parameter = torch.zeros(2, dtype=torch.float32, device=z.device, requires_grad=True)
             optimizer = torch.optim.LBFGS([parameter], lr=1., max_iter=100,
                                          tolerance_grad=1e-7, tolerance_change=1e-9,
@@ -138,11 +156,12 @@ def fit_affine(logits, weights, *, original_ids, fold_ids, partitions,
                 return loss
 
             optimizer.step(closure)
-            slope = float(((parameter[0] / scale) / magnitude).detach())
-            intercept = float((parameter[1] - parameter[0] * center / scale).detach())
+            slope = float(parameter[0].detach())
+            intercept = float(parameter[1].detach())
     require(math.isfinite(slope) and math.isfinite(intercept), "nonfinite affine coefficients")
     result = AffineCalibration(slope=slope, intercept=intercept, class_prior=.5,
-        original_ids=ids, partitions=tuple(partitions), lineage=lineage)
+        original_ids=ids, partitions=tuple(partitions), lineage=lineage,
+        input_offset=float(offset), input_scale=float(magnitude))
     pair_metrics(result.logits(z), weights)
     result.ratios(z)  # Numerical validity includes the actual ratio, not just BCE.
     return result
@@ -163,7 +182,9 @@ def transfer_diagnostics(calibration, oof_logits, refit_logits, weights, *, line
     z, _, mass = paired_tensors(oof_logits, weights)
     final, _, _ = paired_tensors(refit_logits, weights)
     require(final.shape == z.shape, "transfer alignment mismatch")
-    delta = float(((final - z).square() * mass).sum().sqrt())
+    # Diagnostics can accumulate squared FP32 differences in FP64 without
+    # changing the FP32 calibration or ratio computation.
+    delta = float(((final.double() - z.double()).square() * mass.double()).sum().sqrt())
     require(math.isfinite(delta), "nonfinite calibration transfer")
     return TransferDiagnostics(original_ids=calibration.original_ids,
         metrics=(("inner_oof_log_loss", before[0]), ("inner_oof_brier", before[1]),
