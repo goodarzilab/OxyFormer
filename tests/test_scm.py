@@ -1561,3 +1561,101 @@ def test_rational_conversion_ties_and_subnormal_spacing():
     spacing = Fraction(*np.nextafter(np.longdouble(1), np.longdouble(2)).as_integer_ratio())-one
     assert wide(one+spacing/2) == 1
     assert wide(one+3*spacing/2) == np.longdouble(1)+2*wide(spacing)
+
+
+def _decimal_laplace_policy_reference(lo, hi, center, scale, delta, beta, error, effect):
+    # Independent exact-input, high-precision truncated Laplace antiderivative.
+    from decimal import Decimal, localcontext
+    from fractions import Fraction
+    with localcontext() as context:
+        context.prec = 160
+        def dec(v):
+            v = Fraction(v)
+            return Decimal(v.numerator)/Decimal(v.denominator)
+        L,U,C,S,d,B = map(dec, (lo,hi,center,scale,delta,beta))
+        cutoff = U-d
+        assert cutoff <= C
+        normalizer = 2-((L-C)/S).exp()-((C-U)/S).exp()
+        if effect == 'linear':
+            integral = B*d*((((cutoff-L)/S).exp()-1)*((L-C)/S).exp())
+        else:
+            m,k = B/10*2*d, B/10*(d*d-10*d)
+            primitive = lambda a: ((a-C)/S).exp()*(m*(a-S)+k)
+            integral = primitive(cutoff)-primitive(L)
+        return float(integral/normalizer/dec(1-Fraction(error)**2))
+
+
+@pytest.mark.parametrize("decays", [60., 64., 65., 80.])
+def test_continuation_resolves_amplified_exponential_tail(decays):
+    lo,hi,delta,error = 9590.,10010.,200.,.9999999999999999
+    center = lo+(hi-lo)*float(expit(.1))
+    scale = (center-(hi-delta))/decays
+    f = replace(frame(1,1), columns=('x',), x=((0.,),), coordinates=((.1,0.),))
+    expected = _decimal_laplace_policy_reference(lo,hi,center,scale,delta,200.,error,'sign_changing')
+    result = generate_suite_a(f, config('sign_changing', beta=200., assignment='near_deterministic',
+                              near_scale=scale, denominator_error=error), policy(((lo,hi),),delta=delta))
+    for truth in (result.observed_law_truth, result.structural_causal_truth):
+        assert truth.value == pytest.approx(expected, abs=1e-8, rel=0)
+
+
+@pytest.mark.parametrize("edge", [-2.**-65, float(np.nextafter(-2.**-65,-np.inf)),
+                                  float(np.nextafter(-2.**-65,np.inf))])
+def test_continuation_retains_narrow_positive_eligibility_panel(edge):
+    hi,delta,scale,error = 1.,1.,.05,.9999999999999999
+    center = edge+(hi-edge)*.5
+    f = replace(frame(1,1), columns=('x',), x=((0.,),), coordinates=((0.,0.),))
+    expected = _decimal_laplace_policy_reference(edge,hi,center,scale,delta,200.,error,'linear')
+    result = generate_suite_a(f, config('linear', beta=200., assignment='near_deterministic',
+                              near_scale=scale, denominator_error=error), policy(((edge,hi),),delta=delta))
+    assert expected > 1e-5
+    for truth in (result.observed_law_truth, result.structural_causal_truth):
+        assert truth.value == pytest.approx(expected, abs=1e-12, rel=0)
+
+
+@pytest.mark.parametrize("local", [-1, 0, 1])
+@pytest.mark.parametrize("lower", [-2.**-65, float(np.nextafter(-2.**-65,-np.inf)),
+                                   float(np.nextafter(-2.**-65,np.inf)), -5e-324])
+def test_continuation_quadrature_preserves_positive_panel_mass(local, lower):
+    from decimal import Decimal, localcontext
+    from fractions import Fraction
+    from scipy.special import logsumexp
+    from oxyformer.validation.scm import exact, wide
+    law = AssignmentLaw(frame(1,1), 0, LatentState(local=local), config(), ((lower,1.),))
+    logs = []
+    for rule in law.quadrature(32, [exact(0)]):
+        coordinates = rule.coordinates
+        mask = coordinates.inside(exact(lower), exact(0))
+        if mask.any():
+            assert mask.all()  # No quadrature panel crosses the exact boundary.
+            assert all(exact(lower) < coordinates.anchor+coordinates.unit*exact(v) < 0
+                       for v in coordinates.values)
+            logs.extend(rule.log_weights)
+    assert logs
+    with localcontext() as context:
+        context.prec = 800  # Retain cancellation at the subnormal support edge.
+        def dec(v):
+            v = Fraction(v)
+            return Decimal(v.numerator)/Decimal(v.denominator)
+        L,rate = dec(lower), dec(Fraction(.3)*local)
+        if local:
+            expected = (1-(rate*L).exp())/((rate).exp()-(rate*L).exp())
+        else:
+            expected = -L/(1-L)
+        expected = wide(Fraction(expected))
+    actual = np.exp(logsumexp(np.asarray(logs, dtype=np.longdouble)))
+    assert abs(actual/expected-1) < 1e-12
+
+
+@pytest.mark.parametrize("tolerance", [1e-5, 1e-8, 1e-12])
+@pytest.mark.parametrize("selected", [False, True])
+def test_continuation_tail_budget_includes_response_and_selected_normalization(tolerance, selected):
+    from oxyformer.validation.generators import _groups, _quadrature_tail_budget
+    c = config('linear', beta=200., assignment='near_deterministic', near_scale=.05,
+               denominator_error=.9999999999999999, selected_outcome=selected,
+               survey_inclusion=selected, missing_biomarkers=selected)
+    f,p = frame(1,1),policy(((9995.,10005.),))
+    groups = _groups(f,c,p)
+    bound = _quadrature_tail_budget(f,c,p,groups,tolerance)
+    assert 0 < bound < tolerance/16
+    cutoffs = [float(term.law.tail_decay) for group in groups.values() for term in group]
+    assert min(cutoffs) > (4200 if selected else 60)
