@@ -464,10 +464,32 @@ def exact_shift_intervals(components, delta):
 
 
 def wide(value):
-    """Extended exponent range AFTER exact cancellation of coarse geometry."""
-    if isinstance(value, Fraction):
-        return np.longdouble(str(value.numerator))/np.longdouble(str(value.denominator))
-    return np.longdouble(value)
+    """Round an exact rational once to longdouble, with ties to even.
+
+    Integer quotient/remainder avoids independently rounding numerator and
+    denominator, and avoids decimal-string limits during enclosure refinement.
+    The spacing floor also handles subnormal results without double rounding.
+    """
+    if not isinstance(value, Fraction):
+        return np.longdouble(value)
+    if value == 0:
+        return np.longdouble(0)
+    numerator, denominator = abs(value.numerator), value.denominator
+    exponent = numerator.bit_length()-denominator.bit_length()
+    if (numerator < denominator << exponent if exponent >= 0
+            else numerator << -exponent < denominator):
+        exponent -= 1
+    info = np.finfo(np.longdouble)
+    spacing = max(exponent-info.nmant, info.minexp-info.nmant)
+    if spacing >= 0:
+        denominator <<= spacing
+    else:
+        numerator <<= -spacing
+    significand, remainder = divmod(numerator, denominator)
+    if 2*remainder > denominator or (2*remainder == denominator and significand % 2):
+        significand += 1
+    rounded = np.ldexp(np.longdouble(significand), spacing)
+    return -rounded if value < 0 else rounded
 
 
 def directed_bound(value, *, upward):
