@@ -426,3 +426,28 @@ def test_final_refit_ratio_audit_uses_validated_positive_weight_rows(
         diagnostics = TransferDiagnostics.from_json(result["transfer_diagnostics"])
         assert diagnostics.original_ids == ids
         assert diagnostics.lineage.unit_ids == ids
+
+
+@pytest.mark.parametrize("kind", ["outcome", "origin"])
+@pytest.mark.parametrize("weight", [1e38, 1e-40])
+def test_training_objective_is_invariant_to_extreme_common_weight_scale(completed, kind, weight):
+    case, artifact = completed
+    config = case[-1]
+    local, ids, _ = _partition(config, config.inner.split, 0)
+    initialization = fitting.CheckpointArtifact.from_json(state(artifact)["initializations"][0])
+
+    def train(scale):
+        rows = tuple((*row[:-1], scale) if row[0] in ids else row for row in config.data.rows)
+        changed = replace(config, data=replace(config.data, rows=rows))
+        bundle, encoder = _bundle(changed, local, ids, initialization, kind, config.settings.grid[0])
+        view = subset(changed.data.covariates(("x",)), ids)
+        model, _, complete, _ = _train_one(changed, bundle, encoder, view, (), 1, 1103,
+                                           _Budget(changed, CheckpointRequest()))
+        assert complete
+        return model.state_dict()
+
+    baseline, actual = train(1.), train(weight)
+    for name, expected in baseline.items():
+        if isinstance(expected, torch.Tensor):
+            # Model parameters remain FP32; use the unchanged default tolerance.
+            torch.testing.assert_close(actual[name], expected)
