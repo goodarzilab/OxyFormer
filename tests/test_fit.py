@@ -156,9 +156,12 @@ def test_both_treatments_predicted_from_label_free_views(completed):
     calibration = AffineCalibration.from_json(controller["calibration"])
     with torch.no_grad():
         logits = _predict(model, view, artifact.prediction_inputs, config.policy)
-    expected = (logits * calibration.slope + calibration.intercept).exp().double()
-    torch.testing.assert_close(torch.tensor(result.r_a, dtype=torch.float64), expected[:, 0])
-    torch.testing.assert_close(torch.tensor(result.r_d, dtype=torch.float64), expected[:, 1])
+    # predict_fold computes calibration and ratios in FP32 before widening for
+    # output; use FP32 references and its default assert_close tolerances.
+    assert logits.dtype == torch.float32
+    expected = (logits * calibration.slope + calibration.intercept).exp()
+    torch.testing.assert_close(torch.tensor(result.r_a, dtype=torch.float32), expected[:, 0])
+    torch.testing.assert_close(torch.tensor(result.r_d, dtype=torch.float32), expected[:, 1])
     for invalid in (config.data, replace(view, use="ssl")):
         with pytest.raises(ContractError, match="label-free"):
             predict_fold(artifact, invalid, config.policy)
