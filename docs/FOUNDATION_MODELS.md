@@ -7,7 +7,8 @@ The frozen plan sections 2, 8.4 and 10, its adoption note, and
 nonprofit research project. This implementation selects TabPFN **v2 weights**
 with package **9.1.0**, and TabICLv2 weights with package **2.2.0**. This is a
 reproducibility choice, not a legal exclusion of later approved versions.
-Official sources and installed source were inspected on 2026-10-04. No study
+Official sources and installed source were inspected on 2026-10-04 and official
+package/checkpoint documentation was rechecked on 2026-10-05. No study
 data, checkpoints or generated results belong in Git.
 
 ## Exact identities and provisioning
@@ -96,13 +97,20 @@ the view. The adapter then excludes string cells. No feature is replaced with a 
 are NaN; numeric and binary covariates are supported. Categorical strings must
 not be silently encoded by this adapter. County/geography is not a predictor.
 
-- Identity outcomes return a predictive **mean**, never a median or effect.
-  Binary Bernoulli outcomes return class-1 probability and require both classes
-  in context. Poisson, negative-binomial and aggregated binomial targets are
+- Identity outcomes return a predictive **mean** in the registered `years`,
+  `grams` or `g/dL` scale, never a median or effect. Binary Bernoulli outcomes
+  support `risk_difference`, return class-1 probability and require both classes
+  in context. Every other outcome scale, including unknown scales, is refused
+  before creating a backend. These concrete scales come from the merged endpoint
+  and birth/ENDES producers; adding scales requires an explicit compatibility
+  change. Origin classification labels describe original/shifted copies and are
+  independent of the endpoint's outcome scale. Poisson, negative-binomial and aggregated binomial targets are
   unsupported: counts cannot be silently reinterpreted as continuous rates.
 - Both package `fit(X,y)` signatures lack sample weights. Callers must explicitly
   supply `weight_semantics="unit"` and all-one weights; target/survey semantics,
   unequal weights, zero weights and non-unit constants all block the comparator.
+  Exact unit-ness is checked in the supplied numeric precision, including
+  extended-precision values immediately adjacent to one, before any conversion.
   Neither replication nor unweighted fitting substitutes for weighted training.
 - `fit_outcome` consumes exactly `split.training_ids(fold)` in order. `fit_origin`
   consumes authoritative `PolicyPairs`: original rows then shifted rows, the same
@@ -149,7 +157,10 @@ whether a caller falsely labeled population weights as unit weights.
 ## Fixed variants
 
 `build_variant` constructs independent nuisance heads and checks their existing
-one-million-parameter cap. PMA variants require an owned county context at
+one-million-parameter cap on the final network, including owned context and
+offsets. A3/A4 defer the temporary parent architecture's check until replaced
+modules have been removed and the alternative head has been installed.
+PMA variants require an owned county context at
 construction; omitting it cannot silently turn a labeled full variant into A2.
 `VARIANTS` and `configs/models/ablations.yaml` use
 independent names. A0 is primary. A1 resets encoder/PMA initialization and skips

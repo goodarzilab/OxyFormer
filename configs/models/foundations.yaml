@@ -4,6 +4,9 @@ device: cpu
 outcome_families:
 - identity
 - bernoulli
+outcome_scales:
+  identity: [years, grams, g/dL]
+  bernoulli: [risk_difference]
 weight_semantics: unit_only
 query_batch_rows: 1
 checkpoints:

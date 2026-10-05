@@ -232,6 +232,8 @@ def test_fold_context_is_exact_and_copied(backend, fold):
 
 @pytest.mark.parametrize('family', ['identity', 'bernoulli'])
 def test_query_consistency(backend, fold, family):
+    if family == 'bernoulli':
+        fold = outcome_scale_fold(fold, 'risk_difference')
     model = fitted(backend, fold, family=family)
     view = fold[1]
     a = torch.tensor([[[1.], [3.]], [[2.], [4.]]])
@@ -534,3 +536,82 @@ def test_origin_genuine_boundary_probability_still_blocks(backend, fold, monkeyp
     assert (model.probability(*args) == boundary).all()
     with pytest.raises(ContractError, match='boundary probability; no implicit clipping'):
         model.logits(*args)
+
+
+def outcome_scale_fold(fold, scale):
+    train, held, split = fold
+    spec = replace(train.spec, outcome_scale=scale)
+    split = replace(split, spec=spec)
+    views = [replace(view, spec=spec, lineage=replace(view.lineage, split_hash=split.content_hash))
+             for view in (train, held)]
+    return *views, split
+
+
+@pytest.mark.parametrize('family,scale', [
+    ('identity', 'count'), ('identity', 'rate'), ('identity', 'risk_difference'),
+    ('identity', 'unknown'), ('bernoulli', 'count'), ('bernoulli', 'years'),
+    ('bernoulli', 'binomial'), ('bernoulli', 'unknown'),
+])
+def test_unsupported_target_scales_block_before_backend(backend, fold, monkeypatch, family, scale):
+    train, _, split = outcome_scale_fold(fold, scale)
+    model = backend[0](family=family)
+    calls = []
+    make = model._make_estimator
+    def record_backend():
+        calls.append(True)
+        return make()
+    monkeypatch.setattr(model, '_make_estimator', record_backend)
+    labels = [0, 1, 2, 3] if family == 'identity' else [0, 1, 0, 1]
+    with pytest.raises(ContractError, match='unsupported outcome scale'):
+        model.fit_outcome(train, split, 0, np.arange(4.), labels,
+                          sample_weight=np.ones(4), weight_semantics='unit')
+    assert not calls and model._estimator is None
+
+
+@pytest.mark.parametrize('family,scale', [
+    ('identity', 'years'), ('identity', 'grams'), ('identity', 'g/dL'),
+    ('bernoulli', 'risk_difference'),
+])
+def test_supported_target_scales_keep_endpoint_units(backend, fold, family, scale):
+    fold = outcome_scale_fold(fold, scale)
+    model = fitted(backend, fold, family=family)
+    assert model.spec.outcome_scale == scale
+    assert torch.isfinite(query(model, fold[1])).all()
+
+
+@pytest.mark.parametrize('direction', [0, 2])
+@pytest.mark.parametrize('container', ['array', 'list'])
+def test_extended_precision_nonunit_weights_are_not_discarded(backend, fold, direction, container):
+    weights = np.ones(4, dtype=np.longdouble)
+    weights[1] = np.nextafter(np.longdouble(1), np.longdouble(direction))
+    assert weights[1] != 1
+    if np.finfo(np.longdouble).eps < np.finfo(np.float64).eps:
+        assert np.float64(weights[1]) == 1
+    if container == 'list':
+        weights = list(weights)
+    with pytest.raises(ContractError, match='unsupported.*weight'):
+        backend[0]().fit_outcome(fold[0], fold[2], 0, np.arange(4.), np.arange(4.),
+                                sample_weight=weights, weight_semantics='unit')
+
+
+@pytest.mark.parametrize('dtype', [np.float32, np.float64, np.longdouble, np.int64])
+def test_exact_unit_weights_are_accepted(backend, fold, dtype):
+    model = backend[0]().fit_outcome(fold[0], fold[2], 0, np.arange(4.), np.arange(4.),
+                                    sample_weight=np.ones(4, dtype=dtype), weight_semantics='unit')
+    assert model._estimator is not None
+
+
+@pytest.mark.parametrize('variant,expected', [('A3', 966273), ('A4', 965544)])
+def test_alternative_cap_uses_final_architecture(architecture, variant, expected):
+    encoder, context, design = architecture
+    pair = build_variant(variant, encoder, treatment_design=design, raw_x_dim=12810,
+                         county_context=context, dropout=0.)
+    for model in (pair.outcome, pair.correction):
+        assert sum(p.numel() for p in model.parameters()) == expected
+        assert model.check_parameter_cap() == expected
+    # The next width above the final architecture's cap must still be rejected.
+    over_width = 12810 + (1_000_000 - expected) // 64 + 1
+    for model in (pair.outcome, pair.correction):
+        with pytest.raises(ContractError, match='one-million-parameter cap'):
+            type(model)(encoder, treatment_design=design, raw_x_dim=over_width,
+                        county_context=context, dropout=0.)
