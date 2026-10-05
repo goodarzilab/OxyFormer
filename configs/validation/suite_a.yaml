@@ -1,0 +1,261 @@
+# Validation platform note: the required standard and CI CPU environments use
+# extended-precision longdouble. Frozen inherited tests contain 1e-400 literals
+# and precision-sensitive expectations, so those historical fixtures are not a
+# native binary64-longdouble test campaign. Explicit binary64 arithmetic
+# exercises are separate diagnostics; they do not claim another-host execution.
+# Input-type contract (all domain endpoints denote their exact binary values):
+# Exact built-in int/float and concrete NumPy integer/floating scalar types
+# of every width are accepted. Subclasses and numeric/array protocol objects
+# are refused BEFORE coercion; containers must be exact list, tuple or ndarray.
+# Lists, tuples and arrays may mix these types; each supplied element is captured
+# before NumPy promotion and checked exactly. Existing numeric arrays supply
+# their stored values; callers must use object arrays to retain mixed precision.
+# Boolean, complex, string, nonfinite and out-of-domain numbers are refused.
+# Configuration, frames, paired-world/truth/uncertainty records and assignment support endpoints
+# use the shared JSON binary64 schema: every input must be representable there
+# without loss, otherwise a specific representability error is raised. Policy
+# objects come from the authoritative ShiftOrStayPolicy API and supply its
+# already-serialized values. In contrast, exact_shift_intervals is a raw
+# rational geometry helper: it additionally admits explicit Fraction inputs,
+# and LatentState.denominator_factor additionally admits exact Fraction values,
+# never Fraction subclasses. Geometry retains supported real endpoints/delta exactly
+# and never serializes them into binary64 records.
+# Intervention doses and integration tolerances >= 1e-5000 retain their exact
+# supplied values and need not fit binary64. Seeds, row indices, pair sizes and
+# max_order accept any supported scalar type representing an exact integer.
+# Counts/seeds keep their existing bounds; integration max_order is at least 32.
+# Response/adjustment row indices and assignment-piece indices use the same
+# concrete integer adapter and nonnegative alignment bounds. Standalone
+# quadrature orders likewise accept exact integral scalars, with order >= 1.
+# Conditional inverse probabilities use the closed interval [0,1]; endpoints
+# map to exact component boundaries. Tiny local draws remain rational through
+# physical and response scaling, before observation serialization.
+# Domain/physical sign checks never use a value rounded from a raw input.
+# Integration convergence includes the exact displacement from rounding the
+# computed truth to its binary64 artifact; no output-ULP tolerance floor applies.
+# Fixed numeric input domain; no clipping, rescaling, or computation outside it.
+# Start with the smallest per-quantity box for the 14 registered recipes plus
+# the exact-location pair and shared reference inputs. Widen every magnitude
+# bound by AT LEAST 100x using exact expansion and outward binary rounding. Zero remains valid for signed quantities and disabled
+# mechanisms, zero weights and identity shifts. Probability constraints still
+# apply. The independently fixed positive shift floor remains the exact
+# binary64 value 0.02 (with zero for identity), as in the inherited contract.
+# Wider axes retain the inherited successful numerical stress tests:
+# tiny near scales/weights use scaled/log arithmetic; paired interventions use
+# exact rational arithmetic. These extensions do not widen nonlinear-response
+# coefficients or the positive shift floor. This is not all-float64 support.
+# Shared reference inputs: X in [-1,1], coordinates in [0,10], unit weights;
+# supports have endpoints in [0,10], delta=2; near centers lie within supports.
+# Coefficient box covers beta and local/regional strengths. Paired c and tau
+# have separate bounds because they use a different response implementation.
+# Public constructor field domains: primitive config/frame/pair coefficients,
+# supports, coordinates, X and weights use their named box plus physical signs.
+# ObservedRecords.a uses recorded_exposure (true support plus signed error),
+# measured_x uses covariate; registered_events are nonnegative exact integers;
+# serialized observed_denominator is in (0,200], including a rounded upper end.
+# Every floating record field is finite and losslessly binary64-representable;
+# integer fields retain exact integers;
+# flags are booleans, names/IDs are strings, optional values admit None, and
+# aligned fields retain their schema's shapes. Frame validation is recursive.
+# Gaussian innovations, baselines, computed outcomes and truths are outputs:
+# their domain is finite binary64, not the primitive support/coefficient box.
+# Integration diagnostics likewise retain finite binary64 display values.
+# LocalCoordinates/QuadraturePiece are internal arithmetic carriers, with
+# rational geometry and array nodes/weights, not serialized simulator inputs.
+# The tolerance bound does not add scalar input types: Fraction tolerances
+# are refused even for atoms/empty targets. It is a bound on admitted values,
+# not a promise that its decimal endpoint has an admitted scalar representation.
+# The tolerance floor is an exact decimal string, below IEEE extended/quad
+# subnormals and more than 100x below the registered default for every recipe.
+# Precise selected log masses and their expm1 differences remain rational
+# through convergence; relative-mass display values are rounded upward.
+# Latent denominators lie in [smallest_positive_longdouble, 2), with exact
+# admission before rounding. structural_mean refuses nonfinite output instead
+# of emitting NaN/inf. Normal generated factors are at least 2**-53.
+# structural_mean forms the complete response and scales it before rounding.
+# Its true-dose domain is the primitive dose box plus/minus abs(state.error),
+# rounded outward to longdouble to include smooth count-support diagnostics.
+# This admits valid error-shifted intervention doses, not arbitrary primitives.
+# Nonlinear response quadrature partitions all support components into exact
+# spans <= 16 (phase span <= 8), in addition to assignment/selection cutoffs.
+# The complete declared support endpoint box remains supported.
+# Assignment normalization/panel masses take logs of scaled positive rationals;
+# subnormal scales remain positive even when longdouble has binary64 range.
+# Internal tail allowances use rational arithmetic with a directed Decimal
+# exponential bound; only the display bound is rounded upward to binary64.
+numeric_domain:
+  id: suite-a-100x-v1
+  margin: 100.0
+  latent_denominator:
+    minimum: smallest_positive_longdouble
+    maximum_exclusive: 2
+  integration_tolerance:
+    minimum: "1e-5000"
+    registered: 1.0e-8
+  # Union these disabled values with the positive intervals in supported_box.
+  # noise_sd=0 is a deliberate noiseless simulation, not an invalid scale.
+  zero_exceptions:
+  - delta
+  - denominator_error
+  - exposure_error
+  - migration
+  - noise_sd
+  - weight
+  registered_box:
+    dose:
+    - 0.0
+    - 10.0
+    delta:
+    - 2.0
+    - 2.0
+    near_scale:
+    - 0.05
+    - 0.05
+    coefficient:
+    - -2.0
+    - 2.0
+    noise_sd:
+    - 1.0
+    - 1.0
+    exposure_error:
+    - 0.4
+    - 0.4
+    migration:
+    - 2.0
+    - 2.0
+    registration_probability:
+    - 0.65
+    - 1.0
+    denominator_error:
+    - 0.2
+    - 0.2
+    coordinate:
+    - 0.0
+    - 10.0
+    covariate:
+    - -1.0
+    - 1.0
+    weight:
+    - 1.0
+    - 1.0
+    paired_c:
+    - -1.5
+    - 1.5
+    paired_tau:
+    - -2.0
+    - 2.0
+    intervention_dose:
+    - 0.0
+    - 10.0
+  supported_box:
+    recorded_exposure:
+    - -10050.0
+    - 10050.0
+    dose:
+    - -10010.0
+    - 10010.0
+    delta:
+    - 0.02
+    - 200.0
+    near_scale:
+    - 5.0e-324
+    - 1000.0
+    coefficient:
+    - -200.0
+    - 200.0
+    noise_sd:
+    - 0.009999999999999998
+    - 100.0
+    exposure_error:
+    - 0.004
+    - 40.00000000000001
+    migration:
+    - 0.019999999999999997
+    - 200.0
+    registration_probability:
+    - 0.0065
+    - 100.0
+    denominator_error:
+    - 0.002
+    - 20.000000000000004
+    coordinate:
+    - -1000.0
+    - 1000.0
+    covariate:
+    - -100.0
+    - 100.0
+    weight:
+    - 5.0e-324
+    - 1.7e+308
+    paired_c:
+    - -1.0e+307
+    - 1.0e+307
+    paired_tau:
+    - -1.0e+300
+    - 1.0e+300
+    intervention_dose:
+    - -1.0e+308
+    - 1.0e+308
+suite: A
+scenario_expansion: explicit_only
+# Synthetic recipe. A caller supplies approved fixed covariates and frozen
+# ShiftOrStayPolicy support; no real records or inferred policy IDs live here.
+# All baseline values/defaults are validated by SCMConfig. active_mechanisms
+# must equal the exact enabled switch set, including the effect family.
+truth_population: fixed_covariate_frame_with_factual_selection
+truth_adjustment: approved_X_missingness_support_stratum_region_and_measured_confounders
+structural_intervention: increment_true_dose_by_recorded_policy_shift_hold_selection_fixed
+truth_store: evaluator_only_separate_from_observations
+suite_b: interface_only_follow_on
+scenarios:
+  - name: null_effect
+    effect: "null"
+    active_mechanisms: ["null"]
+  - name: linear_reference
+    active_mechanisms: [linear]
+  - name: nonlinear
+    effect: nonlinear
+    active_mechanisms: [nonlinear]
+  - name: sign_changing
+    effect: sign_changing
+    active_mechanisms: [sign_changing]
+  - name: measured_local_regional
+    local_confounding: measured
+    regional_confounding: measured
+    active_mechanisms: [linear, local_measured, regional_measured]
+  - name: omitted_local_regional
+    local_confounding: omitted
+    regional_confounding: omitted
+    active_mechanisms: [linear, local_omitted, regional_omitted]
+  - name: near_location
+    assignment: near_deterministic
+    active_mechanisms: [linear, near_deterministic]
+  - name: disconnected_support
+    support_gaps: true
+    active_mechanisms: [linear, support_gaps]
+  - name: heterogeneous_eligibility
+    heterogeneous_eligibility: true
+    active_mechanisms: [linear, heterogeneous_eligibility]
+  - name: unsupported_atoms
+    assignment: atoms
+    active_mechanisms: [linear, atoms]
+  - name: extreme_ratios
+    extreme_ratios: true
+    active_mechanisms: [linear, extreme_ratios]
+  - name: error_migration_selection
+    exposure_error: 0.4
+    migration: 2.0
+    selected_outcome: true
+    active_mechanisms: [linear, exposure_error, migration, selected_outcome]
+  - name: survey_biomarker_missingness
+    survey_inclusion: true
+    missing_biomarkers: true
+    active_mechanisms: [linear, survey_inclusion, missing_biomarkers]
+  - name: registration_denominator
+    registration_probability: 0.65
+    denominator_error: 0.2
+    active_mechanisms: [linear, under_registration, denominator_error]
+# The mandatory exact-location pair is generated by
+# observational_equivalence_pair(), with common S, X and epsilon and one Y.
+# It is separate from fixed-frame continuous assignment scenarios: S is random
+# under its known population law, while it is held fixed under interventions.
