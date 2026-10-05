@@ -133,6 +133,9 @@ def test_pairs_preserve_grouping_weights_and_endpoint_target(completed):
         for group in config.entity_graph.components():
             assert not (set(group) & set(audit.fitting_ids) and set(group) & set(audit.evaluation_ids))
         assert "unlabeled-acs" not in audit.fitting_ids + audit.evaluation_ids
+        if result["kind"] == "origin":
+            assert result["selection_ids"] == (audit.checkpoint_ids or audit.fitting_ids)
+            assert set(result["selection_ids"]).isdisjoint(audit.evaluation_ids)
         assert result["mass"] == sum(_inputs(config, result["ids"]).origin_weights)
     calibration = AffineCalibration.from_json(controller["calibration"])
     assert set(calibration.original_ids) == set(case[1].training_ids(0))
@@ -337,3 +340,51 @@ def test_zero_mass_inner_evaluation_fold_is_a_zero_contribution(tmp_path):
     results = state(artifact)["results"]
     assert artifact.complete
     assert all(r["mass"] == 0 and all(m == 0 for m in r["metrics"]) for r in results if r["fold"] == 0)
+
+
+def test_calibration_grid_choice_excludes_its_evaluation_metrics(completed, monkeypatch, tmp_path):
+    from copy import deepcopy
+    from types import SimpleNamespace
+    from oxyformer.training.calibration import pair_metrics
+
+    case, artifact = completed
+    config = case[-1]
+    saved = state(artifact)
+    captured = []
+    real_calibration = fitting.fit_affine
+
+    def capture(logits, weights, **kwargs):
+        captured.append(dict(zip(kwargs["original_ids"], logits)))
+        return real_calibration(logits, weights, **kwargs)
+
+    monkeypatch.setattr(fitting, "fit_affine", capture)
+    for reverse in (False, True):
+        controller = deepcopy(saved)
+        controller["position"] = 27  # Three inner folds, SSL + eight grid fits each.
+        for result in controller["results"]:
+            if result["kind"] != "origin":
+                continue
+            # Only fold 0's OOF measurements change. Its fitting-only grid
+            # evidence and every other fold's held-out measurements stay fixed.
+            if result["grid"] in (0, 1):
+                good = (result["grid"] == int(reverse)) if result["fold"] == 0 else False
+                pair = [-2., 2.] if good else [1., -1.]
+            else:
+                pair = [3., -3.]
+            result["predictions"] = [pair[:] for _ in result["ids"]]
+            result["metrics"] = pair_metrics(result["predictions"],
+                _inputs(config, result["ids"]).origin_weights)
+        calls = iter((None, "requested"))
+        budget = SimpleNamespace(reason=lambda: next(calls))
+        fitting._fit_controller(config, case[1], case[2], artifact.checkpoint.identity,
+                                controller, tmp_path, budget)
+    fold_zero = set(config.inner.split.original_ids[i]
+                    for i, fold in enumerate(config.inner.split.fold_ids) if fold == 0)
+    # Candidate selection must not switch in response to its own OOF metrics.
+    # Compare the selected grid, using its unique row values in each run.
+    selected = []
+    for reverse, predictions in zip((False, True), captured):
+        row = predictions[next(iter(fold_zero))]
+        selected.append(int(reverse) if row == [-2., 2.] else 1 - int(reverse)
+                        if row == [1., -1.] else 2)
+    assert selected[0] == selected[1]
