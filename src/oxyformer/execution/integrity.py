@@ -12,7 +12,7 @@ import tempfile
 
 from oxyformer.contracts import StageResult
 from oxyformer.provenance import ArtifactRecord, canonical_json, require
-from .paths import atomic_json, atomic_write, output_path
+from .paths import atomic_json, atomic_write, output_path, temporary_path
 
 FINGERPRINT = "_execution/fingerprint.json"
 RESULT = "_execution/result.json"
@@ -23,7 +23,7 @@ PUBLICATION_EXCLUSIONS = (FINGERPRINT, RESULT)
 def publication_receipt(root, *, create=False):
     """Independent runner state; consumers never learn authority from payloads."""
     store = Path(os.environ.get('OXYFORMER_PUBLICATION_STORE',
-            Path.home() / '.local/state/oxyformer/publications'))
+            Path.home() / 'oxyformer-swarm/state/publications'))
     require(store.is_absolute(), 'publication store must be absolute')
     root = Path(os.path.abspath(root))
     require(not store.resolve().is_relative_to(root) and not root.is_relative_to(store.resolve()),
@@ -64,7 +64,7 @@ def _stable(metadata):
 
 def directory_path(path):
     """Check directory components before resolving; never erase a symlink."""
-    path = Path(path).absolute()
+    path = temporary_path(path)
     for component in (*reversed(path.parents), path):
         require(stat.S_ISDIR(component.lstat().st_mode),
             f'input directory is a symlink or special file: {component}')
@@ -72,7 +72,7 @@ def directory_path(path):
 
 
 def regular_file_stat(path):
-    path = Path(path)
+    path = temporary_path(path)
     directory_path(path.parent)
     metadata = path.lstat()
     require(stat.S_ISREG(metadata.st_mode), f'input is not a regular file: {path}')
@@ -82,7 +82,7 @@ def regular_file_stat(path):
 @contextmanager
 def open_regular(path):
     """Open one stable regular file without following links or blocking on FIFOs."""
-    path = Path(path)
+    path = temporary_path(path)
     before = regular_file_stat(path)
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, 'rb') as stream:

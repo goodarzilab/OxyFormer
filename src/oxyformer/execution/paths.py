@@ -2,6 +2,7 @@
 from contextlib import ExitStack, contextmanager
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import tarfile
@@ -9,6 +10,17 @@ import tempfile
 import zipfile
 
 from oxyformer.provenance import canonical_json, relative_artifact_path, require
+
+
+def temporary_path(path):
+    """Translate the active TMPDIR FD alias, retaining checks on its suffix."""
+    path = Path(path).absolute()
+    alias = os.environ.get('TMPDIR', '')
+    if re.fullmatch(r'/proc/[0-9]+/fd/[0-9]+', alias) and path.is_relative_to(alias):
+        suffix = path.relative_to(alias)
+        require('..' not in suffix.parts, 'temporary path traversal')
+        path = Path(alias).resolve(strict=True) / suffix
+    return path
 
 
 def output_path(root, relative):

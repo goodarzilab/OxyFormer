@@ -1,5 +1,6 @@
 """Offline stage and campaign acceptance."""
 from copy import deepcopy
+from contextlib import nullcontext
 from dataclasses import replace
 from hashlib import sha256
 import io
@@ -56,16 +57,21 @@ def assert_pass(result):
     assert result.status == 'pass', result.message
 
 
-def dependency_check(out):
+def assert_failed(result, path):
+    assert result.status == 'fail', result.message
+    assert str(path) in result.message
+
+
+def read_check(out):
     return read_json(out / '_execution/dependency_check.json')
 
 
-def fixture_module(repo, function):
+def stage_module(repo, function):
     return SimpleNamespace(run_stage=function, __file__=str(repo / 'src/oxyformer/dummy.py'))
 
 
 def install_stage(monkeypatch, repo, function):
-    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, function))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', stage_module(repo, function))
 
 
 def inline_fixture_stage(request, module_name, repo):
@@ -143,7 +149,7 @@ def runtime(tmp_path, monkeypatch):
     return repo, out
 
 
-def fixture_lineage(request, unit):
+def lineage_for(request, unit):
     return ArtifactLineage(source_hashes=(sha256(b'fixture').hexdigest(),), unit_ids=(unit,),
         parent_hashes=(), split_hash=None, config_hash=request.config_hash,
         model_hash=None, environment=(('python', 'fixture'),), seed=None,
@@ -157,7 +163,7 @@ def dummy(request):
     task = read_json(Path(request.task_path))
     for path in task.get('outputs', ['value.json']):
         atomic_json(out, path, {'value': 1})
-    lineage = fixture_lineage(request, 'dummy')
+    lineage = lineage_for(request, 'dummy')
     outputs = task.get('outputs', ['value.json'])
     return StageResult(request_hash=request.content_hash, status='pass', message='fixture',
         artifacts=tuple(ArtifactRecord(path=p, sha256=file_hash(out / p),
@@ -195,11 +201,11 @@ def read_request(out):
     return StageRequest.from_json((out / '_execution/request.json').read_text())
 
 
-def read_stage_result(out):
+def read_result(out):
     return StageResult.from_json((out / '_execution/result.json').read_text())
 
 
-def initialize_attempt(repo, path):
+def new_attempt(repo, path):
     path.mkdir()
     (path / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
     return path
@@ -213,7 +219,7 @@ def task_file(out, **changes):
     return path
 
 
-def publish_source_fixture(repo, root, *, parent=None, head=None):
+def publish_source(repo, root, *, parent=None, head=None):
     """Seal the synthetic producer attempt."""
     dependencies = {} if parent is None else {'data-unit': str(parent)}
     inputs = () if parent is None else (str(parent / FINGERPRINT),)
@@ -224,7 +230,7 @@ def publish_source_fixture(repo, root, *, parent=None, head=None):
         dependency_hashes=tuple(file_hash(p) for p in inputs), output_dir=str(root),
         code_identity=head or git(repo, 'rev-parse', 'HEAD'))
     atomic_write(root, '_execution/request.json', request.to_json())
-    lineage = fixture_lineage(request, 'data-unit')
+    lineage = lineage_for(request, 'data-unit')
     result = StageResult(request_hash=request.content_hash, status='pass', message='source fixture',
         artifacts=tuple(ArtifactRecord(path=p, sha256=file_hash(root / p),
                 lineage=lineage, kind='source')
@@ -234,9 +240,14 @@ def publish_source_fixture(repo, root, *, parent=None, head=None):
     return published
 
 
-def make_source_fixture(repo, source, monkeypatch=None):
+def source_files(root):
+    for name in SOURCE_NEEDS['data-unit']:
+        (root / name).write_text('{}')
+
+
+def make_source(repo, source, monkeypatch=None):
     source.mkdir()
-    seal_source_fixture(repo, source)
+    seal_source(repo, source)
     if monkeypatch is not None:
         monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     return source
@@ -244,13 +255,12 @@ def make_source_fixture(repo, source, monkeypatch=None):
 
 @pytest.fixture
 def source(runtime, tmp_path, monkeypatch):
-    return make_source_fixture(runtime[0], tmp_path / 'source', monkeypatch)
+    return make_source(runtime[0], tmp_path / 'source', monkeypatch)
 
 
-def seal_source_fixture(repo, source):
-    (source / 'data.json').write_text('{}')
-    (source / 'receipts.json').write_text('{}')
-    publish_source_fixture(repo, source)
+def seal_source(repo, source):
+    source_files(source)
+    publish_source(repo, source)
 
 
 def test_dummy_stage_atomic_records_and_cache_isolation(runtime, monkeypatch):
@@ -286,12 +296,12 @@ def test_upstream_unchanged_and_output_overlap_rejected(runtime, tmp_path, monke
     source.write_text('{"fixture":1}')
     (upstream / 'receipts.json').write_text('{}')
     before = source.read_bytes(), source.stat().st_mode, source.stat().st_mtime_ns
-    publish_source_fixture(repo, upstream)
+    publish_source(repo, upstream)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(upstream))
     task = task_file(out, needs=SOURCE_NEEDS)
     assert_pass(run_task(repo, out, task))
     assert (source.read_bytes(), source.stat().st_mode, source.stat().st_mtime_ns) == before
-    nested = initialize_attempt(repo, upstream / 'child')
+    nested = new_attempt(repo, upstream / 'child')
     with raises(ContractError, match='overlaps an upstream'):
         run_task(repo, nested, task)
 
@@ -356,14 +366,14 @@ def test_cli_selects_task(runtime, monkeypatch):
 
 
 def locked_task(repo, out, upstream, monkeypatch):
-    initialize_attempt(repo, upstream)
+    new_attempt(repo, upstream)
     lock = upstream / 'recipe_lock.json'
     def producer(request):
         result = dummy(request)
         lock.write_text(json.dumps({'scientific_fingerprint': scientific_fingerprint(repo)}))
         return replace(result, artifacts=(replace(result.artifacts[0], sha256=file_hash(lock)),))
     with monkeypatch.context() as patch:
-        patch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, producer))
+        patch.setitem(sys.modules, 'oxyformer.dummy', stage_module(repo, producer))
         assert_pass(run_task(repo, upstream, deps_env=False, id='campaign-lock', outputs=['recipe_lock.json']))
     monkeypatch.setenv('SWARM_DEP_CAMPAIGN_LOCK', str(upstream))
     return task_file(out, needs={'campaign-lock': ['recipe_lock.json']},
@@ -397,7 +407,7 @@ def test_continuation_ownership_and_consecutive_steps(runtime, tmp_path, monkeyp
     assert_pass(run_task(repo, old, first_task, deps_env=False))
     monkeypatch.setenv('SWARM_DEP_FIRST', str(old))
     for owner, step, expected in [('wrong-owner', 1, 'ownership'), ('work-1', 2, 'consecutive'), ('work-1', 1, None)]:
-        out = initialize_attempt(repo, tmp_path / f'next-{owner}-{step}')
+        out = new_attempt(repo, tmp_path / f'next-{owner}-{step}')
         task = task_file(out, id='next', needs={'first': ['_execution/task.json', '_execution/request.json',
                     RESULT, 'value.json']},
             continuation={'owner': owner, 'step': step, 'predecessor': 'first'})
@@ -561,7 +571,7 @@ def test_failed_upstream_cannot_feed_another_stage(runtime, tmp_path, monkeypatc
         return StageResult(request_hash=request.content_hash, status='fail', artifacts=(), message='gate failed')
     install_stage(monkeypatch, repo, failed)
     assert run_task(repo, upstream, deps_env=False).status == 'fail'
-    out = initialize_attempt(repo, tmp_path / 'consumer')
+    out = new_attempt(repo, tmp_path / 'consumer')
     monkeypatch.setenv('SWARM_DEP_GATE', str(upstream))
     with raises(ContractError, match='did not pass'):
         run_task(repo, out, needs={'gate': [RESULT]})
@@ -653,8 +663,7 @@ def test_task_cannot_exempt_an_incomplete_stage(runtime, tmp_path, monkeypatch):
     repo, out = runtime
     source = tmp_path / 'source'
     source.mkdir()
-    (source / 'data.json').write_text('{}')
-    (source / 'receipts.json').write_text('{}')
+    source_files(source)
     monkeypatch.setenv('SWARM_DEP_INCOMPLETE', str(source))
     with raises(ContractError, match='stage receipt missing'):
         run_task(repo, out, needs={'incomplete': ['data.json', 'receipts.json']}, acquisition_receipts={'incomplete': 'receipts.json'})
@@ -704,7 +713,7 @@ def test_cli_import_from_pristine_repo_keeps_code_roots_clean(runtime, tmp_path,
     if entrypoint == 'builder':
         assert validate_plan(read_json(out / 'expanded_units.json'), {}) == expand_campaign(spec, {})
         return
-    assert verify_dependency_result(out).status == 'pass'
+    assert_pass(verify_dependency_result(out))
     with (out / 'run.log').open('a') as log:
         log.write('unexpected late log write')
     with raises(ContractError, match='fingerprint mismatch.*run.log'):
@@ -808,7 +817,7 @@ def test_locked_campaign_checks_upstream_science(runtime, tmp_path, monkeypatch,
     before = {str(p): file_hash(p) for p in upstream.rglob('*') if p.is_file()}
     (repo / change).write_text('changed\n')
     head = commit(repo)
-    consumer = initialize_attempt(repo, tmp_path / 'consumer')
+    consumer = new_attempt(repo, tmp_path / 'consumer')
     lock_task = locked_task(repo, consumer, tmp_path / 'new-lock', monkeypatch)
     lock_ref = read_json(lock_task)['recipe_lock']
     spec = {'schema_version': 1, 'id': 'new-campaign', 'kind': 'screening',
@@ -878,7 +887,7 @@ def test_executed_stage_exception_always_publishes_failure(runtime, monkeypatch,
     result = run_task(repo, out, deps_env=False)
     assert result.status == 'fail'
     assert result.message
-    receipt = read_stage_result(out)
+    receipt = read_result(out)
     assert receipt == result
 
 
@@ -889,15 +898,14 @@ def test_upstream_tree_mutation_fails_and_blocks_later_consumer(
     repo, out = runtime
     upstream = tmp_path / 'upstream'
     upstream.mkdir()
-    (upstream / 'data.json').write_text('{}')
-    (upstream / 'receipts.json').write_text('{}')
+    source_files(upstream)
     extra = upstream / 'extra'
     extra.mkdir()
     victim = extra / 'victim'
     victim.write_text('original')
     link = extra / 'link'
     link.symlink_to('victim')
-    publish_source_fixture(repo, upstream)
+    publish_source(repo, upstream)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(upstream))
     changed = {'bytes': 'extra/victim', 'chmod': 'extra/victim',
         'added': 'extra/new', 'removed': 'extra/victim',
@@ -924,8 +932,8 @@ def test_upstream_tree_mutation_fails_and_blocks_later_consumer(
     result = run_task(repo, out, needs=SOURCE_NEEDS)
     assert result.status == 'fail'
     assert str(upstream / changed) in result.message
-    assert read_stage_result(out) == result
-    receipt = dependency_check(out)
+    assert read_result(out) == result
+    receipt = read_check(out)
     assert receipt['status'] == 'fail'
     assert changed in receipt['attempts'][str(upstream)]['changed_paths']
     # The runner must not repair upstream data or modes while reporting failure.
@@ -939,7 +947,7 @@ def test_upstream_tree_mutation_fails_and_blocks_later_consumer(
         assert not victim.exists()
     else:
         assert os.readlink(link) == '../data.json'
-    later = initialize_attempt(repo, tmp_path / 'later')
+    later = new_attempt(repo, tmp_path / 'later')
     install_stage(monkeypatch, repo, dummy)
     with raises(ContractError, match='tainted|fingerprint'):
         run_task(repo, later, needs=SOURCE_NEEDS)
@@ -950,10 +958,9 @@ def test_read_only_upstream_tree_remains_usable(runtime, tmp_path, monkeypatch):
     repo, out = runtime
     upstream = tmp_path / 'source'
     upstream.mkdir()
-    (upstream / 'data.json').write_text('{}')
-    (upstream / 'receipts.json').write_text('{}')
+    source_files(upstream)
     (upstream / 'link').symlink_to('data.json')
-    publish_source_fixture(repo, upstream)
+    publish_source(repo, upstream)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(upstream))
     before = {p.name: (p.lstat().st_mode, p.lstat().st_size,
             os.readlink(p) if p.is_symlink() else (None if p.is_dir() else p.read_bytes()))
@@ -1009,12 +1016,11 @@ def test_post_execution_check_names_proc_fd_chmod(runtime, tmp_path, monkeypatch
     repo, out = runtime
     upstream = tmp_path / 'source'
     upstream.mkdir()
-    (upstream / 'data.json').write_text('{}')
-    (upstream / 'receipts.json').write_text('{}')
+    source_files(upstream)
     victim = upstream / 'undeclared'
     victim.write_text('unchanged bytes')
     before = file_hash(victim)
-    publish_source_fixture(repo, upstream)
+    publish_source(repo, upstream)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(upstream))
     def faulty(request):
         result = dummy(request)
@@ -1027,7 +1033,7 @@ def test_post_execution_check_names_proc_fd_chmod(runtime, tmp_path, monkeypatch
     result = run_task(repo, out, needs=SOURCE_NEEDS)
     assert result.status == 'fail'
     assert str(victim) in result.message
-    receipt = dependency_check(out)
+    receipt = read_check(out)
     assert receipt['attempts'][str(upstream)]['status'] == 'tainted'
     assert receipt['attempts'][str(upstream)]['changed_paths'] == ['undeclared']
     assert file_hash(victim) == before and victim.stat().st_mode & 0o100
@@ -1038,7 +1044,7 @@ def test_post_execution_check_names_proc_fd_chmod(runtime, tmp_path, monkeypatch
 def test_transitive_upstream_metadata_cannot_escape_detection(runtime, tmp_path, monkeypatch, when, source):
     repo, middle = runtime
     assert_pass(run_task(repo, middle, id='middle', needs=SOURCE_NEEDS))
-    later = initialize_attempt(repo, tmp_path / 'later')
+    later = new_attempt(repo, tmp_path / 'later')
     monkeypatch.setenv('SWARM_DEP_MIDDLE', str(middle))
     task = task_file(later, needs={'middle': ['value.json']})
     victim = source / 'data.json'
@@ -1062,9 +1068,8 @@ def test_consumer_binds_published_fingerprint_digest(runtime, tmp_path, monkeypa
     repo, out = runtime
     source = tmp_path / 'source'
     source.mkdir()
-    (source / 'data.json').write_text('{}')
-    (source / 'receipts.json').write_text('{}')
-    published = publish_source_fixture(repo, source)
+    source_files(source)
+    published = publish_source(repo, source)
     expected = next(a.sha256 for a in published.artifacts if a.path == FINGERPRINT)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     assert_pass(run_task(repo, out, needs=SOURCE_NEEDS))
@@ -1072,7 +1077,7 @@ def test_consumer_binds_published_fingerprint_digest(runtime, tmp_path, monkeypa
     assert dict(zip(request.dependency_paths, request.dependency_hashes))[str(source / FINGERPRINT)] == expected
     # Alter the publication record itself; its original result digest must win.
     (source / FINGERPRINT).write_text('{}')
-    later = initialize_attempt(repo, tmp_path / 'later')
+    later = new_attempt(repo, tmp_path / 'later')
     with raises(ContractError, match='fingerprint hash mismatch'):
         run_task(repo, later, needs=SOURCE_NEEDS)
 
@@ -1081,8 +1086,7 @@ def test_unsealed_acquisition_cannot_become_a_new_baseline(runtime, tmp_path, mo
     repo, out = runtime
     source = tmp_path / 'source'
     source.mkdir()
-    (source / 'data.json').write_text('{}')
-    (source / 'receipts.json').write_text('{}')
+    source_files(source)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     with raises(ContractError, match='stage receipt missing'):
         run_task(repo, out, needs=SOURCE_NEEDS)
@@ -1116,7 +1120,7 @@ def test_preflight_cannot_rebase_a_changed_dependency(runtime, tmp_path, monkeyp
     (source / 'receipts.json').write_text('{}')
     extra = source / 'undeclared.txt'
     extra.write_text('before')
-    publish_source_fixture(repo, source)
+    publish_source(repo, source)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     original = runner.verify_published_tree
     def interleave(root, result, expected_hash=None):
@@ -1150,7 +1154,7 @@ def test_rewritten_upstream_result_is_rejected_by_later_consumers(runtime, tmp_p
     result = run_task(repo, out, needs=SOURCE_NEEDS)
     assert result.status == 'fail'
     assert str(source / RESULT) in result.message
-    later = initialize_attempt(repo, tmp_path / 'later')
+    later = new_attempt(repo, tmp_path / 'later')
     install_stage(monkeypatch, repo, dummy)
     with raises(ContractError, match='publication|fingerprint|result record'):
         run_task(repo, later, needs=SOURCE_NEEDS)
@@ -1167,7 +1171,7 @@ def test_tempfile_cache_does_not_cross_attempts(runtime, tmp_path, monkeypatch):
     install_stage(monkeypatch, repo, scratch_stage)
     assert_pass(run_task(repo, first, deps_env=False))
     shutil.rmtree(first)
-    later = initialize_attempt(repo, tmp_path / 'later')
+    later = new_attempt(repo, tmp_path / 'later')
     result = run_task(repo, later, deps_env=False)
     assert_pass(result)
 
@@ -1220,11 +1224,11 @@ from oxyformer.contracts import StageResult
 from oxyformer.provenance import ArtifactLineage, ArtifactRecord, file_hash
 from oxyformer.execution.paths import atomic_json
 '''
-    (repo / 'src/oxyformer/dummy.py').write_text(imports + inspect.getsource(read_json) + '\n' + inspect.getsource(fixture_lineage) + '\n' + inspect.getsource(dummy) + '\n' + stage_body)
+    (repo / 'src/oxyformer/dummy.py').write_text(imports + inspect.getsource(read_json) + '\n' + inspect.getsource(lineage_for) + '\n' + inspect.getsource(dummy) + '\n' + stage_body)
     (out / 'code_commit.txt').write_text(commit(repo))
 
 
-def run_cli_fixture(repo, out, stage_body, *, needs=None, entrypoint=None, timeout=30):
+def run_cli(repo, out, stage_body, *, needs=None, entrypoint=None, timeout=30):
     """Run the copied CLI and stage."""
     prepare_cli_fixture(repo, out, stage_body)
     command = [sys.executable, '-m', 'oxyformer.cli'] if entrypoint is None else [sys.executable, '-c', entrypoint]
@@ -1247,12 +1251,12 @@ def test_cli_undeclared_outside_write_fails(runtime, tmp_path, monkeypatch):
     repo, out = runtime
     outside = tmp_path / 'outside.json'
     monkeypatch.setenv('FIXTURE_OUTSIDE', str(outside))
-    process = run_cli_fixture(repo, out, '''def run_stage(request):
+    process = run_cli(repo, out, '''def run_stage(request):
     Path(os.environ['FIXTURE_OUTSIDE']).write_text('undeclared output')
     return dummy(request)
 ''')
     assert_exit(process, 1)
-    result = read_stage_result(out)
+    result = read_result(out)
     assert str(outside) in result.message
 
 
@@ -1267,14 +1271,14 @@ def test_identical_control_rewrite_accepts_later_consumers(runtime, tmp_path, mo
     install_stage(monkeypatch, repo, faulty)
     result = run_task(repo, out, needs=SOURCE_NEEDS)
     assert_pass(result)
-    later = initialize_attempt(repo, tmp_path / 'later')
+    later = new_attempt(repo, tmp_path / 'later')
     install_stage(monkeypatch, repo, dummy)
     assert_pass(run_task(repo, later, needs=SOURCE_NEEDS))
 
 
 def test_cli_finalizes_temporary_directories_before_publication(runtime):
     repo, out = runtime
-    process = run_cli_fixture(repo, out, '''import tempfile
+    process = run_cli(repo, out, '''import tempfile
 scratch = None
 def run_stage(request):
     global scratch
@@ -1283,7 +1287,7 @@ def run_stage(request):
     return dummy(request)
 ''')
     assert_exit(process, 0)
-    assert verify_dependency_result(out).status == 'pass'
+    assert_pass(verify_dependency_result(out))
 
 
 @mark.parametrize('worker_kind', ['thread', 'subprocess'])
@@ -1306,7 +1310,7 @@ def wait_for_worker(root, result, **kwargs):
 runner.publish_result = wait_for_worker
 raise SystemExit(cli.main())
 '''
-    process = run_cli_fixture(repo, out, '''import threading
+    process = run_cli(repo, out, '''import threading
 import time
 import subprocess
 import sys
@@ -1324,9 +1328,9 @@ def run_stage(request):
     return result
 ''', needs=SOURCE_NEEDS, entrypoint=entrypoint)
     assert_exit(process, 1)
-    result = read_stage_result(out)
-    assert result.status == 'fail' and str(victim) in result.message
-    check = dependency_check(out)
+    result = read_result(out)
+    assert_failed(result, victim)
+    check = read_check(out)
     assert check['attempts'][str(source)]['status'] == 'tainted'
 
 
@@ -1351,11 +1355,11 @@ def test_control_rewrites_bind_fingerprinted_properties_only(runtime, tmp_path, 
     assert_pass(result)
     assert victim.stat().st_mtime_ns == before.st_mtime_ns
     assert victim.stat().st_ctime_ns != before.st_ctime_ns
-    later = initialize_attempt(repo, tmp_path / 'later')
+    later = new_attempt(repo, tmp_path / 'later')
     install_stage(monkeypatch, repo, dummy)
     assert_pass(run_task(repo, later, needs=SOURCE_NEEDS))
 
-    changed = initialize_attempt(repo, tmp_path / 'changed')
+    changed = new_attempt(repo, tmp_path / 'changed')
     def fingerprinted_change(request):
         result = dummy(request)
         if operation == 'copy2':
@@ -1365,11 +1369,11 @@ def test_control_rewrites_bind_fingerprinted_properties_only(runtime, tmp_path, 
         return result
     install_stage(monkeypatch, repo, fingerprinted_change)
     result = run_task(repo, changed, needs=SOURCE_NEEDS)
-    assert result.status == 'fail' and str(victim) in result.message
-    check = dependency_check(changed)
+    assert_failed(result, victim)
+    check = read_check(changed)
     assert check['attempts'][str(source)]['status'] == 'tainted'
     assert '_execution/' + control in check['attempts'][str(source)]['changed_paths']
-    refused = initialize_attempt(repo, tmp_path / 'refused')
+    refused = new_attempt(repo, tmp_path / 'refused')
     install_stage(monkeypatch, repo, dummy)
     with raises(ContractError, match='fingerprint|record'):
         run_task(repo, refused, needs=SOURCE_NEEDS)
@@ -1387,16 +1391,16 @@ def run_stage(request):
     subprocess.Popen([sys.executable, '-c', helper])
     return result
 '''
-    process = run_cli_fixture(repo, out, body, needs=SOURCE_NEEDS)
+    process = run_cli(repo, out, body, needs=SOURCE_NEEDS)
     assert victim.read_text() == '[]', process.stdout + process.stderr
-    result = read_stage_result(out)
+    result = read_result(out)
     assert process.returncode == 1 and result.status == 'fail', result.to_json()
     assert str(victim) in result.message
 
 
 def test_worker_allows_normal_resource_tracker_shutdown(runtime):
     repo, out = runtime
-    process = run_cli_fixture(repo, out, '''from multiprocessing.shared_memory import SharedMemory
+    process = run_cli(repo, out, '''from multiprocessing.shared_memory import SharedMemory
 def run_stage(request):
     scratch = SharedMemory(create=True, size=1)
     scratch.close()
@@ -1404,7 +1408,7 @@ def run_stage(request):
     return dummy(request)
 ''', timeout=10)
     assert_exit(process, 0)
-    assert verify_dependency_result(out).status == 'pass'
+    assert_pass(verify_dependency_result(out))
 
 
 def test_changed_fingerprint_fifo_is_refused_without_blocking(runtime, tmp_path, monkeypatch, source):
@@ -1417,14 +1421,14 @@ def test_changed_fingerprint_fifo_is_refused_without_blocking(runtime, tmp_path,
         raise RuntimeError('stage failed after replacing control')
     install_stage(monkeypatch, repo, faulty)
     result = run_task(repo, out, needs=SOURCE_NEEDS)
-    assert result.status == 'fail' and str(victim) in result.message
+    assert_failed(result, victim)
     process = refused_dependency_probe(source)
     assert 'fingerprint' in process.stdout
 
 
 def test_worker_accepts_expected_nonzero_housekeeping_status(runtime):
     repo, out = runtime
-    process = run_cli_fixture(repo, out, '''import subprocess
+    process = run_cli(repo, out, '''import subprocess
 def run_stage(request):
     result = dummy(request)
     log = Path(request.output_dir) / 'clean.log'
@@ -1433,7 +1437,7 @@ def run_stage(request):
     return result
 ''')
     assert_exit(process, 0)
-    assert verify_dependency_result(out).status == 'pass'
+    assert_pass(verify_dependency_result(out))
 
     assert (out / '_execution/cache/tmpdir/late').is_file()
 
@@ -1449,7 +1453,7 @@ with (out / 'run.log').open('w') as log:
     os.dup2(log.fileno(), 2)
 raise SystemExit(main())
 '''
-    process = run_cli_fixture(repo, out, '''from dataclasses import replace
+    process = run_cli(repo, out, '''from dataclasses import replace
 def run_stage(request):
     result = dummy(request)
     log = ArtifactRecord(path='run.log', sha256=file_hash(Path(request.output_dir) / 'run.log'),
@@ -1457,12 +1461,12 @@ def run_stage(request):
     return replace(result, artifacts=(*result.artifacts, log))
 ''', entrypoint=entrypoint)
     assert process.returncode == 0, (out / 'run.log').read_text()
-    assert verify_dependency_result(out).status == 'pass'
+    assert_pass(verify_dependency_result(out))
 
 
 def test_changing_fingerprint_to_fifo_cannot_skip_post_check(runtime, tmp_path, monkeypatch, source):
     repo, out = runtime
-    process = run_cli_fixture(repo, out, """def run_stage(request):
+    process = run_cli(repo, out, """def run_stage(request):
     result = dummy(request)
     victim = Path(os.environ['SWARM_DEP_DATA_UNIT']) / '_execution/fingerprint.json'
     victim.unlink()
@@ -1470,16 +1474,16 @@ def test_changing_fingerprint_to_fifo_cannot_skip_post_check(runtime, tmp_path, 
     return result
 """, needs=SOURCE_NEEDS, timeout=5)
     assert_exit(process, 1)
-    result = read_stage_result(out)
-    assert result.status == 'fail' and str(source / FINGERPRINT) in result.message
-    check = dependency_check(out)
+    result = read_result(out)
+    assert_failed(result, source / FINGERPRINT)
+    check = read_check(out)
     assert check['attempts'][str(source)]['status'] == 'tainted'
 
 
 @mark.parametrize('control', ['result.json', 'request.json'])
 def test_preflight_control_fifo_swap_is_nonblocking(runtime, tmp_path, control):
     repo, _ = runtime
-    source = make_source_fixture(repo, tmp_path / 'source')
+    source = make_source(repo, tmp_path / 'source')
     code = '''import os,sys
 from pathlib import Path
 from oxyformer.execution import runner
@@ -1529,7 +1533,7 @@ def test_generated_collector_binds_each_expected_producer(runtime, tmp_path, mon
     other = expand_campaign(dict(spec, id='campaign-b'), {})
     attempts = {}
     for task in [*plan['tasks'][:-1], other['tasks'][0]]:
-        attempt = initialize_attempt(repo, tmp_path / task['id'])
+        attempt = new_attempt(repo, tmp_path / task['id'])
         task_path = attempt / 'input-task.json'
         task_path.write_text(json.dumps(task))  # exact generated task, unedited
         assert_pass(run_task(repo, attempt, task_path))
@@ -1544,7 +1548,7 @@ def test_generated_collector_binds_each_expected_producer(runtime, tmp_path, mon
     good_task = out / 'generated-collector.json'
     good_task.write_text(json.dumps(selected))
     assert_pass(run_task(repo, out, good_task))
-    wrong = initialize_attempt(repo, tmp_path / 'wrong-collector')
+    wrong = new_attempt(repo, tmp_path / 'wrong-collector')
     wrong_task = wrong / 'generated-collector.json'
     wrong_task.write_text(good_task.read_text())
     monkeypatch.setenv(dependency_variable(plan['expected_leaves'][-1]),
@@ -1559,7 +1563,7 @@ def test_ignored_untracked_stage_code_is_refused(runtime):
     git(repo, 'rm', '--cached', 'src/oxyformer/dummy.py')
     with (repo / '.git/info/exclude').open('a') as stream:
         stream.write('\n/src/oxyformer/dummy.py\n')
-    process = run_cli_fixture(repo, out, 'run_stage = dummy\n')
+    process = run_cli(repo, out, 'run_stage = dummy\n')
     assert git(repo, 'ls-files', 'src/oxyformer/dummy.py') == ''
     assert git(repo, 'check-ignore', 'src/oxyformer/dummy.py') == 'src/oxyformer/dummy.py'
     assert_exit(process, 2)
@@ -1568,7 +1572,7 @@ def test_ignored_untracked_stage_code_is_refused(runtime):
 
 def test_archive_fifo_change_cannot_skip_failure_receipt(runtime, tmp_path, monkeypatch):
     repo, out = runtime
-    source = initialize_attempt(repo, tmp_path / 'source')
+    source = new_attempt(repo, tmp_path / 'source')
     def archive_producer(request):
         result = dummy(request)
         archive = Path(request.output_dir) / 'payload.tar'
@@ -1578,10 +1582,10 @@ def test_archive_fifo_change_cannot_skip_failure_receipt(runtime, tmp_path, monk
             tar.addfile(member, io.BytesIO(b'ok'))
         return replace(result, artifacts=(replace(result.artifacts[0], sha256=file_hash(archive)),))
     with monkeypatch.context() as patch:
-        patch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, archive_producer))
+        patch.setitem(sys.modules, 'oxyformer.dummy', stage_module(repo, archive_producer))
         assert_pass(run_task(repo, source, deps_env=False, id='source', outputs=['payload.tar']))
     monkeypatch.setenv('SWARM_DEP_SOURCE', str(source))
-    process = run_cli_fixture(repo, out, '''from oxyformer.execution.paths import safe_extract
+    process = run_cli(repo, out, '''from oxyformer.execution.paths import safe_extract
 def run_stage(request):
     result = dummy(request)
     victim = Path(os.environ['SWARM_DEP_SOURCE']) / 'payload.tar'
@@ -1591,20 +1595,19 @@ def run_stage(request):
     return result
 ''', needs={'source': ['payload.tar']}, timeout=5)
     assert_exit(process, 1)
-    result = read_stage_result(out)
-    assert result.status == 'fail' and str(source / 'payload.tar') in result.message
+    result = read_result(out)
+    assert_failed(result, source / 'payload.tar')
 
 
 def test_output_inside_transitive_attempt_is_refused_before_writing(runtime, tmp_path, monkeypatch):
     repo, middle = runtime
     source = tmp_path / 'source'
     source.mkdir()
-    (source / 'data.json').write_text('{}')
-    (source / 'receipts.json').write_text('{}')
-    nested = initialize_attempt(repo, source / 'handoff')
+    source_files(source)
+    nested = new_attempt(repo, source / 'handoff')
     # Publish the proposed output/task first, so only the consumer may mutate.
     task = task_file(nested, needs={'middle': ['value.json']})
-    publish_source_fixture(repo, source)
+    publish_source(repo, source)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     assert_pass(run_task(repo, middle, id='middle', needs=SOURCE_NEEDS))
     monkeypatch.setenv('SWARM_DEP_MIDDLE', str(middle))
@@ -1655,42 +1658,44 @@ def test_recipe_fingerprint_covers_resources_under_import_roots(runtime, relativ
 
 
 @mark.parametrize('special', ['fifo', 'socket', 'directory', 'symlink'])
-def test_safe_extract_checks_archive_type_before_open(tmp_path, special):
-    import socket
-    archive = tmp_path / 'payload.tar'
-    sock = None
-    if special == 'fifo':
-        os.mkfifo(archive)
-    elif special == 'socket':
-        sock = socket.socket(socket.AF_UNIX)
-        sock.bind(str(archive))
-    elif special == 'directory':
-        archive.mkdir()
-    else:
-        archive.symlink_to('/dev/null')
-    code = '''import sys
-from oxyformer.execution.paths import safe_extract
+@mark.parametrize('alias', [False, True])
+def test_safe_extract_checks_archive_type_before_open(tmp_path, special, alias):
+    with isolated_caches(tmp_path) if alias else nullcontext():
+        import socket
+        archive = (Path(os.environ['TMPDIR']) if alias else tmp_path) / 'payload.tar'
+        sock = None
+        if special == 'fifo':
+            os.mkfifo(archive)
+        elif special == 'socket':
+            sock = socket.socket(socket.AF_UNIX)
+            sock.bind(str(archive))
+        elif special == 'directory':
+            archive.mkdir()
+        else:
+            archive.symlink_to('/dev/null')
+        code = '''import sys
+from oxyformer.execution.paths import safe_extract, temporary_path
 from oxyformer.provenance import ContractError
 try:
     safe_extract(sys.argv[1], sys.argv[2], 'extracted')
 except ContractError as exc:
-    assert sys.argv[1] in str(exc), str(exc)
+    assert str(temporary_path(sys.argv[1])) in str(exc), str(exc)
 else:
     raise AssertionError('nonregular archive accepted')
 '''
-    try:
-        process = bounded_python(code, str(archive), str(tmp_path))
-        assert not (tmp_path / 'extracted').exists()
-    finally:
-        if sock is not None:
-            sock.close()
+        try:
+            process = bounded_python(code, str(archive), str(tmp_path))
+            assert not (tmp_path / 'extracted').exists()
+        finally:
+            if sock is not None:
+                sock.close()
 
 
 def test_output_containing_transitive_attempt_is_refused_before_writing(runtime, tmp_path, monkeypatch):
     repo, middle = runtime
-    out = initialize_attempt(repo, tmp_path / 'consumer')
+    out = new_attempt(repo, tmp_path / 'consumer')
     task = task_file(out, needs={'middle': ['value.json']})
-    source = make_source_fixture(repo, out / 'source')
+    source = make_source(repo, out / 'source')
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     assert_pass(run_task(repo, middle, id='middle', needs=SOURCE_NEEDS))
     monkeypatch.setenv('SWARM_DEP_MIDDLE', str(middle))
@@ -1723,12 +1728,12 @@ def test_locked_recipe_checks_scientific_identity_of_transitive_attempts(runtime
     value = read_json(old_task)
     old_task.write_text(json.dumps(dict(value, id='ancestor')))
     assert_pass(run_task(repo, ancestor, old_task))
-    middle = initialize_attempt(repo, tmp_path / 'middle')
+    middle = new_attempt(repo, tmp_path / 'middle')
     monkeypatch.setenv('SWARM_DEP_ANCESTOR', str(ancestor))
     assert_pass(run_task(repo, middle, id='middle', needs={'ancestor': ['value.json']}))
     (repo / 'src/science.py').write_text('new_science = 2\n')
     head = commit(repo)
-    consumer = initialize_attempt(repo, tmp_path / 'consumer')
+    consumer = new_attempt(repo, tmp_path / 'consumer')
     path = locked_task(repo, consumer, tmp_path / 'new-lock', monkeypatch)
     task = read_json(path)
     task['needs']['middle'] = ['value.json']
@@ -1765,12 +1770,11 @@ def test_code_identity_does_not_refresh_upstream_git_index(runtime, tmp_path, mo
     clone = source / 'src'
     shutil.move(repo, clone)
     if overlap:
-        out = initialize_attempt(clone, source / 'handoff')
+        out = new_attempt(clone, source / 'handoff')
     task = task_file(out, needs=SOURCE_NEEDS)
-    (source / 'data.json').write_text('{}')
-    (source / 'receipts.json').write_text('{}')
+    source_files(source)
     git(clone, 'status', '--porcelain')
-    publish_source_fixture(clone, source)
+    publish_source(clone, source)
     victim = clone / 'src/science.py'
     meta = victim.stat()
     os.utime(victim, ns=(meta.st_atime_ns, meta.st_mtime_ns + 1000000000))
@@ -1793,7 +1797,7 @@ def test_stage_cannot_publish_in_attempt_symlink_as_regular_artifact(runtime, mo
         return result
     monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty))
     result = run_task(repo, out, deps_env=False)
-    assert result.status == 'fail' and str(out / 'value.json') in result.message
+    assert_failed(result, out / 'value.json')
 
 
 @mark.parametrize('directory_link', [False, True])
@@ -1840,8 +1844,8 @@ def test_stage_cannot_change_persisted_control_identity(runtime, monkeypatch, co
         return result
     monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty))
     result = run_task(repo, out, deps_env=False)
-    assert result.status == 'fail' and str(victim) in result.message
-    assert read_stage_result(out).status == 'fail'
+    assert_failed(result, victim)
+    assert read_result(out).status == 'fail'
 
 
 @mark.parametrize('control', ['dependency_check.json', 'result.json', 'fingerprint.json', '_execution'])
@@ -1867,9 +1871,9 @@ def test_reserved_receipt_collision_preserves_upstream_failure(runtime, tmp_path
     assert result.status == 'fail'
     collision = out / control if control == '_execution' else out / '_execution' / control
     assert str(victim if mutate else collision) in result.message
-    receipt = dependency_check(out)
+    receipt = read_check(out)
     assert ('data.json' in receipt['attempts'][str(source)]['changed_paths']) == mutate
-    assert read_stage_result(out).status == 'fail'
+    assert read_result(out).status == 'fail'
     assert (source / 'receipts.json').read_text() == '{}'
 
 
@@ -1886,10 +1890,10 @@ def test_unwritable_control_directory_cannot_suppress_upstream_receipts(runtime,
     (source / 'extra').mkdir(parents=True)
     victim = source / 'extra/victim'
     victim.write_text('before')
-    seal_source_fixture(repo, source)
+    seal_source(repo, source)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     try:
-        process = run_cli_fixture(repo, out, '''def run_stage(request):
+        process = run_cli(repo, out, '''def run_stage(request):
     result = dummy(request)
     (Path(os.environ['SWARM_DEP_DATA_UNIT']) / 'extra/victim').write_text('changed')
     (Path(request.output_dir) / '_execution').chmod(0o500)
@@ -1897,9 +1901,9 @@ def test_unwritable_control_directory_cannot_suppress_upstream_receipts(runtime,
 ''', needs=SOURCE_NEEDS)
         assert victim.read_text() == 'changed', process.stdout + process.stderr
         assert_exit(process, 1)
-        result = read_stage_result(out)
-        assert result.status == 'fail' and str(victim) in result.message
-        receipt = dependency_check(out)
+        result = read_result(out)
+        assert_failed(result, victim)
+        receipt = read_check(out)
         assert 'extra/victim' in receipt['attempts'][str(source)]['changed_paths']
     finally:
         # Restore only this failed consumer's directory so pytest can clean up.
@@ -1920,7 +1924,7 @@ def unavailable(root, relative, text):
 runner._replace_control = integrity._replace_control = unavailable
 raise SystemExit(main(sys.argv[1:]))
 """.replace('RECEIPT', receipt)
-    process = run_cli_fixture(repo, out, """def run_stage(request):
+    process = run_cli(repo, out, """def run_stage(request):
     result = dummy(request)
     (Path(os.environ['SWARM_DEP_DATA_UNIT']) / 'data.json').write_text('changed')
     return result
@@ -1994,10 +1998,10 @@ def test_deep_tree_preserves_detection_and_publication(runtime, tmp_path, monkey
     install_stage(monkeypatch, repo, stage)
     try:
         result = run_task(repo, out, needs=SOURCE_NEEDS)
-        assert read_stage_result(out) == result
+        assert read_result(out) == result
         if location == 'upstream':
-            assert result.status == 'fail' and str(created[-1]) in result.message
-            check = dependency_check(out)
+            assert_failed(result, created[-1])
+            check = read_check(out)
             assert created[-1].relative_to(source).as_posix() in check['attempts'][str(source)]['changed_paths']
             with raises(ContractError, match='fingerprint mismatch'):
                 verify_dependency_result(source)
@@ -2015,9 +2019,9 @@ def test_rewritten_upstream_publication_fails_changer_and_transitive_collector(r
     source.mkdir()
     victim = source / 'undeclared'
     victim.write_text('before')
-    seal_source_fixture(repo, source)
+    seal_source(repo, source)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
-    middle = initialize_attempt(repo, tmp_path / 'middle')
+    middle = new_attempt(repo, tmp_path / 'middle')
     assert_pass(run_task(repo, middle, id='middle', needs=SOURCE_NEEDS))
     monkeypatch.setenv('SWARM_DEP_MIDDLE', str(middle))
     def rewritten(request):
@@ -2026,7 +2030,7 @@ def test_rewritten_upstream_publication_fails_changer_and_transitive_collector(r
         fingerprint = read_json(source / FINGERPRINT)
         fingerprint['entries'] = publication_tree(source)
         (source / FINGERPRINT).write_text(canonical_json(fingerprint))
-        producer = read_stage_result(source)
+        producer = read_result(source)
         producer = replace(producer, artifacts=tuple(
             replace(a, sha256=file_hash(source / FINGERPRINT)) if a.path == FINGERPRINT else a
             for a in producer.artifacts))
@@ -2034,9 +2038,9 @@ def test_rewritten_upstream_publication_fails_changer_and_transitive_collector(r
         return result
     install_stage(monkeypatch, repo, rewritten)
     failed = run_task(repo, out, id='changing', needs={'middle': ['value.json']})
-    assert failed.status == 'fail' and str(victim) in failed.message
-    assert read_stage_result(out) == failed
-    check = dependency_check(out)
+    assert_failed(failed, victim)
+    assert read_result(out) == failed
+    check = read_check(out)
     assert check['status'] == 'fail'
     assert check['attempts'][str(source)]['status'] == 'tainted'
     assert 'undeclared' in check['attempts'][str(source)]['changed_paths']
@@ -2045,14 +2049,14 @@ def test_rewritten_upstream_publication_fails_changer_and_transitive_collector(r
     # Refuse both the failed changer and the previously passing middle whose
     # persisted request binds the ancestor's original publication identity.
     for unit, reason in [('changing', 'did not pass'), ('middle', 'input hash mismatch')]:
-        collector = initialize_attempt(repo, tmp_path / ('collector-' + unit))
+        collector = new_attempt(repo, tmp_path / ('collector-' + unit))
         with raises(ContractError, match=reason):
             run_task(repo, collector, needs={unit: ['value.json']})
         assert not (collector / '_execution').exists()
         assert not (collector / 'value.json').exists()
 
 
-    direct = initialize_attempt(repo, tmp_path / 'direct-consumer')
+    direct = new_attempt(repo, tmp_path / 'direct-consumer')
     with raises(ContractError, match='tainted|fingerprint'):
         run_task(repo, direct, needs=SOURCE_NEEDS)
     assert not (direct / 'value.json').exists()
@@ -2065,11 +2069,10 @@ def test_deep_valid_dependency_lineage_does_not_exhaust_python_stack(runtime, tm
     for index in range(1100):
         root = tmp_path / str(index)
         root.mkdir()
-        for name in SOURCE_NEEDS['data-unit']:
-            (root / name).write_text('{}')
-        publish_source_fixture(repo, root, parent=parent, head=head)
+        source_files(root)
+        publish_source(repo, root, parent=parent, head=head)
         parent = root
-    assert verify_dependency_result(parent).status == 'pass'
+    assert_pass(verify_dependency_result(parent))
 
 
 @mark.parametrize('commit_change', [True, False])
@@ -2094,7 +2097,7 @@ def test_stage_cannot_replace_recorded_checkout_identity(runtime, monkeypatch, c
     assert request.code_identity == original
     assert read_json(out / '_execution/identity.json')['head'] == original
     assert result.status == 'fail', 'replacement checkout passed under the original recorded identity'
-    assert read_stage_result(out) == result
+    assert read_result(out) == result
     if commit_change:
         assert 'code identity changed' in result.message
         assert original in result.message and git(repo, 'rev-parse', 'HEAD') in result.message
@@ -2128,7 +2131,7 @@ def test_git_replacement_ref_cannot_rebind_recorded_checkout(runtime, monkeypatc
     assert request.code_identity == original
     assert read_json(out / '_execution/identity.json')['head'] == original
     assert result.status == 'fail', 'Git replacement changed executed code under unchanged recorded HEAD'
-    assert read_stage_result(out) == result
+    assert read_result(out) == result
     assert 'src/science.py' in result.message
     with raises(ContractError, match='did not pass'):
         verify_dependency_result(out)
@@ -2210,14 +2213,14 @@ def run_stage(request):
     target.write_text(json.dumps({'value': value}))
     return replace(result, artifacts=(replace(result.artifacts[0], sha256=file_hash(target)),))
 '''
-    process = run_cli_fixture(repo, out, body)
+    process = run_cli(repo, out, body)
     assert read_json(out / 'value.json') == {'value': 2}
     original = git(repo, 'rev-parse', 'HEAD')
     assert (out / 'code_commit.txt').read_text().strip() == original
     assert read_request(out).code_identity == original
     assert read_json(out / '_execution/identity.json')['head'] == original
     assert_exit(process, 1)
-    result = read_stage_result(out)
+    result = read_result(out)
     assert result.status == 'fail' and 'src/science.py' in result.message
     with raises(ContractError, match='did not pass'):
         verify_dependency_result(out)
@@ -2250,7 +2253,7 @@ def test_unlocked_stage_rejects_alternative_owner_approvals(runtime, tmp_path):
 def test_multiprocessing_socket_uses_attempt_cache_on_long_paths(runtime, context):
     repo, out = runtime
     assert len(str(out)) > 51
-    process = run_cli_fixture(repo, out, """from multiprocessing import get_context
+    process = run_cli(repo, out, """from multiprocessing import get_context
 def run_stage(request):
     with get_context('CONTEXT').Manager() as manager:
         values = manager.list([1, 2])
@@ -2258,14 +2261,14 @@ def run_stage(request):
     return dummy(request)
 """.replace('CONTEXT', context))
     assert_exit(process, 0)
-    assert verify_dependency_result(out).status == 'pass'
+    assert_pass(verify_dependency_result(out))
 
 
 @mark.parametrize('damage', ['missing', 'digest', 'fifo'])
 def test_publication_requires_independent_authority(runtime, source, damage):
     from oxyformer.execution.integrity import publication_receipt, record_publication
     receipt = publication_receipt(source)
-    result = read_stage_result(source)
+    result = read_result(source)
     original = receipt.read_bytes()
     with raises(FileExistsError):
         record_publication(source, result)
@@ -2289,7 +2292,28 @@ def test_removed_upstream_remains_tainted_after_restore(runtime, monkeypatch, so
         return result
     install_stage(monkeypatch, repo, remove)
     result = run_task(repo, out, needs=SOURCE_NEEDS)
-    assert result.status == 'fail' and str(source) in result.message
+    assert_failed(result, source)
     moved.rename(source)
     with raises(ContractError, match='tainted'):
         verify_dependency_result(source)
+
+
+def test_temporary_archive_alias_is_readable(runtime):
+    repo, out = runtime
+    process = run_cli(repo, out, """import io, tarfile, tempfile
+from oxyformer.execution.paths import safe_extract
+from oxyformer.execution.integrity import read_regular, regular_file_hash, directory_path
+def run_stage(request):
+    with tempfile.NamedTemporaryFile(delete=False) as scratch:
+        with tarfile.open(fileobj=scratch, mode='w') as archive:
+            entry = tarfile.TarInfo('data.txt')
+            entry.size = 2
+            archive.addfile(entry, io.BytesIO(b'ok'))
+    extracted = safe_extract(scratch.name, request.output_dir, 'unpacked')
+    assert (extracted / 'data.txt').read_bytes() == b'ok'
+    assert regular_file_hash(scratch.name) == sha256(read_regular(scratch.name)).hexdigest()
+    assert directory_path(Path(scratch.name).parent).is_relative_to(Path(request.output_dir))
+    return dummy(request)
+""")
+    assert_exit(process, 0)
+    assert_pass(verify_dependency_result(out))
