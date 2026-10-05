@@ -2310,3 +2310,57 @@ def test_continuation_wide_nonlinear_truth_matches_closed_form():
     assert sample.observed_law_truth.value == pytest.approx(expected, abs=1e-10)
     assert sample.structural_causal_truth.value == pytest.approx(expected, abs=1e-10)
     assert sample.integration_uncertainty.converged
+
+
+@pytest.mark.parametrize("selected,tolerance", [(False, 1e-11), (True, 1e-8)])
+def test_continuation_wide_mixture_against_independent_quadrature(selected, tolerance):
+    from scipy.special import expit
+    length = 256.
+    f = replace(frame(1, 1), x=((0., 0.),))
+    c = config("nonlinear", migration=2., selected_outcome=selected)
+    sample = generate_suite_a(f, c, policy(((0., length),)), tolerance=tolerance)
+    def joint(a):
+        densities = np.array([1/length, .25*np.exp(-.25*a)/(-np.expm1(-.25*length))])
+        availability = expit(1-.2*a-1.2*np.array([0., 1.])) if selected else 1.
+        return np.array([.7, .3])*densities*availability
+    def response(a):
+        illness = np.array([0., 1.])
+        return 50+2*illness+np.sin((a-2*illness)/2)
+    def posterior(a):
+        weights = joint(a)
+        return weights@response(a)/weights.sum()
+    def integrate(function, upper):
+        return quad(function, 0., upper, points=np.arange(2., upper, 2.),
+                    epsabs=2e-13, epsrel=2e-13, limit=300)[0]
+    mass = integrate(lambda a: joint(a).sum(), length)
+    observed = integrate(lambda a: joint(a).sum()*(posterior(a+2)-posterior(a)), length-2)/mass
+    causal = integrate(lambda a: joint(a)@(response(a+2)-response(a)), length-2)/mass
+    assert sample.observed_law_truth.value == pytest.approx(observed, abs=2e-11)
+    assert sample.structural_causal_truth.value == pytest.approx(causal, abs=2e-11)
+
+
+@pytest.mark.parametrize("denominator", ["tiny", "subnormal", "near_two"])
+def test_continuation_scaled_mean_denominator_boundaries(denominator):
+    from fractions import Fraction
+    from oxyformer.validation.scm import structural_mean, sampled_mean, wide
+    info = np.finfo(np.longdouble)
+    small = Fraction(1, 2**int(-info.minexp+info.nmant))
+    factor = {"tiny": Fraction(1, 10**5000), "subnormal": small,
+              "near_two": Fraction(2)-small}[denominator]
+    f = replace(frame(1, 1), x=((-100., -100.),))
+    state = LatentState(denominator_factor=factor)
+    # The exact rational scale cancels before either output representation.
+    assert structural_mean([factor], f, 0, state, config())[0] == 1
+    assert sampled_mean(factor, f, 0, state, config()) == 1
+    expected = wide(Fraction(3, 7))
+    assert structural_mean([factor*Fraction(3, 7)], f, 0, state, config())[0] == expected
+
+
+def test_continuation_scaled_mean_refuses_true_output_overflow():
+    from fractions import Fraction
+    from oxyformer.validation.scm import structural_mean, sampled_mean
+    state = LatentState(denominator_factor=Fraction(1, 10**5000))
+    for evaluate in (lambda: structural_mean([1.], frame(1, 1), 0, state, config()),
+                     lambda: sampled_mean(1., frame(1, 1), 0, state, config())):
+        with pytest.raises(ContractError, match="nonfinite structural response"):
+            evaluate()
