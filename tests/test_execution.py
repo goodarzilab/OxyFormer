@@ -1983,3 +1983,38 @@ def test_reserved_receipt_collision_preserves_upstream_failure(runtime, tmp_path
     assert ('data.json' in receipt['attempts'][str(source)]['changed_paths']) == mutate
     assert StageResult.from_json((out / '_execution/result.json').read_text()).status == 'fail'
     assert (source / 'receipts.json').read_text() == '{}'
+
+
+def test_pass_without_artifacts_is_rejected_by_merged_contract():
+    with pytest.raises(ContractError, match='passing stage must declare artifacts'):
+        StageResult(request_hash='0' * 64, status='pass', artifacts=(), message='validation only')
+
+
+def test_unwritable_control_directory_cannot_suppress_upstream_receipts(runtime, tmp_path, monkeypatch):
+    if os.geteuid() == 0:
+        pytest.skip('this reproduction requires ordinary Unix permissions')
+    repo, out = runtime
+    source = tmp_path / 'source'
+    (source / 'extra').mkdir(parents=True)
+    victim = source / 'extra/victim'
+    victim.write_text('before')
+    (source / 'data.json').write_text('{}')
+    (source / 'receipts.json').write_text('{}')
+    publish_source_fixture(repo, source)
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
+    try:
+        process = run_cli_fixture(repo, out, '''def run_stage(request):
+    result = dummy(request)
+    (Path(os.environ['SWARM_DEP_DATA_UNIT']) / 'extra/victim').write_text('changed')
+    (Path(request.output_dir) / '_execution').chmod(0o500)
+    return result
+''', needs={'data-unit': ['data.json', 'receipts.json']})
+        assert victim.read_text() == 'changed', process.stdout + process.stderr
+        assert process.returncode == 1, process.stdout + process.stderr
+        result = StageResult.from_json((out / '_execution/result.json').read_text())
+        assert result.status == 'fail' and str(victim) in result.message
+        receipt = json.loads((out / '_execution/dependency_check.json').read_text())
+        assert 'extra/victim' in receipt['attempts'][str(source)]['changed_paths']
+    finally:
+        # Restore only this failed consumer's directory so pytest can clean up.
+        (out / '_execution').chmod(0o700)
