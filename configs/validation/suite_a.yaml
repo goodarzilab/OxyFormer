@@ -1,3 +1,19 @@
+# Input-type contract (all domain endpoints denote their exact binary values):
+# Python int/float and NumPy integer/floating scalars of every width are accepted.
+# Lists, tuples and arrays may mix these types; each supplied element is captured
+# before NumPy promotion and checked exactly. Existing numeric arrays supply
+# their stored values; callers must use object arrays to retain mixed precision.
+# Boolean, complex, string, nonfinite and out-of-domain numbers are refused.
+# Configuration, frames, paired-world records and assignment support endpoints
+# use the shared JSON binary64 schema: every input must be representable there
+# without loss, otherwise a specific representability error is raised. Policy
+# objects come from the authoritative ShiftOrStayPolicy API and supply its
+# already-serialized values; exact_shift_intervals accepts raw numeric supports.
+# Intervention doses and positive integration tolerances retain their exact
+# supplied values and need not fit binary64. Seeds, row indices, pair sizes and
+# max_order accept any supported scalar type representing an exact integer.
+# Counts/seeds keep their existing bounds; integration max_order is at least 32.
+# Domain/physical sign checks never use a value rounded from a raw input.
 # Fixed numeric input domain; no clipping, rescaling, or computation outside it.
 # Start with the smallest per-quantity box for the 14 registered recipes plus
 # the exact-location pair and shared reference inputs. Widen every magnitude
