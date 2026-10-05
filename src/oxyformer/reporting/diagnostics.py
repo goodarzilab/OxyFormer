@@ -7,7 +7,7 @@ import numpy as np
 
 from oxyformer.contracts import source_lineage_hash
 from oxyformer.estimation.covariance import AlignedInfluence, align_estimates, cluster_covariance, spatial_sensitivities
-from oxyformer.provenance import require
+from oxyformer.provenance import nonempty, require
 from oxyformer.reporting.records import CV_TMLE_METHODS
 from oxyformer.validation.overlap import overlap_report
 
@@ -84,9 +84,12 @@ def summarize(bundle, manifest):
     n = len(bundle.original_ids)
     for name in ("weights", "observed_exposure", "shifted_exposure", "counties", "states"):
         require(len(getattr(bundle, name)) == n, f"{name} observation alignment mismatch")
-    require(all(bundle.counties) and all(bundle.states), "empty geography labels")
+    for label in bundle.counties + bundle.states:
+        nonempty(label, "geography label")
     require(len(bundle.ratios) == len(bundle.seed_ids), "ratio seed alignment mismatch")
     require(bool(bundle.balance_basis_id.strip()), "frozen balance basis ID missing")
+    for name, _ in bundle.attrition:
+        nonempty(name, "attrition step")
     counts = [count for _, count in bundle.attrition]
     require(len(counts) >= 2 and counts[-1] == n and all(a >= b >= 0 for a, b in zip(counts, counts[1:])),
             "contradictory attrition counts")

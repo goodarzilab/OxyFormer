@@ -10,7 +10,7 @@ from fractions import Fraction
 import math
 from pathlib import Path
 
-from oxyformer.provenance import ContractError, read_artifact, require
+from oxyformer.provenance import ContractError, nonempty, read_artifact, require
 from oxyformer.reporting.diagnostics import sensitivity_records, summarize
 from oxyformer.reporting.records import CoverageScenario, CV_TMLE_METHODS, STAGE_GATES
 
@@ -95,7 +95,8 @@ def external_approval(approvals, gate, scope):
                all(record.get(k) == v for k, v in scope.items())]
     require(len(matches) <= 1, "contradictory or duplicate external approval")
     return bool(matches and matches[0].get("status") == "approved" and
-                matches[0].get("reviewer") and matches[0].get("reference"))
+                all(isinstance(matches[0].get(key), str) and matches[0][key].strip()
+                    for key in ("reviewer", "reference")))
 
 
 def coverage_evidence(bundle, manifest, verified_receipts):
@@ -155,7 +156,8 @@ def coverage_decisions(bundle, manifest, approved):
             "null rejection upper bound": s.null_rejection_upper_bound <= approved["null_rejection_upper_bound_max"],
             "SE calibration": lo <= s.mean_se_over_empirical_sd <= hi,
             "numerical failure bound": s.numerical_failure_upper_bound <= approved["numerical_failure_upper_bound_max"],
-            "failures and retry rules published": s.all_failures_published and bool(s.registered_retry_rules),
+            "failures and retry rules published": s.all_failures_published and
+                len(s.registered_retry_rules) > 0 and all(rule.strip() for rule in s.registered_retry_rules),
         }
         failures = [label for label, passed in checks.items() if not passed]
         gates.append({"gate": f"coverage:{name}", "status": "failed" if failures else "pass",
@@ -260,6 +262,9 @@ def evaluate(bundle, manifest, receipts, approvals, config_hash):
         if not concentration or not all(k in concentration for k in ("applies_to", "definitions", "s_max_max", "g_eff_min", "require", "on_failure")):
             gates.append({"gate": "influence_concentration", "status": "blocked", "reason": "owner influence_concentration_gate approval missing"})
         else:
+            for field in ("definitions", "require", "on_failure"):
+                require(isinstance(concentration[field], str), f"concentration {field} must be text")
+                nonempty(concentration[field], f"concentration {field}")
             require(set(concentration["applies_to"]) == {"one_step", "cv_tmle"}, "contradictory estimator concentration approval")
             require(0 < concentration["s_max_max"] <= 1 and concentration["g_eff_min"] >= 1, "invalid concentration approval")
             for method, metric in report["diagnostics"]["information"].items():

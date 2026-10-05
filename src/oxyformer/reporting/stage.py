@@ -5,6 +5,7 @@ receipts and approvals. The latter must resolve to the repository's read-only
 configs/approvals.yaml. Each must be named and hash-bound by StageRequest.
 Report artifacts are created only in output_dir; no model or source is edited.
 """
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -15,7 +16,7 @@ import yaml
 
 from oxyformer.contracts import StageRequest, StageResult
 from oxyformer.provenance import ArtifactLineage, ArtifactRecord, ContractError, canonical_json, file_hash, read_artifact, require
-from oxyformer.reporting.diagnostics import sensitivity_records
+from oxyformer.reporting.diagnostics import sensitivity_records, summarize
 from oxyformer.reporting.evidence_matrix import LIMITATIONS, evaluate, require_container
 from oxyformer.reporting.records import ExpectedTasks, ReportBundle, STAGE_GATES, TaskReceipts
 from oxyformer.reporting.render import render_forest, render_html
@@ -61,19 +62,27 @@ def run_stage(request: StageRequest) -> StageResult:
               "evidence_label": "diagnostic-only", "estimators": [], "gates": [], "limitations": list(LIMITATIONS)}
     bundle = None
     try:
+        # Authenticate the task and bundle independently so a missing unrelated
+        # prerequisite cannot hide available estimates. Full request verification
+        # remains mandatory before evaluation and again before publication.
+        task_bytes = Path(request.task_path).read_bytes()
+        require(sha256(task_bytes).hexdigest() == request.task_hash, "reporting task hash mismatch")
+        task = require_container(json.loads(task_bytes), dict, "reporting task")
+        require(set(task) == {"bundle", "manifest", "receipts", "approvals"}, "invalid reporting task fields")
+        dependencies = dict(zip(request.dependency_paths, request.dependency_hashes))
+        require(set(task.values()) == set(dependencies), "report task/dependency paths mismatch")
+        bundle = read_artifact(task["bundle"], ReportBundle, dependencies[task["bundle"]])
+        report["bundle_hash"] = bundle.content_hash
+        report["estimators"] = [e.to_dict()["payload"] for e in bundle.estimates]
+        report["sensitivities"] = sensitivity_records(bundle)
+        manifest = read_artifact(task["manifest"], ExpectedTasks, dependencies[task["manifest"]])
+        report["manifest_hash"] = manifest.content_hash
+        report["diagnostics"] = summarize(bundle, manifest)
         request.verify_inputs()
         config = require_container(yaml.safe_load(Path(request.config_path).read_text()), dict, "reporting config")
         require(config.get("schema_version") == 1, "unsupported reporting config")
         require(request.stage in STAGE_GATES, "unknown reporting stage")
-        task = require_container(json.loads(Path(request.task_path).read_text()), dict, "reporting task")
-        require(set(task) == {"bundle", "manifest", "receipts", "approvals"}, "invalid reporting task fields")
-        dependencies = dict(zip(request.dependency_paths, request.dependency_hashes))
-        require(set(task.values()) == set(dependencies), "report task/dependency paths mismatch")
         require(Path(task["approvals"]).resolve() == _owner_registry(request).resolve(), "approval path is not owner registry")
-        bundle = read_artifact(task["bundle"], ReportBundle, dependencies[task["bundle"]])
-        report["estimators"] = [e.to_dict()["payload"] for e in bundle.estimates]
-        report["sensitivities"] = sensitivity_records(bundle)
-        manifest = read_artifact(task["manifest"], ExpectedTasks, dependencies[task["manifest"]])
         receipts = read_artifact(task["receipts"], TaskReceipts, dependencies[task["receipts"]])
         require(manifest.stage == request.stage, "reporting stage mismatch")
         approvals = require_container(yaml.safe_load(Path(task["approvals"]).read_text()), dict, "owner approvals")
@@ -83,7 +92,7 @@ def run_stage(request: StageRequest) -> StageResult:
     except FileNotFoundError as exc:
         report.update(state="missing", releasable=False, evidence_label="diagnostic-only")
         report["gates"].append({"gate": "inputs", "status": "missing", "reason": str(exc)})
-    except (ContractError, ValueError, TypeError, KeyError, OSError, yaml.YAMLError) as exc:
+    except (ContractError, ValueError, TypeError, KeyError, OverflowError, OSError, yaml.YAMLError) as exc:
         report.update(state="failed", releasable=False, evidence_label="diagnostic-only")
         report["gates"].append({"gate": "inputs", "status": "failed", "reason": str(exc)})
     report["request_hash"] = request.content_hash

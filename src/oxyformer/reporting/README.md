@@ -134,3 +134,23 @@ training permissions: the shared FeatureRegistry/CovariateView contract refuses
 precise geography and exposure proxies as nuisances. Renaming forbidden values
 and lying about their semantic role is outside that contract; upstream adapters
 remain responsible for truthful roles. Probe fit cannot see held-out exposure.
+
+Mandatory publication fields are checked for content. Retry rules must contain
+at least one rule, and every entry must be non-whitespace text; an explicit
+`no retries` entry is valid. Blank rules remain representable in an incomplete
+coverage artifact but fail release. Attrition steps, geography identifiers and
+balance-function names must also contain text, in addition to their existing
+alignment and numerical checks. External reviewer/reference fields and the
+owner concentration definition, requirement and failure-action text must be
+nonempty strings. This validates publication completeness, not the scientific
+truth of a producer's prose or the authenticity of a human approval.
+
+The stage authenticates the task and bundle against the frozen request before
+checking aggregate prerequisites. Thus an absent or changed receipt, manifest,
+config or approval file cannot hide an authenticated estimate. The report keeps
+all estimates and sensitivities as diagnostic-only; an independently verified,
+compatible manifest also permits the existing derived diagnostics. Missing or
+changed task/bundle bytes provide no authenticated estimates to display. Complete
+request verification, the fixed owner-registry path, every scientific gate and
+a second input verification still precede release. Output isolation and immutable
+publication remain required even for refusal reports.

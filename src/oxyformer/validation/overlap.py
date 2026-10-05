@@ -8,7 +8,7 @@ import numpy as np
 
 from oxyformer.design.policies import fp64_vector
 from oxyformer.estimation.influence import normalized_weights
-from oxyformer.provenance import require
+from oxyformer.provenance import nonempty, require
 
 
 def weight_diagnostics(values):
@@ -38,6 +38,9 @@ def overlap_report(weights, ratios, observed, shifted, names, f_a, f_d):
     q = normalized_weights(weights, len(a))
     fa, fd = np.asarray(f_a, dtype=np.float64), np.asarray(f_d, dtype=np.float64)
     require(bool(names) and len(set(names)) == len(names), "frozen balance functions required")
+    for name in names:
+        require(isinstance(name, str), "balance function name must be text")
+        nonempty(name, "balance function name")
     require(fa.shape == fd.shape == (len(a), len(names)), "balance function alignment mismatch")
     require(bool(np.isfinite(fa).all() and np.isfinite(fd).all()), "nonfinite balance functions")
     moved = d != a
