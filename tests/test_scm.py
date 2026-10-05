@@ -2570,3 +2570,79 @@ def test_resumed_saturated_selection_uses_its_log_slope_bound():
     # All logits exceed 1000, so the entire log-selection variation is <1.
     # No response oscillation, assignment decay or eligibility boundary exists.
     assert not any(-10000 < v < -9000 for v in boundaries)
+
+
+@pytest.mark.parametrize('sign', [-1, 1])
+@pytest.mark.parametrize('multiple', [1, 2, 3])
+def test_resumed_round1_subnormal_probability_survives_response_scaling(sign, multiple):
+    from decimal import Decimal, localcontext
+    from fractions import Fraction
+    from oxyformer.validation.scm import exact, sampled_mean
+    q = np.nextafter(np.longdouble(0), np.longdouble(1))
+    f = replace(frame(1, 1), x=((-100., -100.),))
+    state = LatentState(local=sign, denominator_factor=Fraction(*q.as_integer_ratio()))
+    c = config(local_strength=-1. if sign > 0 else 0.)
+    law = AssignmentLaw(f, 0, state, c, ((0., 1.),))
+    at = law.quantile_coordinates(0, q*multiple)
+    dose = at.anchor + at.unit*exact(at.values.item())
+    with localcontext() as context:
+        context.prec = 90
+        rate = Decimal.from_float(.3)
+        reference = Decimal(-sign*multiple)*(1-(-rate).exp())/rate
+    # The omitted next inverse-series term is O(q) after denominator scaling.
+    assert sampled_mean(dose, f, 0, state, c) == pytest.approx(float(reference), rel=2e-15)
+    assert 0 <= dose <= 1
+
+
+@pytest.mark.parametrize('assignment,index', [('continuous', 0),
+    ('near_deterministic', 0), ('near_deterministic', 1)])
+def test_resumed_round1_endpoint_probability_is_exact_support(assignment, index):
+    from oxyformer.validation.scm import exact
+    c = config(assignment=assignment, extreme_ratios=assignment == 'continuous')
+    law = AssignmentLaw(frame(1, 1), 0, LatentState(), c, ((0., 100.),))
+    piece = law.pieces[index]
+    at = law.quantile_coordinates(index, 1.)
+    expected = piece.lower if piece.rate > 0 else piece.upper
+    assert np.isfinite(at.rounded())
+    assert at.anchor+at.unit*exact(at.values.item()) == expected
+    assert at.inside(piece.lower, piece.upper)
+
+
+@pytest.mark.parametrize('u', [np.nextafter(np.longdouble(0), np.longdouble(-1)),
+    np.nextafter(np.longdouble(1), np.longdouble(2))])
+def test_resumed_round1_quantile_probability_domain(u):
+    law = AssignmentLaw(frame(1, 1), 0, LatentState(), config(), ((0., 1.),))
+    with pytest.raises(ContractError, match='probabilit'):
+        law.quantile_coordinates(0, u)
+
+
+def test_resumed_round1_quantile_array_retains_tiny_and_endpoint_values():
+    from oxyformer.validation.scm import exact
+    q = np.nextafter(np.longdouble(0), np.longdouble(1))
+    law = AssignmentLaw(frame(1, 1), 0, LatentState(local=-1.), config(), ((0., 1.),))
+    at = law.quantile_coordinates(0, [q, .5, 1.])
+    doses = [at.anchor+at.unit*exact(v) for v in at.values]
+    assert 0 < doses[0] < exact(q)
+    assert 0 < doses[1] < 1
+    assert doses[2] == 1
+    assert at.rounded()[0] == q
+    assert at.inside(0., 1.).all()
+    assert at.inside(exact(q)/2, exact(q)).tolist() == [True, False, False]
+
+
+def test_resumed_round1_sampled_dose_preserves_retained_fraction():
+    from fractions import Fraction
+    from oxyformer.validation.scm import sampled_mean
+    q = np.nextafter(np.longdouble(0), np.longdouble(1))
+    class Draw:
+        def choice(self, *args, **kwargs):
+            return 0
+        def random(self):
+            return q
+    f = replace(frame(1, 1), x=((-100., -100.),))
+    state = LatentState(local=-1., denominator_factor=Fraction(*q.as_integer_ratio()))
+    c = config(local_strength=0.)
+    law = AssignmentLaw(f, 0, state, c, ((0., 1.),))
+    recorded, retained = law.sample_count_dose(Draw())
+    assert recorded == 0.  # Binary64 observation rounding is a separate step.
+    assert sampled_mean(retained, f, 0, state, c) == pytest.approx(.8639392643942738, rel=2e-15)

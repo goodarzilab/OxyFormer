@@ -11,6 +11,7 @@ from dataclasses import dataclass, fields, replace
 from types import MappingProxyType
 from itertools import product
 from fractions import Fraction
+from decimal import Decimal, localcontext
 from functools import lru_cache
 from typing import Literal, get_args, get_origin, get_type_hints
 
@@ -755,6 +756,10 @@ class LocalCoordinates:
     values: np.ndarray
 
     def rounded(self):
+        values = np.asarray(self.values)
+        if values.dtype == object:
+            return np.asarray([wide(self.anchor+self.unit*exact(v)) for v in values.flat],
+                              dtype=np.longdouble).reshape(values.shape)
         return wide(self.anchor)+wide(self.unit)*self.values
 
     def shifted(self, delta):
@@ -766,6 +771,11 @@ class LocalCoordinates:
     def inside(self, lower, upper):
         # A nearest-rounded rational cutoff can include an excluded node. Use
         # the first/last representable value *inside* each exact closed bound.
+        values = np.asarray(self.values)
+        if values.dtype == object:
+            lo, hi = exact(lower), exact(upper)
+            return np.asarray([lo <= self.anchor+self.unit*exact(v) <= hi for v in values.flat],
+                              dtype=bool).reshape(values.shape)
         lower = directed_bound((exact(lower)-self.anchor)/self.unit, upward=True)
         upper = directed_bound((exact(upper)-self.anchor)/self.unit, upward=False)
         return (self.values >= lower) & (self.values <= upper)
@@ -842,6 +852,44 @@ def observation_transition_points(state, config):
         gates.append((exact(1)-exact(.8)*exact(state.illness), exact(.1)))
     logits = (-64, -32, -16, -8, -4, -2, -1, 0, 1, 2, 4, 8, 16, 32, 64)
     return tuple((intercept-logit)/slope for intercept, slope in gates for logit in logits)
+
+
+def _retained_decay_quantile(extent, probability):
+    """Retain a decay coordinate before native underflow or endpoint rounding.
+
+    Physical scaling and downstream responses consume the returned rational.
+    The Decimal path has at least twice native decimal precision plus40 guard
+    digits. For tiny x, sum -log(1-x) without forming the rounded value1-x.
+    """
+    if probability == 0:
+        return Fraction(0)
+    if probability == 1:
+        return extent
+    with localcontext() as context:
+        context.prec = max(100, 2*np.finfo(np.longdouble).precision+40)
+        if extent >= 4*context.prec:
+            # exp(-extent) < half an ULP below1 at this working precision.
+            mass = Decimal(1)
+        else:
+            e = Decimal(extent.numerator)/Decimal(extent.denominator)
+            mass = 1-(-e).exp()
+        u = Decimal(probability.numerator)/Decimal(probability.denominator)
+        x = u*mass
+        if x < Decimal('.125'):
+            power = result = x
+            n = 2
+            while True:
+                power *= x
+                updated = result+power/n
+                if updated == result:
+                    break
+                result = updated
+                n += 1
+        else:
+            result = -(1-x).ln()
+        retained = Fraction(result)
+    require(0 <= retained <= extent, "inverse quantile left its exact support")
+    return retained
 
 
 class AssignmentLaw:
@@ -923,7 +971,10 @@ class AssignmentLaw:
         """Conditional inverse transform, also used before draw serialization."""
         piece_index = bounded_index(piece_index, len(self.pieces), "piece index")
         p = self.pieces[piece_index]
-        u = np.asarray(numeric_array(u, "quantile probabilities"), dtype=np.longdouble)
+        captured = numeric_array(u, "quantile probabilities")
+        require(all(0 <= exact(v) <= 1 for v in captured.flat),
+                "quantile probabilities must lie in [0, 1]")
+        u = np.asarray(captured, dtype=np.longdouble)
         if p.rate == 0:
             return LocalCoordinates(p.lower+self.error,p.upper-p.lower,u)
         exact_extent = abs(p.rate)*(p.upper-p.lower)
@@ -939,8 +990,18 @@ class AssignmentLaw:
             # rounded physical extent can have arbitrarily large error.
             return LocalCoordinates(p.peak+self.error, p.upper-p.lower,
                                     -u if p.rate > 0 else u)
-        t = -np.log1p(-u*(-np.expm1(-extent)))
-        return LocalCoordinates(p.peak+self.error,1/abs(p.rate),(-t if p.rate > 0 else t))
+        with np.errstate(divide="ignore", under="ignore"):
+            t = np.asarray(-np.log1p(-u*(-np.expm1(-extent))))
+        outside = np.asarray([not np.isfinite(v) or exact(v) > exact_extent
+                              for v in t.flat], dtype=bool).reshape(t.shape)
+        retain = outside | (u == 1) | ((u > 0) & (t < np.finfo(np.longdouble).tiny))
+        if retain.any():
+            values = np.empty(t.shape, dtype=object)
+            for index in np.ndindex(t.shape):
+                values[index] = (_retained_decay_quantile(exact_extent, exact(u[index]))
+                                 if retain[index] else exact(t[index]))
+            t = values
+        return LocalCoordinates(p.peak+self.error,1/abs(p.rate),np.asarray(-t if p.rate > 0 else t))
 
     def sample(self, rng):
         index = rng.choice(len(self.pieces),p=self.probabilities)
@@ -950,9 +1011,9 @@ class AssignmentLaw:
         """Retain the true local dose for rates; serialize only the observation."""
         index = rng.choice(len(self.pieces),p=self.probabilities)
         coordinates = self.quantile_coordinates(index,rng.random())
-        # as_integer_ratio preserves the extended-precision local draw, including
-        # offsets much smaller than an ULP of the absolute recorded exposure.
-        local = Fraction(*np.longdouble(coordinates.values).as_integer_ratio())
+        # Retained rational coordinates must not pass through a native float
+        # before physical scaling or a denominator can amplify their offset.
+        local = exact(coordinates.values.item())
         true_dose = coordinates.anchor-self.error+coordinates.unit*local
         piece = self.pieces[index]
         if not piece.lower <= true_dose <= piece.upper:

@@ -27,6 +27,9 @@
 # Response/adjustment row indices and assignment-piece indices use the same
 # concrete integer adapter and nonnegative alignment bounds. Standalone
 # quadrature orders likewise accept exact integral scalars, with order >= 1.
+# Conditional inverse probabilities use the closed interval [0,1]; endpoints
+# map to exact component boundaries. Tiny local draws remain rational through
+# physical and response scaling, before observation serialization.
 # Domain/physical sign checks never use a value rounded from a raw input.
 # Integration convergence includes the exact displacement from rounding the
 # computed truth to its binary64 artifact; no output-ULP tolerance floor applies.
