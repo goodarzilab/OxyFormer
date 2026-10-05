@@ -21,8 +21,24 @@ from oxyformer.contracts import StageRequest, StageResult
 from oxyformer.execution.campaign import expand_campaign, validate_plan
 from oxyformer.execution.identity import code_identity, scientific_fingerprint
 from oxyformer.execution.paths import atomic_json, safe_extract
-from oxyformer.execution.runner import dependency_variable, resolve_dependencies, run
+from oxyformer.execution.runner import dependency_variable, resolve_dependencies, run as run_worker
 from oxyformer.provenance import ArtifactLineage, ArtifactRecord, ContractError, file_hash
+
+
+def inline_fixture_stage(request, module_name, repo):
+    """Inject small closure stages; real process lifecycle is covered by CLI tests."""
+    import importlib
+    from oxyformer.execution.paths import isolated_caches
+    with isolated_caches(request.output_dir):
+        try:
+            module = importlib.import_module(module_name)
+        except (ImportError, FileNotFoundError) as exc:
+            return StageResult(request_hash=request.content_hash, status='blocked', artifacts=(), message=str(exc))
+        return module.run_stage(request)
+
+
+def run(*args, **kwargs):
+    return run_worker(*args, execute=inline_fixture_stage, **kwargs)
 
 
 def git(repo, *args):
@@ -204,6 +220,7 @@ def test_missing_module_blocks_lazily(runtime):
 
 def test_cli_selects_task(runtime, monkeypatch):
     repo, out = runtime
+    monkeypatch.setattr('oxyformer.execution.runner.run', run)
     monkeypatch.setattr('oxyformer.execution.identity.verify_module_origins', lambda *a, **k: None)
     path = out / 'tasks.json'
     path.write_text(json.dumps({'tasks': [{'id': 'selected', 'stage': 'dummy', 'outputs': ['value.json']}]}))
@@ -1146,3 +1163,133 @@ def test_late_publication_control_modes_are_verified(runtime, tmp_path, monkeypa
     with pytest.raises(ContractError, match='fingerprint mismatch'):
         run('dummy', out, repo, deps_env=True,
             task_file=task_file(out, needs={'data-unit': ['data.json', 'receipts.json']}))
+
+
+def run_cli_fixture(repo, out, stage_body, *, needs=None, entrypoint=None):
+    """Execute real copied CLI code and a synthetic stage in a fresh interpreter."""
+    import inspect
+    original = Path(__file__).parents[1]
+    shutil.copytree(original / 'src/oxyformer', repo / 'src/oxyformer', dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    shutil.copyfile(original / '.gitignore', repo / '.gitignore')
+    imports = '''from pathlib import Path
+import os
+import json
+from hashlib import sha256
+from oxyformer.contracts import StageResult
+from oxyformer.provenance import ArtifactLineage, ArtifactRecord, file_hash
+from oxyformer.execution.paths import atomic_json
+'''
+    (repo / 'src/oxyformer/dummy.py').write_text(imports + inspect.getsource(dummy) + '\n' + stage_body)
+    (out / 'code_commit.txt').write_text(commit(repo))
+    command = [sys.executable, '-m', 'oxyformer.cli'] if entrypoint is None else [sys.executable, '-c', entrypoint]
+    command += ['run-stage', '--stage', 'dummy', '--repo', str(repo), '--out', str(out),
+                '--task', str(task_file(out, needs=needs or {})), '--deps-env']
+    return subprocess.run(command, cwd=repo, env=dict(os.environ, PYTHONPATH=str(repo / 'src'),
+                          CUDA_VISIBLE_DEVICES=''), capture_output=True, text=True, timeout=30)
+
+
+def test_cli_undeclared_outside_write_fails(runtime, tmp_path, monkeypatch):
+    repo, out = runtime
+    outside = tmp_path / 'outside.json'
+    monkeypatch.setenv('FIXTURE_OUTSIDE', str(outside))
+    process = run_cli_fixture(repo, out, '''def run_stage(request):
+    Path(os.environ['FIXTURE_OUTSIDE']).write_text('undeclared output')
+    return dummy(request)
+''')
+    assert process.returncode == 1, process.stdout + process.stderr
+    result = StageResult.from_json((out / '_execution/result.json').read_text())
+    assert str(outside) in result.message
+
+
+@pytest.mark.parametrize('control', ['result.json', 'fingerprint.json'])
+def test_identical_control_rewrite_still_rejects_later_consumers(runtime, tmp_path, monkeypatch, control):
+    repo, out = runtime
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'data.json').write_text('{}')
+    (source / 'receipts.json').write_text('{}')
+    publish_source_fixture(repo, source)
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
+    needs = {'data-unit': ['data.json', 'receipts.json']}
+    victim = source / '_execution' / control
+    def faulty(request):
+        result = dummy(request)
+        victim.write_bytes(victim.read_bytes())
+        return result
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    result = run('dummy', out, repo, deps_env=True, task_file=task_file(out, needs=needs))
+    assert result.status == 'fail'
+    assert str(victim) in result.message
+    later = tmp_path / 'later'
+    later.mkdir()
+    (later / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=dummy, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    with pytest.raises(ContractError, match='fingerprint|control'):
+        run('dummy', later, repo, deps_env=True, task_file=task_file(later, needs=needs))
+
+
+def test_cli_finalizes_temporary_directories_before_publication(runtime):
+    from oxyformer.execution.runner import verify_dependency_result
+    repo, out = runtime
+    process = run_cli_fixture(repo, out, '''import tempfile
+scratch = None
+def run_stage(request):
+    global scratch
+    scratch = tempfile.TemporaryDirectory()
+    (Path(scratch.name) / 'scratch').write_text('temporary work')
+    return dummy(request)
+''')
+    assert process.returncode == 0, process.stdout + process.stderr
+    assert verify_dependency_result(out).status == 'pass'
+
+
+@pytest.mark.parametrize('worker_kind', ['thread', 'subprocess'])
+def test_cli_waits_for_background_mutation_before_post_check(runtime, tmp_path, monkeypatch, worker_kind):
+    repo, out = runtime
+    source = tmp_path / 'source'
+    source.mkdir()
+    victim = source / 'data.json'
+    victim.write_text('{}')
+    (source / 'receipts.json').write_text('{}')
+    publish_source_fixture(repo, source)
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
+    monkeypatch.setenv('FIXTURE_WORKER_KIND', worker_kind)
+    # The harness waits at publication to make the race deterministic. It is
+    # outside the scientific stage, whose bug is simply an unjoined worker.
+    entrypoint = '''import time
+from pathlib import Path
+import oxyformer.cli as cli
+import oxyformer.execution.runner as runner
+original = runner.publish_result
+def wait_for_worker(root, result):
+    deadline = time.monotonic() + 5
+    while not (Path(root) / 'worker-finished').exists():
+        assert time.monotonic() < deadline
+        time.sleep(.01)
+    return original(root, result)
+runner.publish_result = wait_for_worker
+raise SystemExit(cli.main())
+'''
+    process = run_cli_fixture(repo, out, '''import threading
+import time
+import subprocess
+import sys
+def run_stage(request):
+    result = dummy(request)
+    def background():
+        time.sleep(.2)
+        (Path(os.environ['SWARM_DEP_DATA_UNIT']) / 'data.json').write_text('[]')
+        (Path(request.output_dir) / 'worker-finished').write_text('done')
+    if os.environ['FIXTURE_WORKER_KIND'] == 'thread':
+        threading.Thread(target=background).start()
+    else:
+        code = "import time,os; from pathlib import Path; time.sleep(.2); (Path(os.environ['SWARM_DEP_DATA_UNIT'])/'data.json').write_text('[]'); Path(os.environ['FIXTURE_FINISHED']).write_text('done')"
+        subprocess.Popen([sys.executable, '-c', code], env=dict(os.environ, FIXTURE_FINISHED=str(Path(request.output_dir) / 'worker-finished')))
+    return result
+''', needs={'data-unit': ['data.json', 'receipts.json']}, entrypoint=entrypoint)
+    assert process.returncode == 1, process.stdout + process.stderr
+    result = StageResult.from_json((out / '_execution/result.json').read_text())
+    assert result.status == 'fail' and str(victim) in result.message
+    check = json.loads((out / '_execution/dependency_check.json').read_text())
+    assert check['attempts'][str(source)]['status'] == 'tainted'
