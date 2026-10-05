@@ -384,7 +384,9 @@ def _train_one(config, bundle, encoder_state, view, stopping, epochs, seed, budg
         _profile(model, config, view, inputs)
         model.eval()
         score = None
-        if stopping:
+        # A zero-mass stopping set has no checkpoint-selection information;
+        # retain the final epoch of the already-declared training bound.
+        if stopping and sum(_inputs(config, stopping).origin_weights) > 0:
             stop_view = subset(config.data.covariates(view.columns), stopping)
             stop_inputs = _inputs(config, stopping)
             with torch.no_grad():
@@ -620,6 +622,7 @@ def _fit_controller(config, outer, manifest, identity, controller, root, budget)
                 for g in range(4):
                     values = [r for r in controller["results"] if r["kind"] == model_kind and r["grid"] == g]
                     mass = sum(r["mass"] for r in values)
+                    require(mass > 0, "inner evaluation pool has no target mass")
                     scores = tuple(sum(r["metrics"][j] * r["mass"] for r in values) / mass
                                    for j in range(len(values[0]["metrics"])))
                     candidates.append((scores, g))
@@ -709,14 +712,16 @@ def predict_fold(artifacts, covariate_view, policy) -> OOFNuisances:
     with _numerics(), torch.no_grad():
         controller = load_checkpoint(artifacts.checkpoint, artifacts.checkpoint.identity)["controller"]
         outcome = _build(controller["final"]["outcome"]).eval()
-        origin = _build(controller["final"]["origin"]).eval()
         mu = _predict(outcome, covariate_view, inputs, policy, outcome_mean=True).double()
-        logits = _predict(origin, covariate_view, inputs, policy)
         calibration = AffineCalibration.from_json(controller["calibration"])
-        ratio = calibration.ratios(logits).double()
-        # An identity policy has a known unit density ratio, independent of fit.
+        # Apply the known identity before evaluating an unnecessary classifier
+        # or exponential; neither can improve an exactly known unit ratio.
         if policy.is_identity:
-            ratio = torch.ones_like(ratio)
+            ratio = torch.ones_like(mu)
+        else:
+            origin = _build(controller["final"]["origin"]).eval()
+            logits = _predict(origin, covariate_view, inputs, policy)
+            ratio = calibration.ratios(logits).double()
         ids = covariate_view.original_ids
         lineage = replace(artifacts.checkpoint.lineage, unit_ids=ids,
             parent_hashes=(artifacts.data_manifest.content_hash, artifacts.checkpoint.content_hash,
