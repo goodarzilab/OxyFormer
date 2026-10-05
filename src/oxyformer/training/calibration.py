@@ -96,11 +96,14 @@ def paired_tensors(logits, weights, *, allow_zero_mass=False):
             "calibration requires [original, observed/shifted] logits and origin weights")
     require(bool(torch.isfinite(z).all()) and bool(torch.isfinite(w).all()),
             "nonfinite calibration inputs")
-    total = w.sum()
-    require(bool((w >= 0).all()) and bool(torch.isfinite(total)) and
-            (allow_zero_mass or bool(total > 0)), "invalid calibration target weights")
+    require(bool((w >= 0).all()), "invalid calibration target weights")
     positive = w > 0
+    require(allow_zero_mass or bool(positive.any()), "invalid calibration target weights")
     z, w = z[positive], w[positive]
+    # Common rescaling preserves the target law without overflowing its sum.
+    if len(w):
+        w = w / w.max()
+    total = w.sum()
     labels = torch.tensor([0., 1.], device=z.device).expand_as(z)
     # Normalize before duplication; both copies always retain the same mass.
     denominator = torch.where(total > 0, total, torch.ones_like(total))
@@ -118,6 +121,14 @@ def _pair_metrics(z, y, w):
     brier = float(((z.sigmoid() - y).square() * w).sum())
     require(math.isfinite(loss) and math.isfinite(brier), "nonfinite calibration score")
     return loss, brier
+
+
+def _weighted_median(values, mass):
+    """Choose an observed coordinate without averaging away small contrasts."""
+    order = values.argsort()
+    cumulative = mass[order].cumsum(0)
+    index = torch.searchsorted(cumulative, cumulative[-1] / 2)
+    return values[order[index]]
 
 
 def fit_affine(logits, weights, *, original_ids, fold_ids, partitions,
@@ -145,10 +156,19 @@ def fit_affine(logits, weights, *, original_ids, fold_ids, partitions,
                 "calibration predictions do not match held-out partition")
     z, labels, mass = paired_tensors(logits, weights)
     with torch.inference_mode(False), torch.enable_grad(), torch.autocast(z.device.type, enabled=False):
-        # Midrange centering preserves representable small differences around
-        # a large offset. Halve before adding to avoid endpoint overflow.
-        offset = z.min() / 2 + z.max() / 2
-        magnitude = (z - offset).abs().max()
+        # Robust coordinates preserve ordinary contrasts when a tiny-weight
+        # original has an extreme logit. These statistics only condition the
+        # same affine objective; every positive-weight pair remains in it.
+        offset = _weighted_median(z.flatten(), mass.flatten())
+        centered = z - offset
+        if not bool(torch.isfinite(centered).all()):
+            # Opposite FP32 endpoints need an interior origin for subtraction.
+            offset = z.min() / 2 + z.max() / 2
+            centered = z - offset
+        deviations = centered.abs()
+        varying = deviations > 0
+        magnitude = (_weighted_median(deviations[varying], mass[varying])
+                     if bool(varying.any()) else z.new_zeros(()))
         if float(magnitude) == 0:
             slope, intercept, magnitude = 0., 0., torch.ones_like(magnitude)
         else:

@@ -238,3 +238,32 @@ def test_zero_weight_rows_retain_weight_and_ownership_checks():
     with pytest.raises(ContractError, match="lineage mismatch"):
         fit_affine(logits, [1.] * 6 + [0.],
                    **(values | {"lineage": lineage(values["original_ids"][:-1])}))
+
+
+def test_mixed_scale_positive_weight_logits_preserve_ordinary_contrasts():
+    base, base_values = nonseparable_case()
+    logits, values = with_zero_weight_original()
+    logits[-1] = -1e20
+    weights = [1.] * 6 + [1e-30]
+    baseline = fit_affine(base, [1.] * 6, **base_values)
+    fitted = fit_affine(logits, weights, **values)
+    # The identity map is already strictly better than the false constant fit.
+    assert pair_metrics(fitted.logits(logits), weights)[0] <= pair_metrics(logits, weights)[0]
+    torch.testing.assert_close(fitted.ratios(logits[:6]), baseline.ratios(base))
+    assert torch.isfinite(fitted.ratios(logits)).all()
+
+
+@pytest.mark.parametrize("weights", [[1e38] * 6, [2e38, 2e38, 0., 0.]])
+def test_finite_weights_with_overflowing_sum_preserve_weighted_work(weights):
+    values = nonseparable_case()[1] if len(weights) == 6 else inputs()
+    logits = torch.zeros(len(weights), 2)
+    reference_weights = [w / max(weights) for w in weights]
+    baseline = fit_affine(logits, reference_weights, **values)
+    fitted = fit_affine(logits, weights, **values)
+    assert fitted.slope == fitted.intercept == 0.
+    torch.testing.assert_close(fitted.ratios(logits), baseline.ratios(logits))
+    assert pair_metrics(logits, weights) == pair_metrics(logits, reference_weights)
+    actual = transfer_diagnostics(fitted, logits, logits + 2., weights, lineage=values["lineage"])
+    reference = transfer_diagnostics(baseline, logits, logits + 2., reference_weights,
+                                     lineage=values["lineage"])
+    assert actual.metrics == reference.metrics
