@@ -13,7 +13,7 @@ The [frozen plan](plan/OXYFORMER_V2_PLAN.md) wins over task shorthand.
 
 Owner approval of TabPFN versions does not allow floating checkpoints, unreviewed
 payloads or an unsupported observation model. The current nested runner blocks
-A5–A7 until resumable signed-correction/foundation interfaces exist. Their
+A5–A7 and F0/F1 until resumable signed-correction/foundation interfaces exist. Their
 required scientific comparisons cannot be counted as completed by omission.
 
 ## Gates in order

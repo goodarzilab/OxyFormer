@@ -18,8 +18,10 @@ whole cap. These are binding limits, not a prediction that a fit will finish.
 1. Inventory the complete endpoint/target × variant × fold × seed × scenario ×
    repetition × deletion work before budgeting. Retain explicit IDs and output
    declarations. A0 has 15 outer-fold/seed jobs; its full schedule has 390
-   nuisance fits and approximately 60 SSL fits. A1–A7 remain required in their
-   registered scope; A8 is a separately approved months 2–3 extension. B0 is
+   nuisance fits and approximately 60 SSL fits. A1–A7 and the merged TabPFN
+   comparators F0/F1 remain required in their registered scope. A6/A7/F0/F1
+   currently require unit weights; do not silently change a weighted target to
+   run them. A8 is a separately approved months 2–3 extension. B0 is
    calibration only and D0 is diagnostic only.
 2. Profile complete production procedures, including loading, setup, nested
    tuning, calibration, publication and verification. Record the code,
