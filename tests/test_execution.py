@@ -1868,3 +1868,51 @@ def test_generated_continuations_and_collector_use_attempt_directories(runtime, 
         monkeypatch.setenv(dependency_variable(task['id']), str(attempt))
         for name in ('task.json', 'request.json', 'fingerprint.json'):
             assert (attempt / '_execution' / name).is_file()
+
+
+@pytest.mark.parametrize('consumer', ['environment', 'direct-verifier'])
+def test_replaced_attempt_root_cannot_redirect_later_consumers(runtime, tmp_path, monkeypatch, consumer):
+    from oxyformer.execution.runner import verify_dependency_result
+    repo, changing = runtime
+    source, alternate = tmp_path / 'source-a', tmp_path / 'source-b'
+    for root in (source, alternate):
+        root.mkdir()
+        (root / 'data.json').write_text('{}')
+        (root / 'receipts.json').write_text('{}')
+        publish_source_fixture(repo, root)  # two genuine, independently sealed attempts
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
+    needs = {'data-unit': ['data.json', 'receipts.json']}
+    def replace_root(request):
+        result = dummy(request)
+        source.rename(tmp_path / 'source-a.saved')
+        source.symlink_to(alternate, target_is_directory=True)
+        return result
+    with monkeypatch.context() as patch:
+        patch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(
+            run_stage=replace_root, __file__=str(repo / 'src/oxyformer/dummy.py')))
+        result = run('dummy', changing, repo, deps_env=True,
+                     task_file=task_file(changing, needs=needs))
+    assert result.status == 'fail' and str(source) in result.message
+    check = json.loads((changing / '_execution/dependency_check.json').read_text())
+    assert check['attempts'][str(source)]['status'] == 'tainted'
+    assert '.' in check['attempts'][str(source)]['changed_paths']
+    if consumer == 'direct-verifier':
+        with pytest.raises(ContractError, match='attempt directory|symlink|owner|fingerprint'):
+            verify_dependency_result(source)
+    else:
+        later = tmp_path / 'later'
+        later.mkdir()
+        (later / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+        with pytest.raises(ContractError, match='attempt directory|symlink|owner|fingerprint'):
+            run('dummy', later, repo, deps_env=True, task_file=task_file(later, needs=needs))
+        assert not (later / 'value.json').exists()
+
+
+def test_dependency_parent_alias_remains_usable(tmp_path):
+    parent = tmp_path / 'real-parent'
+    source = parent / 'attempt'
+    source.mkdir(parents=True)
+    alias = tmp_path / 'parent-alias'
+    alias.symlink_to(parent, target_is_directory=True)
+    assert resolve_dependencies(['source'], {'SWARM_DEP_SOURCE': str(alias / 'attempt')}) == {
+        'source': source}

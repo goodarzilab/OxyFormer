@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 
 import yaml
@@ -35,6 +36,19 @@ def dependency_variable(unit_id):
     return 'SWARM_DEP_' + re.sub('[^A-Z0-9]', '_', unit_id.upper())
 
 
+
+def dependency_root(value):
+    """Keep the attempt's final directory entry visible to fingerprint checks."""
+    path = Path(value)
+    require(path.is_absolute(), 'dependency must be absolute')
+    # Normalize host parent aliases, but never resolve the attempt entry itself:
+    # a replacement symlink must not select another producer's genuine receipt.
+    path = path.parent.resolve(strict=True) / path.name
+    require(stat.S_ISDIR(path.lstat().st_mode),
+            f'dependency must be a nonsymlink attempt directory: {path}')
+    return path
+
+
 def resolve_dependencies(ids, environ=None):
     environ = os.environ if environ is None else environ
     variables = [dependency_variable(i) for i in ids]
@@ -44,8 +58,7 @@ def resolve_dependencies(ids, environ=None):
         require(name in environ, f'missing dependency variable {name}')
         path = Path(environ[name])
         require(path.is_absolute(), f'dependency must be absolute: {name}')
-        result[unit] = path.resolve(strict=True)
-        require(result[unit].is_dir(), f'dependency must be an attempt directory: {name}')
+        result[unit] = dependency_root(path)
     return result
 
 
@@ -74,7 +87,7 @@ def dependency_file(root, relative):
 
 
 def verify_dependency_result(root, *, expected_hash=None, trees=None, active=None, verified=None):
-    root = Path(root).resolve(strict=True)
+    root = dependency_root(root)
     active = set() if active is None else active
     verified = {} if verified is None else verified
     require(root not in active, 'dependency publication cycle')
@@ -89,7 +102,7 @@ def verify_dependency_result(root, *, expected_hash=None, trees=None, active=Non
         result_file = dependency_file(root, '_execution/result.json')
         request = StageRequest.from_json(read_regular(dependency_file(root, '_execution/request.json')))
         result = StageResult.from_json(read_regular(result_file))
-        require(Path(request.output_dir).resolve() == root, 'dependency attempt owner mismatch')
+        require(dependency_root(request.output_dir) == root, 'dependency attempt owner mismatch')
         require(result.status == 'pass', 'dependency stage did not pass')
         tree = verify_published_tree(root, result, expected_hash)
         verify_result(result, request)
@@ -100,7 +113,7 @@ def verify_dependency_result(root, *, expected_hash=None, trees=None, active=Non
         for parent in config.get('dependencies', {}).values():
             parent = Path(parent)
             require(parent.is_absolute(), 'dependency publication path must be absolute')
-            parent = parent.resolve(strict=True)
+            parent = dependency_root(parent)
             expected = hashes.get(str(parent / FINGERPRINT))
             require(expected is not None, 'dependency fingerprint absent from published request')
             verify_dependency_result(parent, expected_hash=expected, trees=trees,
