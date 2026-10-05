@@ -224,6 +224,17 @@ def fit_affine(logits, weights, *, original_ids, fold_ids, partitions,
             slope = float(parameter[0].detach())
             intercept = float(parameter[1].detach())
     require(math.isfinite(slope) and math.isfinite(intercept), "nonfinite affine coefficients")
+    # A slope below one can bring an overflowing normalized input back into
+    # range, but the public FP32 map validates after that intermediate. Move
+    # powers of two into BOTH stored coefficients until the slope no longer
+    # shrinks the normalized value, or every finite FP32 difference fits in
+    # the chosen scale. Binary rescaling preserves the fitted affine map and
+    # avoids rounding a subnormal input scale through division by the slope.
+    factor = 1.
+    while slope != 0 and abs(slope) * factor < 1. and float(magnitude) * factor < 2.:
+        factor *= 2.
+    slope = float(torch.tensor(slope * factor, dtype=torch.float32))
+    magnitude = magnitude.new_tensor(float(magnitude) * factor)
     result = AffineCalibration(slope=slope, intercept=intercept, class_prior=.5,
         original_ids=ids, partitions=tuple(partitions), lineage=lineage,
         input_offset=float(offset), input_scale=float(magnitude))

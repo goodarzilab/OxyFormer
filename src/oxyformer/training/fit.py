@@ -356,6 +356,56 @@ def _pooled_metrics(results):
                  for j in range(len(results[0]["metrics"])))
 
 
+def _unit_products(values, weights, unit, multiplier=None):
+    """Form signed products before a positive weight can underflow alone."""
+    exponent = values.abs().log() + weights.log() - math.log(unit)
+    sign = values.sign()
+    if multiplier is not None:
+        exponent = exponent + multiplier.abs().log()
+        sign = sign * multiplier.sign()
+    return exponent.exp() * sign
+
+
+class _LossInUnits(torch.autograd.Function):
+    """Carry a local likelihood derivative through extreme weight units.
+
+    The authoritative likelihood supplies both per-row losses and derivatives.
+    Combining its derivative with raw mass before division avoids an underflowed
+    weight becoming zero before a large residual can contribute to backward.
+    """
+    @staticmethod
+    def forward(ctx, prediction, losses, derivatives, weights, unit):
+        ctx.save_for_backward(derivatives, weights)
+        ctx.unit = unit
+        return _unit_products(losses, weights, unit)
+
+    @staticmethod
+    def backward(ctx, gradient):
+        derivatives, weights = ctx.saved_tensors
+        return _unit_products(derivatives, weights, ctx.unit, gradient), None, None, None, None
+
+
+def _loss_in_units(prediction, weights, unit, evaluate, reduction):
+    scaled = weights / unit
+    # Keep ordinary arithmetic and the merged likelihood's normal autograd
+    # path. Use the wider product representation when normalized mass becomes
+    # subnormal or zero, before this rounding can alter a row's contribution.
+    if not bool(((weights > 0) & (scaled < torch.finfo(weights.dtype).tiny)).any()):
+        return evaluate(prediction, scaled, reduction)
+    with torch.enable_grad():
+        local = prediction.detach().requires_grad_(True)
+        # Original weights were validated first. Indicator weights expose the
+        # merged per-row likelihood while retaining its zero-row protection.
+        losses = evaluate(local, (weights > 0).to(weights.dtype), "none")
+        derivatives, = torch.autograd.grad(losses.sum(), local)
+    weighted = _LossInUnits.apply(prediction, losses.detach(), derivatives, weights, unit)
+    if reduction == "none":
+        return weighted
+    total = weighted.sum()
+    mass = scaled.sum()
+    return total / torch.where(mass > 0, mass, torch.ones_like(mass)) if reduction == "mean" else total
+
+
 def _outcome_loss(config, prediction, ids, *, reduction="sum", weight_unit=1.):
     # Accumulate target-weighted losses before normalization in FP64. Model
     # predictions and target validity remain governed by their FP32 contract.
@@ -363,12 +413,27 @@ def _outcome_loss(config, prediction, ids, *, reduction="sum", weight_unit=1.):
     weights = torch.tensor(_inputs(config, ids).origin_weights, dtype=torch.float64)
     if reduction == "mean":
         weight_unit = _weight_unit(weights.tolist())
-    weights = weights / weight_unit
     target = torch.tensor(_values(config, config.data.manifest.outcome_field, ids), dtype=torch.float32)
     population = (torch.tensor(_values(config, config.population_field, ids), dtype=torch.float32)
                   if config.population_field else None)
-    return endpoint_loss(prediction, target, weights, family=config.family,
-                         population=population, reduction=reduction)
+    return _loss_in_units(prediction, weights, weight_unit,
+        lambda p, w, r: endpoint_loss(p, target, w, family=config.family,
+                                      population=population, reduction=r), reduction)
+
+
+def _origin_loss(prediction, pairs, weight_unit):
+    weights = torch.tensor(pairs.origin_weights, dtype=torch.float64)
+    scaled = weights / weight_unit
+    if bool(((weights > 0) & (scaled < torch.finfo(weights.dtype).tiny)).any()):
+        # PolicyPairs order is all observed, then all shifted. Preserve raw
+        # pairs and weights; only the local likelihood's arithmetic is scaled.
+        prediction = prediction.transpose(0, 1).reshape(-1)
+        return _loss_in_units(prediction, weights, weight_unit,
+            lambda p, w, r: paired_origin_loss(p, replace(pairs, origin_weights=tuple(w.tolist())),
+                                               reduction=r), "sum")
+    numerical_pairs = (pairs if weight_unit == 1. else replace(pairs,
+        origin_weights=tuple(w / weight_unit for w in pairs.origin_weights)))
+    return paired_origin_loss(prediction, numerical_pairs, reduction="sum")
 
 
 def _profile(model, config, view, inputs):
@@ -457,9 +522,7 @@ def _train_one(config, bundle, encoder_state, view, stopping, epochs, seed, budg
                 # The authoritative records retain raw origin weights. Only
                 # the numerical loss receives weights in common arithmetic
                 # units, using the SAME unit as the full fitting denominator.
-                numerical_pairs = (pairs if weight_unit == 1. else replace(pairs,
-                    origin_weights=tuple(w / weight_unit for w in pairs.origin_weights)))
-                loss = paired_origin_loss(predicted.double(), numerical_pairs, reduction="sum")
+                loss = _origin_loss(predicted.double(), pairs, weight_unit)
                 mass = 2 * original_mass
             # Uniform sampling of ORIGINALS estimates the global weighted loss.
             # Dividing each batch by its own mass would optimize a different law.
