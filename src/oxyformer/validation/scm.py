@@ -412,15 +412,40 @@ def effect(a, config):
 
 
 def structural_mean(a_true, frame, row, state, config):
-    a_true = np.asarray(numeric_array(a_true, "structural doses"), dtype=np.longdouble)
-    # Cancel the complete dose-independent affine expression before rounding.
-    # Even bounded X can leave a tiny positive baseline after large cancellation.
-    baseline = (Fraction(50) + sum((exact(v) for v in frame.x[row] if v is not None), Fraction(0))/4
-                + exact(config.local_strength)*exact(state.local)
-                + exact(config.regional_strength)*exact(state.regional) + 2*exact(state.illness))
-    mean = wide(baseline) + effect(np.asarray(a_true) - config.migration * state.illness, config)
-    with np.errstate(over="ignore", invalid="ignore"):
-        result = config.registration_probability * mean / wide(state.denominator_factor)
+    """Round the complete response only after exact denominator scaling.
+
+    True intervention doses can extend beyond the primitive support box when
+    the recorded policy acts on error-shifted exposure. The per-state envelope
+    adds abs(error), with outward longdouble endpoints to include the rounded
+    diagnostic doses supplied by count-support validation.
+    """
+    doses = numeric_array(a_true, "structural doses")
+    error = abs(exact(state.error))
+    lower = exact(directed_bound(exact(NUMERIC_DOMAIN["dose"][0])-error, upward=False))
+    upper = exact(directed_bound(exact(NUMERIC_DOMAIN["dose"][1])+error, upward=True))
+    require(all(lower <= exact(v) <= upper for v in doses.flat),
+            "structural doses outside supported numeric domain")
+    baseline = _count_baseline(frame, row, state, config)
+    scale = exact(config.registration_probability)/state.denominator_factor
+    displacement = exact(config.migration)*exact(state.illness)
+    result = np.empty(doses.shape, dtype=np.longdouble)
+    with np.errstate(over="ignore", invalid="ignore", under="ignore"):
+        for index, value in enumerate(doses.flat):
+            dose = exact(value)-displacement
+            if config.effect != "nonlinear" or config.beta == 0:
+                result.flat[index] = wide(scale*(baseline+effect_fraction(dose, config)))
+                continue
+            # A pointwise sine enclosure is scaled as a complete expression;
+            # separate rounding of cancelling terms cannot cause a false
+            # nonfinite refusal, even at the admitted denominator floor.
+            bits = 80
+            while True:
+                bounds = _sine_bounds(dose/2, bits)
+                rounded = [wide(scale*(baseline+exact(config.beta)*v)) for v in bounds]
+                if rounded[0] == rounded[1]:
+                    result.flat[index] = rounded[0]
+                    break
+                bits *= 2
     require(bool(np.isfinite(result).all()), "structural mean is not representable as finite longdouble")
     return result
 
@@ -632,6 +657,10 @@ def exact_shift_intervals(components, delta):
     This continuous truth geometry precedes serialization of observed doses.
     """
     validate_numeric(delta, "delta", "delta", allow_zero=True, allow_fraction=True)
+    components = numeric_array(components, "support endpoints", allow_fraction=True)
+    require((components.ndim == 1 and components.size == 0)
+            or (components.ndim == 2 and components.shape[1] == 2),
+            "support components must be a sequence of endpoint pairs")
     if len(components):
         validate_components(components, allow_fraction=True)
     shift = exact(delta)
