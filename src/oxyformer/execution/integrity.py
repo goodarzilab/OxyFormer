@@ -272,11 +272,17 @@ def fingerprint_tree(root, *, exclude=()):
                         raise InputChanged(path, 'entry changed while hashing')
                 entry['sha256'] = digest.hexdigest()
             elif stat.S_ISDIR(kind):
-                with os.scandir(path) as children:
-                    names = sorted(child.name for child in children)
+                names = []
                 pending.append((path, relative, before))
-                pending.extend((path / name, name if relative == '.' else relative + '/' + name, None)
-                    for name in reversed(names))
+                try:
+                    with os.scandir(path) as children:
+                        for child in children:
+                            names.append(child.name)
+                finally:
+                    # A later enumeration error cannot erase names already
+                    # observed, including additions restored before this visit.
+                    pending.extend((path / name, name if relative == '.' else relative + '/' + name, None)
+                        for name in reversed(sorted(names)))
                 return
             if _stable(path.lstat()) != _stable(before):
                 raise InputChanged(path, 'entry changed while fingerprinting')
