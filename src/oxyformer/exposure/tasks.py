@@ -1,8 +1,8 @@
 """Build concrete atlas tasks from committed inventories and inspected DEM headers.
 
-Only headers and paired XML metadata are read by offset in an uncompressed tar.
-Full payload integrity belongs to runner acquisition admission. No pixel reads,
-extraction, downloads, exposure calculations, or approval changes occur here.
+Raster metadata is read from headers by offset and paired XML in an uncompressed
+tar. Member bytes are streamed for digest verification without decoding pixels
+or extracting files. The stage adapter delegates science to the unchanged API.
 """
 from dataclasses import replace
 import shutil
@@ -61,6 +61,13 @@ def inspect_dem(acquisition, source=None):
             require(member.size == entry['bytes'] and member.size <= declared['max_bytes'], f'{rid}: size mismatch')
             require(declared.get('expected_bytes', member.size) == member.size, f'{rid}: size differs from dem.json')
             require(declared.get('expected_sha256', entry['sha256']) == entry['sha256'], f'{rid}: digest differs from dem.json')
+            # The outer payload hash alone cannot detect a producer that packed
+            # changed bytes after recording the individual resource digest.
+            digest = sha256()
+            with archive.extractfile(member) as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b''):
+                    digest.update(block)
+            require(digest.hexdigest() == entry['sha256'], f'{rid}: resource digest mismatch')
             if declared['format'] != 'tiff':
                 continue
             paired = resources[rid + '_metadata']
