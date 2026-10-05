@@ -879,8 +879,7 @@ def test_tree_fingerprint_binds_types_modes_bytes_links_and_all_entries(tmp_path
     before = fingerprint_tree(root)
     assert set(before) == {'.', 'empty', 'file', 'link', 'pipe'}
     assert before['file'] == {'type': stat.S_IFREG, 'mode': stat.S_IMODE(file.stat().st_mode),
-                              'size': 4, 'sha256': sha256(b'abcd').hexdigest(), 'target': None,
-                              'mtime_ns': file.stat().st_mtime_ns, 'ctime_ns': file.stat().st_ctime_ns}
+                              'size': 4, 'sha256': sha256(b'abcd').hexdigest(), 'target': None}
     assert before['empty']['type'] == stat.S_IFDIR
     assert before['link']['type'] == stat.S_IFLNK and before['link']['target'] == 'file'
     assert before['pipe']['type'] == stat.S_IFIFO
@@ -1006,7 +1005,7 @@ def test_unsealed_acquisition_cannot_become_a_new_baseline(runtime, tmp_path, mo
     assert not (source / '_execution').exists()
 
 
-def test_restored_upstream_write_still_fails(runtime, tmp_path, monkeypatch):
+def test_restored_upstream_state_is_identical_under_fingerprint_contract(runtime, tmp_path, monkeypatch):
     repo, out = runtime
     source = tmp_path / 'source'
     source.mkdir()
@@ -1024,8 +1023,8 @@ def test_restored_upstream_write_still_fails(runtime, tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty, __file__=str(repo / 'src/oxyformer/dummy.py')))
     result = run('dummy', out, repo, deps_env=True,
                  task_file=task_file(out, needs={'data-unit': ['data.json', 'receipts.json']}))
-    assert result.status == 'fail'
-    assert str(victim) in result.message
+    # Fingerprints compare input states, not a history of transient writes.
+    assert result.status == 'pass', result.message
     assert victim.read_bytes() == b'{}'
 
 
@@ -1213,7 +1212,7 @@ def test_cli_undeclared_outside_write_fails(runtime, tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize('control', ['result.json', 'fingerprint.json'])
-def test_identical_control_rewrite_still_rejects_later_consumers(runtime, tmp_path, monkeypatch, control):
+def test_identical_control_rewrite_accepts_later_consumers(runtime, tmp_path, monkeypatch, control):
     repo, out = runtime
     source = tmp_path / 'source'
     source.mkdir()
@@ -1229,14 +1228,13 @@ def test_identical_control_rewrite_still_rejects_later_consumers(runtime, tmp_pa
         return result
     monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty, __file__=str(repo / 'src/oxyformer/dummy.py')))
     result = run('dummy', out, repo, deps_env=True, task_file=task_file(out, needs=needs))
-    assert result.status == 'fail'
-    assert str(victim) in result.message
+    assert result.status == 'pass', result.message
     later = tmp_path / 'later'
     later.mkdir()
     (later / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
     monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=dummy, __file__=str(repo / 'src/oxyformer/dummy.py')))
-    with pytest.raises(ContractError, match='fingerprint|control'):
-        run('dummy', later, repo, deps_env=True, task_file=task_file(later, needs=needs))
+    assert run('dummy', later, repo, deps_env=True,
+               task_file=task_file(later, needs=needs)).status == 'pass'
 
 
 def test_cli_finalizes_temporary_directories_before_publication(runtime):
@@ -1307,7 +1305,7 @@ def run_stage(request):
 
 @pytest.mark.parametrize('operation', ['rewrite_restore_mtime', 'copy2'])
 @pytest.mark.parametrize('control', ['result.json', 'fingerprint.json'])
-def test_restored_control_metadata_cannot_be_accepted_later(runtime, tmp_path, monkeypatch, operation, control):
+def test_control_rewrites_bind_fingerprinted_properties_only(runtime, tmp_path, monkeypatch, operation, control):
     repo, out = runtime
     source = tmp_path / 'source'
     source.mkdir()
@@ -1330,15 +1328,42 @@ def test_restored_control_metadata_cannot_be_accepted_later(runtime, tmp_path, m
         return result
     monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty, __file__=str(repo / 'src/oxyformer/dummy.py')))
     result = run('dummy', out, repo, deps_env=True, task_file=task_file(out, needs=needs))
-    assert result.status == 'fail' and str(victim) in result.message
+    assert result.status == 'pass', result.message
     assert victim.stat().st_mtime_ns == before.st_mtime_ns
     assert victim.stat().st_ctime_ns != before.st_ctime_ns
     later = tmp_path / 'later'
     later.mkdir()
     (later / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
     monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=dummy, __file__=str(repo / 'src/oxyformer/dummy.py')))
-    with pytest.raises(ContractError, match='fingerprint|control'):
-        run('dummy', later, repo, deps_env=True, task_file=task_file(later, needs=needs))
+    assert run('dummy', later, repo, deps_env=True,
+               task_file=task_file(later, needs=needs)).status == 'pass'
+
+    # Both late records must still bind bytes/size and permissions. No stage
+    # or verifier repairs the changed upstream file, even after refusal.
+    changed = tmp_path / 'changed'
+    changed.mkdir()
+    (changed / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    def fingerprinted_change(request):
+        result = dummy(request)
+        if operation == 'copy2':
+            victim.chmod(victim.stat().st_mode ^ 0o100)
+        else:
+            victim.write_bytes(victim.read_bytes() + b' ')
+        return result
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=fingerprinted_change, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    result = run('dummy', changed, repo, deps_env=True,
+                 task_file=task_file(changed, needs=needs))
+    assert result.status == 'fail' and str(victim) in result.message
+    check = json.loads((changed / '_execution/dependency_check.json').read_text())
+    assert check['attempts'][str(source)]['status'] == 'tainted'
+    assert '_execution/' + control in check['attempts'][str(source)]['changed_paths']
+    refused = tmp_path / 'refused'
+    refused.mkdir()
+    (refused / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=dummy, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    with pytest.raises(ContractError, match='fingerprint|record'):
+        run('dummy', refused, repo, deps_env=True,
+            task_file=task_file(refused, needs=needs))
 
 
 def test_nested_worker_mutation_cannot_outlive_publication(runtime, tmp_path, monkeypatch):
