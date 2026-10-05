@@ -5,6 +5,7 @@ receipts and approvals. The latter must resolve to the repository's read-only
 configs/approvals.yaml. Each must be named and hash-bound by StageRequest.
 Report artifacts are created only in output_dir; no model or source is edited.
 """
+from dataclasses import dataclass
 from hashlib import sha256
 import json
 import os
@@ -38,30 +39,35 @@ def _realpath(path):
         return _realpath(path.parent) / path.name
 
 
-_MODULE = _realpath(__file__)
-_SOURCE_ROOT = _MODULE.parents[3]
-# A source checkout has a fixed registry. Installed code has no repository
-# beside it: use the repository config already bound by the frozen request.
-try:
-    _SOURCE_CHECKOUT = _realpath(_SOURCE_ROOT / "src/oxyformer/reporting/stage.py") == _MODULE
-except (ContractError, OSError):
-    # An installed package may have an unrelated, unusable src entry beside it.
-    # This optional classification probe is not a request or protected path.
-    _SOURCE_CHECKOUT = False
-OWNER_APPROVALS = _SOURCE_ROOT / "configs/approvals.yaml" if _SOURCE_CHECKOUT else None
-_SOURCE_CONFIG = _SOURCE_ROOT / "configs/reporting.yaml" if OWNER_APPROVALS is not None else None
+# Classify only the path actually imported, before resolving symlinks. Probing
+# another src/stage.py lets an unrelated alias change repository authority.
+_MODULE = Path(__file__)
+_SOURCE_ROOT = (_MODULE.parents[3] if _MODULE.parts[-4:] ==
+                ("src", "oxyformer", "reporting", "stage.py") else None)
 
 
-def _owner_registry(request):
-    if OWNER_APPROVALS is not None:
-        return OWNER_APPROVALS
-    # The frozen config spelling declares the repository. Resolving the config
-    # leaf first would move that anchor when configs/ is a storage symlink.
-    # Resolve individual leaves only when comparing their filesystem identity.
+@dataclass(frozen=True)
+class _RepositoryAuthority:
+    repository: Path
+
+    @property
+    def config(self):
+        return self.repository / "configs/reporting.yaml"
+
+    @property
+    def approvals(self):
+        return self.repository / "configs/approvals.yaml"
+
+
+def _repository_authority(request):
+    if _SOURCE_ROOT is not None:
+        return _RepositoryAuthority(_realpath(_SOURCE_ROOT))
+    # Installed code uses the frozen config spelling's repository prefix. A
+    # configs/ storage symlink must not move that prefix to its target's parent.
     config = Path(request.config_path)
     require(config.name == "reporting.yaml" and config.parent.name == "configs",
             "installed reporting requires repository configs/reporting.yaml")
-    return config.with_name("approvals.yaml")
+    return _RepositoryAuthority(_realpath(config.parents[1]))
 
 
 def _publish(root, name, text):
@@ -87,7 +93,9 @@ def run_stage(request: StageRequest) -> StageResult:
     report = {"schema_version": 1, "stage": request.stage, "state": "blocked", "releasable": False,
               "evidence_label": "diagnostic-only", "estimators": [], "gates": [], "limitations": list(LIMITATIONS)}
     bundle = None
+    authority = None
     try:
+        authority = _repository_authority(request)
         # Authenticate bundle and manifest independently so an unrelated missing
         # prerequisite cannot hide their supported outputs. Full request verification
         # remains mandatory before evaluation and again before publication.
@@ -107,11 +115,10 @@ def run_stage(request: StageRequest) -> StageResult:
         request.verify_inputs()
         config = require_container(yaml.safe_load(Path(request.config_path).read_text()), dict, "reporting config")
         require(config.get("schema_version") == 1, "unsupported reporting config")
-        if _SOURCE_CONFIG is not None:
-            require(_realpath(request.config_path) == _realpath(_SOURCE_CONFIG),
-                    "reporting config path is not repository configs/reporting.yaml")
+        require(_realpath(request.config_path) == _realpath(authority.config),
+                "reporting config path is not repository configs/reporting.yaml")
         require(request.stage in STAGE_GATES, "unknown reporting stage")
-        require(_realpath(task["approvals"]) == _realpath(_owner_registry(request)), "approval path is not owner registry")
+        require(_realpath(task["approvals"]) == _realpath(authority.approvals), "approval path is not owner registry")
         receipts = read_artifact(task["receipts"], TaskReceipts, dependencies[task["receipts"]])
         require(manifest.stage == request.stage, "reporting stage mismatch")
         approvals = require_container(yaml.safe_load(Path(task["approvals"]).read_text()), dict, "owner approvals")
@@ -127,16 +134,17 @@ def run_stage(request: StageRequest) -> StageResult:
     report["request_hash"] = request.content_hash
     report["code_identity"] = request.code_identity
     try:
-        return _write_report(request, report, bundle)
+        return _write_report(request, report, bundle, authority)
     except (ContractError, OSError) as exc:
         # Never reference a stale released report as evidence for this failure.
         return StageResult(request_hash=request.content_hash, status="fail", artifacts=(),
                            message=f"report output unavailable: {exc}")
 
 
-def _write_report(request, report, bundle):
+def _write_report(request, report, bundle, authority):
+    require(authority is not None, "repository authority unavailable")
     root = _realpath(request.output_dir)
-    repository = _realpath(_owner_registry(request).parents[1])
+    repository = authority.repository
     protected_paths = tuple(_realpath(repository / name) for name in ("outputs", "report", "src", "configs"))
     for protected in protected_paths:
         require(not root.is_relative_to(protected) and not protected.is_relative_to(root),

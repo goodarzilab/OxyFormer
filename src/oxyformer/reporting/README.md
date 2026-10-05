@@ -13,12 +13,26 @@ diagnostics retained. A non-editable installation uses the repository
 adjacent `approvals.yaml` is the only accepted registry. The frozen config path's
 repository prefix is retained before resolving its leaf: a symlinked `configs/`
 directory cannot move the repository anchor. Each protected leaf and approval
-identity is then resolved separately. Installed code never
-looks for owner approvals beside `site-packages`. Its optional source-layout probe
-can encounter an unrelated file or broken link under the Python installation;
-such a candidate means installed mode, without weakening resolution of actual
-request inputs or protected repository paths. Output protection uses that
-same repository. Results are created once in `output_dir`:
+identity is then resolved separately. The deployment profile depends only on the path actually imported:
+`<repo>/src/oxyformer/reporting/stage.py` denotes a source checkout; other
+package locations use the installed convention. No alternate module, Git/config
+marker, distribution metadata or unrelated filesystem entry is probed. A whole
+checkout alias denotes the same repository. For a src-only storage alias, import
+through `<repo>/src` to retain source authority; importing the storage spelling
+outside that layout uses the frozen config declaration, as do installed symlink
+farms. Editable installs follow the import path their installer exposes. A custom
+installation under a directory literally named `src` must follow the source
+layout convention. These profiles describe ordinary filesystem imports, not
+custom import loaders.
+
+One immutable repository context is established per request. Config identity,
+owner-registry identity and the publisher's four protected leaves all use it.
+Missing or invalid source inputs cannot select another repository. A source config
+alias through another directory does not make that directory a second protected
+repository. If authority cannot be established, no artifacts are published.
+Installed code's repository identity is only as authoritative as the frozen
+config declaration; it never looks for approvals beside `site-packages`.
+Results are created once in `output_dir`:
 `report.json`, self-contained `report.html`, and `estimators.svg`. Existing
 outputs are never overwritten. Identical reruns reverify inputs and existing
 bytes and return the same result; matching partial publications are completed.

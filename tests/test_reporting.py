@@ -366,13 +366,17 @@ def make_request(tmp_path, case, monkeypatch, approvals=None):
         path = tmp_path / f'{name}.json'
         write_artifact(path, record)
         paths[name] = str(path)
-    approved = tmp_path / 'owner-approvals.yaml'
+    repository = tmp_path / 'source-repository'
+    config = repository / 'configs/reporting.yaml'
+    config.parent.mkdir(parents=True)
+    config.write_bytes(CONFIG.read_bytes())
+    approved = config.with_name('approvals.yaml')
     approved.write_text(yaml.safe_dump(approve(*case) if approvals is None else approvals))
-    monkeypatch.setattr(stage, 'OWNER_APPROVALS', approved)
+    monkeypatch.setattr(stage, '_SOURCE_ROOT', repository)
     paths['approvals'] = str(approved)
     task = tmp_path / 'report-task.json'
     task.write_text(json.dumps(paths))
-    return StageRequest(stage=m.stage, config_path=str(CONFIG), config_hash=file_hash(CONFIG),
+    return StageRequest(stage=m.stage, config_path=str(config), config_hash=file_hash(config),
                         task_path=str(task), task_hash=file_hash(task), dependency_paths=tuple(paths.values()),
                         dependency_hashes=tuple(file_hash(p) for p in paths.values()),
                         output_dir=str(tmp_path / 'report-output'), code_identity='b'*40)
@@ -524,7 +528,8 @@ def test_source_and_attrition_contradictions_stop(case):
 
 def test_production_approval_path_cannot_be_redirected(case, tmp_path, monkeypatch):
     request = make_request(tmp_path, case, monkeypatch)
-    monkeypatch.setattr(stage, 'OWNER_APPROVALS', ROOT/'configs/approvals.yaml')
+    monkeypatch.setattr(stage, '_SOURCE_ROOT', ROOT)
+    request = replace(request, config_path=str(CONFIG))
     result = run_stage(request)
     assert result.status == 'fail'
     report = json.loads((Path(request.output_dir)/'report.json').read_text())
@@ -588,7 +593,11 @@ def test_review_equal_thirty_counties_reach_approved_boundary():
 
 def test_review_invalid_output_isolation_returns_failed_result(case, tmp_path, monkeypatch):
     request = make_request(tmp_path, case, monkeypatch)
-    request = replace(request, output_dir=str(tmp_path))  # contains input artifacts
+    output = tmp_path / 'input-container'
+    output.mkdir()
+    task = output / 'task.json'
+    task.write_bytes(Path(request.task_path).read_bytes())
+    request = replace(request, task_path=str(task), output_dir=str(output))
     result = run_stage(request)
     assert result.status == 'fail'
     assert 'isolated' in result.message
@@ -1277,8 +1286,7 @@ def isolated_repository_request(case, tmp_path, monkeypatch):
     registry = config.with_name('approvals.yaml')
     task = json.loads(Path(request.task_path).read_text())
     registry.write_bytes(Path(task['approvals']).read_bytes())
-    monkeypatch.setattr(stage, 'OWNER_APPROVALS', registry)
-    monkeypatch.setattr(stage, '_SOURCE_CONFIG', config)
+    monkeypatch.setattr(stage, '_SOURCE_ROOT', repository)
     task['approvals'] = str(registry)
     Path(request.task_path).write_text(json.dumps(task))
     return repository, replace(
@@ -1290,8 +1298,9 @@ def isolated_repository_request(case, tmp_path, monkeypatch):
 @pytest.mark.parametrize('protected_name', ['outputs', 'report', 'src', 'configs'])
 @pytest.mark.parametrize('relation', ['equal', 'inside', 'contains'])
 @pytest.mark.parametrize('output_alias', [False, True])
+@pytest.mark.parametrize('missing_receipts', [False, True])
 def test_report_isolation_resolves_both_sides_before_creation(
-        case, tmp_path, monkeypatch, protected_name, relation, output_alias):
+        case, tmp_path, monkeypatch, protected_name, relation, output_alias, missing_receipts):
     repository, request = isolated_repository_request(case, tmp_path, monkeypatch)
     storage = tmp_path / 'storage'
     storage.mkdir()
@@ -1309,6 +1318,8 @@ def test_report_isolation_resolves_both_sides_before_creation(
         output = alias / output.relative_to(storage)
     request = replace(request, output_dir=str(output))
     request.verify_inputs()
+    if missing_receipts:
+        Path(json.loads(Path(request.task_path).read_text())['receipts']).unlink()
     before = sorted(str(p.relative_to(storage)) for p in storage.rglob('*'))
     result = run_stage(request)
     assert result.status == 'fail' and result.artifacts == ()
@@ -1454,7 +1465,7 @@ import sys
 from pathlib import Path
 from oxyformer.contracts import StageRequest
 from oxyformer.reporting import stage
-assert stage.OWNER_APPROVALS is None
+assert stage._SOURCE_ROOT is None
 request = StageRequest.from_json(Path(sys.argv[1]).read_text())
 print(stage.run_stage(request).to_json())
 """
@@ -1638,18 +1649,19 @@ def test_nonfinite_supplied_estimator_difference_keeps_authenticated_estimates(c
 @pytest.mark.parametrize('location', ['repository', 'copy', 'file_alias', 'repository_alias'])
 def test_source_reporting_config_requires_repository_identity(case, tmp_path, monkeypatch, location):
     request = make_request(tmp_path, case, monkeypatch)
+    source_config = Path(request.config_path)
     if location == 'copy':
         config = tmp_path / 'copied-reporting.yaml'
         config.write_bytes(CONFIG.read_bytes())
     elif location == 'file_alias':
         config = tmp_path / 'reporting-alias.yaml'
-        config.symlink_to(CONFIG)
+        config.symlink_to(source_config)
     elif location == 'repository_alias':
         alias = tmp_path / 'repository-alias'
-        alias.symlink_to(ROOT, target_is_directory=True)
+        alias.symlink_to(source_config.parents[1], target_is_directory=True)
         config = alias / 'configs/reporting.yaml'
     else:
-        config = CONFIG
+        config = source_config
     # Hash identity and scoped approvals alone do not establish config path identity.
     assert file_hash(config) == request.config_hash
     request = replace(request, config_path=str(config))
@@ -1661,6 +1673,174 @@ def test_source_reporting_config_requires_repository_identity(case, tmp_path, mo
     assert report['releasable'] == (location != 'copy')
     assert report['estimators'] == [e.to_dict()['payload'] for e in case[0].estimates]
     assert report['diagnostics'] == json.loads(canonical_json(summarize(case[0], case[1])))
+    source_config = Path(request.config_path)
     if location == 'copy':
         assert report['evidence_label'] == 'diagnostic-only'
         assert any('config path is not repository' in gate['reason'] for gate in report['gates'])
+
+
+@pytest.mark.parametrize('destination', ['isolated', 'protected'])
+def test_installed_module_alias_cannot_change_repository_authority(produced_primary_case, tmp_path, monkeypatch, destination):
+    same_case, _ = produced_primary_case
+    request = make_request(tmp_path, same_case, monkeypatch)
+    installed = tmp_path / 'venv/lib/python3.11/site-packages'
+    shutil.copytree(ROOT / 'src/oxyformer', installed / 'oxyformer',
+                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    alias = installed.parent / 'src/oxyformer/reporting/stage.py'
+    alias.parent.mkdir(parents=True)
+    alias.symlink_to(installed / 'oxyformer/reporting/stage.py')
+    repository = tmp_path / 'project'
+    config = repository / 'configs/reporting.yaml'
+    config.parent.mkdir(parents=True)
+    config.write_bytes(CONFIG.read_bytes())
+    task = json.loads(Path(request.task_path).read_text())
+    approved = config.with_name('approvals.yaml')
+    approved.write_bytes(Path(task['approvals']).read_bytes())
+    task['approvals'] = str(approved)
+    Path(request.task_path).write_text(json.dumps(task))
+    output = repository / 'src/attempt' if destination == 'protected' else tmp_path / 'isolated-output'
+    request = replace(request, config_path=str(config), config_hash=file_hash(config),
+        task_hash=file_hash(request.task_path), dependency_paths=tuple(task.values()),
+        dependency_hashes=tuple(file_hash(p) for p in task.values()), output_dir=str(output))
+    request.verify_inputs()
+    request_path = tmp_path / 'installed-request.json'
+    request_path.write_text(request.to_json())
+    script = '''
+import sys
+from pathlib import Path
+from oxyformer.contracts import StageRequest
+from oxyformer.reporting import stage
+request = StageRequest.from_json(Path(sys.argv[1]).read_text())
+print(stage.run_stage(request).to_json())
+'''
+    completed = subprocess.run([sys.executable, '-c', script, str(request_path)], cwd=tmp_path,
+        env={**os.environ, 'PYTHONPATH': str(installed), 'CUDA_VISIBLE_DEVICES': ''},
+        capture_output=True, text=True, timeout=60)
+    assert completed.returncode == 0, completed.stderr
+    result = StageResult.from_json(completed.stdout)
+    print(json.dumps({'destination': destination, 'status': result.status,
+        'message': result.message, 'artifacts': [a.path for a in result.artifacts],
+        'created': output.exists()}))
+    if destination == 'isolated':
+        assert result.status == 'pass'
+        result.verify(request)
+    else:
+        assert result.status == 'fail' and result.artifacts == ()
+        assert not output.exists()
+
+
+@pytest.mark.parametrize('profile', ['source', 'whole_alias', 'src_alias', 'storage', 'symlink_farm'])
+def test_repository_authority_follows_actual_import_path(case, tmp_path, monkeypatch, profile):
+    repository, request = isolated_repository_request(case, tmp_path, monkeypatch)
+    shutil.copytree(ROOT / 'src/oxyformer', repository / 'src/oxyformer',
+                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    import_path = repository / 'src'
+    if profile == 'whole_alias':
+        alias = tmp_path / 'whole-alias'
+        alias.symlink_to(repository, target_is_directory=True)
+        import_path = alias / 'src'
+    elif profile in ('src_alias', 'storage', 'symlink_farm'):
+        storage = tmp_path / 'storage/code'
+        storage.parent.mkdir()
+        (repository / 'src').rename(storage)
+        (repository / 'src').symlink_to(storage, target_is_directory=True)
+        if profile == 'storage':
+            import_path = storage
+        elif profile == 'symlink_farm':
+            import_path = tmp_path / 'venv/lib/python3.11/site-packages'
+            import_path.mkdir(parents=True)
+            (import_path / 'oxyformer').symlink_to(storage / 'oxyformer', target_is_directory=True)
+    request_path = tmp_path / 'request.json'
+    request_path.write_text(request.to_json())
+    script = '''
+import sys
+from pathlib import Path
+from oxyformer.contracts import StageRequest
+from oxyformer.reporting import stage
+request = StageRequest.from_json(Path(sys.argv[1]).read_text())
+assert stage._repository_authority(request).repository == Path(sys.argv[2]).resolve(strict=True)
+assert (stage._SOURCE_ROOT is not None) == (sys.argv[3] == 'source')
+print(stage.run_stage(request).to_json())
+'''
+    expected = 'installed' if profile in ('storage', 'symlink_farm') else 'source'
+    completed = subprocess.run([sys.executable, '-c', script, str(request_path), str(repository), expected],
+        cwd=tmp_path, env={**os.environ, 'PYTHONPATH': str(import_path), 'CUDA_VISIBLE_DEVICES': ''},
+        capture_output=True, text=True, timeout=60)
+    assert completed.returncode == 0, completed.stderr
+    result = StageResult.from_json(completed.stdout)
+    assert result.status == 'pass', result.message
+    result.verify(request)
+
+
+def test_source_config_alias_does_not_add_a_repository(case, tmp_path, monkeypatch):
+    repository, request = isolated_repository_request(case, tmp_path, monkeypatch)
+    prefix = tmp_path / 'config-alias-prefix'
+    config = prefix / 'configs/reporting.yaml'
+    config.parent.mkdir(parents=True)
+    config.symlink_to(Path(request.config_path))
+    request = replace(request, config_path=str(config), output_dir=str(prefix / 'src/attempt'))
+    result = run_stage(request)
+    assert result.status == 'pass', result.message
+    result.verify(request)
+    assert not (repository / 'src').exists()
+
+
+@pytest.mark.parametrize('failure', ['missing', 'invalid'])
+@pytest.mark.parametrize('destination', ['isolated', 'protected'])
+@pytest.mark.parametrize('config_spelling', ['source', 'copy'])
+def test_source_config_failure_keeps_repository_authority(
+        case, tmp_path, monkeypatch, failure, destination, config_spelling):
+    repository, request = isolated_repository_request(case, tmp_path, monkeypatch)
+    source_config = Path(request.config_path)
+    if config_spelling == 'copy':
+        copied = tmp_path / 'other-repository/configs/reporting.yaml'
+        copied.parent.mkdir(parents=True)
+        copied.write_bytes(source_config.read_bytes())
+        request = replace(request, config_path=str(copied))
+    if failure == 'missing':
+        source_config.unlink()
+    else:
+        source_config.write_text('schema_version: 999\n')
+    if destination == 'protected':
+        request = replace(request, output_dir=str(repository / 'src/attempt'))
+    result = run_stage(request)
+    if destination == 'protected':
+        assert result.status == 'fail' and not result.artifacts
+        assert 'overlaps protected repository path' in result.message
+        assert not Path(request.output_dir).exists()
+    else:
+        assert result.status in ('blocked', 'fail')
+        saved = json.loads((Path(request.output_dir) / 'report.json').read_text())
+        assert not saved['releasable']
+        assert saved['estimators'] == [e.to_dict()['payload'] for e in case[0].estimates]
+        assert saved['diagnostics'] == json.loads(canonical_json(summarize(case[0], case[1])))
+
+
+def test_unknown_repository_authority_creates_nothing(case, tmp_path, monkeypatch):
+    request = make_request(tmp_path, case, monkeypatch)
+    monkeypatch.setattr(stage, '_SOURCE_ROOT', None)
+    config = tmp_path / 'arbitrary-config.yaml'
+    config.write_bytes(Path(request.config_path).read_bytes())
+    request = replace(request, config_path=str(config))
+    request.verify_inputs()
+    result = run_stage(request)
+    assert result.status == 'fail' and not result.artifacts
+    assert 'repository authority unavailable' in result.message
+    assert not Path(request.output_dir).exists()
+
+
+@pytest.mark.parametrize('missing_task', [False, True])
+def test_repository_authority_is_established_once(case, tmp_path, monkeypatch, missing_task):
+    request = make_request(tmp_path, case, monkeypatch)
+    authority_function = stage._repository_authority
+    calls = []
+    def capture_authority(request):
+        calls.append(request)
+        return authority_function(request)
+    monkeypatch.setattr(stage, '_repository_authority', capture_authority)
+    if missing_task:
+        Path(request.task_path).unlink()
+    result = run_stage(request)
+    assert calls == [request]
+    assert result.status == ('blocked' if missing_task else 'pass')
+    assert len(result.artifacts) == 3
