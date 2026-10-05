@@ -286,6 +286,35 @@ def structural_mean(a_true, frame, row, state, config):
     return config.registration_probability * mean / wide(state.denominator_factor)
 
 
+def effect_fraction(dose, config, bits=256):
+    """Exact polynomial response or midpoint of a certified sine enclosure."""
+    beta = exact(config.beta)
+    if config.effect == "null":
+        return Fraction(0)
+    if config.effect == "linear":
+        return beta*dose
+    if config.effect == "sign_changing":
+        return beta*(dose-5)**2/10
+    lower, upper = _sine_bounds(dose/2, bits)
+    return beta*(lower+upper)/2
+
+
+def sampled_mean(dose, frame, row, state, config):
+    """Retain the exact sampled dose through the complete response rounding."""
+    dose = exact(dose)-exact(config.migration)*exact(state.illness)
+    baseline = _count_baseline(frame, row, state, config)
+    scale = exact(config.registration_probability)/state.denominator_factor
+    if config.effect != "nonlinear" or config.beta == 0:
+        return float(scale*(baseline+effect_fraction(dose, config)))
+    bits = 80
+    while True:
+        lower, upper = _sine_bounds(dose/2, bits)
+        values = [float(scale*(baseline+exact(config.beta)*v)) for v in (lower, upper)]
+        if values[0] == values[1]:
+            return values[0]
+        bits *= 2
+
+
 def _count_baseline(frame, row, state, config):
     return (Fraction(50) + sum((exact(v) for v in frame.x[row] if v is not None), Fraction(0))/4
             + exact(config.local_strength)*exact(state.local)

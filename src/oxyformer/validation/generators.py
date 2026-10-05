@@ -8,6 +8,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
+from decimal import Decimal, localcontext
+from fractions import Fraction
+from functools import lru_cache
+import math
 from typing import Callable, Literal, Protocol
 
 import numpy as np
@@ -20,7 +24,7 @@ from oxyformer.validation.analytic_truth import UniformShiftTruth
 from oxyformer.validation.scm import (
     AssignmentLaw, CovariateFrame, LatentState, SCMConfig, adjustment_key,
     latent_states, observation_probabilities, observation_log_probability, structural_mean, validate_count_rates, count_event_rate,
-    LocalCoordinates, exact, exact_shift_intervals, wide, observation_transition_points, _count_baseline, _sine_bounds,
+    sampled_mean, effect_fraction, LocalCoordinates, exact, exact_shift_intervals, wide, observation_transition_points, _count_baseline, _sine_bounds,
     validate_numeric, validate_policy_domain, validate_seed, REGISTERED_NUMERIC_BOX, NUMERIC_DOMAIN, NUMERIC_MARGIN,
 )
 
@@ -169,7 +173,7 @@ def _sample_observations(frame, config, policy, seed):
             denominator = float(100 * factor)
             outcome = count / denominator
         else:
-            mean = float(structural_mean(wide(true_dose), frame, i, state, config))
+            mean = sampled_mean(true_dose, frame, i, state, config)
             outcome = mean + config.noise_sd * (geo_noise + clusters[cluster] + rng.normal()) / np.sqrt(3)
         cov = []
         if config.local_confounding == "measured":
@@ -198,6 +202,8 @@ class _Term:
     state: LatentState
     log_weight: np.longdouble
     law: AssignmentLaw
+    prior_weight: Fraction = Fraction(1)
+    precision: int = 0
 
 
 def _log_origin_mass(frame, eligible_only=False):
@@ -225,9 +231,10 @@ def _groups(frame, config, policy):
             log_weight = np.log(wide(frame.weights[row]))+np.log(probability)
             if identity in terms:
                 terms[identity].log_weight = np.logaddexp(terms[identity].log_weight,log_weight)
+                terms[identity].prior_weight += exact(frame.weights[row])*exact(probability)
             else:
                 law = AssignmentLaw(frame,row,state,config,support[frame.support_keys[row]])
-                terms[identity] = _Term(row,state,log_weight,law)
+                terms[identity] = _Term(row,state,log_weight,law,exact(frame.weights[row])*exact(probability))
     return {key:list(terms.values()) for key,terms in groups.items()}
 
 
@@ -348,7 +355,115 @@ def _causal_contrast(factual, shifted, term, config):
     return np.array(values, dtype=np.longdouble)
 
 
+def _decimal(value):
+    value = exact(value)
+    return Decimal(value.numerator)/Decimal(value.denominator)
+
+
+def _decimal_expm1(value):
+    if abs(value) >= Decimal('.1'):
+        return value.exp()-1
+    term = total = value
+    index = 1
+    while True:
+        index += 1
+        term *= value/index
+        updated = total+term
+        if updated == total:
+            return total
+        total = updated
+
+
+def _decimal_logsumexp(values, precision):
+    largest = max(values)
+    # Discard only relative terms below the working precision with extra slack.
+    total = sum((v-largest).exp() for v in values if v-largest > -3*precision)
+    return largest+total.ln()
+
+
+@lru_cache(maxsize=256)
+def _decimal_normalizer(law, precision):
+    with localcontext() as context:
+        context.prec = precision
+        logs = []
+        for p in law.pieces:
+            if p.rate == 0:
+                integral = _decimal(p.upper-p.lower).ln()
+            else:
+                extent = _decimal(abs(p.rate)*(p.upper-p.lower))
+                integral = (Decimal(0) if extent > 3*precision
+                            else (-_decimal_expm1(-extent)).ln())-_decimal(abs(p.rate)).ln()
+            logs.append(_decimal(p.peak_kernel-law.kernel_reference)+integral)
+        return _decimal_logsumexp(logs, precision)
+
+
+def _decimal_posterior(point, terms, config, precision):
+    kernels = []
+    for i, term in enumerate(terms):
+        for p in term.law.pieces:
+            if p.lower+term.law.error <= point <= p.upper+term.law.error:
+                kernels.append((i, term.law.kernel_at(p, point)))
+                break
+    require(bool(kernels), "policy leaves conditional observed-law support")
+    reference = max(v for _, v in kernels)
+    logs = []
+    for i, kernel in kernels:
+        term = terms[i]
+        value = (_decimal(kernel-reference)+_decimal(term.prior_weight).ln()
+                 -_decimal_normalizer(term.law, precision))
+        logits = []
+        if config.selected_outcome:
+            logits.append(1-exact(.2)*point-exact(1.2)*exact(term.state.illness))
+        if config.survey_inclusion:
+            logits.append(exact(.7)-exact(.12)*point+exact(.5)*exact(term.state.local))
+        if config.missing_biomarkers:
+            logits.append(1-exact(.1)*point-exact(.8)*exact(term.state.illness))
+        for logit in logits:
+            z = _decimal(logit)
+            value += min(z, 0)-(1+(-abs(z)).exp()).ln()
+        logs.append(value)
+    maximum = max(logs)
+    probabilities = [(v-maximum).exp() if v-maximum > -3*precision else Decimal(0) for v in logs]
+    total = sum(probabilities)
+    result = [Decimal(0)]*len(terms)
+    for (i,_), probability in zip(kernels, probabilities):
+        result[i] = probability/total
+    return result
+
+
+def _precise_posterior_contrast(factual, shifted, terms, frame, config):
+    """Scale-aware precision for amplified posterior changes, before rounding.
+
+    Exact local kernels and priors, analytic normalizers, and selection logits
+    share one Decimal context. Centering preserves exact nulls. Precision includes
+    forty guard digits beyond response/tolerance scaling; finite quadrature still
+    has the separately reported numerical convergence diagnostic.
+    """
+    precision = terms[0].precision
+    require(all(t.state.denominator_factor == terms[0].state.denominator_factor for t in terms),
+            "posterior requires the marginalized independent denominator")
+    baselines = [_count_baseline(frame,t.row,t.state,config) for t in terms]
+    scale = exact(config.registration_probability)/terms[0].state.denominator_factor
+    values = []
+    with localcontext() as context:
+        context.prec = precision
+        for v in factual.values:
+            point = factual.anchor+factual.unit*exact(v)
+            moved = point+shifted.anchor-factual.anchor
+            first = _decimal_posterior(point, terms, config, precision)
+            second = _decimal_posterior(moved, terms, config, precision)
+            doses = [point-t.law.error-exact(config.migration)*exact(t.state.illness) for t in terms]
+            before = [effect_fraction(d,config,4*precision) for d in doses]
+            after = [effect_fraction(d+moved-point,config,4*precision) for d in doses]
+            contrast = sum((b-a)*_decimal(baselines[i]-baselines[0]+before[i]-before[0])
+                           +b*_decimal(after[i]-before[i]) for i,(a,b) in enumerate(zip(first,second)))
+            values.append(wide(Fraction(contrast*_decimal(scale))))
+    return np.asarray(values, dtype=np.longdouble)
+
+
 def _posterior_contrast(factual, shifted, terms, frame, config):
+    if terms[0].precision and len(terms) > 1:
+        return _precise_posterior_contrast(factual, shifted, terms, frame, config)
     factual_weights = _posterior_weights(factual, terms, config)
     shifted_weights = _posterior_weights(shifted, terms, config)
     difference = shifted_weights-factual_weights
@@ -411,12 +526,17 @@ def _quadrature_tail_budget(frame, config, policy, groups, tolerance):
     contrast = max(2*response, exact(1))
     # Integer ceilings with generous slack keep the cutoff conservative despite
     # rounding in logarithms. No exponentiation of tiny selection probabilities.
-    budget_log = min(np.log(wide(tolerance))-np.log(wide(contrast))-np.log(wide(16)),
+    budget_log = min(math.log(tolerance)-np.log(wide(contrast))-np.log(wide(16)),
                      np.log(wide(1e-12)))
     extra = int(np.ceil(-budget_log))+4
     cutoff = penalty+extra
+    # Use higher precision only where amplification can erase a requested
+    # absolute contrast at ordinary longdouble precision.
+    digits = max(0., (np.log(wide(contrast))-math.log(tolerance))/np.log(wide(10)))
+    precision = int(np.ceil(digits))+40 if digits > np.finfo(np.longdouble).precision-3 else 0
     for term in terms:
         term.law.tail_decay = cutoff
+        term.precision = precision
     relative = 2*np.exp(-wide(extra))
     return float(2*wide(contrast)*relative/(1-relative))
 
@@ -494,7 +614,7 @@ def generate_suite_a(frame: CovariateFrame, config: SCMConfig, policy: ShiftOrSt
     """
     validate_seed(seed)
     validate_policy_domain(policy)
-    require(type(tolerance) in (int, float) and np.isfinite(tolerance) and tolerance > 0
+    require(type(tolerance) in (int, float) and (type(tolerance) is int or np.isfinite(tolerance)) and tolerance > 0
             and type(max_order) is int and max_order >= 32, "invalid integration controls")
     eligible_by_key = {key:exact_shift_intervals(c,policy.delta_mmhg) for key,c in policy.components_by_key}
     config.validate_policy(policy, frame, eligible_by_key=eligible_by_key)
@@ -526,7 +646,7 @@ def generate_suite_a(frame: CovariateFrame, config: SCMConfig, policy: ShiftOrSt
         values, log_mass, mass_error = _integrate(frame,config,policy,groups,order,boundaries,eligible_by_key)
         difference = np.abs(values-previous)
         mass_difference = float(abs(np.expm1(log_mass-previous_log_mass)))
-        converged = bool(np.max(difference)+tail_bound <= tolerance and mass_difference <= tolerance and mass_error <= 1e-10)
+        converged = bool(exact(np.max(difference))+exact(tail_bound) <= exact(tolerance) and exact(mass_difference) <= exact(tolerance) and mass_error <= 1e-10)
         if converged:
             break
         previous,previous_log_mass = values,log_mass
