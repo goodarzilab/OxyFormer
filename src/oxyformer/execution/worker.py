@@ -26,7 +26,7 @@ WORKER_RESULT = '_execution/worker-result.json'
 def execute(request, module_name, repo):
     """Wait for the stage interpreter, including its finalizers, before return."""
     environment = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', PYTHONPATH=str(Path(repo) / 'src'))
-    process = subprocess.Popen([sys.executable, '-m', 'oxyformer.execution.worker',
+    process = subprocess.Popen([sys.executable, '-B', '-m', 'oxyformer.execution.worker',
                                 str(Path(request.output_dir) / '_execution/request.json'),
                                 str(repo), module_name], cwd=repo, env=environment)
     try:
@@ -74,7 +74,7 @@ def supervise(request_path, repository, module_name):
 
     signal.signal(signal.SIGINT, terminate)
     signal.signal(signal.SIGTERM, terminate)
-    stage = subprocess.Popen([sys.executable, '-m', 'oxyformer.execution.worker',
+    stage = subprocess.Popen([sys.executable, '-B', '-m', 'oxyformer.execution.worker',
                               '--stage-process', request_path, repository, module_name], cwd=repository)
     if interrupted:
         stage.send_signal(interrupted[-1])
