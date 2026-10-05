@@ -1405,3 +1405,101 @@ def run_stage(request):
 ''', timeout=10)
     assert process.returncode == 0, process.stdout + process.stderr
     assert verify_dependency_result(out).status == 'pass'
+
+
+def test_changed_fingerprint_fifo_is_refused_without_blocking(runtime, tmp_path, monkeypatch):
+    repo, out = runtime
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'data.json').write_text('{}')
+    (source / 'receipts.json').write_text('{}')
+    publish_source_fixture(repo, source)
+    victim = source / '_execution/fingerprint.json'
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
+    def faulty(request):
+        result = dummy(request)
+        victim.unlink()
+        os.mkfifo(victim)
+        raise RuntimeError('stage failed after replacing control')
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    result = run('dummy', out, repo, deps_env=True,
+                 task_file=task_file(out, needs={'data-unit': ['data.json', 'receipts.json']}))
+    assert result.status == 'fail' and str(victim) in result.message
+    # A separate bounded process proves the consumer refuses instead of opening
+    # a named pipe in blocking mode. The fixture never supplies a pipe writer.
+    code = '''import sys
+from pathlib import Path
+from oxyformer.execution.runner import verify_dependency_result
+from oxyformer.provenance import ContractError
+try:
+    verify_dependency_result(Path(sys.argv[1]))
+except (ContractError, OSError) as exc:
+    print(exc)
+else:
+    raise AssertionError('changed fingerprint accepted')
+'''
+    process = subprocess.run([sys.executable, '-c', code, str(source)],
+                             env=dict(os.environ, PYTHONPATH=str(Path(__file__).parents[1] / 'src')),
+                             capture_output=True, text=True, timeout=3)
+    assert process.returncode == 0, process.stdout + process.stderr
+    assert 'fingerprint' in process.stdout
+
+
+def test_worker_accepts_expected_nonzero_housekeeping_status(runtime):
+    from oxyformer.execution.runner import verify_dependency_result
+    repo, out = runtime
+    process = run_cli_fixture(repo, out, '''import subprocess
+def run_stage(request):
+    result = dummy(request)
+    log = Path(request.output_dir) / 'clean.log'
+    log.write_text('')
+    subprocess.Popen(['/bin/sh', '-c', 'sleep 1; grep -q stale "$1"', 'fixture', str(log)])
+    return result
+''')
+    assert process.returncode == 0, process.stdout + process.stderr
+    assert verify_dependency_result(out).status == 'pass'
+
+
+def test_cli_keeps_declared_run_log_hash_valid(runtime):
+    from oxyformer.execution.runner import verify_dependency_result
+    repo, out = runtime
+    entrypoint = '''import os,sys
+from pathlib import Path
+from oxyformer.cli import main
+out = Path(sys.argv[sys.argv.index('--out') + 1])
+with (out / 'run.log').open('w') as log:
+    os.dup2(log.fileno(), 1)
+    os.dup2(log.fileno(), 2)
+raise SystemExit(main())
+'''
+    process = run_cli_fixture(repo, out, '''from dataclasses import replace
+def run_stage(request):
+    result = dummy(request)
+    log = ArtifactRecord(path='run.log', sha256=file_hash(Path(request.output_dir) / 'run.log'),
+                         lineage=result.artifacts[0].lineage, kind='log')
+    return replace(result, artifacts=(*result.artifacts, log))
+''', entrypoint=entrypoint)
+    assert process.returncode == 0, (out / 'run.log').read_text()
+    assert verify_dependency_result(out).status == 'pass'
+
+
+def test_changing_fingerprint_to_fifo_cannot_skip_post_check(runtime, tmp_path, monkeypatch):
+    repo, out = runtime
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'data.json').write_text('{}')
+    (source / 'receipts.json').write_text('{}')
+    publish_source_fixture(repo, source)
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
+    process = run_cli_fixture(repo, out, """def run_stage(request):
+    result = dummy(request)
+    victim = Path(os.environ['SWARM_DEP_DATA_UNIT']) / '_execution/fingerprint.json'
+    victim.unlink()
+    os.mkfifo(victim)
+    return result
+""", needs={'data-unit': ['data.json', 'receipts.json']}, timeout=5)
+    assert process.returncode == 1, process.stdout + process.stderr
+    result = StageResult.from_json((out / '_execution/result.json').read_text())
+    assert result.status == 'fail' and str(source / '_execution/fingerprint.json') in result.message
+    check = json.loads((out / '_execution/dependency_check.json').read_text())
+    assert check['attempts'][str(source)]['status'] == 'tainted'
