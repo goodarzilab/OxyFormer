@@ -131,3 +131,8 @@ DEM payload inspection verifies the whole payload digest and keeps one stable
 file observation open across member/header inspection, including validation
 errors. An initial invalid member digest still refuses without claiming a
 mutation; a payload change before or during inspection leaves permanent taint.
+Shared readers prepare their immutable acquisition binding before reading and
+retain it across nested checks, so later authority I/O cannot erase an observed
+change. Byte/digest comparisons run before later stability checks. GDAL reads
+member headers through the verified payload descriptor via /proc/self/fd, never
+through a separately reopened acquisition pathname.

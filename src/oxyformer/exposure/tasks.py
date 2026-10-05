@@ -58,14 +58,14 @@ def inspect_dem(acquisition, source=None):
     return result
 
 
-def _inspect_dem_payload(acquisition, source, receipt, stream):
+def _inspect_dem_payload(acquisition, source, receipt, payload_stream):
     resources = {r['id']: r for r in source['resources']}
     acquired = {r['id']: r for r in receipt['resources']}
     require(len(acquired) == len(receipt['resources']) and acquired.keys() == resources.keys(), 'DEM receipt resource inventory mismatch')
     payload = acquisition / 'payload.tar'
     require(payload.stat().st_size == receipt['payload_bytes'], 'DEM payload size mismatch')
     metadata = {}
-    with tarfile.open(fileobj=stream, mode='r:') as archive, rasterio.Env(
+    with tarfile.open(fileobj=payload_stream, mode='r:') as archive, rasterio.Env(
             GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR', GDAL_PAM_ENABLED=False):
         members = {}
         for member in archive:
@@ -105,7 +105,8 @@ def _inspect_dem_payload(acquisition, source, receipt, stream):
             require(xml.findtext('.//horizdn') == 'North American Datum of 1983', f'{rid}: XML horizontal datum mismatch')
             # GDAL sees just this member as a seekable file. It cannot discover
             # undeclared sidecars and never needs to scan/extract the raster.
-            uri = f'/vsisubfile/{member.offset_data}_{member.size},{payload.resolve()}'
+            # Pin GDAL to the verified descriptor, including across path renames.
+            uri = f'/vsisubfile/{member.offset_data}_{member.size},/proc/self/fd/{payload_stream.fileno()}'
             with rasterio.open(uri) as ds:
                 require(ds.count == 1 and ds.crs is not None, f'{rid}: raster bands/CRS mismatch')
                 crs = CRS(ds.crs)
