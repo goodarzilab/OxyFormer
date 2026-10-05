@@ -304,3 +304,67 @@ def test_oversized_campaign_is_refused_before_draw_allocation(tmp_path, monkeypa
     result = campaign.run_stage(req)
     assert result.status == "blocked" and "forty leaves" in result.message
     assert allocations == []
+
+
+@pytest.mark.parametrize("case", ["locked_preflight", "scaled_publication"])
+def test_review_round_three_admission_matches_complete_locked_leaf(tmp_path, monkeypatch, case):
+    """Unresolved review reproductions: preserve as red recovery regressions."""
+    req, _ = setup_lock(tmp_path, profile_safety_factor=1., wall_seconds=270)
+    profile_count = 25 if case == "locked_preflight" else 2
+    profile_path = tmp_path / "profile/result.json"
+    profile = coverage.read_json(profile_path)
+    profile["draws"], profile["records"] = successful_records(profile_count)
+    write(profile_path, profile)
+    timing_path = tmp_path / "profile/timing.json"
+    timing = coverage.read_json(timing_path)
+    timing.update(wall_seconds=20. + profile_count * 10.,
+                  complete_repetition_seconds=[10.] * profile_count)
+    write(timing_path, timing)
+    req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    admitted = campaign.run_stage(req)
+    assert admitted.status == "pass", admitted.message
+    root = Path(req.output_dir)
+    lock = coverage.read_json(root / "recipe_lock.json")
+    plans = coverage.read_json(root / "expanded_units.json")["plans"]
+    leaf = plans[1]["tasks"][0]
+    screen_id = plans[0]["tasks"][-1]["id"]
+    screening = tmp_path / "screening"
+    write(screening / "gate.json", {"pass": True, "mode": "screening", "lock_hash": coverage.digest(lock)})
+    leaf_request = request(tmp_path / "leaf-request", leaf,
+        {"campaign-lock": root, "inputs": tmp_path / "inputs", screen_id: screening})
+    clock = [0.]
+    monkeypatch.setattr(coverage.time, "monotonic", lambda: clock[0])
+    def fingerprint():
+        clock[0] += 20. if case == "locked_preflight" else 18.
+        return deepcopy(STAMPS)
+    original_validate = campaign.validate_leaf_task
+    def validate(*args):
+        value = original_validate(*args)
+        if case == "locked_preflight":
+            clock[0] += 1.
+        return value
+    def draw_result(draw, frame, scenario, template, recipe, destination, deadline):
+        complete = clock[0] + 10. <= deadline
+        clock[0] += 10. if complete else max(0., deadline - clock[0])
+        return {"draw": draw, "status": "success" if complete else "incomplete",
+            "reason": "synthetic ten-second complete procedure", "wall_seconds": 10.,
+            "truth": 0., "causal_truth": 0., "truth_integration_error": 0.,
+            "estimates": {m: {"value": float(draw["index"] % 2), "se": 1.} for m in coverage.METHODS}}
+    original_publish = coverage.publish
+    def publish(request, values, **kwargs):
+        if case == "scaled_publication":
+            clock[0] += len(values["result.json"]["records"])
+        return original_publish(request, values, **kwargs)
+    monkeypatch.setattr(campaign, "fingerprint", fingerprint)
+    monkeypatch.setattr(campaign, "validate_leaf_task", validate)
+    monkeypatch.setattr(coverage, "execute_draw", draw_result)
+    monkeypatch.setattr(coverage, "publish", publish)
+    result = coverage.run_stage(leaf_request)
+    result.verify(leaf_request)
+    data = coverage.read_json(Path(leaf_request.output_dir) / "result.json")
+    print({"case": case, "admission": admitted.status, "leaf": result.status,
+           "wall_seconds": clock[0], "budget": 270, "counts": data["summary"]["counts"]})
+    if case == "locked_preflight":
+        assert result.status == "pass", "Admission omitted locked validation and stranded an otherwise complete draw"
+    else:
+        assert result.status != "pass", "Leaf published pass after 293 seconds against its locked 270-second budget"
