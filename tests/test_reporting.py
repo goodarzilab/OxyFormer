@@ -1,6 +1,7 @@
 """Synthetic, offline CPU tests for reporting boundaries and scientific stops."""
 from copy import deepcopy
 from dataclasses import replace
+from fractions import Fraction
 from hashlib import sha256
 import json
 import os
@@ -1463,3 +1464,162 @@ print(stage.run_stage(request).to_json())
         assert result.status == 'fail' and not result.artifacts
         assert 'overlaps protected repository path' in result.message
         assert not root.exists()
+
+
+@pytest.mark.parametrize('failure', ['none', 'extra', 'receipts_unbound', 'approvals_unbound',
+    'manifest_unbound', 'manifest_changed', 'manifest_missing', 'manifest_spec', 'manifest_seeds',
+    'bundle_unbound', 'bundle_changed'])
+def test_refusal_preserves_independently_supported_payloads(case, tmp_path, monkeypatch, failure):
+    b, m, receipts = case
+    b = replace(b, sensitivities=(Sensitivity(name='diagnostic sensitivity',
+                estimate=b.estimates[0], target_change='unchanged'),))
+    if failure == 'manifest_spec':
+        m = replace(m, spec=replace(m.spec, target_id='different target'))
+    elif failure == 'manifest_seeds':
+        m = replace(m, seed_ids=(991,))
+    request = make_request(tmp_path, (b, m, receipts), monkeypatch)
+    task = json.loads(Path(request.task_path).read_text())
+    dependencies = dict(zip(request.dependency_paths, request.dependency_hashes))
+    if failure == 'extra':
+        extra = tmp_path / 'extra.json'
+        extra.write_text('{}')
+        dependencies[str(extra)] = file_hash(extra)
+    elif failure.endswith('_unbound'):
+        del dependencies[task[failure.removesuffix('_unbound')]]
+    elif failure.endswith('_changed'):
+        Path(task[failure.removesuffix('_changed')]).write_text('changed')
+    elif failure == 'manifest_missing':
+        Path(task['manifest']).unlink()
+    request = replace(request, dependency_paths=tuple(dependencies), dependency_hashes=tuple(dependencies.values()))
+    result = run_stage(request)
+    if failure not in ('manifest_changed', 'manifest_missing', 'bundle_changed'):
+        result.verify(request)
+    report = json.loads((Path(request.output_dir) / 'report.json').read_text())
+    assert report['releasable'] == (failure == 'none')
+    assert result.status == ('pass' if failure == 'none' else 'blocked' if failure == 'manifest_missing' else 'fail')
+    if failure != 'none':
+        assert report['evidence_label'] == 'diagnostic-only'
+    bundle_supported = not failure.startswith('bundle_')
+    assert report['estimators'] == ([e.to_dict()['payload'] for e in b.estimates] if bundle_supported else [])
+    if bundle_supported:
+        assert report['sensitivities'][0]['name'] == 'diagnostic sensitivity'
+    diagnostics_supported = bundle_supported and not failure.startswith('manifest_')
+    if diagnostics_supported:
+        assert report['diagnostics'] == json.loads(canonical_json(summarize(b, m)))
+    else:
+        assert 'diagnostics' not in report
+
+
+def test_finite_exact_balance_difference_must_not_overflow(case, tmp_path, monkeypatch):
+    b, manifest, receipts = case
+    maximum, half_gap, epsilon = sys.float_info.max, 2.**970, 2.**915
+    ratios = (20., 20.) + (1.,) * 38
+    observed = ((maximum,), (float(np.nextafter(maximum, 0.)),), (40 * epsilon,)) + ((0.,),) * 37
+    shifted = ((-half_gap + 40 * epsilon,),) + ((-half_gap,),) * 39
+    exact_left = sum((Fraction(r) * Fraction(f[0]) for r, f in zip(ratios, observed)), Fraction(0)) / 40
+    exact_right = sum((Fraction(f[0]) for f in shifted), Fraction(0)) / 40
+    assert exact_left - exact_right == Fraction(maximum)
+    assert float(exact_left) == maximum and float(exact_right) == -half_gap
+    b = replace(b, balance_basis_id='synthetic finite boundary', balance_names=('frozen function',),
+                balance_observed=observed, balance_shifted=shifted, ratios=(ratios,) * len(b.seed_ids))
+    report = evaluate_case((b, manifest, receipts))
+    assert report['state'] == 'released'
+    for overlap in report['diagnostics']['overlap_by_seed'].values():
+        assert overlap['functional_balance'] == [dict(function='frozen function',
+            ratio_expectation=maximum, shifted_expectation=-half_gap, difference=maximum)]
+    request = make_request(tmp_path, (b, manifest, receipts), monkeypatch)
+    result = run_stage(request)
+    result.verify(request)
+    assert result.status == 'pass'
+    saved = json.loads((Path(request.output_dir) / 'report.json').read_text())
+    assert saved['diagnostics'] == json.loads(canonical_json(report['diagnostics']))
+
+
+@pytest.mark.parametrize('label', ['target', 'ratio'])
+@pytest.mark.parametrize('boundary', ['below', 'equal', 'above', 'zero'])
+def test_ess_warning_uses_exact_quarter_boundary(label, boundary):
+    if boundary == 'below':
+        mass = (1. + 2.**-52,) + (1.,) * 9 + (0.,) * 30
+    elif boundary == 'equal':
+        mass = (1.,) * 10 + (0.,) * 30
+    elif boundary == 'above':
+        mass = (1.,) * 10 + (2.**-52,) + (0.,) * 29
+    else:
+        mass = (0.,) * 40
+    if boundary == 'zero' and label == 'target':
+        # A moved subset may have zero target mass while the full target is valid.
+        weights, ratios = (1.,) + mass[1:], (1.,) * 40
+        observed, shifted = (1.,) * 40, (1.,) + (3.,) * 39
+    else:
+        weights, ratios = (mass, (1.,) * 40) if label == 'target' else ((1.,) * 40, mass)
+        observed, shifted = (1.,) * 40, (3.,) * 40
+    if boundary != 'zero':
+        exact = sum(map(Fraction, mass))**2 / sum(Fraction(v)**2 for v in mass) / 40
+        assert (exact < Fraction(1, 4), exact == Fraction(1, 4), exact > Fraction(1, 4)) == (
+            boundary == 'below', boundary == 'equal', boundary == 'above')
+    report = overlap_report(weights, ratios, observed, shifted,
+                            ('constant',), ((1.,),) * 40, ((1.,),) * 40)
+    subsets = [report['subsets']['moved']] if boundary == 'zero' and label == 'target' else report['subsets'].values()
+    for subset in subsets:
+        fraction = subset[f'{label}_weights']['ess_fraction']
+        assert fraction == (None if boundary == 'zero' else .25)
+        assert (f'{label} ESS < 25% of subset records' in subset['warnings']) == (boundary == 'below')
+
+
+@pytest.mark.parametrize('field', ['expectation', 'difference'])
+def test_balance_conversion_accepts_rounding_to_finite_maximum(case, tmp_path, monkeypatch, field):
+    b, m, receipts = case
+    maximum, increment = sys.float_info.max, 2.**965
+    if field == 'expectation':
+        observed = ((maximum,), (40 * increment,)) + ((0.,),) * 38
+        weights, ratios = (1.,) * 40, (40., 1.) + (0.,) * 38
+        shifted = ((0.,),) * 40
+    else:
+        weights, ratios = (1.,) * 40, (1.,) * 40
+        observed, shifted = ((maximum,),) * 40, ((-increment,),) * 40
+    exact = Fraction(maximum) + Fraction(increment)
+    assert exact > Fraction(maximum) and float(exact) == maximum
+    b = replace(b, weights=weights, ratios=(ratios,) * len(b.seed_ids),
+                balance_names=('finite rounded boundary',), balance_observed=observed, balance_shifted=shifted)
+    report = evaluate_case((b, m, receipts))
+    assert report['state'] == 'released'
+    for overlap in report['diagnostics']['overlap_by_seed'].values():
+        balance = overlap['functional_balance'][0]
+        assert balance['difference'] == maximum
+        assert balance['ratio_expectation'] == maximum
+    request = make_request(tmp_path, (b, m, receipts), monkeypatch)
+    result = run_stage(request)
+    assert result.status == 'pass'
+    result.verify(request)
+
+
+def test_balance_expectation_overflow_refuses_even_when_exact_difference_is_finite(case, tmp_path, monkeypatch):
+    b, m, receipts = case
+    maximum = sys.float_info.max
+    b = replace(b, ratios=((2.,) * 40,) * len(b.seed_ids), balance_names=('huge expectation',),
+                balance_observed=((maximum,),) * 40, balance_shifted=((maximum,),) * 40)
+    # Left=2*M, right=M, difference=M: the left expectation still cannot be published.
+    report = evaluate_case((b, m, receipts))
+    assert report['state'] == 'failed' and not report['releasable']
+    request = make_request(tmp_path, (b, m, receipts), monkeypatch)
+    result = run_stage(request)
+    result.verify(request)
+    assert result.status == 'fail'
+    saved = json.loads((Path(request.output_dir) / 'report.json').read_text())
+    assert saved['estimators'] == [e.to_dict()['payload'] for e in b.estimates]
+    assert 'diagnostics' not in saved
+
+
+def test_nonfinite_supplied_estimator_difference_keeps_authenticated_estimates(case, tmp_path, monkeypatch):
+    b, m, receipts = case
+    b = replace(b, estimates=tuple(replace(e, value=value) for e, value in zip(b.estimates, (-1e308, 1e308))))
+    report = evaluate_case((b, m, receipts))
+    assert report['state'] == 'failed' and not report['releasable']
+    canonical_json(report)
+    request = make_request(tmp_path, (b, m, receipts), monkeypatch)
+    result = run_stage(request)
+    assert result.status == 'fail'
+    result.verify(request)
+    saved = json.loads((Path(request.output_dir) / 'report.json').read_text())
+    assert saved['estimators'] == [e.to_dict()['payload'] for e in b.estimates]
+    assert 'diagnostics' not in saved

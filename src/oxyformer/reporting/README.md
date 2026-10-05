@@ -173,7 +173,8 @@ estimates and sensitivities remain publishable with the failure reason.
 
 Functional-balance expectations use exact products and sums of the supplied
 binary64 target masses, ratios and basis values, divided by the exact total
-target mass. Only the final expectations are rounded to binary64. Thus large
+target mass. The difference is formed from these exact expectations before any of the three
+final fields are rounded to binary64. Thus large
 positive and negative contributions can cancel before rounding or overflow;
 no tolerance or overlap threshold is relaxed. A truly unrepresentable final
 diagnostic still fails finite-record validation. Forest coordinates divide by
@@ -187,6 +188,18 @@ masses first cannot erase a low-ESS warning. Signed-correction concentration use
 exact normalized products, retaining relative concentration even when a displayed
 absolute mass rounds to zero. These calculations keep the same formulas and
 warning thresholds. Aggregate dependency-list mismatches refuse release only
-after an individually hash-bound bundle has been retained for diagnostic display.
+after an individually hash-bound bundle and compatible hash-bound manifest have
+supplied the existing finite diagnostic payload. An unbound, missing, changed or
+incompatible manifest withholds diagnostics while authenticated estimates and
+sensitivities remain visible. No partial alternative summarizer is used.
+
+Target and ratio ESS warnings compare exact fractions with one quarter before
+rounding their presentation fields. A displayed `ess_fraction` can read `0.25`
+while the strict below-quarter warning is present. Balance differences likewise
+use exact expectations before rounding. This describes the overlap module's
+dataflow; merged covariance, spatial kernels and NumPy quantiles keep their
+existing algorithms. Final-field conversion failure and nonfinite records refuse
+release. An exact value just above float maximum that converts to finite maximum
+remains admissible; no separate exact-magnitude gate is imposed.
 
 Atomic publication requires a filesystem supporting same-directory hard links.

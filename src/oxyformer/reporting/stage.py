@@ -82,8 +82,8 @@ def run_stage(request: StageRequest) -> StageResult:
               "evidence_label": "diagnostic-only", "estimators": [], "gates": [], "limitations": list(LIMITATIONS)}
     bundle = None
     try:
-        # Authenticate the task and bundle independently so a missing unrelated
-        # prerequisite cannot hide available estimates. Full request verification
+        # Authenticate bundle and manifest independently so an unrelated missing
+        # prerequisite cannot hide their supported outputs. Full request verification
         # remains mandatory before evaluation and again before publication.
         task_bytes = Path(request.task_path).read_bytes()
         require(sha256(task_bytes).hexdigest() == request.task_hash, "reporting task hash mismatch")
@@ -94,10 +94,10 @@ def run_stage(request: StageRequest) -> StageResult:
         report["bundle_hash"] = bundle.content_hash
         report["estimators"] = [e.to_dict()["payload"] for e in bundle.estimates]
         report["sensitivities"] = sensitivity_records(bundle)
-        require(set(task.values()) == set(dependencies), "report task/dependency paths mismatch")
         manifest = read_artifact(task["manifest"], ExpectedTasks, dependencies[task["manifest"]])
         report["manifest_hash"] = manifest.content_hash
         report["diagnostics"] = summarize(bundle, manifest)
+        require(set(task.values()) == set(dependencies), "report task/dependency paths mismatch")
         request.verify_inputs()
         config = require_container(yaml.safe_load(Path(request.config_path).read_text()), dict, "reporting config")
         require(config.get("schema_version") == 1, "unsupported reporting config")

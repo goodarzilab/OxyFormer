@@ -13,19 +13,24 @@ from oxyformer.provenance import ContractError, nonempty, require
 
 
 def _weight_diagnostics(masses):
+    """Exact private values; callers round only after their warning decisions."""
     # Products such as w*r may be positive even below binary64's minimum.
     total = sum(masses, Fraction(0))
     if not total:
         return {"ess": None, "ess_fraction": None, "max_share": None}
     ess = total ** 2 / sum((v ** 2 for v in masses), Fraction(0))
-    return {"ess": float(ess), "ess_fraction": float(ess / len(masses)),
-            "max_share": float(max(masses) / total)}
+    return {"ess": ess, "ess_fraction": ess / len(masses),
+            "max_share": max(masses) / total}
+
+
+def _weight_record(diagnostic):
+    return {name: float(value) if value is not None else None for name, value in diagnostic.items()}
 
 
 def weight_diagnostics(values):
     v = fp64_vector(values, "nonnegative weights")
     require(bool((v >= 0).all()), "negative sampling weight")
-    return _weight_diagnostics([Fraction.from_float(float(x)) for x in v])
+    return _weight_record(_weight_diagnostics([Fraction.from_float(float(x)) for x in v]))
 
 
 def _signed_diagnostics(masses):
@@ -45,7 +50,7 @@ def signed_diagnostics(values):
 
 
 def _functional_expectations(weights, ratios, observed, shifted):
-    """Round only final expectations, after exact binary64 products and sums.
+    """Keep exact expectations through the caller's balance subtraction.
 
     A finite basis can have very large, canceling weighted contributions. Raw
     target masses also avoid overflow or rounding in a floating normalization.
@@ -56,14 +61,10 @@ def _functional_expectations(weights, ratios, observed, shifted):
     ratio_masses = [w * Fraction.from_float(float(r)) for w, r in zip(masses, ratios)]
 
     def expectation(mass, column):
-        value = sum((w * Fraction.from_float(float(f)) for w, f in zip(mass, column)), Fraction(0)) / total
-        try:
-            return float(value)
-        except OverflowError as exc:
-            raise ContractError("nonfinite functional balance expectation") from exc
+        return sum((w * Fraction.from_float(float(f)) for w, f in zip(mass, column)), Fraction(0)) / total
 
-    return (np.array([expectation(ratio_masses, column) for column in observed.T]),
-            np.array([expectation(masses, column) for column in shifted.T]))
+    return ([expectation(ratio_masses, column) for column in observed.T],
+            [expectation(masses, column) for column in shifted.T])
 
 
 def overlap_report(weights, ratios, observed, shifted, names, f_a, f_d):
@@ -97,14 +98,21 @@ def overlap_report(weights, ratios, observed, shifted, names, f_a, f_d):
         p99 = float(np.quantile(r[mask], .99))
         warnings = ["ratio p99 > 10"] if p99 > 10 else []
         for label, diagnostic in (("target", target), ("ratio", ratio)):
-            if diagnostic["ess_fraction"] is not None and diagnostic["ess_fraction"] < .25:
+            if diagnostic["ess_fraction"] is not None and diagnostic["ess_fraction"] < Fraction(1, 4):
                 warnings.append(f"{label} ESS < 25% of subset records")
         subsets[name] = {"count": int(mask.sum()), "target_mass": float(sum((masses[i] for i in selected), Fraction(0)) / total),
-                         "target_weights": target, "ratio_weights": ratio,
+                         "target_weights": _weight_record(target), "ratio_weights": _weight_record(ratio),
                          "signed_correction": _signed_diagnostics([corrections[i] for i in selected]),
                          "ratio_p99": p99, "warnings": warnings}
     left, right = _functional_expectations(weights, r, fa, fd)
-    require(bool(np.isfinite(left).all() and np.isfinite(right).all()), "nonfinite functional balance")
+    try:
+        balance = [dict(function=n, ratio_expectation=float(l), shifted_expectation=float(v),
+                        difference=float(l - v)) for n, l, v in zip(names, left, right)]
+    except OverflowError as exc:
+        raise ContractError("nonfinite functional balance") from exc
+    require(all(np.isfinite(record[key]) for record in balance
+                for key in ("ratio_expectation", "shifted_expectation", "difference")),
+            "nonfinite functional balance")
     # Subtract and sum before rounding: finite opposing shifts can cancel.
     exact_shift = sum((w * (Fraction.from_float(float(after)) - Fraction.from_float(float(before)))
                        for w, before, after in zip(masses, a, d)), Fraction(0)) / total
@@ -115,8 +123,7 @@ def overlap_report(weights, ratios, observed, shifted, names, f_a, f_d):
     return {"moved_fraction": subsets["moved"]["target_mass"],
             "affected_fraction": subsets["affected"]["target_mass"],
             "achieved_shift": shift, "subsets": subsets,
-            "functional_balance": [dict(function=n, ratio_expectation=float(l), shifted_expectation=float(v),
-                                         difference=float(l - v)) for n, l, v in zip(names, left, right)],
+            "functional_balance": balance,
             "formulas": {"ess": "(sum v)^2 / sum(v^2), v>=0; target v=w, ratio v=w*r",
                          "signed": "c_i=(w_i/W)*(r_i-1); max(abs(c))/sum(abs(c)); no ESS",
                          "balance": "E_T[r*f(A,X)] versus E_T[f(d(A,X),X)]"},
