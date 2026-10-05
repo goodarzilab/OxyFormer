@@ -30,7 +30,7 @@ from oxyformer.data.loaders import LoadedData, validate_split
 from oxyformer.design.eligibility import GeographyTable
 from oxyformer.design.policies import PolicyCovariates, ShiftOrStayPolicy, paired_records
 from oxyformer.design.splits import InnerSplit, tract_count
-from oxyformer.execution.paths import atomic_json
+from oxyformer.execution.paths import atomic_json, output_path
 from oxyformer.models.ablations import VARIANTS, build_variant
 from oxyformer.models.county_context import CountyContext
 from oxyformer.models.encoder import FeatureEncoder
@@ -123,12 +123,37 @@ class PreparedEndpoint(Immutable):
         return inner
 
     def configuration(self, fold, output_dir, **kwargs):
-        return FitConfig(data=self.data, entity_graph=self.entity_graph, inner=self.validate(fold), fold=fold,
+        config = FitConfig(data=self.data, entity_graph=self.entity_graph, inner=self.validate(fold), fold=fold,
             policy=self.policy, policy_covariates=self.policy_covariates,
             treatment_design=self.treatment_design, feature_kinds=self.feature_kinds,
             families=self.families, county_field=self.county_field,
             exposure_assignment_level=self.exposure_assignment_level, family=self.family,
             population_field=self.population_field, output_dir=str(output_dir), **kwargs)
+        _check_fitting_minima(config, self.outer, self.geography)
+        return config
+
+
+def _check_fitting_minima(config, outer, geography):
+    """Apply the frozen minima to the records actually used after stopping."""
+    manifest = config.data.manifest
+    require(type(geography) is GeographyTable and geography.data_manifest_hash == manifest.content_hash,
+            "geography must bind the fitting manifest")
+    rows = {row.original_id: row for row in geography.rows}
+    require(set(rows) == set(manifest.original_ids), "geographic coverage mismatch")
+    routes = dict(zip(manifest.original_ids, config.data.county_routing(config.county_field)))
+    require(all(rows[i].county == routes[i] for i in rows), "county route mismatch")
+    require(all(rows[i].outcome_flag == 1 and rows[i].label_available for i in outer.original_ids),
+            "modeled or unavailable labels forbidden")
+    counties = {rows[i].county for i in outer.original_ids}
+    for county in counties:
+        require(tract_count([rows[i] for i in outer.training_ids(config.fold)], county) >= 8,
+                "fewer than eight outer-training tracts")
+    for fold in range(3):
+        _, ids, _ = _partition(config, config.inner.split, fold,
+                                 stopping=dict(config.stopping_ids).get(fold, ()))
+        for county in counties:
+            require(tract_count([rows[i] for i in ids], county) >= 4,
+                    "fewer than four inner-fitting tracts after stopping reservation")
 
 
 def _build(bundle, *, encoder_state=None):
@@ -457,19 +482,15 @@ def _advance(config, outer, manifest, identity, controller, root, budget, varian
     return controller, True, "max_epochs"
 
 
-def _ordered_split(split):
-    assignments = dict(zip(split.original_ids, split.fold_ids))
-    ids = tuple(sorted(assignments))
-    return replace(split, original_ids=ids, fold_ids=tuple(assignments[i] for i in ids))
-
-
-def run_fold(config, outer, seed, *, variant="A0"):
+def run_fold(config, outer, seed, *, geography, variant="A0"):
     """One resumable endpoint/outer-fold/seed; no mutable cache survives a call."""
     require(variant in TRANSFORMER_VARIANTS, "variant needs a compatible resumable nuisance adapter")
-    outer = _ordered_split(outer)
-    config = replace(config, inner=replace(config.inner, split=_ordered_split(config.inner.split)))
     manifest = config.data.manifest
     allowed = fitting._validate(manifest.spec, outer, manifest, config, seed)
+    _check_fitting_minima(config, outer, geography)
+    destination = Path(config.output_dir)
+    require(not any(p.is_symlink() for p in (destination, *destination.parents)),
+            "symlink in fitting output path")
     with fitting._numerics():
         identity = fitting._science_identity(config, outer, manifest, seed, allowed)
         identity = replace(identity, config_hash=digest([identity.config_hash, variant]))
@@ -674,7 +695,15 @@ def run_stage(request: StageRequest) -> StageResult:
         require(set(chain) == {"owner", "step", "predecessor"} and bool(chain["owner"])
                 and type(chain["step"]) is int and chain["step"] >= 0, "invalid continuation chain")
         require((chain["step"] == 0) == (chain["predecessor"] is None), "missing predecessor")
-        root = Path(request.output_dir).resolve(strict=True)
+        destination = Path(request.output_dir)
+        require(not any(p.is_symlink() for p in (destination, *destination.parents)),
+                "symlink in stage output path")
+        root = destination.resolve(strict=True)
+        # Validate every write destination before importing or fitting anything.
+        # In particular, pandas' parquet writer otherwise follows an existing link.
+        for name in ("work", "predecessor", "relocated", "continuation.tar", "progress.json",
+                     "artifact_manifest.json", "nuisances.parquet", "model_bundle.tar", "metrics.json"):
+            require(not output_path(root, name).exists(), "attempt output already exists: " + name)
         binding = {"code": request.code_identity, "environment": list(map(list, environment_identity(torch.device("cpu")))),
             "recipe": lock_ref["sha256"], "endpoint": endpoint.content_hash,
             "parameters": parameters, "stage": request.stage,
@@ -691,7 +720,7 @@ def run_stage(request: StageRequest) -> StageResult:
             **options, predecessor=predecessor, slice_seconds=limits.get("seconds", 14400.),
             checkpoint_margin_seconds=limits.get("margin_seconds", 120.), max_batches=limits.get("max_batches"))
         artifact = (predecessor if predecessor is not None and predecessor.complete else
-                    run_fold(fit_config, endpoint.outer, parameters["seed"], variant=variant))
+                    run_fold(fit_config, endpoint.outer, parameters["seed"], geography=endpoint.geography, variant=variant))
         controller = load_checkpoint(artifact.checkpoint, artifact.checkpoint.identity)["controller"]
         export_continuation(artifact, root / "continuation.tar", binding=binding,
                             task_id=task["id"], chain=chain, allowed_root=root)
@@ -718,7 +747,8 @@ def run_stage(request: StageRequest) -> StageResult:
             names.extend((("nuisances.parquet", "oof_nuisances"), ("model_bundle.tar", "model_bundle"),
                           ("metrics.json", "metrics")))
         records = [ArtifactRecord(path=name, kind=kind, sha256=file_hash(root / name),
-                                  lineage=artifact.checkpoint.lineage) for name, kind in names]
+                                  lineage=nuisances.lineage if kind == "oof_nuisances"
+                                  else artifact.checkpoint.lineage) for name, kind in names]
         atomic_json(root, "artifact_manifest.json", {"complete": artifact.complete,
             "request_hash": request.content_hash, "artifacts": [record.to_dict() for record in records]})
         records.append(ArtifactRecord(path="artifact_manifest.json", kind="artifact_manifest",
@@ -727,5 +757,5 @@ def run_stage(request: StageRequest) -> StageResult:
             message="Nested procedure complete" if artifact.complete else "Slice checkpointed; nested procedure incomplete")
         result.verify(request)
         return result
-    except (ContractError, KeyError, TypeError, ValueError, FileNotFoundError) as exc:
+    except (ContractError, KeyError, TypeError, ValueError, OSError, tarfile.TarError, RuntimeError) as exc:
         return StageResult(request_hash=request.content_hash, status="fail", artifacts=(), message=str(exc) or type(exc).__name__)

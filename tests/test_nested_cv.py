@@ -41,15 +41,15 @@ def endpoint(root):
         exposure_assignment_level=config.exposure_assignment_level)
 
 
-def tiny_config(prepared, root, **kwargs):
+def tiny_config(prepared, root, *, batch_size=256, **kwargs):
     return prepared.configuration(0, root, ssl_epochs=1,
-        settings=nested.NuisanceSettings(batch_size=256, frozen_epochs=1), **kwargs)
+        settings=nested.NuisanceSettings(batch_size=batch_size, frozen_epochs=1), **kwargs)
 
 
 def fitted(root, prepared=None, **kwargs):
     prepared = prepared or endpoint(root)
     config = tiny_config(prepared, root, **kwargs)
-    return prepared, nested.run_fold(config, prepared.outer, 1103)
+    return prepared, nested.run_fold(config, prepared.outer, 1103, geography=prepared.geography)
 
 
 def predictions(prepared, artifact):
@@ -84,11 +84,14 @@ def test_registered_schedule(full):
     assert config["seeds"] == list(nested.SEEDS)
 
 
-@pytest.mark.parametrize("batches", [1, 3, 15, 30])
-def test_portable_continuation_matches_uninterrupted(full, tmp_path, batches):
+@pytest.mark.parametrize("batches,batch_size", [(1, 256), (3, 256), (15, 256), (30, 256), (5, 8)])
+def test_portable_continuation_matches_uninterrupted(full, tmp_path, batches, batch_size):
     prepared, expected = full
-    config = tiny_config(prepared, tmp_path / "old" / "work", max_batches=batches)
-    partial = nested.run_fold(config, prepared.outer, 1103)
+    if batch_size != 256:
+        expected = nested.run_fold(tiny_config(prepared, tmp_path / "uninterrupted", batch_size=batch_size),
+            prepared.outer, 1103, geography=prepared.geography)
+    config = tiny_config(prepared, tmp_path / "old" / "work", max_batches=batches, batch_size=batch_size)
+    partial = nested.run_fold(config, prepared.outer, 1103, geography=prepared.geography)
     assert not partial.complete
     archive = tmp_path / "continuation.tar"
     chain = {"owner": "synthetic-owner", "step": 0, "predecessor": None}
@@ -99,7 +102,7 @@ def test_portable_continuation_matches_uninterrupted(full, tmp_path, batches):
     destination.mkdir()
     restored = nested.import_continuation(archive, destination, binding={"recipe": "fixed"},
         chain={"owner": "synthetic-owner", "step": 1, "predecessor": "first"})
-    actual = nested.run_fold(tiny_config(prepared, destination / "work", predecessor=restored), prepared.outer, 1103)
+    actual = nested.run_fold(tiny_config(prepared, destination / "work", predecessor=restored, batch_size=batch_size), prepared.outer, 1103, geography=prepared.geography)
     assert_fitted_invariant(expected, actual)
     assert_prediction_invariant(predictions(prepared, expected), predictions(prepared, actual))
     assert state(expected)["counts"] == state(actual)["counts"]
@@ -108,7 +111,7 @@ def test_portable_continuation_matches_uninterrupted(full, tmp_path, batches):
 @pytest.mark.parametrize("variant", ["A1", "A2", "A3", "A4"])
 def test_registered_transformer_variants(tmp_path, variant):
     prepared = endpoint(tmp_path)
-    artifact = nested.run_fold(tiny_config(prepared, tmp_path / "work"), prepared.outer, 1103, variant=variant)
+    artifact = nested.run_fold(tiny_config(prepared, tmp_path / "work"), prepared.outer, 1103, geography=prepared.geography, variant=variant)
     assert artifact.complete
     assert state(artifact)["counts"]["ssl_fits"] == (0 if variant == "A1" else 4)
     assert state(artifact)["counts"]["nuisance_fits"] == 26
@@ -171,6 +174,8 @@ def test_stage_exports_and_declared_predecessor(full, tmp_path):
     frame = pd.read_parquet(complete / "nuisances.parquet")
     assert not {"y", "outcome", "life_expectancy_years"} & set(frame.columns)
     assert tuple(frame.mu_a) == predictions(prepared, expected).mu_a
+    record = next(a for a in result.artifacts if a.kind == "oof_nuisances")
+    assert record.lineage.unit_ids == tuple(frame.original_ids)
 
 
 @pytest.mark.parametrize("field", ["code_identity", "target_id", "seed", "environment", "recipe"])
@@ -224,3 +229,81 @@ def test_unsupported_variant_blocks_before_training(full, tmp_path):
     result = nested.run_stage(req)
     assert result.status == "blocked"
     assert not list(Path(req.output_dir).iterdir())
+
+
+def two_county_endpoint(root):
+    prepared = endpoint(root)
+    routes = {oid: f"c{j % 2}" for j, oid in enumerate(prepared.data.manifest.original_ids)}
+    return replace(prepared,
+        data=replace(prepared.data, rows=tuple(row[:4] + (routes[row[0]],) + row[5:] for row in prepared.data.rows)),
+        geography=replace(prepared.geography, rows=tuple(replace(row, county=routes[row.original_id])
+            for row in prepared.geography.rows)))
+
+
+def test_stopping_reservation_rechecks_county_minima(tmp_path):
+    prepared = two_county_endpoint(tmp_path)
+    fitting = prepared.inner[0].split.training_ids(0)
+    # Whole linked pairs remain together. Each county falls from eight fitting
+    # tracts to three after five pairs are reserved for stopping.
+    with pytest.raises(ContractError, match="four.*stopping"):
+        tiny_config(prepared, tmp_path / "work", stopping_ids=((0, fitting[:10]),))
+
+
+def test_work_symlink_refused_before_any_external_write(tmp_path):
+    prepared = endpoint(tmp_path)
+    req = request(tmp_path / "request", prepared, max_batches=1)
+    external = tmp_path / "external"
+    external.mkdir()
+    (Path(req.output_dir) / "work").symlink_to(external, target_is_directory=True)
+    result = nested.run_stage(req)
+    assert result.status == "fail"
+    assert list(external.iterdir()) == [], "stage wrote outside its output directory"
+
+
+@pytest.mark.parametrize("stale", ["tar", "work"])
+def test_invalid_attempt_returns_failed_stage_result(tmp_path, stale):
+    prepared = endpoint(tmp_path)
+    if stale == "tar":
+        previous = tmp_path / "previous"
+        previous.mkdir()
+        (previous / "continuation.tar").write_bytes(b"truncated checkpoint")
+        req = request(tmp_path / "request", prepared, predecessor=previous)
+    else:
+        req = request(tmp_path / "request", prepared, max_batches=1)
+        (Path(req.output_dir) / "work" / "nuisance").mkdir(parents=True)
+    result = nested.run_stage(req)
+    assert result.status == "fail"
+    assert not result.artifacts
+
+
+def test_direct_controller_cannot_bypass_stopping_minima(tmp_path):
+    prepared = two_county_endpoint(tmp_path)
+    config = tiny_config(prepared, tmp_path / "work")
+    fitting = prepared.inner[0].split.training_ids(0)
+    invalid = replace(config, stopping_ids=((0, fitting[:10]),))
+    with pytest.raises(ContractError, match="four.*stopping"):
+        nested.run_fold(invalid, prepared.outer, 1103, geography=prepared.geography)
+    assert not (tmp_path / "work").exists()
+    valid = tiny_config(prepared, tmp_path / "valid", stopping_ids=((0, fitting[:6]),))
+    assert valid.stopping_ids == ((0, fitting[:6]),)
+
+
+def test_parquet_symlink_refused_before_fitting(tmp_path):
+    prepared = endpoint(tmp_path)
+    req = request(tmp_path / "request", prepared, max_batches=1)
+    external = tmp_path / "sentinel"
+    external.write_bytes(b"unchanged")
+    (Path(req.output_dir) / "nuisances.parquet").symlink_to(external)
+    result = nested.run_stage(req)
+    assert result.status == "fail"
+    assert external.read_bytes() == b"unchanged"
+    assert not (Path(req.output_dir) / "work").exists()
+
+
+def test_controller_preserves_frozen_split_identity(tmp_path):
+    prepared = endpoint(tmp_path)
+    outer = replace(prepared.outer, original_ids=prepared.outer.original_ids[::-1],
+                    fold_ids=prepared.outer.fold_ids[::-1])
+    artifact = nested.run_fold(tiny_config(prepared, tmp_path / "work", max_batches=1),
+        outer, 1103, geography=prepared.geography)
+    assert artifact.split.content_hash == outer.content_hash

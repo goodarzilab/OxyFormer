@@ -14,7 +14,7 @@ from oxyformer.validation.leakage import assert_fitted_invariant, assert_predict
 
 
 def refit(prepared, root):
-    return nested.run_fold(tiny_config(prepared, root), prepared.outer, 1103)
+    return nested.run_fold(tiny_config(prepared, root), prepared.outer, 1103, geography=prepared.geography)
 
 
 @pytest.mark.parametrize("column", ["y", "x"])
@@ -122,9 +122,8 @@ def test_stopping_and_reference_ownership(full, tmp_path):
     for bundle in state(artifact)["final"].values():
         refs = nested.CovariateView.from_json(bundle["references"])
         assert set(refs.original_ids) == set(prepared.outer.training_ids(0))
-    cfg = tiny_config(prepared, tmp_path / "bad", stopping_ids=((0, tuple(sorted(outer_held)[:2])),))
     with pytest.raises(ContractError, match="stopping"):
-        nested.run_fold(cfg, prepared.outer, 1103)
+        tiny_config(prepared, tmp_path / "bad", stopping_ids=((0, tuple(sorted(outer_held)[:2])),))
 
 
 def test_unseen_county_offsets_are_not_invented(full):
