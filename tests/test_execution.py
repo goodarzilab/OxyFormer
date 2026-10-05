@@ -44,6 +44,8 @@ def runtime(tmp_path, monkeypatch):
     (repo / 'configs/execution').mkdir(parents=True)
     (repo / 'src').mkdir()
     (repo / 'src/science.py').write_text('value = 1\n')
+    (repo / 'src/oxyformer').mkdir()
+    (repo / 'src/oxyformer/dummy.py').write_text('# synthetic module origin for injected stage fixtures\n')
     (repo / 'README.md').write_text('fixture\n')
     (repo / 'configs/execution/stages.yaml').write_text(yaml.safe_dump({
         'schema_version': 1, 'stages': {'dummy': {'module': 'oxyformer.dummy',
@@ -54,7 +56,7 @@ def runtime(tmp_path, monkeypatch):
     out = tmp_path / 'attempt'
     out.mkdir()
     (out / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD') + '\n')
-    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=dummy))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=dummy, __file__=str(repo / 'src/oxyformer/dummy.py')))
     return repo, out
 
 
@@ -176,7 +178,7 @@ def test_result_symlink_escape(runtime, tmp_path, monkeypatch):
         elsewhere.write_text('{"value":1}')
         target.symlink_to(elsewhere)
         return result
-    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=escaping))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=escaping, __file__=str(repo / 'src/oxyformer/dummy.py')))
     result = run('dummy', out, repo, task_file=task_file(out))
     assert result.status == 'fail' and 'escapes output' in result.message
 
@@ -200,8 +202,9 @@ def test_missing_module_blocks_lazily(runtime):
     assert (out / '_execution/result.json').exists()
 
 
-def test_cli_selects_task(runtime):
+def test_cli_selects_task(runtime, monkeypatch):
     repo, out = runtime
+    monkeypatch.setattr('oxyformer.execution.identity.verify_module_origins', lambda *a, **k: None)
     path = out / 'tasks.json'
     path.write_text(json.dumps({'tasks': [{'id': 'selected', 'stage': 'dummy', 'outputs': ['value.json']}]}))
     assert main(['run-stage', '--stage', 'dummy', '--out', str(out), '--repo', str(repo),
@@ -218,7 +221,7 @@ def locked_task(repo, out, upstream, monkeypatch):
         lock.write_text(json.dumps({'scientific_fingerprint': scientific_fingerprint(repo)}))
         return replace(result, artifacts=(replace(result.artifacts[0], sha256=file_hash(lock)),))
     with monkeypatch.context() as patch:
-        patch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=producer))
+        patch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=producer, __file__=str(repo / 'src/oxyformer/dummy.py')))
         assert run('dummy', upstream, repo,
                    task_file=task_file(upstream, outputs=['recipe_lock.json'])).status == 'pass'
     monkeypatch.setenv('SWARM_DEP_CAMPAIGN_LOCK', str(upstream))
@@ -335,6 +338,7 @@ def test_campaign_reproducible_bounded_and_merge_barriers(spec):
         command = unit['command']
         assert 'git clone --depth 1 --branch dev' in command
         assert 'PYTHONPATH="$SWARM_UNIT_DIR/src/src"' in command
+        assert 'cd "$SWARM_UNIT_DIR/src"' in command
         assert 'envs/oxyformer/bin/python -m oxyformer.cli run-stage' in command
         assert not any(token in command for token in ['sbatch ', 'srun ', 'crontab ', 'systemctl ', 'release_lock'])
     first, second = plan['tasks'][:2]
@@ -415,7 +419,7 @@ def test_failed_upstream_cannot_feed_another_stage(runtime, tmp_path, monkeypatc
     repo, upstream = runtime
     def failed(request):
         return StageResult(request_hash=request.content_hash, status='fail', artifacts=(), message='gate failed')
-    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=failed))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=failed, __file__=str(repo / 'src/oxyformer/dummy.py')))
     assert run('dummy', upstream, repo, task_file=task_file(upstream)).status == 'fail'
     out = tmp_path / 'consumer'
     out.mkdir()
@@ -539,7 +543,7 @@ def test_cli_import_from_pristine_repo_keeps_bytecode_ignored(runtime, tmp_path)
     import inspect
     repo, out = runtime
     original = Path(__file__).parents[1]
-    shutil.copytree(original / 'src/oxyformer', repo / 'src/oxyformer',
+    shutil.copytree(original / 'src/oxyformer', repo / 'src/oxyformer', dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
     shutil.copyfile(original / '.gitignore', repo / '.gitignore')
     imports = '''from pathlib import Path
@@ -627,8 +631,9 @@ def test_campaign_task_requires_lock_even_for_generic_stage(runtime):
         run('dummy', out, repo, task_file=task_file(out, campaign='screen-01'))
 
 
-def test_cli_malformed_task_types_are_blocked(runtime):
+def test_cli_malformed_task_types_are_blocked(runtime, monkeypatch):
     repo, out = runtime
+    monkeypatch.setattr('oxyformer.execution.identity.verify_module_origins', lambda *a, **k: None)
     task = task_file(out, outputs=None)
     assert main(['run-stage', '--stage', 'dummy', '--repo', str(repo), '--out', str(out),
                  '--task', str(task)]) == 2
@@ -743,7 +748,7 @@ def test_executed_stage_exception_always_publishes_failure(runtime, monkeypatch,
     repo, out = runtime
     def failing(request):
         raise exception
-    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=failing))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=failing, __file__=str(repo / 'src/oxyformer/dummy.py')))
     result = run('dummy', out, repo, task_file=task_file(out))
     assert result.status == 'fail'
     assert result.message
@@ -792,7 +797,7 @@ def test_upstream_tree_mutation_fails_and_blocks_later_consumer(
         if exit_kind == 'system-exit':
             raise SystemExit(7)
         return result
-    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty, __file__=str(repo / 'src/oxyformer/dummy.py')))
     result = run('dummy', out, repo, deps_env=True, task_file=task_file(out, needs=needs))
     assert result.status == 'fail'
     assert str(upstream / changed) in result.message
@@ -814,7 +819,7 @@ def test_upstream_tree_mutation_fails_and_blocks_later_consumer(
     later = tmp_path / 'later'
     later.mkdir()
     (later / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
-    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=dummy))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=dummy, __file__=str(repo / 'src/oxyformer/dummy.py')))
     with pytest.raises(ContractError, match='tainted|fingerprint'):
         run('dummy', later, repo, deps_env=True, task_file=task_file(later, needs=needs))
     assert not (later / 'value.json').exists()
@@ -857,7 +862,8 @@ def test_tree_fingerprint_binds_types_modes_bytes_links_and_all_entries(tmp_path
     before = fingerprint_tree(root)
     assert set(before) == {'.', 'empty', 'file', 'link', 'pipe'}
     assert before['file'] == {'type': stat.S_IFREG, 'mode': stat.S_IMODE(file.stat().st_mode),
-                              'size': 4, 'sha256': sha256(b'abcd').hexdigest(), 'target': None}
+                              'size': 4, 'sha256': sha256(b'abcd').hexdigest(), 'target': None,
+                              'mtime_ns': file.stat().st_mtime_ns, 'ctime_ns': file.stat().st_ctime_ns}
     assert before['empty']['type'] == stat.S_IFDIR
     assert before['link']['type'] == stat.S_IFLNK and before['link']['target'] == 'file'
     assert before['pipe']['type'] == stat.S_IFIFO
@@ -901,7 +907,7 @@ def test_post_execution_check_names_proc_fd_chmod(runtime, tmp_path, monkeypatch
         if raises:
             raise RuntimeError('synthetic failure after chmod')
         return result
-    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty, __file__=str(repo / 'src/oxyformer/dummy.py')))
     result = run('dummy', out, repo, deps_env=True,
                  task_file=task_file(out, needs={'data-unit': ['data.json', 'receipts.json']}))
     assert result.status == 'fail'
@@ -940,7 +946,7 @@ def test_transitive_upstream_metadata_cannot_escape_detection(runtime, tmp_path,
             result = dummy(request)
             victim.chmod(victim.stat().st_mode ^ 0o100)
             return result
-        monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty))
+        monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty, __file__=str(repo / 'src/oxyformer/dummy.py')))
         result = run('dummy', later, repo, deps_env=True, task_file=task)
         assert result.status == 'fail'
         assert str(victim) in result.message
@@ -981,3 +987,162 @@ def test_unsealed_acquisition_cannot_become_a_new_baseline(runtime, tmp_path, mo
         run('dummy', out, repo, deps_env=True,
             task_file=task_file(out, needs={'data-unit': ['data.json', 'receipts.json']}))
     assert not (source / '_execution').exists()
+
+
+def test_restored_upstream_write_still_fails(runtime, tmp_path, monkeypatch):
+    repo, out = runtime
+    source = tmp_path / 'source'
+    source.mkdir()
+    victim = source / 'data.json'
+    victim.write_text('{}')
+    (source / 'receipts.json').write_text('{}')
+    publish_source_fixture(repo, source)
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
+    def faulty(request):
+        original = victim.read_bytes()
+        victim.write_bytes(b'[]')
+        assert victim.read_bytes() == b'[]'
+        victim.write_bytes(original)
+        return dummy(request)
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    result = run('dummy', out, repo, deps_env=True,
+                 task_file=task_file(out, needs={'data-unit': ['data.json', 'receipts.json']}))
+    assert result.status == 'fail'
+    assert str(victim) in result.message
+    assert victim.read_bytes() == b'{}'
+
+
+@pytest.mark.parametrize('mutation', ['chmod', 'undeclared_bytes'])
+def test_preflight_cannot_rebase_a_changed_dependency(runtime, tmp_path, monkeypatch, mutation):
+    import oxyformer.execution.runner as runner
+    repo, out = runtime
+    source = tmp_path / 'source'
+    source.mkdir()
+    victim = source / 'data.json'
+    victim.write_text('{}')
+    (source / 'receipts.json').write_text('{}')
+    extra = source / 'undeclared.txt'
+    extra.write_text('before')
+    publish_source_fixture(repo, source)
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
+    original = runner.verify_published_tree
+    def interleave(root, result, expected_hash=None):
+        verified = original(root, result, expected_hash)
+        if root == source:
+            if mutation == 'chmod':
+                victim.chmod(victim.stat().st_mode ^ 0o100)
+            else:
+                extra.write_text('after')
+        return verified
+    monkeypatch.setattr(runner, 'verify_published_tree', interleave)
+    result = run('dummy', out, repo, deps_env=True,
+                 task_file=task_file(out, needs={'data-unit': ['data.json', 'receipts.json']}))
+    assert result.status == 'fail'
+    assert str(victim if mutation == 'chmod' else extra) in result.message
+
+
+@pytest.mark.parametrize('record_index', [0, -1])
+def test_rewritten_upstream_result_is_rejected_by_later_consumers(runtime, tmp_path, monkeypatch, record_index):
+    repo, out = runtime
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'data.json').write_text('{}')
+    (source / 'receipts.json').write_text('{}')
+    publish_source_fixture(repo, source)
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
+    needs = {'data-unit': ['data.json', 'receipts.json']}
+    def faulty(request):
+        result = dummy(request)
+        record = source / '_execution/result.json'
+        published = StageResult.from_json(record.read_text())
+        artifacts = list(published.artifacts)
+        selected = artifacts[record_index]
+        artifacts[record_index] = replace(selected, lineage=replace(selected.lineage,
+                                          parent_hashes=('b' * 64,)))
+        record.write_text(replace(published, artifacts=artifacts).to_json())
+        return result
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    result = run('dummy', out, repo, deps_env=True, task_file=task_file(out, needs=needs))
+    assert result.status == 'fail'
+    assert str(source / '_execution/result.json') in result.message
+    later = tmp_path / 'later'
+    later.mkdir()
+    (later / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=dummy, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    with pytest.raises(ContractError, match='publication|fingerprint|result record'):
+        run('dummy', later, repo, deps_env=True, task_file=task_file(later, needs=needs))
+
+
+def test_tempfile_cache_does_not_cross_attempts(runtime, tmp_path, monkeypatch):
+    import tempfile
+    repo, first = runtime
+    monkeypatch.setattr(tempfile, 'tempdir', None)
+    def scratch_stage(request):
+        scratch = Path(tempfile.mkdtemp())
+        assert scratch.is_relative_to(Path(request.output_dir))
+        return dummy(request)
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=scratch_stage, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    assert run('dummy', first, repo, task_file=task_file(first)).status == 'pass'
+    shutil.rmtree(first)
+    later = tmp_path / 'later'
+    later.mkdir()
+    (later / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    result = run('dummy', later, repo, task_file=task_file(later))
+    assert result.status == 'pass', result.message
+
+
+def test_cli_rejects_modules_imported_from_another_checkout(runtime, tmp_path):
+    import inspect
+    repo, out = runtime
+    original = Path(__file__).parents[1]
+    shutil.copytree(original / 'src/oxyformer', repo / 'src/oxyformer', dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    shutil.copyfile(original / '.gitignore', repo / '.gitignore')
+    imports = '''from pathlib import Path
+import os
+import json
+from hashlib import sha256
+from oxyformer.contracts import StageResult
+from oxyformer.provenance import ArtifactLineage, ArtifactRecord, file_hash
+from oxyformer.execution.paths import atomic_json
+'''
+    (repo / 'src/oxyformer/dummy.py').write_text(imports + inspect.getsource(dummy) + '\nrun_stage = dummy\n')
+    (out / 'code_commit.txt').write_text(commit(repo))
+    other = tmp_path / 'other'
+    shutil.copytree(repo, other)
+    wrong = other / 'src/oxyformer/dummy.py'
+    wrong.write_text(wrong.read_text().replace("{'value': 1}", "{'value': 2}"))
+    process = subprocess.run([sys.executable, '-m', 'oxyformer.cli', 'run-stage',
+                              '--stage', 'dummy', '--repo', str(repo), '--out', str(out),
+                              '--task', str(task_file(out))], cwd=other / 'src',
+                             env=dict(os.environ, PYTHONPATH=str(repo / 'src'), CUDA_VISIBLE_DEVICES=''),
+                             capture_output=True, text=True)
+    assert process.returncode == 2, process.stdout + process.stderr
+    assert 'outside --repo' in process.stderr
+    assert not (out / 'value.json').exists()
+
+
+def test_forty_leaf_limit_includes_cpu_slices(spec):
+    # The owner mandate bounds total leaves, not only GPU leaves.
+    spec['work'] = spec['work'][:1]
+    spec['work'][0]['slices'] = [{'gpus': 1, 'wall_seconds': 60}] * 39 + [{'gpus': 0, 'wall_seconds': 60}]
+    assert len(expand_campaign(spec, {})['expected_leaves']) == 40
+    spec['work'][0]['slices'].append({'gpus': 1, 'wall_seconds': 60})
+    with pytest.raises(ContractError, match='forty leaves'):
+        expand_campaign(spec, {})
+
+
+@pytest.mark.parametrize('name', ['_execution/result.json', '_execution/fingerprint.json'])
+def test_late_publication_control_modes_are_verified(runtime, tmp_path, monkeypatch, name):
+    repo, out = runtime
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'data.json').write_text('{}')
+    (source / 'receipts.json').write_text('{}')
+    publish_source_fixture(repo, source)
+    path = source / name
+    path.chmod(path.stat().st_mode ^ 0o100)
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
+    with pytest.raises(ContractError, match='fingerprint mismatch'):
+        run('dummy', out, repo, deps_env=True,
+            task_file=task_file(out, needs={'data-unit': ['data.json', 'receipts.json']}))
