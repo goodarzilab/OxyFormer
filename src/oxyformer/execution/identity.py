@@ -12,6 +12,7 @@ import subprocess
 import sys
 
 from oxyformer.provenance import canonical_json, require
+from .integrity import read_regular
 
 FINGERPRINT_VERSION = 'tracked-science-v1'
 
@@ -29,7 +30,7 @@ def code_identity(repo, out):
     require(Path(git(repo, 'rev-parse', '--show-toplevel')).resolve() == repo,
             'repo must be repository root')
     head = git(repo, 'rev-parse', 'HEAD')
-    require((Path(out) / 'code_commit.txt').read_text().strip() == head,
+    require(read_regular(Path(out) / 'code_commit.txt').decode('utf-8').strip() == head,
             'code_commit.txt does not match cloned repository HEAD')
     require(not git(repo, 'status', '--porcelain', '--untracked-files=no'),
             'cloned repository has tracked modifications')
