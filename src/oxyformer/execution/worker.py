@@ -1,14 +1,17 @@
 """Run a CLI stage to process exit before the parent checks and publishes it.
 
 This is a completion boundary, not filesystem confinement. The worker writes
-only its unsealed result; the parent validates it after normal Python thread,
-child-process and temporary-object cleanup has finished.
+only its unsealed result. A separate Linux subreaper waits for the scientific
+interpreter to close its descriptors and finish finalizers, then reaps adopted
+descendants before the parent validates and publishes. It confines no writes.
 """
 import atexit
+import ctypes
 import importlib
 import os
 from pathlib import Path
 import subprocess
+import signal
 import sys
 
 from oxyformer.contracts import StageRequest, StageResult
@@ -22,35 +25,72 @@ WORKER_RESULT = '_execution/worker-result.json'
 def execute(request, module_name, repo):
     """Wait for the stage interpreter, including its finalizers, before return."""
     environment = dict(os.environ, PYTHONPATH=str(Path(repo) / 'src'))
-    process = subprocess.run([sys.executable, '-m', 'oxyformer.execution.worker',
-                              str(Path(request.output_dir) / '_execution/request.json'),
-                              str(repo), module_name], cwd=repo, env=environment)
+    process = subprocess.Popen([sys.executable, '-m', 'oxyformer.execution.worker',
+                                str(Path(request.output_dir) / '_execution/request.json'),
+                                str(repo), module_name], cwd=repo, env=environment)
+    try:
+        process.wait()
+    except BaseException:
+        # Do not let an interrupted caller publish/check while its worker is
+        # still active. The lifecycle process forwards termination and reaps.
+        process.send_signal(signal.SIGTERM)
+        while True:
+            try:
+                process.wait()
+                break
+            except KeyboardInterrupt:
+                continue
+        raise
     require(process.returncode == 0, f'stage worker exited with status {process.returncode}')
     return StageResult.from_json((Path(request.output_dir) / WORKER_RESULT).read_text())
 
 
-def _wait_children():
-    # Registered before importing the stage so its later atexit callbacks run
-    # first. Python joins non-daemon threads before atexit. Reap any unjoined
-    # direct subprocesses too; a mere run_stage return is not process completion.
+def _reap_descendants():
+    statuses = []
     while True:
         try:
-            os.waitpid(-1, 0)
+            _, status = os.waitpid(-1, 0)
+            statuses.append(os.waitstatus_to_exitcode(status))
         except InterruptedError:
             continue
         except ChildProcessError:
-            return
+            return statuses
 
 
-def main():
-    request_path, repository, module_name = sys.argv[1:]
+def supervise(request_path, repository, module_name):
+    # Adoption is set before any stage work starts. This dedicated process does
+    # not import the stage or own its resource-tracker pipes. Waiting here lets
+    # the scientific interpreter perform normal shutdown before helper reaping.
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+        error = ctypes.get_errno()
+        raise OSError(error, 'cannot enable child-subreaper: ' + os.strerror(error))
+    stage = None
+    interrupted = []
+
+    def terminate(signum, frame):
+        interrupted.append(signum)
+        if stage is not None:
+            stage.send_signal(signum)
+
+    signal.signal(signal.SIGINT, terminate)
+    signal.signal(signal.SIGTERM, terminate)
+    stage = subprocess.Popen([sys.executable, '-m', 'oxyformer.execution.worker',
+                              '--stage-process', request_path, repository, module_name], cwd=repository)
+    if interrupted:
+        stage.send_signal(interrupted[-1])
+    code = stage.wait()
+    descendants = _reap_descendants()
+    return 1 if interrupted or code != 0 or any(descendants) else 0
+
+
+def stage_main(request_path, repository, module_name):
     request = StageRequest.from_json(Path(request_path).read_text())
     try:
         request.verify_inputs()
         caches = isolated_caches(request.output_dir)
         caches.__enter__()
         atexit.register(caches.__exit__, None, None, None)
-        atexit.register(_wait_children)
         try:
             module = importlib.import_module(module_name)
         except (ImportError, FileNotFoundError) as exc:
@@ -67,6 +107,13 @@ def main():
                              message=str(exc).strip() or type(exc).__name__)
     atomic_write(request.output_dir, WORKER_RESULT, result.to_json())
     return 0
+
+
+def main():
+    args = sys.argv[1:]
+    if args and args[0] == '--stage-process':
+        return stage_main(*args[1:])
+    return supervise(*args)
 
 
 if __name__ == '__main__':
