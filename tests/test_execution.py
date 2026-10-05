@@ -17,7 +17,7 @@ import pytest
 import yaml
 
 from oxyformer.cli import main
-from oxyformer.contracts import StageResult
+from oxyformer.contracts import StageRequest, StageResult
 from oxyformer.execution.campaign import expand_campaign, validate_plan
 from oxyformer.execution.identity import code_identity, scientific_fingerprint
 from oxyformer.execution.paths import atomic_json, safe_extract
@@ -83,6 +83,30 @@ def task_file(out, **changes):
     return path
 
 
+
+def publish_source_fixture(repo, root):
+    """The source producer seals its own completed synthetic attempt."""
+    from oxyformer.execution.integrity import publish_result
+    from oxyformer.execution.paths import atomic_write
+    config = atomic_json(root, '_execution/config.json', {})
+    task = atomic_json(root, '_execution/task.json', {'id': 'data-unit', 'stage': 'source'})
+    request = StageRequest(stage='source', config_path=str(config), config_hash=file_hash(config),
+                           task_path=str(task), task_hash=file_hash(task), dependency_paths=(),
+                           dependency_hashes=(), output_dir=str(root), code_identity=git(repo, 'rev-parse', 'HEAD'))
+    atomic_write(root, '_execution/request.json', request.to_json())
+    lineage = ArtifactLineage(source_hashes=(sha256(b'fixture').hexdigest(),), unit_ids=('data-unit',),
+                              parent_hashes=(), split_hash=None, config_hash=request.config_hash,
+                              model_hash=None, environment=(('python', 'fixture'),), seed=None,
+                              parameter_count=None)
+    result = StageResult(request_hash=request.content_hash, status='pass', message='source fixture',
+                         artifacts=tuple(ArtifactRecord(path=p, sha256=file_hash(root / p),
+                                                        lineage=lineage, kind='source')
+                                         for p in ['data.json', 'receipts.json']))
+    published = publish_result(root, result)
+    assert published.status == 'pass', published.message
+    return published
+
+
 def test_dummy_stage_atomic_records_and_cache_isolation(runtime, monkeypatch):
     repo, out = runtime
     monkeypatch.setenv('HF_HOME', '/unrelated/cache')
@@ -116,6 +140,7 @@ def test_upstream_unchanged_and_output_overlap_rejected(runtime, tmp_path, monke
     source.write_text('{"fixture":1}')
     (upstream / 'receipts.json').write_text('{}')
     before = source.read_bytes(), source.stat().st_mode, source.stat().st_mtime_ns
+    publish_source_fixture(repo, upstream)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(upstream))
     task = task_file(out, needs={'data-unit': ['data.json', 'receipts.json']})
     assert run('dummy', out, repo, deps_env=True, task_file=task).status == 'pass'
@@ -735,6 +760,7 @@ def test_upstream_tree_mutation_fails_and_blocks_later_consumer(
     victim.write_text('original')
     link = extra / 'link'
     link.symlink_to('victim')
+    publish_source_fixture(repo, upstream)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(upstream))
     needs = {'data-unit': ['data.json', 'receipts.json']}
     changed = {'bytes': 'extra/victim', 'chmod': 'extra/victim',
@@ -793,10 +819,11 @@ def test_read_only_upstream_tree_remains_usable(runtime, tmp_path, monkeypatch):
     (upstream / 'data.json').write_text('{}')
     (upstream / 'receipts.json').write_text('{}')
     (upstream / 'link').symlink_to('data.json')
+    publish_source_fixture(repo, upstream)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(upstream))
     needs = {'data-unit': ['data.json', 'receipts.json']}
     before = {p.name: (p.lstat().st_mode, p.lstat().st_size,
-                      os.readlink(p) if p.is_symlink() else p.read_bytes())
+                      os.readlink(p) if p.is_symlink() else (None if p.is_dir() else p.read_bytes()))
               for p in upstream.iterdir()}
     for attempt in [out, tmp_path / 'later']:
         attempt.mkdir(exist_ok=True)
@@ -804,7 +831,7 @@ def test_read_only_upstream_tree_remains_usable(runtime, tmp_path, monkeypatch):
         assert run('dummy', attempt, repo, deps_env=True,
                    task_file=task_file(attempt, needs=needs)).status == 'pass'
     after = {p.name: (p.lstat().st_mode, p.lstat().st_size,
-                     os.readlink(p) if p.is_symlink() else p.read_bytes())
+                     os.readlink(p) if p.is_symlink() else (None if p.is_dir() else p.read_bytes()))
              for p in upstream.iterdir()}
     assert after == before
 
@@ -857,6 +884,7 @@ def test_post_execution_check_names_proc_fd_chmod(runtime, tmp_path, monkeypatch
     victim = upstream / 'undeclared'
     victim.write_text('unchanged bytes')
     before = file_hash(victim)
+    publish_source_fixture(repo, upstream)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(upstream))
     def faulty(request):
         result = dummy(request)
