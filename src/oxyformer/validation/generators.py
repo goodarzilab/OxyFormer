@@ -611,22 +611,56 @@ def _integrate_precise(frame, config, policy, groups, order, boundaries, eligibi
     mass_error = 0.
     with localcontext() as context:
         context.prec = precision
+        log_gauss_weights = tuple(weight.ln() for weight in weights)
+
+        def node_log_weight(point, log_weight, width, term, prior, normalizer):
+            piece = next(p for p in term.law.pieces
+                         if p.lower+term.law.error <= point <= p.upper+term.law.error)
+            return (prior+width+log_weight+_decimal(term.law.kernel_at(piece,point))
+                    -normalizer+_decimal_selection_log(point,term.state,config))
+
+        prepared, candidates = {}, []
         for key, terms in groups.items():
             for term in terms:
                 rules = term.law.quadrature(order,boundaries[key])
-                # Independent ordinary-precision rule checks assignment mass;
-                # it also keeps the existing lost-mass diagnostic observable.
+                # The diagnostic still checks all assignment mass, before any
+                # response work is skipped for already-negligible node weights.
                 represented = logsumexp(np.concatenate([r.log_weights for r in rules]))
                 mass_error = max(mass_error,abs(float(np.expm1(represented))))
                 prior = _decimal(term.prior_weight).ln()
                 normalizer = _decimal_normalizer(term.law,precision)
                 scale = exact(config.registration_probability)/term.state.denominator_factor
+                prepared[id(term)] = (rules, prior, normalizer, scale)
+                # One actual quadrature node per rule seeds a lower bound on
+                # the global maximum without evaluating any response contrast.
+                for rule in rules:
+                    at = rule.coordinates.anchor+rule.coordinates.unit*nodes[0]
+                    width = _decimal(rule.coordinates.unit).ln()
+                    candidates.append(node_log_weight(at,log_gauss_weights[0],width,
+                                                      term,prior,normalizer))
+        known_maximum = max(candidates)
+        for key, terms in groups.items():
+            for term in terms:
+                rules, prior, normalizer, scale = prepared[id(term)]
                 for rule in rules:
                     coordinates = replace(rule.coordinates,values=np.asarray(nodes,dtype=object))
                     points = [coordinates.anchor+coordinates.unit*v for v in nodes]
+                    width = _decimal(coordinates.unit).ln()
+                    log_weights = [node_log_weight(point, log_weight, width, term, prior, normalizer)
+                                   for point, log_weight in zip(points, log_gauss_weights)]
+                    known_maximum = max(known_maximum, max(log_weights))
+                    # A lower bound on the eventual global maximum suffices:
+                    # nodes discarded here are necessarily discarded by the
+                    # unchanged final -3*precision filter below.
+                    keep = np.array([v-known_maximum > -3*precision for v in log_weights])
+                    if not keep.any():
+                        continue
+                    coordinates = coordinates.subset(keep)
+                    points = [p for p, k in zip(points, keep) if k]
+                    log_weights = [v for v, k in zip(log_weights, keep) if k]
                     moved = np.array([any(lo <= p <= hi for lo,hi in eligibility[key[1]]) for p in points])
-                    observed = [Decimal(0)]*order
-                    causal = [Decimal(0)]*order
+                    observed = [Decimal(0)]*len(points)
+                    causal = [Decimal(0)]*len(points)
                     for i in np.flatnonzero(moved):
                         dose = points[i]-term.law.error-exact(config.migration)*exact(term.state.illness)
                         change = (effect_fraction(dose+exact(policy.delta_mmhg),config,4*precision)
@@ -640,13 +674,7 @@ def _integrate_precise(frame, config, policy, groups, order, boundaries, eligibi
                                                            terms,frame,config,decimal_result=True)
                         for i,value in zip(np.flatnonzero(moved),values):
                             observed[i] = value
-                    width = _decimal(coordinates.unit).ln()
-                    for point, weight, obs, cause in zip(points,weights,observed,causal):
-                        piece = next(p for p in term.law.pieces
-                                     if p.lower+term.law.error <= point <= p.upper+term.law.error)
-                        log_weight = (prior+width+weight.ln()+_decimal(term.law.kernel_at(piece,point))
-                                      -normalizer+_decimal_selection_log(point,term.state,config))
-                        entries.append((log_weight,obs,cause))
+                    entries.extend(zip(log_weights, observed, causal))
         maximum = max(log_weight for log_weight,_,_ in entries)
         mass, observed, causal = Decimal(0), Decimal(0), Decimal(0)
         for log_weight, obs, cause in entries:
