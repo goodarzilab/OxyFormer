@@ -5,8 +5,10 @@
 `receipts`, and `approvals` to absolute paths. These must be exactly the
 request's `dependency_paths`, with their corresponding `dependency_hashes`.
 Config is `configs/reporting.yaml`. Approvals must resolve to the repository's
-read-only `configs/approvals.yaml`. Source checkouts bind this registry to the
-code's repository. A non-editable installation uses the repository
+read-only `configs/approvals.yaml`. Source checkouts bind both this registry and
+`configs/reporting.yaml` to the code's repository. Config aliases resolving to
+that file are accepted; byte-identical copies elsewhere are refused with supported
+diagnostics retained. A non-editable installation uses the repository
 `configs/reporting.yaml` at the hash-bound `StageRequest.config_path`; its
 adjacent `approvals.yaml` is the only accepted registry. The frozen config path's
 repository prefix is retained before resolving its leaf: a symlinked `configs/`

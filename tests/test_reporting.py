@@ -1269,6 +1269,7 @@ def isolated_repository_request(case, tmp_path, monkeypatch):
     task = json.loads(Path(request.task_path).read_text())
     registry.write_bytes(Path(task['approvals']).read_bytes())
     monkeypatch.setattr(stage, 'OWNER_APPROVALS', registry)
+    monkeypatch.setattr(stage, '_SOURCE_CONFIG', config)
     task['approvals'] = str(registry)
     Path(request.task_path).write_text(json.dumps(task))
     return repository, replace(
@@ -1623,3 +1624,34 @@ def test_nonfinite_supplied_estimator_difference_keeps_authenticated_estimates(c
     saved = json.loads((Path(request.output_dir) / 'report.json').read_text())
     assert saved['estimators'] == [e.to_dict()['payload'] for e in b.estimates]
     assert 'diagnostics' not in saved
+
+
+@pytest.mark.parametrize('location', ['repository', 'copy', 'file_alias', 'repository_alias'])
+def test_source_reporting_config_requires_repository_identity(case, tmp_path, monkeypatch, location):
+    request = make_request(tmp_path, case, monkeypatch)
+    if location == 'copy':
+        config = tmp_path / 'copied-reporting.yaml'
+        config.write_bytes(CONFIG.read_bytes())
+    elif location == 'file_alias':
+        config = tmp_path / 'reporting-alias.yaml'
+        config.symlink_to(CONFIG)
+    elif location == 'repository_alias':
+        alias = tmp_path / 'repository-alias'
+        alias.symlink_to(ROOT, target_is_directory=True)
+        config = alias / 'configs/reporting.yaml'
+    else:
+        config = CONFIG
+    # Hash identity and scoped approvals alone do not establish config path identity.
+    assert file_hash(config) == request.config_hash
+    request = replace(request, config_path=str(config))
+    request.verify_inputs()
+    result = run_stage(request)
+    result.verify(request)
+    report = json.loads((Path(request.output_dir) / 'report.json').read_text())
+    assert result.status == ('fail' if location == 'copy' else 'pass')
+    assert report['releasable'] == (location != 'copy')
+    assert report['estimators'] == [e.to_dict()['payload'] for e in case[0].estimates]
+    assert report['diagnostics'] == json.loads(canonical_json(summarize(case[0], case[1])))
+    if location == 'copy':
+        assert report['evidence_label'] == 'diagnostic-only'
+        assert any('config path is not repository' in gate['reason'] for gate in report['gates'])

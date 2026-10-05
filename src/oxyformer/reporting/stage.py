@@ -44,6 +44,7 @@ _SOURCE_ROOT = _MODULE.parents[3]
 # beside it: use the repository config already bound by the frozen request.
 OWNER_APPROVALS = (_SOURCE_ROOT / "configs" / "approvals.yaml"
                    if _realpath(_SOURCE_ROOT / "src/oxyformer/reporting/stage.py") == _MODULE else None)
+_SOURCE_CONFIG = _SOURCE_ROOT / "configs/reporting.yaml" if OWNER_APPROVALS is not None else None
 
 
 def _owner_registry(request):
@@ -101,6 +102,9 @@ def run_stage(request: StageRequest) -> StageResult:
         request.verify_inputs()
         config = require_container(yaml.safe_load(Path(request.config_path).read_text()), dict, "reporting config")
         require(config.get("schema_version") == 1, "unsupported reporting config")
+        if _SOURCE_CONFIG is not None:
+            require(_realpath(request.config_path) == _realpath(_SOURCE_CONFIG),
+                    "reporting config path is not repository configs/reporting.yaml")
         require(request.stage in STAGE_GATES, "unknown reporting stage")
         require(_realpath(task["approvals"]) == _realpath(_owner_registry(request)), "approval path is not owner registry")
         receipts = read_artifact(task["receipts"], TaskReceipts, dependencies[task["receipts"]])
