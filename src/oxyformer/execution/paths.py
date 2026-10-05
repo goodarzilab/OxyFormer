@@ -17,7 +17,7 @@ def output_path(root, relative):
     path = root / relative
     require(path.resolve().is_relative_to(root), 'output escapes attempt')
     require(not any(p.is_symlink() for p in (path, *path.parents) if p != root.parent),
-            'symlink in output path')
+        'symlink in output path')
     return path
 
 
@@ -56,7 +56,7 @@ def safe_extract(archive, root, relative, *, members=None, max_bytes=10 * 1024**
         is_zip = zipfile.is_zipfile(stream)
         stream.seek(0)
         handle = stack.enter_context(zipfile.ZipFile(stream) if is_zip else
-                                     tarfile.open(fileobj=stream, mode='r:*'))
+            tarfile.open(fileobj=stream, mode='r:*'))
         seen = set()
         total = 0
         for item in handle.infolist() if is_zip else handle.getmembers():
@@ -103,18 +103,24 @@ def safe_extract(archive, root, relative, *, members=None, max_bytes=10 * 1024**
 @contextmanager
 def isolated_caches(root):
     names = ('HF_HOME', 'TORCH_HOME', 'XDG_CACHE_HOME', 'MPLCONFIGDIR',
-             'NUMBA_CACHE_DIR', 'TRITON_CACHE_DIR', 'TMPDIR')
+        'NUMBA_CACHE_DIR', 'TRITON_CACHE_DIR', 'TMPDIR')
     previous = {name: os.environ.get(name) for name in names}
     previous_tempdir = tempfile.tempdir
+    directory_fd = None
     try:
         for name in names:
             path = output_path(root, '_execution/cache/' + name.lower())
             path.mkdir(parents=True, exist_ok=True)
             os.environ[name] = str(path)
+        directory_fd = os.open(os.environ['TMPDIR'], os.O_RDONLY | os.O_DIRECTORY)
+        # The supervisor retains this alias through all descendant shutdown.
+        os.environ['TMPDIR'] = f'/proc/{os.getpid()}/fd/{directory_fd}'
         tempfile.tempdir = os.environ['TMPDIR']
         yield
     finally:
         tempfile.tempdir = previous_tempdir
+        if directory_fd is not None:
+            os.close(directory_fd)
         for name, value in previous.items():
             if value is None:
                 os.environ.pop(name, None)

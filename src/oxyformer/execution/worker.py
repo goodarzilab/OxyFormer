@@ -1,5 +1,4 @@
 """Run a CLI stage to process exit before the parent checks and publishes it."""
-import atexit
 import ctypes
 import importlib
 import os
@@ -21,8 +20,8 @@ def execute(request, module_name, repo):
     """Wait for the stage interpreter, including its finalizers, before return."""
     environment = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', PYTHONPATH=str(Path(repo) / 'src'))
     process = subprocess.Popen([sys.executable, '-B', '-m', 'oxyformer.execution.worker',
-                                str(Path(request.output_dir) / '_execution/request.json'),
-                                str(repo), module_name], cwd=repo, env=environment)
+            str(Path(request.output_dir) / '_execution/request.json'),
+            str(repo), module_name], cwd=repo, env=environment)
     try:
         process.wait()
     except BaseException:
@@ -63,12 +62,15 @@ def supervise(request_path, repository, module_name):
 
     signal.signal(signal.SIGINT, terminate)
     signal.signal(signal.SIGTERM, terminate)
-    stage = subprocess.Popen([sys.executable, '-B', '-m', 'oxyformer.execution.worker',
-                              '--stage-process', request_path, repository, module_name], cwd=repository)
-    if interrupted:
-        stage.send_signal(interrupted[-1])
-    code = stage.wait()
-    _reap_descendants()
+    request = StageRequest.from_json(read_regular(request_path))
+    with isolated_caches(request.output_dir):
+        stage = subprocess.Popen([sys.executable, '-B', '-m', 'oxyformer.execution.worker',
+                '--stage-process', request_path, repository, module_name], cwd=repository)
+        if interrupted:
+            stage.send_signal(interrupted[-1])
+        code = stage.wait()
+        _reap_descendants()
+
     return 1 if interrupted or code != 0 else 0
 
 
@@ -76,17 +78,14 @@ def stage_main(request_path, repository, module_name):
     request = StageRequest.from_json(read_regular(request_path))
     try:
         require(code_identity(repository, request.output_dir) == request.code_identity,
-                'worker code identity changed')
+            'worker code identity changed')
         verify_module_origins(repository)
         verify_inputs(request)
-        caches = isolated_caches(request.output_dir)
-        caches.__enter__()
-        atexit.register(caches.__exit__, None, None, None)
         try:
             module = importlib.import_module(module_name)
         except (ImportError, FileNotFoundError) as exc:
             result = StageResult(request_hash=request.content_hash, status='blocked', artifacts=(),
-                                 message=str(exc).strip() or type(exc).__name__)
+                message=str(exc).strip() or type(exc).__name__)
         else:
             verify_module_origins(repository)
             require(callable(getattr(module, 'run_stage', None)), 'stage has no run_stage(StageRequest)')
@@ -95,7 +94,7 @@ def stage_main(request_path, repository, module_name):
         require(isinstance(result, StageResult), 'stage did not return StageResult')
     except BaseException as exc:
         result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
-                             message=str(exc).strip() or type(exc).__name__)
+            message=str(exc).strip() or type(exc).__name__)
     atomic_write(request.output_dir, WORKER_RESULT, result.to_json())
     return 0
 

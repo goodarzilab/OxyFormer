@@ -17,13 +17,13 @@ KINDS = {'screening', 'primary', 'ablation', 'final-coverage', 'anchor', 'refit-
 
 def concrete_id(value):
     require(isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,31}', value),
-            'IDs must be concrete and at most 32 characters')
+        'IDs must be concrete and at most 32 characters')
 
 
 def concrete(value):
     if isinstance(value, str):
         require(not any(marker in value for marker in ('{', '}', '<TEMPLATE', '<ID>')),
-                'unresolved template')
+            'unresolved template')
     elif isinstance(value, dict):
         for key, item in value.items():
             concrete(key)
@@ -35,12 +35,12 @@ def concrete(value):
 
 def outputs_valid(outputs):
     require(isinstance(outputs, list) and outputs and len(set(outputs)) == len(outputs),
-            'explicit unique outputs required')
+        'explicit unique outputs required')
     for name in outputs:
         relative_artifact_path(name)
         require(name.split('/')[0] not in RESERVED, 'reserved output name')
     require(not any(a != b and b.startswith(a + '/') for a in outputs for b in outputs),
-            'overlapping outputs')
+        'overlapping outputs')
 
 
 def resources(gpus, seconds):
@@ -52,8 +52,8 @@ def resources(gpus, seconds):
     hours, remainder = divmod(seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
     flags = ['--partition=standard', '--account=root', '--qos=normal',
-             '--nodes=1', '--ntasks=1', '--cpus-per-task=4', '--mem=16G',
-             f'--time={hours:02}:{minutes:02}:{seconds:02}']
+        '--nodes=1', '--ntasks=1', '--cpus-per-task=4', '--mem=16G',
+        f'--time={hours:02}:{minutes:02}:{seconds:02}']
     if gpus:
         flags.append(f'--gpus={gpus}')
     return flags, gpu_hours
@@ -99,7 +99,7 @@ def _spec_check(spec, approvals):
     require(set(lock) == {'dependency', 'path', 'sha256'}, 'invalid recipe reference')
     check_hash(lock['sha256'])
     require(lock['dependency'] in spec['inputs'] and lock['path'] in spec['inputs'][lock['dependency']],
-            'recipe must be an explicit input')
+        'recipe must be an explicit input')
     for paths in spec['inputs'].values():
         require(isinstance(paths, list) and paths and len(set(paths)) == len(paths), 'invalid input files')
         for path in paths:
@@ -121,11 +121,11 @@ def _spec_check(spec, approvals):
     if spec['kind'] in {'final-coverage', 'anchor', 'refit-audit'}:
         allocation = approvals.get('owner_decisions', {}).get('campaign_allocations', {}).get(spec['id'])
         require(isinstance(allocation, dict) and allocation.get('kind') == spec['kind'],
-                'missing owner campaign allocation')
+            'missing owner campaign allocation')
         amount = allocation.get('gpu_hours')
         require(type(amount) in (int, float) and math.isfinite(amount)
-                and Decimal(str(amount)) * 3600 >= total_gpu_seconds,
-                'owner allocation does not cover campaign')
+            and Decimal(str(amount)) * 3600 >= total_gpu_seconds,
+            'owner allocation does not cover campaign')
     return external
 
 
@@ -137,11 +137,11 @@ def _id(spec, slot):
 def _unit(spec, task, prerequisites, gpus, seconds, role):
     flags, hours = resources(gpus, seconds)
     return {'id': task['id'], 'kind': 'slurm', 'title': f'{spec["id"]}: {task["id"]}',
-            'needs': sorted(set(prerequisites) | set(task['needs'])), 'runtime': 'oxyformer-env',
-            'outputs': ['code_commit.txt', 'run.log', '_execution/result.json', *task['outputs']],
-            'inputs': [PYTHON], 'sbatch': flags, 'gpu_hours': hours,
-            'pool': 'gpu' if gpus else 'cpu', 'write_scopes': [task['id'] + '/**'],
-            'command': stage_command(task), 'max_attempts': 1}
+        'needs': sorted(set(prerequisites) | set(task['needs'])), 'runtime': 'oxyformer-env',
+        'outputs': ['code_commit.txt', 'run.log', '_execution/result.json', *task['outputs']],
+        'inputs': [PYTHON], 'sbatch': flags, 'gpu_hours': hours,
+        'pool': 'gpu' if gpus else 'cpu', 'write_scopes': [task['id'] + '/**'],
+        'command': stage_command(task), 'max_attempts': 1}
 
 
 def _build(spec):
@@ -149,17 +149,17 @@ def _build(spec):
     for work in spec['work']:
         previous = None
         owner = sha256(canonical_json({'campaign': spec['id'], 'work': work,
-                                      'recipe': spec['recipe_lock']}).encode()).hexdigest()
+                    'recipe': spec['recipe_lock']}).encode()).hexdigest()
         for step, segment in enumerate(work['slices']):
             unit_id = _id(spec, [work['id'], step])
             needs = deepcopy(spec['inputs'])
             if previous:
                 needs[previous] = ['_execution/task.json', '_execution/request.json',
-                                   '_execution/result.json', *work['outputs']]
+                    '_execution/result.json', *work['outputs']]
             task = {'id': unit_id, 'stage': work['stage'], 'campaign': spec['id'],
-                    'parameters': deepcopy(work.get('parameters', {})), 'needs': needs,
-                    'outputs': work['outputs'], 'recipe_lock': spec['recipe_lock'],
-                    'continuation': {'owner': owner, 'step': step, 'predecessor': previous}}
+                'parameters': deepcopy(work.get('parameters', {})), 'needs': needs,
+                'outputs': work['outputs'], 'recipe_lock': spec['recipe_lock'],
+                'continuation': {'owner': owner, 'step': step, 'predecessor': previous}}
             tasks.append(task)
             units.append(_unit(spec, task, spec['prerequisites'], segment['gpus'], segment['wall_seconds'], 'leaf'))
             leaves.append(unit_id)
@@ -167,10 +167,10 @@ def _build(spec):
     needs = deepcopy(spec['inputs'])
     for task in tasks:
         needs[task['id']] = ['_execution/task.json', '_execution/request.json',
-                             '_execution/result.json', *task['outputs']]
+            '_execution/result.json', *task['outputs']]
     task = {'id': _id(spec, ['collector']), 'stage': spec['collector']['stage'],
-            'campaign': spec['id'], 'needs': needs, 'outputs': spec['collector']['outputs'],
-            'recipe_lock': spec['recipe_lock'], 'expected_leaves': leaves}
+        'campaign': spec['id'], 'needs': needs, 'outputs': spec['collector']['outputs'],
+        'recipe_lock': spec['recipe_lock'], 'expected_leaves': leaves}
     tasks.append(task)
     units.append(_unit(spec, task, spec['prerequisites'], 0, spec['collector']['wall_seconds'], 'collector'))
     return units, tasks, leaves
@@ -207,12 +207,12 @@ def validate_plan(plan, approvals):
     expected_units, expected_tasks, leaves = _build(spec)
     collector_id = expected_units[-1]['id']
     require(collector_id in by_id and set(leaves) <= set(by_id[collector_id]['needs']),
-            'collector omitted required leaf dependency')
+        'collector omitted required leaf dependency')
     require(set(ids) == {u['id'] for u in expected_units}, 'required campaign leaves omitted or added')
     require(plan['expected_leaves'] == leaves, 'expected leaf manifest drift')
     require(plan['tasks'] == expected_tasks, 'task or continuation ownership drift')
     require({u['id']: u for u in expected_units} == by_id,
-            'unit command, resources, outputs or dependency drift')
+        'unit command, resources, outputs or dependency drift')
     return plan
 
 
@@ -222,17 +222,17 @@ def expand_campaign(spec, approvals):
     _spec_check(spec, approvals)
     units, tasks, leaves = _build(spec)
     return validate_plan({'schema_version': 1, 'spec': spec, 'units': units,
-                          'tasks': tasks, 'expected_leaves': leaves}, approvals)
+            'tasks': tasks, 'expected_leaves': leaves}, approvals)
 
 
 UNIT_SCHEMA = {
     'schema_version': 1,
     'unit_fields': ['id', 'kind', 'title', 'needs', 'runtime', 'outputs', 'inputs',
-                    'sbatch', 'gpu_hours', 'pool', 'write_scopes', 'command', 'max_attempts'],
+        'sbatch', 'gpu_hours', 'pool', 'write_scopes', 'command', 'max_attempts'],
     'task_fields': ['id', 'stage', 'campaign', 'needs', 'outputs', 'recipe_lock',
-                    'parameters', 'continuation', 'expected_leaves'],
+        'parameters', 'continuation', 'expected_leaves'],
     'spec_required': ['schema_version', 'id', 'kind', 'prerequisites', 'inputs',
-                      'recipe_lock', 'work', 'collector'],
+        'recipe_lock', 'work', 'collector'],
     'work_required': ['id', 'stage', 'outputs', 'slices'],
     'slice_required': ['gpus', 'wall_seconds'],
     'limits': {'leaves': 40, 'gpu_hours_per_leaf': 4, 'id_length': 32, 'arrays': False},

@@ -12,10 +12,10 @@ import yaml
 from oxyformer.contracts import StageRequest, StageResult
 from oxyformer.provenance import ContractError, canonical_json, relative_artifact_path, require
 from .integrity import (DEPENDENCY_CHECK, FINGERPRINT, RESULT, _replace_control, _repair_control_directory,
-                        post_execution_check, publish_result,
-                        directory_path, read_regular, regular_file_stat, regular_file_hash as file_hash,
-                        verify_inputs, verify_result, verify_published_tree)
-from .identity import code_identity, environment_record, scientific_fingerprint, verify_recipe
+    post_execution_check, publish_result, record_taints,
+    directory_path, read_regular, regular_file_stat, regular_file_hash as file_hash,
+    verify_inputs, verify_result, verify_published_tree)
+from .identity import git_bytes, code_identity, environment_record, scientific_fingerprint, verify_recipe
 from .paths import atomic_json, atomic_write, output_path
 
 
@@ -64,7 +64,7 @@ def dependency_file(root, relative):
 
 
 def verify_dependency_result(root, *, expected_hash=None, trees=None, active=None, verified=None,
-                             output_dir=None):
+    output_dir=None):
     """Verify the complete lineage with an explicit postorder traversal."""
     root = directory_path(root)
     active = set() if active is None else active
@@ -85,13 +85,13 @@ def verify_dependency_result(root, *, expected_hash=None, trees=None, active=Non
                 current = directory_path(current)
                 if output_dir is not None:
                     require(not output_dir.is_relative_to(current) and not current.is_relative_to(output_dir),
-                            f'output overlaps an upstream attempt: {current}')
+                        f'output overlaps an upstream attempt: {current}')
                 require(current not in active, 'dependency publication cycle')
                 if current in verified:
                     result = verified[current]
                     require(expected is None or any(a.path == FINGERPRINT and a.sha256 == expected
-                                                    for a in result.artifacts),
-                            'dependency published fingerprint identity changed')
+                            for a in result.artifacts),
+                        'dependency published fingerprint identity changed')
                 else:
                     active.add(current)
                     entered.add(current)
@@ -139,7 +139,7 @@ def verify_dependency_recipe(root, lock):
     identity = read_mapping(identity_path)
     require(identity.get('head') == request.code_identity, 'dependency code identity mismatch')
     require(identity.get('scientific_fingerprint') == lock['scientific_fingerprint'],
-            'dependency scientific code/config drift')
+        'dependency scientific code/config drift')
     return [task_path, identity_path]
 
 
@@ -172,7 +172,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     out = out.resolve(strict=True)
     if 'SWARM_UNIT_DIR' in os.environ:
         require(out == Path(os.environ['SWARM_UNIT_DIR']).resolve(strict=True),
-                '--out must equal SWARM_UNIT_DIR')
+            '--out must equal SWARM_UNIT_DIR')
     repo = Path(repo).resolve(strict=True)
     require(not out.is_relative_to(repo), 'output may not be inside repository')
     head = code_identity(repo, out)
@@ -182,11 +182,11 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     require(stage in registry['stages'], f'unknown stage: {stage}')
     settings = registry['stages'][stage]
     approvals_file = Path(approvals) if approvals else repo / 'configs/approvals.yaml'
-    approvals_value = read_mapping(approvals_file)
+    approvals_value = read_mapping(approvals_file, expected_bytes=git_bytes(repo, 'show', 'HEAD:configs/approvals.yaml'))
     require(approvals_value.get('schema_version') == 1 and approvals_value.get('approved_by'),
-            'owner approvals are missing')
+        'owner approvals are missing')
     sources = {str(registry_file): file_hash(registry_file),
-               str(approvals_file.resolve()): file_hash(approvals_file)}
+        str(approvals_file.resolve()): file_hash(approvals_file)}
     if task_file is not None:
         task_file = Path(task_file).absolute()
         document = read_mapping(task_file)
@@ -203,15 +203,15 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     else:
         require(task_id is None, '--task-id requires --task')
         task = {'id': settings.get('unit_id', stage), 'stage': stage, 'needs': settings.get('needs', {}),
-                'outputs': settings.get('outputs', [])}
+            'outputs': settings.get('outputs', [])}
     require(task.get('stage') == stage, 'task stage mismatch')
     task.setdefault('needs', settings.get('needs', {}))
     task.setdefault('outputs', settings.get('outputs', []))
     for unit, paths in settings.get('needs', {}).items():
         require(unit in task['needs'] and set(paths) <= set(task['needs'][unit]),
-                'task omitted stage-required dependency')
+            'task omitted stage-required dependency')
     require(set(settings.get('outputs', [])) <= set(task['outputs']),
-            'task omitted stage-required output')
+        'task omitted stage-required output')
     needs = task.get('needs', {})
     require(isinstance(needs, dict), 'task needs must map IDs to relative files')
     require(deps_env or not needs, 'dependencies require --deps-env')
@@ -222,7 +222,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     verified_dependencies = {}
     for unit, root in deps.items():
         require(not out.is_relative_to(root) and not root.is_relative_to(out),
-                f'output overlaps an upstream attempt: {root}')
+            f'output overlaps an upstream attempt: {root}')
         require(isinstance(needs[unit], list) and needs[unit], 'dependency requires explicit files')
         for relative in needs[unit]:
             files.append(dependency_file(root, relative))
@@ -231,7 +231,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
             require(acquisition_receipt in needs[unit], 'acquisition receipt must be a declared input')
         require((root / '_execution/result.json').is_file(), f'stage receipt missing or not regular: {root / "_execution/result.json"}')
         result = verify_dependency_result(root, trees=dependency_trees, verified=verified_dependencies,
-                                          output_dir=out)
+            output_dir=out)
         verify_dependency_id(root, unit)
         published_hashes[root / FINGERPRINT] = next(
             a.sha256 for a in result.artifacts if a.path == FINGERPRINT)
@@ -267,51 +267,52 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
                 if path not in files:
                     files.append(path)
         require(file_hash(approvals_file) == file_hash(repo / 'configs/approvals.yaml'),
-                'locked approvals differ from fingerprinted repository config')
+            'locked approvals differ from fingerprinted repository config')
     config = {'stage': stage, 'settings': settings, 'approvals': approvals_value,
-              'input_sources': sources, 'dependencies': {k: str(v) for k, v in deps.items()}}
+        'input_sources': sources, 'dependencies': {k: str(v) for k, v in deps.items()}}
     config_path = atomic_json(out, '_execution/config.json', config)
     task_path = atomic_json(out, '_execution/task.json', task)
     tree_path = atomic_json(out, '_execution/dependencies.json', dependency_trees)
     files.append(tree_path)
     request = StageRequest(stage=stage, config_path=str(config_path), config_hash=file_hash(config_path),
-                           task_path=str(task_path), task_hash=file_hash(task_path),
-                           dependency_paths=tuple(map(str, files)),
-                           dependency_hashes=tuple(published_hashes[p] if p in published_hashes
-                                                   else file_hash(p) for p in files),
-                           output_dir=str(out), code_identity=head)
+        task_path=str(task_path), task_hash=file_hash(task_path),
+        dependency_paths=tuple(map(str, files)),
+        dependency_hashes=tuple(published_hashes[p] if p in published_hashes
+            else file_hash(p) for p in files),
+        output_dir=str(out), code_identity=head)
     atomic_write(out, '_execution/request.json', request.to_json())
     environment = environment_record()
     atomic_json(out, '_execution/environment.json', environment)
     atomic_json(out, '_execution/identity.json', {'head': head, 'scientific_fingerprint': scientific_fingerprint(repo)})
     immutable_controls = {str(out / ('_execution/' + name)): file_hash(out / ('_execution/' + name))
-                          for name in ('request.json', 'environment.json', 'identity.json')}
+        for name in ('request.json', 'environment.json', 'identity.json')}
     try:
         verify_inputs(request)
         module_name = settings.get('module')
         require(isinstance(module_name, str) and module_name.startswith('oxyformer.'),
-                'stage module not registered')
+            'stage module not registered')
         if execute is None:
             from .worker import execute
         result = execute(request, module_name, repo)
         require(isinstance(result, StageResult), 'stage did not return StageResult')
     except BaseException as exc:
         result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
-                             message=str(exc).strip() or type(exc).__name__)
+            message=str(exc).strip() or type(exc).__name__)
     changed = []
     try:
         check = post_execution_check(dependency_trees)
         changed = [str(Path(root) / name) for root, detail in check['attempts'].items()
-                   for name in detail['changed_paths']]
+            for name in detail['changed_paths']]
+        record_taints(check)
         control_directory_changed = _repair_control_directory(out)
         collisions = [str(out / name) for name in (DEPENDENCY_CHECK, RESULT, FINGERPRINT)
-                      if os.path.lexists(out / name)]
+            if os.path.lexists(out / name)]
         if control_directory_changed:
             collisions.append(str(out / '_execution'))
         _replace_control(out, DEPENDENCY_CHECK, canonical_json(check))
         if check['status'] == 'fail':
             result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
-                                 message='upstream attempt tainted; changed paths: ' + ', '.join(changed))
+                message='upstream attempt tainted; changed paths: ' + ', '.join(changed))
         else:
             try:
                 sys.stdout.flush()
@@ -321,7 +322,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
                     require(file_hash(path) == digest, f'execution control changed: {path}')
                 verify_result(result, request)
                 require(all(not (out / a.path).resolve().is_relative_to(repo) for a in result.artifacts),
-                        'artifact overlaps cloned repository')
+                    'artifact overlaps cloned repository')
                 require(all(not a.path.startswith('_execution/') for a in result.artifacts), 'reserved execution artifact')
                 declared = set(task.get('outputs', []))
                 if result.status == 'pass':
@@ -330,10 +331,10 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
                     require(file_hash(path) == digest, f'input source changed: {path}')
                 observed_head = code_identity(repo, out)
                 require(observed_head == request.code_identity,
-                        f'code identity changed: recorded {request.code_identity}, observed {observed_head}')
+                    f'code identity changed: recorded {request.code_identity}, observed {observed_head}')
             except BaseException as exc:
                 result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
-                                     message=str(exc).strip() or type(exc).__name__)
+                    message=str(exc).strip() or type(exc).__name__)
         return publish_result(out, result, owned_controls=True)
     except BaseException as exc:
         message = 'stage finalization failed: ' + (str(exc).strip() or type(exc).__name__)

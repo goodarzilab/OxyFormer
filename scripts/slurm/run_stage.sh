@@ -4,8 +4,10 @@ set -euo pipefail
 export GIT_NO_REPLACE_OBJECTS=1
 : "${SWARM_UNIT_DIR:?}"
 : "${STAGE:?}"
-git clone --depth 1 --branch dev https://github.com/goodarzilab/OxyFormer.git "$SWARM_UNIT_DIR/src"
-git -C "$SWARM_UNIT_DIR/src" rev-parse HEAD > "$SWARM_UNIT_DIR/code_commit.txt"
+if [[ "${1:-}" != --prepared ]]; then
+    git clone --depth 1 --branch dev https://github.com/goodarzilab/OxyFormer.git "$SWARM_UNIT_DIR/src"
+    git -C "$SWARM_UNIT_DIR/src" rev-parse HEAD > "$SWARM_UNIT_DIR/code_commit.txt"
+fi
 export PYTHONDONTWRITEBYTECODE=1
 export PYTHONPATH="$SWARM_UNIT_DIR/src/src"
 if [[ -n "${TASK_MANIFEST:-}" && "$TASK_MANIFEST" != /* ]]; then TASK_MANIFEST="$PWD/$TASK_MANIFEST"; fi

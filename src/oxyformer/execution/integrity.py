@@ -20,9 +20,46 @@ DEPENDENCY_CHECK = "_execution/dependency_check.json"
 PUBLICATION_EXCLUSIONS = (FINGERPRINT, RESULT)
 
 
+def publication_receipt(root, *, create=False):
+    """Independent runner state; consumers never learn authority from payloads."""
+    store = Path(os.environ.get('OXYFORMER_PUBLICATION_STORE',
+            Path.home() / '.local/state/oxyformer/publications'))
+    require(store.is_absolute(), 'publication store must be absolute')
+    root = Path(os.path.abspath(root))
+    require(not store.resolve().is_relative_to(root) and not root.is_relative_to(store.resolve()),
+        'publication store overlaps attempt')
+    if create:
+        store.mkdir(parents=True, exist_ok=True)
+    return directory_path(store) / sha256(str(root).encode()).hexdigest()
+
+
+def record_publication(root, result):
+    receipt = publication_receipt(root, create=True)
+    atomic_json(receipt.parent, receipt.name, {'attempt': str(root),
+        'result_sha256': sha256(result.to_json().encode()).hexdigest()})
+
+
+def verify_publication(root, result):
+    receipt = publication_receipt(root)
+    require(not os.path.lexists(str(receipt) + '.tainted'), f'tainted upstream fingerprint: {root}')
+    require(json.loads(read_regular(receipt)) == {'attempt': str(root),
+        'result_sha256': sha256(result.to_json().encode()).hexdigest()},
+        f'dependency publication fingerprint authority mismatch: {root}')
+
+
+def record_taints(check):
+    for root, detail in check['attempts'].items():
+        if detail['changed_paths']:
+            receipt = publication_receipt(root)
+            try:
+                atomic_json(receipt.parent, receipt.name + '.tainted', detail['changed_paths'])
+            except FileExistsError:
+                pass  # Taint is permanent; a later observer cannot clear it.
+
+
 def _stable(metadata):
     return (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_size,
-            metadata.st_mtime_ns, metadata.st_ctime_ns)
+        metadata.st_mtime_ns, metadata.st_ctime_ns)
 
 
 def directory_path(path):
@@ -30,7 +67,7 @@ def directory_path(path):
     path = Path(path).absolute()
     for component in (*reversed(path.parents), path):
         require(stat.S_ISDIR(component.lstat().st_mode),
-                f'input directory is a symlink or special file: {component}')
+            f'input directory is a symlink or special file: {component}')
     return path.resolve(strict=True)
 
 
@@ -51,11 +88,11 @@ def open_regular(path):
     with os.fdopen(fd, 'rb') as stream:
         opened = os.fstat(stream.fileno())
         require(stat.S_ISREG(opened.st_mode) and _stable(opened) == _stable(before),
-                f'input changed before reading: {path}')
+            f'input changed before reading: {path}')
         yield stream
         require(_stable(os.fstat(stream.fileno())) == _stable(before)
-                and _stable(regular_file_stat(path)) == _stable(before),
-                f'input changed while reading: {path}')
+            and _stable(regular_file_stat(path)) == _stable(before),
+            f'input changed while reading: {path}')
 
 
 def read_regular(path):
@@ -74,7 +111,7 @@ def regular_file_hash(path):
 def verify_inputs(request):
     """StageRequest.verify_inputs checks using nonblocking regular-file reads."""
     for path, digest in zip((request.config_path, request.task_path) + request.dependency_paths,
-                            (request.config_hash, request.task_hash) + request.dependency_hashes):
+        (request.config_hash, request.task_hash) + request.dependency_hashes):
         require(regular_file_hash(path) == digest, f'input hash mismatch: {path}')
 
 
@@ -87,7 +124,7 @@ def verify_result(result, request):
         path = (root / artifact.path).resolve(strict=True)
         require(path.is_relative_to(root), 'artifact escapes output directory')
         require(regular_file_hash(root / artifact.path) == artifact.sha256,
-                f'artifact hash mismatch: {artifact.path}')
+            f'artifact hash mismatch: {artifact.path}')
 
 
 def fingerprint_tree(root, *, exclude=()):
@@ -105,7 +142,7 @@ def fingerprint_tree(root, *, exclude=()):
             before = path.lstat()
             kind = stat.S_IFMT(before.st_mode)
             entry.update(type=kind, mode=stat.S_IMODE(before.st_mode),
-                         size=before.st_size, sha256=None, target=None)
+                size=before.st_size, sha256=None, target=None)
             if stat.S_ISLNK(kind):
                 entry['target'] = os.readlink(path)
             elif stat.S_ISREG(kind):
@@ -124,7 +161,7 @@ def fingerprint_tree(root, *, exclude=()):
                     names = sorted(child.name for child in children)
                 pending.append((path, relative, before))
                 pending.extend((path / name, name if relative == '.' else relative + '/' + name, None)
-                               for name in reversed(names))
+                    for name in reversed(names))
                 return
             if _stable(path.lstat()) != _stable(before):
                 raise OSError('entry changed while fingerprinting')
@@ -147,7 +184,7 @@ def fingerprint_tree(root, *, exclude=()):
 def changed_paths(before, after):
     """All added, removed, changed or unreadable entries, in stable order."""
     return sorted(name for name in before.keys() | after.keys()
-                  if before.get(name) != after.get(name) or 'error' in after.get(name, {}))
+        if before.get(name) != after.get(name) or 'error' in after.get(name, {}))
 
 
 def post_execution_check(before):
@@ -157,14 +194,14 @@ def post_execution_check(before):
         actual = fingerprint_tree(root)
         changed = changed_paths(expected, actual)
         attempts[root] = {'status': 'tainted' if changed else 'unchanged',
-                          'changed_paths': changed, 'fingerprint': actual}
+            'changed_paths': changed, 'fingerprint': actual}
     return {'status': 'fail' if any(a['changed_paths'] for a in attempts.values()) else 'pass',
-            'attempts': attempts}
+        'attempts': attempts}
 
 
 def publication_view(entries):
     return {name: entry for name, entry in entries.items()
-            if name not in PUBLICATION_EXCLUSIONS}
+        if name not in PUBLICATION_EXCLUSIONS}
 
 
 def publication_tree(root):
@@ -231,11 +268,11 @@ def publish_result(root, result, *, owned_controls=False):
     """Seal a producer's own completed tree; a consumer never calls this."""
     root = directory_path(root)
     collisions = [str(root / name) for name in PUBLICATION_EXCLUSIONS
-                  if os.path.lexists(root / name)]
+        if os.path.lexists(root / name)]
     require(owned_controls or not collisions, 'publication controls already exist')
     if collisions and result.status == 'pass':
         result = replace(result, status='fail', artifacts=(),
-                         message='reserved publication control collision: ' + ', '.join(collisions))
+            message='reserved publication control collision: ' + ', '.join(collisions))
     if result.status != 'pass':
         _replace_control(root, RESULT, result.to_json())
         return result
@@ -248,24 +285,25 @@ def publish_result(root, result, *, owned_controls=False):
             errors = [str(root / name) for name, entry in entries.items() if 'error' in entry]
             require(not errors, 'publication fingerprint unreadable: ' + ', '.join(errors))
             value = {'schema_version': 1, 'attempt': str(root),
-                     'excluded': list(PUBLICATION_EXCLUSIONS), 'entries': entries,
-                     'stage_result': result.to_dict(),
-                     'control_modes': {name: stat.S_IMODE((root / name).lstat().st_mode)
-                                       for name in PUBLICATION_EXCLUSIONS}}
+                'excluded': list(PUBLICATION_EXCLUSIONS), 'entries': entries,
+                'stage_result': result.to_dict(),
+                'control_modes': {name: stat.S_IMODE((root / name).lstat().st_mode)
+                    for name in PUBLICATION_EXCLUSIONS}}
             _replace_control(root, FINGERPRINT, canonical_json(value))
             if publication_tree(root) == entries:
                 break
         else:
             raise ValueError('attempt changed during fingerprint publication')
         fingerprint = ArtifactRecord(path=FINGERPRINT, sha256=regular_file_hash(root / FINGERPRINT),
-                                     lineage=result.artifacts[0].lineage, kind='attempt_fingerprint')
+            lineage=result.artifacts[0].lineage, kind='attempt_fingerprint')
         published = replace(result, artifacts=(*result.artifacts, fingerprint))
         _replace_control(root, RESULT, published.to_json())
         require(publication_tree(root) == entries, 'attempt changed during result publication')
+        record_publication(root, published)
         return published
     except BaseException as exc:
         failed = replace(result, status='fail', artifacts=(),
-                         message='publication failed: ' + (str(exc).strip() or type(exc).__name__))
+            message='publication failed: ' + (str(exc).strip() or type(exc).__name__))
         _replace_control(root, RESULT, failed.to_json())
         return failed
 
@@ -275,36 +313,37 @@ def verify_published_tree(root, result, expected_hash=None):
     root = directory_path(root)
     records = [record for record in result.artifacts if record.path == FINGERPRINT]
     require(len(records) == 1 and records[0].kind == 'attempt_fingerprint',
-            'dependency publication fingerprint missing')
+        'dependency publication fingerprint missing')
     require(expected_hash is None or records[0].sha256 == expected_hash,
-            'dependency published fingerprint identity changed')
+        'dependency published fingerprint identity changed')
     path = root / FINGERPRINT
     require(not path.is_symlink() and path.resolve().is_relative_to(root),
-            'dependency fingerprint escapes attempt')
+        'dependency fingerprint escapes attempt')
     raw = read_regular(path)
     require(sha256(raw).hexdigest() == records[0].sha256, 'dependency fingerprint hash mismatch')
     value = json.loads(raw)
     require(isinstance(value, dict) and set(value) == {
-                'schema_version', 'attempt', 'excluded', 'entries', 'stage_result', 'control_modes'}
-            and value['schema_version'] == 1 and value['attempt'] == str(root)
-            and value['excluded'] == list(PUBLICATION_EXCLUSIONS)
-            and isinstance(value['entries'], dict), 'invalid dependency fingerprint record')
+            'schema_version', 'attempt', 'excluded', 'entries', 'stage_result', 'control_modes'}
+        and value['schema_version'] == 1 and value['attempt'] == str(root)
+        and value['excluded'] == list(PUBLICATION_EXCLUSIONS)
+        and isinstance(value['entries'], dict), 'invalid dependency fingerprint record')
     original_result = replace(result, artifacts=tuple(a for a in result.artifacts if a.path != FINGERPRINT))
     require(original_result.to_dict() == value['stage_result'], 'dependency result record changed since publication')
     require(bool(original_result.artifacts) and
-            records[0].lineage == original_result.artifacts[0].lineage,
-            'dependency fingerprint artifact lineage changed since publication')
+        records[0].lineage == original_result.artifacts[0].lineage,
+        'dependency fingerprint artifact lineage changed since publication')
     actual = fingerprint_tree(root)
     changed = changed_paths(value['entries'], publication_view(actual))
     for name in PUBLICATION_EXCLUSIONS:
         entry = actual.get(name, {})
         if ('error' in entry or entry.get('type') != stat.S_IFREG or
-                entry.get('mode') != value['control_modes'].get(name)):
+            entry.get('mode') != value['control_modes'].get(name)):
             changed.append(name)
     require(actual.get(FINGERPRINT, {}).get('sha256') == records[0].sha256,
-            'dependency fingerprint changed during verification')
+        'dependency fingerprint changed during verification')
     require(actual.get(RESULT, {}).get('sha256') == sha256(result.to_json().encode()).hexdigest(),
-            'dependency result record changed during verification')
+        'dependency result record changed during verification')
     require(not changed, 'dependency fingerprint mismatch (tainted): ' +
-            ', '.join(str(root / name) for name in sorted(set(changed))))
+        ', '.join(str(root / name) for name in sorted(set(changed))))
+    verify_publication(root, result)
     return actual
