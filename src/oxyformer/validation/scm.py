@@ -7,12 +7,12 @@ observed law, including measurement error, without fitting an oracle regression.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from types import MappingProxyType
 from itertools import product
 from fractions import Fraction
 from functools import lru_cache
-from typing import Literal
+from typing import Literal, get_args, get_origin, get_type_hints
 
 import numpy as np
 from scipy.special import expit, log_expit, logsumexp
@@ -56,35 +56,98 @@ NUMERIC_DOMAIN = MappingProxyType(_expanded_numeric_box)
 del _expanded_numeric_box
 
 
-def validate_numeric(values, kind, name, *, allow_zero=False):
-    """Refuse unsupported inputs before arithmetic; never normalize or clip.
+def numeric_scalar(value, name):
+    """Read a raw real scalar exactly, before any container/dtype promotion."""
+    require(isinstance(value, (int, float, np.integer, np.floating))
+            and not isinstance(value, (bool, np.bool_)), f"{name} must be numeric")
+    require(isinstance(value, (int, np.integer)) or bool(np.isfinite(value)),
+            f"{name} must be finite")
+    return exact(value)
 
-    The domain is fixed, not caller-configurable. Zero is an explicit disabled
-    mechanism/zero-weight/identity exception for otherwise positive quantities.
-    This check is for declared inputs, not intermediate values or Gaussian draws.
+
+def numeric_array(values, name):
+    # dtype=object captures each supplied scalar. An already-created numeric
+    # ndarray supplies its stored values; information lost by its caller cannot
+    # be reconstructed here. Never call bare asarray before this boundary.
+    try:
+        array = np.asarray(values, dtype=object)
+    except (TypeError, ValueError) as exc:
+        from oxyformer.provenance import ContractError
+        raise ContractError(f"{name} must be a rectangular numeric sequence") from exc
+    for value in array.flat:
+        numeric_scalar(value, name)
+    return array
+
+
+def binary64_scalar(value, name):
+    """Lossless admission to the authoritative finite JSON float records."""
+    rational = numeric_scalar(value, name)
+    try:
+        converted = float(rational)
+    except OverflowError:
+        converted = float("inf")
+    require(np.isfinite(converted) and exact(converted) == rational,
+            f"{name} is not representable without loss in a binary64 record")
+    return converted
+
+
+def integer_scalar(value, name):
+    rational = numeric_scalar(value, name)
+    require(rational.denominator == 1, f"{name} must be an exact integer")
+    return int(rational)
+
+
+def normalize_record_numbers(record):
+    """Normalize raw numbers/sequences before Immutable's JSON coercion.
+
+    Only this unit's records use this adapter. The shared policy/record API is
+    unchanged; supplied ShiftOrStayPolicy objects already own their serialized
+    binary64 values. No unseen pre-construction policy values are recoverable.
+    """
+    def convert(value, annotation, name):
+        if annotation is float:
+            return binary64_scalar(value, name)
+        if annotation is int:
+            return integer_scalar(value, name)
+        args = get_args(annotation)
+        if get_origin(annotation) is tuple:
+            require(isinstance(value, (tuple, list, np.ndarray)), f"{name} must be a sequence")
+            if len(args) == 2 and args[1] is Ellipsis:
+                return tuple(convert(v, args[0], name) for v in value)
+            require(len(value) == len(args), f"{name} has wrong tuple length")
+            return tuple(convert(v, t, name) for v, t in zip(value, args))
+        if type(None) in args and value is not None:
+            return convert(value, next(a for a in args if a is not type(None)), name)
+        return value
+    hints = get_type_hints(type(record))
+    for field in fields(record):
+        object.__setattr__(record, field.name,
+                           convert(getattr(record, field.name), hints[field.name], field.name))
+
+
+def validate_numeric(values, kind, name, *, allow_zero=False):
+    """Refuse unsupported raw inputs using exact, per-element comparisons.
+
+    Domain edges are the exact binary values of NUMERIC_DOMAIN. Zero is an
+    explicit disabled-mechanism/weight/identity exception. See suite_a.yaml for
+    the scalar/container and serialization contract. Return the captured input
+    so consumers never repeat an implicit NumPy promotion after validation.
     """
     lower, upper = NUMERIC_DOMAIN[kind]
-    array = np.asarray(values)
-    if array.dtype.kind == "O":
-        require(all(isinstance(v, (int, float, np.integer, np.floating))
-                    and not isinstance(v, (bool, np.bool_)) for v in array.flat), f"{name} must be numeric")
-        valid = np.array([(isinstance(v, (int, np.integer)) or np.isfinite(v))
-                          and exact(lower) <= exact(v) <= exact(upper) for v in array.flat]).reshape(array.shape)
-    else:
-        require(array.dtype.kind in "fiu", f"{name} must be numeric")
-        valid = np.isfinite(array) & (array >= lower) & (array <= upper)
-    if allow_zero:
-        valid |= array == 0
-    require(bool(valid.all()),
-            f"{name} outside supported numeric domain: [{lower}, {upper}]"
+    array = numeric_array(values, name)
+    lower, upper = exact(lower), exact(upper)
+    valid = all(lower <= exact(v) <= upper or (allow_zero and exact(v) == 0)
+                for v in array.flat)
+    require(valid, f"{name} outside supported numeric domain: [{float(lower)}, {float(upper)}]"
             + (" or zero" if allow_zero else ""))
+    return array
 
 
 def validate_components(components):
-    require(bool(components), "SCM assignment needs nonempty support")
+    require(len(components) > 0, "SCM assignment needs nonempty support")
     validate_numeric(components, "dose", "support endpoints")
-    require(all(lo < hi for lo, hi in components), "invalid support component")
-    require(all(first[1] < second[0] for first, second in zip(components, components[1:])),
+    require(all(exact(lo) < exact(hi) for lo, hi in components), "invalid support component")
+    require(all(exact(first[1]) < exact(second[0]) for first, second in zip(components, components[1:])),
             "support components must be sorted and separated")
 
 
@@ -97,7 +160,9 @@ def validate_policy_domain(policy):
 
 
 def validate_seed(seed):
-    require(type(seed) is int and 0 <= seed < 2**64, "seed must be an integer in [0, 2**64)")
+    seed = integer_scalar(seed, "seed")
+    require(0 <= seed < 2**64, "seed must be an integer in [0, 2**64)")
+    return seed
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -122,10 +187,11 @@ class CovariateFrame(Immutable):
     biomarker_available: tuple[bool, ...]
 
     def __post_init__(self):
-        Immutable.__post_init__(self)
         validate_numeric(self.coordinates, "coordinate", "coordinates")
         validate_numeric([v for row in self.x for v in row if v is not None], "covariate", "X")
         validate_numeric(self.weights, "weight", "origin weights", allow_zero=True)
+        normalize_record_numbers(self)
+        Immutable.__post_init__(self)
         n = len(self.original_ids)
         require(n > 0, "empty covariate frame")
         unique(self.original_ids, "original IDs")
@@ -178,13 +244,14 @@ class SCMConfig(Immutable):
     noise_sd: float = 1.0
 
     def __post_init__(self):
-        Immutable.__post_init__(self)
         validate_numeric((self.beta, self.local_strength, self.regional_strength),
                          "coefficient", "effect/confounding coefficients")
         for name in ("near_scale", "noise_sd", "exposure_error", "migration",
                      "registration_probability", "denominator_error"):
             validate_numeric(getattr(self, name), name, name,
                              allow_zero=name not in ("near_scale", "registration_probability"))
+        normalize_record_numbers(self)
+        Immutable.__post_init__(self)
         expected = {self.effect}
         for scale in ("local", "regional"):
             kind = getattr(self, scale + "_confounding")
@@ -234,11 +301,14 @@ class LatentState:
     denominator_factor: Fraction | float = 1.0
 
     def __post_init__(self):
+        for name in ("local", "regional", "illness"):
+            object.__setattr__(self, name, binary64_scalar(getattr(self, name), name))
         require(self.local in (-1., 0., 1.) and self.regional in (-1., 0., 1.)
                 and self.illness in (0., 1.), "invalid latent causes")
         validate_numeric(abs(self.error), "exposure_error", "latent exposure error", allow_zero=True)
         factor = self.denominator_factor
-        require(isinstance(factor, Fraction) or np.isfinite(factor), "invalid latent denominator factor")
+        if not isinstance(factor, Fraction):
+            numeric_scalar(factor, "latent denominator factor")
         factor = exact(factor)
         require(0 < factor < 2, "invalid latent denominator factor")
         object.__setattr__(self, "denominator_factor", factor)
@@ -493,7 +563,7 @@ def exact_shift_intervals(components, delta):
     This continuous truth geometry precedes serialization of observed doses.
     """
     validate_numeric(delta, "delta", "delta", allow_zero=True)
-    if components:
+    if len(components):
         validate_components(components)
     shift = exact(delta)
     if shift == 0:
@@ -646,7 +716,9 @@ class AssignmentLaw:
     """
     def __init__(self, frame, row, state, config, components):
         validate_components(components)
-        require(type(row) is int and 0 <= row < len(frame.original_ids), "invalid frame row")
+        row = integer_scalar(row, "frame row")
+        require(0 <= row < len(frame.original_ids), "invalid frame row")
+        components = tuple(tuple(binary64_scalar(v, "support endpoint") for v in c) for c in components)
         self.tail_decay = Fraction(128)
         self.components = components
         self.error = exact(state.error)
@@ -692,14 +764,14 @@ class AssignmentLaw:
                 +piece.peak_kernel-self.kernel_reference)
 
     def contains(self, a_observed):
-        a = np.asarray(a_observed)
+        a = numeric_array(a_observed, "recorded dose")
         return np.array([any(p.lower+self.error <= exact(value) <= p.upper+self.error
                              for p in self.pieces) for value in a.ravel()]).reshape(a.shape)
 
     def log_density(self, a_observed):
         # Convenience for ordinary recorded exposures. Truth posterior evaluation
         # instead uses kernel_at and LocalCoordinates before relative conversion.
-        a = np.asarray(a_observed)
+        a = numeric_array(a_observed, "recorded dose")
         flat = []
         for value in a.ravel():
             at = exact(value)
