@@ -1212,3 +1212,33 @@ def test_exact_centroid_boundary_orientations(tmp_path, axis, offset, missing_st
     frame, qc = build_exposure(sources(tile), geography, replace(SPEC, scenarios=(scenario,)))
     assert bool(frame.missing_population.iloc[0] > 0) == missing_strip
     assert bool(frame.pressure_mmhg.isna().iloc[0]) == missing_strip
+
+
+@pytest.mark.parametrize('dtype', ['complex64', 'complex128'])
+@pytest.mark.parametrize('imaginary', [float('nan'), 2.0])
+def test_complex_dem_is_rejected_before_discarding_components(tmp_path, dtype, imaginary):
+    path = tmp_path / 'complex-elevation.tif'
+    with rasterio.open(path, 'w', driver='GTiff', height=1, width=1, count=1,
+                       dtype=dtype, crs='EPSG:5070', transform=from_origin(0, 100, 100, 100)) as ds:
+        ds.write(np.array([[complex(0, imaginary)]], dtype=dtype), 1)
+        ds.set_band_unit(1, 'm')
+    tile = DemTile(resource_id='complex', path=str(path), sha256=file_hash(path), crs='EPSG:5070',
+                   nodata=None, vertical_unit='m', vertical_datum='NAVD88')
+    geography = blocks(pop=(1, 0)).iloc[:1].copy()
+    with pytest.raises(ContractError, match='real numeric elevation'):
+        build_exposure(sources(tile), geography, SPEC)
+
+
+@pytest.mark.parametrize('dtype', ['int16', 'uint16', 'float32', 'float64'])
+def test_real_dem_scalar_types_remain_accepted(tmp_path, dtype):
+    path = tmp_path / 'real-elevation.tif'
+    with rasterio.open(path, 'w', driver='GTiff', height=1, width=1, count=1,
+                       dtype=dtype, crs='EPSG:5070', transform=from_origin(0, 100, 100, 100)) as ds:
+        ds.write(np.array([[100]], dtype=dtype), 1)
+        ds.set_band_unit(1, 'm')
+    tile = DemTile(resource_id='real', path=str(path), sha256=file_hash(path), crs='EPSG:5070',
+                   nodata=None, vertical_unit='m', vertical_datum='NAVD88')
+    frame, qc = build_exposure(sources(tile), blocks(pop=(1, 0)).iloc[:1].copy(), SPEC)
+    assert frame.missing_population.eq(0).all()
+    assert frame.pressure_mmhg.eq(float(pressure_mmhg(100))).all()
+    assert qc['population'] == 1

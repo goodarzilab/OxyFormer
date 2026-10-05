@@ -134,6 +134,7 @@ class RasterSampler:
                     require(tile.fallback_reason is None, 'primary tile has fallback reason')
                 ds = self.stack.enter_context(rasterio.open(raster_path))
                 require(ds.count == 1 and ds.crs is not None, 'DEM CRS missing or wrong band count')
+                require(np.dtype(ds.dtypes[0]).kind in 'iuf', 'DEM must contain real numeric elevation scalars')
                 embedded, declared = CRS(ds.crs), CRS(tile.crs)
                 _validate_vertical_crs(embedded)
                 _validate_vertical_crs(declared)
