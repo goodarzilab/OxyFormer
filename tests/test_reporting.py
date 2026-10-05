@@ -979,7 +979,9 @@ def test_fresh_round2_exact_county_share_boundary_and_neighbors(case, direction)
         assert metric['G_eff'] == pytest.approx(2450/29)
 
 
-@pytest.mark.parametrize('mode', ['shared', 'mismatched', 'alternate_approval', 'protected_output'])
+@pytest.mark.parametrize('mode', ['shared', 'mismatched', 'alternate_approval', 'protected_output',
+    'configs_alias_shared', 'configs_alias_protected', 'renamed_configs_shared',
+    'renamed_configs_protected', 'config_file_alias_shared'])
 def test_installed_reporting_uses_repository_config_binding(produced_primary_case, tmp_path, monkeypatch, mode):
     same_case, different_fit = produced_primary_case
     b, m, receipts = same_case
@@ -993,8 +995,19 @@ def test_installed_reporting_uses_repository_config_binding(produced_primary_cas
                     ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
     repository = tmp_path / 'project'
     config = repository / 'configs/reporting.yaml'
-    config.parent.mkdir(parents=True)
-    config.write_bytes(CONFIG.read_bytes())
+    if mode.startswith(('configs_alias_', 'renamed_configs_')):
+        storage = tmp_path / 'config-storage' / ('configs' if mode.startswith('configs_alias_') else 'settings')
+        storage.mkdir(parents=True)
+        repository.mkdir()
+        config.parent.symlink_to(storage, target_is_directory=True)
+    else:
+        config.parent.mkdir(parents=True)
+    if mode == 'config_file_alias_shared':
+        stored_config = tmp_path / 'stored-reporting-configuration.yaml'
+        stored_config.write_bytes(CONFIG.read_bytes())
+        config.symlink_to(stored_config)
+    else:
+        config.write_bytes(CONFIG.read_bytes())
     task = json.loads(Path(request.task_path).read_text())
     approved = config.with_name('approvals.yaml')
     approved.write_bytes(Path(task['approvals']).read_bytes())
@@ -1008,7 +1021,7 @@ def test_installed_reporting_uses_repository_config_binding(produced_primary_cas
     request = replace(request, config_path=str(config), config_hash=file_hash(config),
                       task_hash=file_hash(request.task_path), dependency_paths=tuple(task.values()),
                       dependency_hashes=tuple(file_hash(p) for p in task.values()))
-    if mode == 'protected_output':
+    if mode == 'protected_output' or mode.endswith('_protected'):
         request = replace(request, output_dir=str(repository / 'src/report-output'))
     request_path = tmp_path / 'installed-request.json'
     request_path.write_text(request.to_json())
@@ -1027,7 +1040,7 @@ print(stage.run_stage(request).to_json())
                                capture_output=True, text=True, timeout=60)
     assert completed.returncode == 0, completed.stderr
     result = StageResult.from_json(completed.stdout)
-    if mode == 'protected_output':
+    if mode == 'protected_output' or mode.endswith('_protected'):
         assert result.status == 'fail'
         assert not result.artifacts
         assert not Path(request.output_dir).exists()
@@ -1039,7 +1052,7 @@ print(stage.run_stage(request).to_json())
         assert not report['releasable']
         assert any('approval path is not owner registry' in g['reason'] for g in report['gates'])
         return
-    if mode == 'shared':
+    if mode == 'shared' or mode.endswith('_shared'):
         assert result.status == 'pass', report['gates']
         assert report['state'] == 'released'
     else:
@@ -1255,3 +1268,79 @@ def test_invalid_approval_metadata_keeps_derived_diagnostics(case, tmp_path, mon
     assert not report['releasable']
     assert report['diagnostics'] == json.loads(canonical_json(summarize(case[0], case[1])))
     assert len(report['estimators']) == 2
+
+
+def repository_request(case, tmp_path, monkeypatch, repository):
+    """Bind synthetic owner inputs to a repository independently of its storage."""
+    request = make_request(tmp_path, case, monkeypatch)
+    task = json.loads(Path(request.task_path).read_text())
+    registry = repository / 'configs/approvals.yaml'
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_bytes(Path(task['approvals']).read_bytes())
+    config = registry.with_name('reporting.yaml')
+    config.write_bytes(CONFIG.read_bytes())
+    monkeypatch.setattr(stage, 'OWNER_APPROVALS', registry)
+    task['approvals'] = str(registry)
+    Path(request.task_path).write_text(json.dumps(task))
+    return replace(request, config_path=str(config), config_hash=file_hash(config),
+                   task_hash=file_hash(request.task_path), dependency_paths=tuple(task.values()),
+                   dependency_hashes=tuple(file_hash(p) for p in task.values()))
+
+
+@pytest.mark.parametrize('protected', ['outputs', 'report', 'src', 'configs'])
+@pytest.mark.parametrize('route', ['protected_alias', 'direct_target', 'alternate_alias',
+                                  'chain', 'missing_target', 'equal_target'])
+def test_protected_storage_alias_refuses_before_creation(case, tmp_path, monkeypatch, protected, route):
+    repository = tmp_path / 'synthetic-repository'
+    repository.mkdir()
+    storage = tmp_path / 'protected-storage'
+    if route != 'missing_target' or protected == 'configs':
+        storage.mkdir()
+    leaf = repository / protected
+    if route == 'chain':
+        intermediate = tmp_path / 'intermediate'
+        intermediate.symlink_to(storage, target_is_directory=True)
+        leaf.symlink_to(intermediate, target_is_directory=True)
+    else:
+        leaf.symlink_to(storage, target_is_directory=True)
+    request = repository_request(case, tmp_path, monkeypatch, repository)
+    if route == 'alternate_alias':
+        alias = tmp_path / 'other-alias'
+        alias.symlink_to(storage, target_is_directory=True)
+        output = alias / 'new-report'
+    elif route == 'direct_target':
+        output = storage / 'new-report'
+    elif route == 'equal_target':
+        output = storage
+    else:
+        output = leaf / 'missing-suffix/new-report'
+    request = replace(request, output_dir=str(output))
+    before = {str(p.relative_to(tmp_path)) for p in tmp_path.rglob('*')}
+    result = run_stage(request)
+    assert result.status == 'fail'
+    assert result.artifacts == ()
+    assert result.request_hash == request.content_hash
+    assert {str(p.relative_to(tmp_path)) for p in tmp_path.rglob('*')} == before
+
+
+@pytest.mark.parametrize('route', ['new_directory', 'isolated_alias', 'alias_missing_suffix', 'lookalike_prefix'])
+def test_isolated_output_alias_remains_releasable(case, tmp_path, monkeypatch, route):
+    repository = tmp_path / 'synthetic-repository'
+    request = repository_request(case, tmp_path, monkeypatch, repository)
+    if route == 'lookalike_prefix':
+        output = repository / 'outputs-independent/new-report'
+    elif route == 'new_directory':
+        output = tmp_path / 'new-parent/new-report'
+    else:
+        storage = tmp_path / 'isolated-storage'
+        if route == 'isolated_alias':
+            storage.mkdir()
+        alias = tmp_path / 'isolated-alias'
+        alias.symlink_to(storage, target_is_directory=True)
+        output = alias / 'new-report'
+    request = replace(request, output_dir=str(output))
+    result = run_stage(request)
+    assert result.status == 'pass', result.message
+    result.verify(request)
+    assert json.loads((output / 'report.json').read_text())['state'] == 'released'
+    assert run_stage(request) == result

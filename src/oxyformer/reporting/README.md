@@ -10,7 +10,13 @@ code's repository. A non-editable installation uses the repository
 `configs/reporting.yaml` at the hash-bound `StageRequest.config_path`; its
 adjacent `approvals.yaml` is the only accepted registry. Installed code never
 looks for owner approvals beside `site-packages`. Output protection uses that
-same repository. Results are created once in `output_dir`:
+same repository. The request's named repository remains the anchor when
+configs/ or reporting.yaml is a symlink; approval identity is then compared
+after resolution. Output destinations and all four protected directory roots
+are resolved consistently before creating directories or files, including
+nonexistent suffixes. Stable aliases into protected storage are refused;
+isolated output aliases and distinct sibling paths remain usable.
+Results are created once in `output_dir`:
 `report.json`, self-contained `report.html`, and `estimators.svg`. Existing
 outputs are never overwritten. Identical reruns reverify inputs and existing
 bytes and return the same result; matching partial publications are completed.

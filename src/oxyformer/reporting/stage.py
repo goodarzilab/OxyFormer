@@ -32,7 +32,10 @@ OWNER_APPROVALS = (_SOURCE_ROOT / "configs" / "approvals.yaml"
 def _owner_registry(request):
     if OWNER_APPROVALS is not None:
         return OWNER_APPROVALS
-    config = Path(request.config_path).resolve()
+    # The frozen request names the repository, even when its configs directory
+    # or reporting.yaml is a symlink. Resolve only for filesystem comparisons,
+    # after selecting the adjacent registry and repository root.
+    config = Path(request.config_path)
     require(config.name == "reporting.yaml" and config.parent.name == "configs",
             "installed reporting requires repository configs/reporting.yaml")
     return config.with_name("approvals.yaml")
@@ -109,7 +112,8 @@ def _write_report(request, report, bundle):
     root = Path(request.output_dir).resolve()
     repository = _owner_registry(request).parents[1].resolve()
     for protected in (repository / "outputs", repository / "report", repository / "src", repository / "configs"):
-        require(not root.is_relative_to(protected), "report output overlaps protected repository path")
+        require(not root.is_relative_to(protected.resolve()),
+                "report output overlaps protected repository path")
     require(not any(Path(p).resolve().is_relative_to(root) for p in
                     (request.config_path, request.task_path) + request.dependency_paths),
             "report output must be isolated from inputs")
