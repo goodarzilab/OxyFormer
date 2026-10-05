@@ -1356,3 +1356,46 @@ def test_assignment_combined_slope_crosses_zero_exactly(direction):
     slope = Fraction(-4)+1/Fraction(scale)
     assert law.pieces[0].rate == slope
     assert (slope > 0)-(slope < 0) == -direction
+
+
+@pytest.mark.parametrize("beta", [1e-20, -1e-20])
+def test_round1_tiny_effect_survives_baseline_and_denominator_amplification(beta):
+    from fractions import Fraction
+    error = .9999999999999999
+    c = config("linear", beta=beta, denominator_error=error)
+    sample = generate_suite_a(frame(1, 1), c, policy())
+    expected = float(Fraction(4, 5)*Fraction(beta)*(1/(1-Fraction(error))+1/(1+Fraction(error))))
+    assert abs(expected) > 1e-5
+    assert sample.observed_law_truth.value == pytest.approx(expected, rel=1e-12, abs=1e-12)
+    assert sample.structural_causal_truth.value == pytest.approx(expected, rel=1e-12, abs=1e-12)
+
+
+@pytest.mark.parametrize("true_dose", [1., 1.25])
+def test_round1_noncount_sampler_keeps_true_dose_before_error_serialization(monkeypatch, true_dose):
+    from fractions import Fraction
+    from oxyformer.validation.scm import LocalCoordinates
+    from oxyformer.validation.generators import _sample_observations
+    def fixed_draw(self, index, u):
+        return LocalCoordinates(Fraction(true_dose)+self.error, Fraction(1), np.asarray(0., dtype=np.longdouble))
+    monkeypatch.setattr(AssignmentLaw, "quantile_coordinates", fixed_draw)
+    observations = _sample_observations(frame(8, 1), config(beta=200., exposure_error=.4, noise_sd=0.), policy(), 0)
+    assert float(Fraction(true_dose)+Fraction(.4)) in observations.a
+    assert observations.y == (float(50+200*Fraction(true_dose)),)*8
+
+
+@pytest.mark.parametrize("family", ["linear", "nonlinear", "sign_changing"])
+@pytest.mark.parametrize("beta", [-1e-20, 1e-20])
+@pytest.mark.parametrize("registration", [.006500000000000001, .65, 1.])
+def test_amplified_small_effect_families_match_independent_contrasts(family, beta, registration):
+    from fractions import Fraction
+    error = .9999999999999999
+    functions = {"linear": lambda a: a, "nonlinear": lambda a: np.sin(a/2),
+                 "sign_changing": lambda a: (a-5)**2/10}
+    unit = functions[family]
+    integral = quad(lambda a: (unit(a+2)-unit(a))/10, 0, 8, epsabs=1e-13)[0]
+    multiplier = Fraction(beta)*Fraction(registration)/(1-Fraction(error)**2)
+    expected = float(multiplier)*integral
+    result = generate_suite_a(frame(1, 1), config(family, beta=beta, denominator_error=error,
+                              registration_probability=registration), policy())
+    assert result.observed_law_truth.value == pytest.approx(expected, abs=1e-12, rel=1e-12)
+    assert result.structural_causal_truth.value == pytest.approx(expected, abs=1e-12, rel=1e-12)
