@@ -166,6 +166,39 @@ def coverage_decisions(bundle, manifest, approved):
     return gates, warnings, investigate
 
 
+def primary_input_consistency(estimates):
+    """Plan 4.4 under the merged one_step/cv_tmle producer convention.
+
+    The first four parents identify initial OOFNuisances, LoadedData,
+    SplitManifest and policy, in that order. Additional parents are provenance,
+    not equality constraints. Comparators and disclosed sensitivities have
+    their own inputs. Return a gate rather than raising so diagnostics survive.
+    """
+    primary = {e.method: e for e in estimates
+               if e.method == "mtp_one_step" or e.method in CV_TMLE_METHODS}
+    one = primary.get("mtp_one_step")
+    paired = one is not None and any(method in CV_TMLE_METHODS for method in primary)
+    reference = one.lineage.parent_hashes[:4] if one is not None else None
+    failures, inputs = [], {}
+    for method, estimate in primary.items():
+        parents = estimate.lineage.parent_hashes
+        inputs[method] = {"parent_hashes": list(parents), "split_hash": estimate.lineage.split_hash}
+        if len(parents) < 4:
+            failures.append(f"{method}: at least four ordered input parents required")
+            continue
+        if parents[2] != estimate.lineage.split_hash:
+            failures.append(f"{method}: SplitManifest parent differs from split_hash")
+        if reference is not None and parents[:4] != reference:
+            failures.append(f"{method}: initial OOF/data/split/policy prefix differs from mtp_one_step")
+    status = "failed" if failures else "pass" if paired else "missing"
+    return {"gate": "primary_input_consistency", "status": status,
+            "reason": "; ".join(failures) if failures else
+                      "shared initial OOF/data/split/policy verified" if paired else
+                      "one-step and CV-TMLE inputs both required",
+            "parent_roles": ["initial OOFNuisances", "LoadedData", "SplitManifest", "policy"],
+            "inputs": inputs}
+
+
 def evaluate(bundle, manifest, receipts, approvals, config_hash):
     """Pure report assembly apart from verifying upstream immutable artifacts."""
     report = {"schema_version": 1, "stage": manifest.stage, "state": "blocked", "releasable": False,
@@ -174,10 +207,16 @@ def evaluate(bundle, manifest, receipts, approvals, config_hash):
               "bundle_hash": bundle.content_hash, "manifest_hash": manifest.content_hash,
               "receipts_hash": receipts.content_hash, "config_hash": config_hash}
     gates = report["gates"]
+    gates.append(primary_input_consistency(bundle.estimates))
     scope = {k: report[k] for k in ("stage", "bundle_hash", "manifest_hash", "receipts_hash", "config_hash")}
     try:
         owner = approval_owner(approvals)
         report["diagnostics"] = summarize(bundle, manifest)
+        # Keep the existing common-split requirement for every bundled estimator,
+        # but record failure after computing diagnostics rather than discarding them.
+        splits = {e.lineage.split_hash for e in bundle.estimates}
+        if None in splits or len(splits) != 1:
+            gates.append({"gate": "input_consistency", "status": "failed", "reason": "estimator split mismatch"})
         report["multiplicity"] = multiplicity(bundle.p_values, manifest.mortality_family)
         methods = [e.method for e in bundle.estimates]
         paired = "mtp_one_step" in methods and any(m in CV_TMLE_METHODS for m in methods)

@@ -71,8 +71,6 @@ def summarize(bundle, manifest):
         bundle.spec.assert_compatible(estimate.spec)
         require(set(estimate.seed_ids) == set(manifest.seed_ids), "estimator seed mismatch")
         require(set(estimate.original_ids) == set(bundle.original_ids), "estimator original IDs mismatch")
-    splits = {e.lineage.split_hash for e in bundle.estimates}
-    require(None not in splits and len(splits) == 1, "estimator split mismatch")
     aligned = align_estimates(estimates)
     county = dict(zip(bundle.original_ids, bundle.counties))
     locations = dict(bundle.county_locations)
