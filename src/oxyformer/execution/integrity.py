@@ -16,6 +16,9 @@ from .paths import atomic_json, atomic_write, output_path
 FINGERPRINT = "_execution/fingerprint.json"
 RESULT = "_execution/result.json"
 PUBLICATION_EXCLUSIONS = (FINGERPRINT, RESULT)
+# The publisher sets this on its OWN late records before atomic replacement.
+# Consumers check the fixed convention, never adopt a current upstream mtime.
+CONTROL_MTIME_NS = 0
 
 
 def _stable(metadata):
@@ -120,6 +123,7 @@ def _replace_control(root, relative, text):
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
+        os.utime(temporary, ns=(CONTROL_MTIME_NS, CONTROL_MTIME_NS))
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):
@@ -205,7 +209,8 @@ def verify_published_tree(root, result, expected_hash=None):
     for name in PUBLICATION_EXCLUSIONS:
         entry = actual.get(name, {})
         if ('error' in entry or entry.get('type') != stat.S_IFREG or
-                entry.get('mode') != value['control_modes'].get(name)):
+                entry.get('mode') != value['control_modes'].get(name) or
+                entry.get('mtime_ns') != CONTROL_MTIME_NS):
             changed.append(name)
     require(actual.get(FINGERPRINT, {}).get('sha256') == records[0].sha256,
             'dependency fingerprint changed during verification')

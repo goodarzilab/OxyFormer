@@ -21,8 +21,7 @@ def main(argv=None):
     from oxyformer.execution.identity import verify_module_origins
     try:
         verify_module_origins(args['repo'])
-        result = run(**args, report=lambda value: print(f'stage returned {value.status}: {value.message}', flush=True),
-                     validate_imports=lambda: verify_module_origins(args['repo']))
+        result = run(**args, report=lambda value: print(f'stage returned {value.status}: {value.message}', flush=True))
     except (ValueError, OSError, KeyError, TypeError, subprocess.CalledProcessError) as exc:
         print(f'blocked: {exc}', file=sys.stderr)
         return 2
