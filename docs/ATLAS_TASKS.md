@@ -127,3 +127,7 @@ propagate rather than pretending a baseline or taint marker is absent. Taint
 writes and the final publication-authority commit share a short external lock;
 the commit checks every direct and transitive dependency marker under that lock.
 Archive hashing and scientific work run outside the lock.
+DEM payload inspection verifies the whole payload digest and keeps one stable
+file observation open across member/header inspection, including validation
+errors. An initial invalid member digest still refuses without claiming a
+mutation; a payload change before or during inspection leaves permanent taint.
