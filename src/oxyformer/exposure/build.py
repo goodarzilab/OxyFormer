@@ -26,12 +26,9 @@ import math
 from pathlib import Path
 import platform
 import tempfile
-import tarfile
-import zipfile
 import numpy as np
 import pandas as pd
 import rasterio
-from pyproj.exceptions import ProjError
 import yaml
 from oxyformer.contracts import StageRequest, StageResult
 from oxyformer.data.source_manifest import load_source
@@ -269,11 +266,36 @@ def _collect(request, task, config, groups):
     return exposure, quality, sorted(seen)
 
 
-def run_stage(request: StageRequest) -> StageResult:
-    """Create shard/atlas files within output_dir; verification errors return fail.
+def _exception_message(exc):
+    """Bound diagnostics without relying on a backend exception's formatter."""
+    prefix = f'{type(exc).__module__}.{type(exc).__qualname__}: '
+    marker = ' ...[truncated]'
+    limit = 4096
+    if len(prefix) > limit - len(marker):
+        return prefix[:limit - len(marker)] + marker
+    try:
+        message = str(exc)
+    except Exception:
+        message = '<exception message unavailable>'
+    available = limit - len(prefix)
+    if len(message) > available:
+        message = message[:available - len(marker)] + marker
+    return prefix + message
 
-    No overwrite/resume is implicit. A fresh or empty attempt directory is required.
-    Missing prerequisites are blocked; executed coverage/identity failures fail.
+
+def run_stage(request: StageRequest) -> StageResult:
+    """Create shard/atlas files within a fresh or empty output_dir.
+
+    Ordinary execution exceptions return fail with no declared artifacts;
+    FileNotFoundError retains the existing blocked classification. Control-flow
+    BaseExceptions propagate. Diagnostics retain the concrete type and original
+    text subject to marked truncation; direct reader/build APIs still raise.
+    Resource exceptions report execution failure, not scientific invalidity.
+
+    Coverage failure writes and declares its accounting artifacts. An exception
+    after publication can leave undeclared files: StageResult is authoritative
+    for this invocation, and handlers never delete, overwrite, repair or retry.
+    Native crashes or inability to construct a result are outside this boundary.
     """
     try:
         request.verify_inputs()
@@ -325,7 +347,6 @@ def run_stage(request: StageRequest) -> StageResult:
         result.verify(request)
         return result
     except FileNotFoundError as exc:
-        return StageResult(request_hash=request.content_hash, status='blocked', artifacts=(), message=str(exc))
-    except (ValueError, KeyError, TypeError, OSError, ProjError, rasterio.errors.RasterioError,
-            tarfile.TarError, zipfile.BadZipFile) as exc:
-        return StageResult(request_hash=request.content_hash, status='fail', artifacts=(), message=str(exc))
+        return StageResult(request_hash=request.content_hash, status='blocked', artifacts=(), message=_exception_message(exc))
+    except Exception as exc:
+        return StageResult(request_hash=request.content_hash, status='fail', artifacts=(), message=_exception_message(exc))

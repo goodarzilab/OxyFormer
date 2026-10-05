@@ -808,3 +808,154 @@ def test_verified_malformed_archive_returns_failed_result(tmp_path, shard_fixtur
     result = run_stage(req)
     assert result.status == 'fail' and result.artifacts == ()
     assert not (Path(req.output_dir) / 'exposure.parquet').exists()
+
+
+@pytest.mark.parametrize('kind', ['deflate', 'encrypted', 'patched_flag', 'strong_flag', 'unsupported', 'csv', 'shapefile'])
+def test_verified_inner_decoder_failure_returns_failed_result(tmp_path, shard_fixture, kind):
+    import csv
+    import struct
+    inventory, _ = shard_fixture
+    directory = tmp_path / 'decoder-input'
+    bzip, szip = write_census_archives(directory)
+    path = bzip if kind == 'shapefile' else szip
+    with zipfile.ZipFile(path) as archive:
+        members = {name: archive.read(name) for name in archive.namelist()}
+    target = next(name for name in members if name.endswith('.shp')) if kind == 'shapefile' else 'al000012010.sf1'
+    if kind == 'shapefile':
+        members[target] = b'invalid shapefile bytes'
+    if kind == 'csv':
+        members[target] = b'x' * (csv.field_size_limit() + 1) + b'\n'
+    with zipfile.ZipFile(path, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+    if kind in ('deflate', 'encrypted', 'patched_flag', 'strong_flag', 'unsupported'):
+        with zipfile.ZipFile(path) as archive:
+            local = archive.getinfo(target).header_offset
+            central = archive.start_dir
+        data = bytearray(path.read_bytes())
+        while True:
+            name_len, extra_len, comment_len = struct.unpack_from('<HHH', data, central + 28)
+            if bytes(data[central+46:central+46+name_len]).decode() == target:
+                break
+            central += 46 + name_len + extra_len + comment_len
+        if kind == 'deflate':
+            name_len, extra_len = struct.unpack_from('<HH', data, local + 26)
+            data[local + 30 + name_len + extra_len] = 0x07
+        elif kind in ('encrypted', 'patched_flag', 'strong_flag'):
+            flag = {'encrypted': 1, 'patched_flag': 32, 'strong_flag': 64}[kind]
+            for position in (local + 6, central + 8):
+                flags = struct.unpack_from('<H', data, position)[0]
+                struct.pack_into('<H', data, position, flags | flag)
+        else:
+            for position in (local + 8, central + 10):
+                struct.pack_into('<H', data, position, 99)
+        path.write_bytes(data)
+    receipt, payload = acquisition(directory, 'census', [('blocks_01', bzip), ('sf1_al', szip)])
+    task = json.loads((tmp_path / 'shard-AL/task.json').read_text())
+    req = request(tmp_path / 'decoder-shard', 'exposure-atlas', task,
+                  [inventory, receipt, payload, tmp_path / 'dem-receipt.json', tmp_path / 'dem.tar'])
+    with pytest.raises(Exception) as raw:
+        read_census_blocks(bzip, szip, state_abbreviation='AL', state_fips='01')
+    expected = {'deflate': 'error', 'encrypted': 'RuntimeError', 'patched_flag': 'NotImplementedError',
+                'strong_flag': 'NotImplementedError', 'unsupported': 'NotImplementedError',
+                'csv': 'Error'}
+    if kind == 'shapefile':
+        assert raw.type.__module__.startswith(('pyogrio.', 'fiona.'))
+    else:
+        assert raw.type.__name__ == expected[kind]
+    result = run_stage(req)
+    assert result.status == 'fail' and result.artifacts == ()
+    assert result.message.startswith(f'{raw.type.__module__}.{raw.type.__qualname__}: ')
+    assert len(result.message) <= 4096
+    assert list(Path(req.output_dir).iterdir()) == []
+    result.verify(req)
+
+
+def boundary_request(tmp_path, shard_fixture, stage):
+    inventory, paths = shard_fixture
+    if stage == 'atlas-collect':
+        return collect_request(tmp_path / 'boundary-collection', inventory, paths)
+    task = json.loads((tmp_path / 'shard-AL/task.json').read_text())
+    return request(tmp_path / 'boundary-shard', stage, task,
+                   [inventory, tmp_path / 'census-receipt.json', tmp_path / 'census.tar',
+                    tmp_path / 'dem-receipt.json', tmp_path / 'dem.tar'])
+
+
+@pytest.mark.parametrize('stage', ['exposure-atlas', 'atlas-collect'])
+@pytest.mark.parametrize('interruption', [KeyboardInterrupt, SystemExit, GeneratorExit])
+def test_stage_does_not_swallow_control_flow(tmp_path, shard_fixture, monkeypatch, interruption, stage):
+    req = boundary_request(tmp_path, shard_fixture, stage)
+    def interrupt(*args):
+        raise interruption('synthetic interruption')
+    monkeypatch.setattr('oxyformer.exposure.build.' + ('_collect' if stage == 'atlas-collect' else '_build_shard'), interrupt)
+    with pytest.raises(interruption, match='synthetic interruption'):
+        run_stage(req)
+
+
+@pytest.mark.parametrize('stage', ['exposure-atlas', 'atlas-collect'])
+@pytest.mark.parametrize('kind', ['unfamiliar', 'empty', 'memory', 'recursion', 'broken_message'])
+def test_stage_reports_ordinary_failures(tmp_path, shard_fixture, monkeypatch, stage, kind):
+    req = boundary_request(tmp_path, shard_fixture, stage)
+    class BackendFailure(Exception):
+        pass
+    class BrokenMessage(Exception):
+        def __str__(self):
+            raise ValueError('formatting failed')
+    error = {'unfamiliar': BackendFailure('x' * 10000), 'empty': AssertionError(),
+             'memory': MemoryError('synthetic resource failure'), 'recursion': RecursionError(),
+             'broken_message': BrokenMessage()}[kind]
+    def fail(*args):
+        raise error
+    monkeypatch.setattr('oxyformer.exposure.build.' + ('_collect' if stage == 'atlas-collect' else '_build_shard'), fail)
+    result = run_stage(req)
+    assert result.status == 'fail' and result.artifacts == ()
+    assert result.message.startswith(f'{type(error).__module__}.{type(error).__qualname__}: ')
+    assert 0 < len(result.message) <= 4096
+    assert list(Path(req.output_dir).iterdir()) == []
+    result.verify(req)
+
+
+def test_late_stage_failure_does_not_claim_or_delete_outputs(tmp_path, shard_fixture, monkeypatch):
+    req = boundary_request(tmp_path, shard_fixture, 'atlas-collect')
+    def fail(*args, **kwargs):
+        raise RuntimeError('synthetic late lineage failure')
+    monkeypatch.setattr('oxyformer.exposure.build.ArtifactLineage', fail)
+    result = run_stage(req)
+    assert result.status == 'fail' and result.artifacts == ()
+    assert 'RuntimeError: synthetic late lineage failure' in result.message
+    assert sorted(p.name for p in Path(req.output_dir).iterdir()) == ['artifact_manifest.json', 'atlas.parquet', 'quality.json']
+    retry = run_stage(req)
+    assert retry.status == 'fail' and 'empty output directory' in retry.message
+
+
+def test_declared_missing_tar_member_fails_instead_of_blocking(tmp_path, shard_fixture):
+    from oxyformer.exposure.archives import extract_member
+    inventory, _ = shard_fixture
+    receipt = tmp_path / 'census-receipt.json'
+    payload = tmp_path / 'census.tar'
+    doc = json.loads(receipt.read_text())
+    resource = next(r for r in doc['resources'] if r['id'] == 'sf1_al')
+    resource['destination'] = 'census/missing.zip'
+    receipt.write_text(canonical_json(doc))
+    with pytest.raises(KeyError):
+        extract_member(payload, resource['destination'], tmp_path / 'unused.zip', resource['sha256'])
+    req = boundary_request(tmp_path, shard_fixture, 'exposure-atlas')
+    result = run_stage(req)
+    assert result.status == 'fail' and result.artifacts == ()
+    assert result.message.startswith('builtins.KeyError: ')
+    assert list(Path(req.output_dir).iterdir()) == []
+
+
+
+def test_stage_coverage_failure_still_declares_accounting_artifacts(tmp_path, shard_fixture):
+    tile = write_raster(tmp_path / 'missing-dem.tif', [0, -9999])
+    acquisition(tmp_path, 'dem', [('synthetic', Path(tile.path))])
+    req = boundary_request(tmp_path, shard_fixture, 'exposure-atlas')
+    result = run_stage(req)
+    assert result.status == 'fail' and len(result.artifacts) == 3
+    result.verify(req)
+    out = Path(req.output_dir)
+    frame = pd.read_parquet(out / 'exposure.parquet')
+    assert frame.population.eq(100).all() and frame.missing_population.eq(60).all()
+    assert frame.pressure_mmhg.isna().all()
+    assert json.loads((out / 'artifact_manifest.json').read_text())['status'] == 'fail'
