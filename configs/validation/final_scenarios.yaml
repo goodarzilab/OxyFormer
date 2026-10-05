@@ -36,4 +36,5 @@ retry_rules:
 profiling:
   required: complete_production_repetitions_same_recipe_scenario_code_environment
   backend: cpu
+  measurement_scope: complete_stage_return
   note: Merged nested_cv has no GPU device interface; GPU batching is not inferred.

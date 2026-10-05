@@ -57,7 +57,8 @@ def setup_lock(tmp_path, **changes):
         "draws": draws, "records": records})
     write(profile / "timing.json", {"production_equivalent": True, "complete": True, "all_successful": True,
         "recipe_hash": coverage.digest(recipe), "device": "cpu", "gpu_seconds": 0,
-        "complete_repetition_seconds": [10., 11.], "wall_seconds": 25., **STAMPS})
+        "complete_repetition_seconds": [10., 11.], "wall_seconds": 25.,
+        "measurement_scope": "complete_stage_return", **STAMPS})
     parameters = {"campaign_id": "test", "recipe": recipe, "scenario_family": [scenario],
         "final_repetitions": 1000, "screening_repetitions": 5, "repetitions_per_leaf": 25,
         "gpus": 0, "wall_seconds": 600, "profile_safety_factor": 2., "evaluation_namespace": "prospective-one",
@@ -288,3 +289,18 @@ def test_locked_leaf_profiles_the_environment_only_once(tmp_path, monkeypatch):
     result = coverage.run_stage(req)
     assert result.status == "pass", result.message
     assert calls == [1]  # Same single fingerprint cost as the production profile.
+
+
+def test_oversized_campaign_is_refused_before_draw_allocation(tmp_path, monkeypatch):
+    req, _ = setup_lock(tmp_path, final_repetitions=100_000_000)
+    original = campaign.repetition_plan
+    allocations = []
+    def allocation_sentinel(namespace, scenario, count):
+        allocations.append(count)
+        if count > 1000:
+            raise MemoryError("synthetic sentinel: oversized draw allocation reached")
+        return original(namespace, scenario, count)
+    monkeypatch.setattr(campaign, "repetition_plan", allocation_sentinel)
+    result = campaign.run_stage(req)
+    assert result.status == "blocked" and "forty leaves" in result.message
+    assert allocations == []

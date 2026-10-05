@@ -337,3 +337,56 @@ def test_execution_faults_remain_incomplete_not_numerical(tmp_path, monkeypatch,
     assert result["status"] == "incomplete"
     assert result["draw"] == draw
     assert "execution failure" in result["reason"]
+
+
+def test_execution_runtime_error_cannot_be_tolerated_as_numerical_failure(tmp_path, monkeypatch):
+    endpoint, frame = synthetic_endpoint(tmp_path)
+    scenario = SCMConfig(name="null_effect", active_mechanisms=("null",), effect="null")
+    draws, records = successful_records()
+    def fail(*args):
+        raise RuntimeError("worker process disconnected")
+    monkeypatch.setattr(coverage, "estimate_repetition", fail)
+    records[0] = coverage.execute_draw(draws[0], frame, scenario, endpoint, smoke_recipe(endpoint, frame), tmp_path, float("inf"))
+    result = summarize(draws, records)
+    assert not result["coverage_pass"]
+    assert result["counts"]["incomplete"] == 1
+    assert result["counts"]["numerical_failure"] == 0
+
+
+def test_profile_measures_final_publication_and_verification(tmp_path, monkeypatch):
+    from test_campaign import request, STAMPS
+    endpoint, frame = synthetic_endpoint(tmp_path)
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    (inputs / "endpoint.json").write_text(endpoint.to_json())
+    (inputs / "frame.json").write_text(frame.to_json())
+    recipe = smoke_recipe(endpoint, frame)
+    recipe["nested_cv"] = {}
+    task = {"id": "simulation-smoke", "stage": "simulation-smoke", "parameters": {
+        "mode": "profile", "recipe": recipe,
+        "scenario": {"name": "null_effect", "effect": "null", "active_mechanisms": ["null"]},
+        "draws": coverage.repetition_plan("measured-publication", "null_effect", 2), "wall_seconds": 1000,
+        "endpoint_input": {"dependency": "input", "path": "endpoint.json"},
+        "frame_input": {"dependency": "input", "path": "frame.json"}}}
+    req = request(tmp_path / "request", task, {"input": inputs})
+    clock = [0.]
+    monkeypatch.setattr(coverage.time, "monotonic", lambda: clock[0])
+    def estimate(*args):
+        clock[0] += 10.
+        return {method: {"value": 0., "se": 1.} for method in coverage.METHODS}
+    def stamp():
+        clock[0] += 50.
+        return deepcopy(STAMPS)
+    original_publish = coverage.publish
+    def delayed_publish(*args, **kwargs):
+        clock[0] += 2.
+        return original_publish(*args, **kwargs)
+    monkeypatch.setattr(coverage, "estimate_repetition", estimate)
+    monkeypatch.setattr(campaign, "fingerprint", stamp)
+    monkeypatch.setattr(coverage, "publish", delayed_publish)
+    result = coverage.run_stage(req)
+    assert result.status == "pass", result.message
+    result.verify(req)
+    timing = json.loads((Path(req.output_dir) / "timing.json").read_text())
+    assert timing["wall_seconds"] == 72.  # Includes the normal leaf's final publish and verify.
+    assert timing["complete_repetition_seconds"] == [10., 10.]
