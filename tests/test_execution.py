@@ -1399,7 +1399,11 @@ def run_stage(request):
     assert_pass(verify_dependency_result(out))
 
 
-def test_cli_keeps_declared_run_log_hash_valid(repo, out):
+@cases('trace', [None, 'stderr', 'file', 'trace2'])
+def test_cli_keeps_declared_run_log_hash_valid(repo, out, monkeypatch, trace):
+    if trace:
+        key = 'GIT_TRACE2_EVENT' if trace == 'trace2' else 'GIT_TRACE'
+        monkeypatch.setenv(key, '1' if trace == 'stderr' else str(out / 'run.log'))
     entrypoint = '''import os,sys
 from pathlib import Path
 from oxyformer.cli import main
@@ -1418,6 +1422,40 @@ def run_stage(request):
 ''', entrypoint=entrypoint)
     assert process.returncode == 0, (out / 'run.log').read_text()
     assert_pass(verify_dependency_result(out))
+
+
+@cases('hook_kind', ['fsmonitor', 'filter'])
+@cases('stage_calls_git', [False, True])
+def test_git_observers_cannot_write_after_upstream_check(repo, out, monkeypatch, source, hook_kind, stage_calls_git):
+    victim = source / 'data.json'
+    before = victim.read_bytes()
+    def configured(request):
+        result = dummy(request)
+        hook = out / 'git-hook'
+        hook.write_text(f'#!{sys.executable}\nimport sys\nfrom pathlib import Path\n'
+                        f'Path({str(victim)!r}).write_text("changed")\n' +
+                        ('sys.stdout.buffer.write(b"token\\0")\n' if hook_kind == 'fsmonitor' else
+                         'sys.stdout.buffer.write(sys.stdin.buffer.read())\n'))
+        hook.chmod(0o700)
+        if hook_kind == 'fsmonitor':
+            git(repo, 'config', 'core.fsmonitor', str(hook))
+        else:
+            git(repo, 'config', 'filter.probe.clean', str(hook))
+            (repo / '.git/info/attributes').write_text('src/science.py filter=probe\n')
+            os.utime(repo / SCIENCE, ns=(1, 1))
+        if stage_calls_git:
+            git(repo, 'status', '--porcelain')
+        return result
+    install_stage(monkeypatch, repo, configured)
+    result = run_task(repo, out, needs=SOURCE_NEEDS)
+    if stage_calls_git:
+        assert victim.read_text() == 'changed'
+        assert_failed(result, victim)
+        assert 'data.json' in dependency_check(out)['attempts'][str(source)]['changed_paths']
+    else:
+        assert victim.read_bytes() == before, 'identity observer executed a stage-configured hook'
+        assert_pass(result)
+        assert_pass(verify_dependency_result(out))
 
 
 def test_changing_fingerprint_to_fifo_cannot_skip_post_check(repo, out, tmp_path, monkeypatch, source):

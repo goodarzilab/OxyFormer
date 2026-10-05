@@ -19,7 +19,12 @@ FINGERPRINT_VERSION = 'tracked-science-v2'
 def git_bytes(repo, *args):
     # Inspection must never refresh a sealed dependency's index on disk.
     # Recorded IDs attest raw objects, never a mutable replacement-ref view.
-    return subprocess.check_output(['git', '--no-optional-locks', '--no-replace-objects', '-C', str(repo), *args])
+    # Tracing can target files directly; stderr capture alone is insufficient.
+    env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_TRACE')}
+    env.update(GIT_TRACE2='0', GIT_TRACE2_EVENT='0', GIT_TRACE2_PERF='0')
+    return subprocess.check_output(['git', '--no-optional-locks', '--no-replace-objects',
+                                    '-c', 'core.fsmonitor=', '-C', str(repo), *args],
+                                   env=env, stderr=subprocess.PIPE)
 
 
 def git(repo, *args):
@@ -41,7 +46,9 @@ def verified_checkout(repo):
     repo = Path(repo).resolve(strict=True)
     require(Path(git(repo, 'rev-parse', '--show-toplevel')).resolve() == repo,
             'repo must be repository root')
-    changes = git(repo, 'status', '--porcelain', '--untracked-files=no')
+    # Compare the index without invoking working-tree clean filters. The loop
+    # below independently checks every on-disk blob, type and executable bit.
+    changes = git(repo, 'diff-index', '--cached', '--no-ext-diff', '--no-textconv', '--name-only', 'HEAD', '--')
     require(not changes, 'cloned repository has tracked modifications: ' + changes)
     untracked = git(repo, 'ls-files', '--others', '-z').split('\0')
     extra = sorted(n for n in untracked if n and scientific_path(n))
