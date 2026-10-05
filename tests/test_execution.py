@@ -18,14 +18,35 @@ import yaml
 
 from oxyformer.cli import main
 from oxyformer.contracts import StageRequest, StageResult
-from oxyformer.execution.campaign import expand_campaign, validate_plan
-from oxyformer.execution.identity import code_identity, scientific_fingerprint
-from oxyformer.execution.paths import atomic_json, safe_extract
-from oxyformer.execution.runner import dependency_variable, resolve_dependencies, run as run_worker, verify_dependency_result
-from oxyformer.provenance import ArtifactLineage, ArtifactRecord, ContractError, file_hash
+from oxyformer.execution.campaign import expand_campaign, resources, validate_plan
+from oxyformer.execution.identity import code_identity, scientific_fingerprint, verify_module_origins
+from oxyformer.execution.paths import atomic_json, atomic_write, isolated_caches, safe_extract
+from oxyformer.execution.runner import (dependency_file, dependency_variable, read_mapping,
+                                        resolve_dependencies, run as run_worker, verify_dependency_result)
+from oxyformer.provenance import ArtifactLineage, ArtifactRecord, ContractError, canonical_json, file_hash
 
+from oxyformer.execution.integrity import (FINGERPRINT, RESULT, _repair_control_directory, changed_paths,
+                                           fingerprint_tree, publication_tree, publish_result, read_regular)
 
+ROOT = Path(__file__).parents[1]
 SOURCE_NEEDS = {'data-unit': ['data.json', 'receipts.json']}
+
+def fixture_env(repo=ROOT):
+    return dict(os.environ, PYTHONPATH=str(repo / 'src'), CUDA_VISIBLE_DEVICES='')
+
+
+def build_tasks(*args, root=ROOT, timeout=30, cwd=None):
+    return subprocess.run([sys.executable, str(root / 'scripts/build_tasks.py'), *map(str, args)],
+                          env=fixture_env(), capture_output=True, text=True, timeout=timeout, cwd=cwd)
+
+
+def assert_exit(process, expected):
+    assert process.returncode == expected, process.stdout + process.stderr
+
+
+def dependency_check(out):
+    return read_json(out / '_execution/dependency_check.json')
+
 
 def fixture_module(repo, function):
     return SimpleNamespace(run_stage=function, __file__=str(repo / 'src/oxyformer/dummy.py'))
@@ -38,7 +59,6 @@ def install_stage(monkeypatch, repo, function):
 def inline_fixture_stage(request, module_name, repo):
     """Inject small closure stages; real process lifecycle is covered by CLI tests."""
     import importlib
-    from oxyformer.execution.paths import isolated_caches
     with isolated_caches(request.output_dir):
         try:
             module = importlib.import_module(module_name)
@@ -129,9 +149,9 @@ else:
 
 def bounded_python(code, *args):
     process = subprocess.run([sys.executable, '-c', code, *map(str, args)],
-                             env=dict(os.environ, PYTHONPATH=str(Path(__file__).parents[1] / 'src')),
+                             env=dict(os.environ, PYTHONPATH=str(ROOT / 'src')),
                              capture_output=True, text=True, timeout=3)
-    assert process.returncode == 0, process.stdout + process.stderr
+    assert_exit(process, 0)
     return process
 
 
@@ -159,8 +179,6 @@ def task_file(out, **changes):
 
 def publish_source_fixture(repo, root, *, parent=None, head=None):
     """The source producer seals its own completed synthetic attempt."""
-    from oxyformer.execution.integrity import FINGERPRINT, publish_result
-    from oxyformer.execution.paths import atomic_write
     dependencies = {} if parent is None else {'data-unit': str(parent)}
     inputs = () if parent is None else (str(parent / FINGERPRINT),)
     config = atomic_json(root, '_execution/config.json', {'dependencies': dependencies})
@@ -199,9 +217,9 @@ def test_dummy_stage_atomic_records_and_cache_isolation(runtime, monkeypatch):
     monkeypatch.setenv('HF_HOME', '/unrelated/cache')
     assert run_task(repo, out, deps_env=False).status == 'pass'
     assert os.environ['HF_HOME'] == '/unrelated/cache'
-    result = read_json((out / '_execution/result.json'))
+    result = read_json(out / '_execution/result.json')
     assert result['payload']['status'] == 'pass'
-    env = read_json((out / '_execution/environment.json'))
+    env = read_json(out / '_execution/environment.json')
     assert env['executable'] == sys.executable and env['packages']
     with pytest.raises(FileExistsError):
         atomic_json(out, '_execution/result.json', {})
@@ -294,7 +312,7 @@ def test_cli_selects_task(runtime, monkeypatch):
     path.write_text(json.dumps({'tasks': [{'id': 'selected', 'stage': 'dummy', 'outputs': ['value.json']}]}))
     assert main(['run-stage', '--stage', 'dummy', '--out', str(out), '--repo', str(repo),
                  '--deps-env', '--task', str(path), '--task-id', 'selected']) == 0
-    assert read_json((out / '_execution/task.json'))['id'] == 'selected'
+    assert read_json(out / '_execution/task.json')['id'] == 'selected'
 
 
 def locked_task(repo, out, upstream, monkeypatch):
@@ -540,7 +558,6 @@ def test_stage_dependency_without_receipt_is_rejected(runtime, tmp_path, monkeyp
 
 
 def test_slurm_minute_rounding_is_included_in_gpu_bound():
-    from oxyformer.execution.campaign import resources
     with pytest.raises(ContractError, match='four GPU-hours'):
         resources(7, 2057)  # Slurm grants 35 minutes: 4.0833 GPU-hours.
     flags, gpu_hours = resources(2, 61)
@@ -563,7 +580,7 @@ def test_safe_tar_accepts_dot_prefix_without_traversal(tmp_path):
 
 def test_campaign_lock_uses_unit_id_distinct_from_stage_name(runtime, tmp_path, monkeypatch):
     repo, out = runtime
-    actual = yaml.safe_load((Path(__file__).parents[1] / 'configs/execution/stages.yaml').read_text())
+    actual = yaml.safe_load((ROOT / 'configs/execution/stages.yaml').read_text())
     lock_settings = deepcopy(actual['stages']['campaign-lock'])
     assert 'tract-gate' in lock_settings['needs']
     assert 'tract-support-gate' not in lock_settings['needs']
@@ -619,7 +636,7 @@ def test_cli_import_from_pristine_repo_keeps_code_roots_clean(runtime, tmp_path)
     repo, out = runtime
     prepare_cli_fixture(repo, out, 'run_stage = dummy\n')
     task = task_file(out)
-    env = dict(os.environ, PYTHONPATH=str(repo / 'src'), CUDA_VISIBLE_DEVICES='')
+    env = fixture_env(repo)
     with (out / 'run.log').open('w') as log:
         process = subprocess.run([sys.executable, '-m', 'oxyformer.cli', 'run-stage',
                                   '--stage', 'dummy', '--repo', str(repo), '--out', str(out),
@@ -637,8 +654,7 @@ def test_cli_import_from_pristine_repo_keeps_code_roots_clean(runtime, tmp_path)
 
 def test_locked_primary_stage_cannot_omit_recipe(runtime):
     repo, out = runtime
-    original = Path(__file__).parents[1]
-    settings = yaml.safe_load((original / 'configs/execution/stages.yaml').read_text())['stages']['primary']
+    settings = yaml.safe_load((ROOT / 'configs/execution/stages.yaml').read_text())['stages']['primary']
     settings['module'] = 'oxyformer.dummy'
     (repo / 'configs/execution/stages.yaml').write_text(yaml.safe_dump({
         'schema_version': 1, 'stages': {'primary': settings}}))
@@ -663,7 +679,7 @@ def test_json_task_preserves_exponent_number_types(runtime):
     repo, out = runtime
     parameters = {'lr': 1e-5, 'large': 1e20, 'numeric_label': '1e-05'}
     assert run_task(repo, out, deps_env=False, parameters=parameters).status == 'pass'
-    actual = read_json((out / '_execution/task.json'))['parameters']
+    actual = read_json(out / '_execution/task.json')['parameters']
     assert actual == parameters
     assert isinstance(actual['lr'], float) and isinstance(actual['large'], float)
 
@@ -702,14 +718,12 @@ def test_cli_malformed_task_types_are_blocked(runtime, monkeypatch):
 
 
 def test_json_content_keeps_types_regardless_of_filename(tmp_path):
-    from oxyformer.execution.runner import read_mapping
     task = tmp_path / 'task.yaml'
     task.write_text(json.dumps({'lr': 1e-5}))
     assert read_mapping(task)['lr'] == 1e-5
 
 
 def test_invalid_json_never_falls_back_to_yaml(tmp_path):
-    from oxyformer.execution.runner import read_mapping
     task = tmp_path / 'task.json'
     task.write_text('lr: 1.0e-5\n')
     with pytest.raises(ContractError, match='invalid JSON'):
@@ -762,31 +776,27 @@ def test_locked_campaign_checks_upstream_science(runtime, tmp_path, monkeypatch,
 
 @pytest.mark.parametrize('existing', [False, True])
 def test_build_tasks_cli_publishes_into_new_or_existing_directory(tmp_path, spec, existing):
-    root = Path(__file__).parents[1]
     spec_file = tmp_path / 'spec.json'
     approvals_file = tmp_path / 'approvals.yaml'
     spec_file.write_text(json.dumps(spec))
-    approvals_file.write_bytes((root / 'configs/approvals.yaml').read_bytes())
+    approvals_file.write_bytes((ROOT / 'configs/approvals.yaml').read_bytes())
     out = tmp_path / 'plans' / 'campaign'
     if existing:
         out.mkdir(parents=True)
-    command = [sys.executable, str(root / 'scripts/build_tasks.py'), '--spec', str(spec_file),
-               '--approvals', str(approvals_file), '--out', str(out)]
-    env = dict(os.environ, PYTHONPATH=str(root / 'src'), CUDA_VISIBLE_DEVICES='')
-    process = subprocess.run(command, cwd=tmp_path, env=env, text=True, capture_output=True)
-    assert process.returncode == 0, process.stdout + process.stderr
-    plan = read_json((out / 'expanded_units.json'))
+    args = ('--spec', spec_file, '--approvals', approvals_file, '--out', out)
+    process = build_tasks(*args, cwd=tmp_path)
+    assert_exit(process, 0)
+    plan = read_json(out / 'expanded_units.json')
     assert validate_plan(plan, {}) == expand_campaign(spec, {})
-    assert read_json((out / 'task_manifest.json'))['tasks'] == plan['tasks']
+    assert read_json(out / 'task_manifest.json')['tasks'] == plan['tasks']
     before = {str(p): file_hash(p) for p in out.iterdir()}
-    repeated = subprocess.run(command, cwd=tmp_path, env=env, text=True, capture_output=True)
+    repeated = build_tasks(*args, cwd=tmp_path)
     assert repeated.returncode != 0
     assert {str(p): file_hash(p) for p in out.iterdir()} == before
 
 
 @pytest.mark.parametrize('kind', ['final-coverage', 'anchor', 'refit-audit'])
 def test_builder_rejects_unanchored_owner_allocation(tmp_path, spec, kind):
-    root = Path(__file__).parents[1]
     spec['kind'] = kind
     spec['id'] = 'synthetic-unapproved'
     approvals = {'schema_version': 1, 'approved_by': 'fixture', 'owner_decisions': {
@@ -796,10 +806,7 @@ def test_builder_rejects_unanchored_owner_allocation(tmp_path, spec, kind):
     alternate = tmp_path / 'alternate.yaml'
     alternate.write_text(yaml.safe_dump(approvals))
     out = tmp_path / 'plan'
-    process = subprocess.run([sys.executable, str(root / 'scripts/build_tasks.py'),
-        '--spec', str(spec_file), '--approvals', str(alternate), '--out', str(out)],
-        env=dict(os.environ, PYTHONPATH=str(root / 'src'), CUDA_VISIBLE_DEVICES=''),
-        text=True, capture_output=True)
+    process = build_tasks('--spec', spec_file, '--approvals', alternate, '--out', out)
     assert process.returncode != 0, 'Builder accepted an allocation outside its owner record'
     assert 'authoritative owner approvals' in process.stderr
     assert not out.exists()
@@ -827,7 +834,6 @@ def test_upstream_tree_mutation_fails_and_blocks_later_consumer(
     upstream.mkdir()
     (upstream / 'data.json').write_text('{}')
     (upstream / 'receipts.json').write_text('{}')
-    # Selected-file hashes miss mutations of undeclared upstream entries.
     extra = upstream / 'extra'
     extra.mkdir()
     victim = extra / 'victim'
@@ -836,7 +842,6 @@ def test_upstream_tree_mutation_fails_and_blocks_later_consumer(
     link.symlink_to('victim')
     publish_source_fixture(repo, upstream)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(upstream))
-    needs = SOURCE_NEEDS
     changed = {'bytes': 'extra/victim', 'chmod': 'extra/victim',
                'added': 'extra/new', 'removed': 'extra/victim',
                'symlink': 'extra/link'}[mutation]
@@ -859,11 +864,11 @@ def test_upstream_tree_mutation_fails_and_blocks_later_consumer(
             raise SystemExit(7)
         return result
     install_stage(monkeypatch, repo, faulty)
-    result = run_task(repo, out, needs=needs)
+    result = run_task(repo, out, needs=SOURCE_NEEDS)
     assert result.status == 'fail'
     assert str(upstream / changed) in result.message
     assert read_stage_result(out) == result
-    receipt = read_json((out / '_execution/dependency_check.json'))
+    receipt = dependency_check(out)
     assert receipt['status'] == 'fail'
     assert changed in receipt['attempts'][str(upstream)]['changed_paths']
     # The runner must not repair upstream data or modes while reporting failure.
@@ -881,7 +886,7 @@ def test_upstream_tree_mutation_fails_and_blocks_later_consumer(
     initialize_attempt(repo, later)
     install_stage(monkeypatch, repo, dummy)
     with pytest.raises(ContractError, match='tainted|fingerprint'):
-        run_task(repo, later, needs=needs)
+        run_task(repo, later, needs=SOURCE_NEEDS)
     assert not (later / 'value.json').exists()
 
 
@@ -894,14 +899,13 @@ def test_read_only_upstream_tree_remains_usable(runtime, tmp_path, monkeypatch):
     (upstream / 'link').symlink_to('data.json')
     publish_source_fixture(repo, upstream)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(upstream))
-    needs = SOURCE_NEEDS
     before = {p.name: (p.lstat().st_mode, p.lstat().st_size,
                       os.readlink(p) if p.is_symlink() else (None if p.is_dir() else p.read_bytes()))
               for p in upstream.iterdir()}
     for attempt in [out, tmp_path / 'later']:
         attempt.mkdir(exist_ok=True)
         (attempt / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
-        assert run_task(repo, attempt, needs=needs).status == 'pass'
+        assert run_task(repo, attempt, needs=SOURCE_NEEDS).status == 'pass'
     after = {p.name: (p.lstat().st_mode, p.lstat().st_size,
                      os.readlink(p) if p.is_symlink() else (None if p.is_dir() else p.read_bytes()))
              for p in upstream.iterdir()}
@@ -909,7 +913,6 @@ def test_read_only_upstream_tree_remains_usable(runtime, tmp_path, monkeypatch):
 
 
 def test_tree_fingerprint_binds_types_modes_bytes_links_and_all_entries(tmp_path):
-    from oxyformer.execution.integrity import fingerprint_tree, changed_paths
     import stat
     root = tmp_path / 'tree'
     root.mkdir()
@@ -932,7 +935,6 @@ def test_tree_fingerprint_binds_types_modes_bytes_links_and_all_entries(tmp_path
 
 
 def test_tree_fingerprint_errors_are_explicit_and_path_specific(tmp_path, monkeypatch):
-    from oxyformer.execution.integrity import fingerprint_tree, changed_paths
     (tmp_path / 'file').write_text('content')
     before = fingerprint_tree(tmp_path)
     original = os.open
@@ -969,7 +971,7 @@ def test_post_execution_check_names_proc_fd_chmod(runtime, tmp_path, monkeypatch
     result = run_task(repo, out, needs=SOURCE_NEEDS)
     assert result.status == 'fail'
     assert str(victim) in result.message
-    receipt = read_json((out / '_execution/dependency_check.json'))
+    receipt = dependency_check(out)
     assert receipt['attempts'][str(upstream)]['status'] == 'tainted'
     assert receipt['attempts'][str(upstream)]['changed_paths'] == ['undeclared']
     assert file_hash(victim) == before and victim.stat().st_mode & 0o100
@@ -1003,7 +1005,6 @@ def test_transitive_upstream_metadata_cannot_escape_detection(runtime, tmp_path,
 
 
 def test_consumer_binds_published_fingerprint_digest(runtime, tmp_path, monkeypatch):
-    from oxyformer.execution.integrity import FINGERPRINT
     repo, out = runtime
     source = tmp_path / 'source'
     source.mkdir()
@@ -1037,9 +1038,8 @@ def test_unsealed_acquisition_cannot_become_a_new_baseline(runtime, tmp_path, mo
 
 def test_restored_upstream_state_is_identical_under_fingerprint_contract(runtime, tmp_path, monkeypatch):
     repo, out = runtime
-    source = make_source_fixture(repo, tmp_path / 'source')
+    source = make_source_fixture(repo, tmp_path / 'source', monkeypatch)
     victim = source / 'data.json'
-    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     def faulty(request):
         original = victim.read_bytes()
         victim.write_bytes(b'[]')
@@ -1085,7 +1085,6 @@ def test_preflight_cannot_rebase_a_changed_dependency(runtime, tmp_path, monkeyp
 def test_rewritten_upstream_result_is_rejected_by_later_consumers(runtime, tmp_path, monkeypatch, record_index):
     repo, out = runtime
     source = make_source_fixture(repo, tmp_path / 'source', monkeypatch)
-    needs = SOURCE_NEEDS
     def faulty(request):
         result = dummy(request)
         record = source / '_execution/result.json'
@@ -1097,14 +1096,14 @@ def test_rewritten_upstream_result_is_rejected_by_later_consumers(runtime, tmp_p
         record.write_text(replace(published, artifacts=artifacts).to_json())
         return result
     install_stage(monkeypatch, repo, faulty)
-    result = run_task(repo, out, needs=needs)
+    result = run_task(repo, out, needs=SOURCE_NEEDS)
     assert result.status == 'fail'
     assert str(source / '_execution/result.json') in result.message
     later = tmp_path / 'later'
     initialize_attempt(repo, later)
     install_stage(monkeypatch, repo, dummy)
     with pytest.raises(ContractError, match='publication|fingerprint|result record'):
-        run_task(repo, later, needs=needs)
+        run_task(repo, later, needs=SOURCE_NEEDS)
 
 
 def test_tempfile_cache_does_not_cross_attempts(runtime, tmp_path, monkeypatch):
@@ -1134,15 +1133,14 @@ def test_cli_rejects_modules_imported_from_another_checkout(runtime, tmp_path):
     process = subprocess.run([sys.executable, '-m', 'oxyformer.cli', 'run-stage',
                               '--stage', 'dummy', '--repo', str(repo), '--out', str(out),
                               '--task', str(task_file(out))], cwd=other / 'src',
-                             env=dict(os.environ, PYTHONPATH=str(repo / 'src'), CUDA_VISIBLE_DEVICES=''),
+                             env=fixture_env(repo),
                              capture_output=True, text=True)
-    assert process.returncode == 2, process.stdout + process.stderr
+    assert_exit(process, 2)
     assert 'outside --repo' in process.stderr
     assert not (out / 'value.json').exists()
 
 
 def test_forty_leaf_limit_includes_cpu_slices(spec):
-    # The owner mandate bounds total leaves, not only GPU leaves.
     spec['work'] = spec['work'][:1]
     spec['work'][0]['slices'] = [{'gpus': 1, 'wall_seconds': 60}] * 39 + [{'gpus': 0, 'wall_seconds': 60}]
     assert len(expand_campaign(spec, {})['expected_leaves']) == 40
@@ -1154,20 +1152,18 @@ def test_forty_leaf_limit_includes_cpu_slices(spec):
 @pytest.mark.parametrize('name', ['_execution/result.json', '_execution/fingerprint.json'])
 def test_late_publication_control_modes_are_verified(runtime, tmp_path, monkeypatch, name):
     repo, out = runtime
-    source = make_source_fixture(repo, tmp_path / 'source')
+    source = make_source_fixture(repo, tmp_path / 'source', monkeypatch)
     path = source / name
     path.chmod(path.stat().st_mode ^ 0o100)
-    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     with pytest.raises(ContractError, match='fingerprint mismatch'):
         run_task(repo, out, needs=SOURCE_NEEDS)
 
 
 def prepare_cli_fixture(repo, out, stage_body):
     import inspect
-    original = Path(__file__).parents[1]
-    shutil.copytree(original / 'src/oxyformer', repo / 'src/oxyformer', dirs_exist_ok=True,
+    shutil.copytree(ROOT / 'src/oxyformer', repo / 'src/oxyformer', dirs_exist_ok=True,
                     ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
-    shutil.copyfile(original / '.gitignore', repo / '.gitignore')
+    shutil.copyfile(ROOT / '.gitignore', repo / '.gitignore')
     imports = '''from pathlib import Path
 import os
 import json
@@ -1186,8 +1182,7 @@ def run_cli_fixture(repo, out, stage_body, *, needs=None, entrypoint=None, timeo
     command = [sys.executable, '-m', 'oxyformer.cli'] if entrypoint is None else [sys.executable, '-c', entrypoint]
     command += ['run-stage', '--stage', 'dummy', '--repo', str(repo), '--out', str(out),
                 '--task', str(task_file(out, needs=needs or {})), '--deps-env']
-    process = subprocess.Popen(command, cwd=repo, env=dict(os.environ, PYTHONPATH=str(repo / 'src'),
-                               CUDA_VISIBLE_DEVICES=''), stdout=subprocess.PIPE,
+    process = subprocess.Popen(command, cwd=repo, env=fixture_env(repo), stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, text=True, start_new_session=True)
     try:
         stdout, stderr = process.communicate(timeout=timeout)
@@ -1208,7 +1203,7 @@ def test_cli_undeclared_outside_write_fails(runtime, tmp_path, monkeypatch):
     Path(os.environ['FIXTURE_OUTSIDE']).write_text('undeclared output')
     return dummy(request)
 ''')
-    assert process.returncode == 1, process.stdout + process.stderr
+    assert_exit(process, 1)
     result = read_stage_result(out)
     assert str(outside) in result.message
 
@@ -1217,19 +1212,18 @@ def test_cli_undeclared_outside_write_fails(runtime, tmp_path, monkeypatch):
 def test_identical_control_rewrite_accepts_later_consumers(runtime, tmp_path, monkeypatch, control):
     repo, out = runtime
     source = make_source_fixture(repo, tmp_path / 'source', monkeypatch)
-    needs = SOURCE_NEEDS
     victim = source / '_execution' / control
     def faulty(request):
         result = dummy(request)
         victim.write_bytes(victim.read_bytes())
         return result
     install_stage(monkeypatch, repo, faulty)
-    result = run_task(repo, out, needs=needs)
+    result = run_task(repo, out, needs=SOURCE_NEEDS)
     assert result.status == 'pass', result.message
     later = tmp_path / 'later'
     initialize_attempt(repo, later)
     install_stage(monkeypatch, repo, dummy)
-    assert run_task(repo, later, needs=needs).status == 'pass'
+    assert run_task(repo, later, needs=SOURCE_NEEDS).status == 'pass'
 
 
 def test_cli_finalizes_temporary_directories_before_publication(runtime):
@@ -1242,16 +1236,15 @@ def run_stage(request):
     (Path(scratch.name) / 'scratch').write_text('temporary work')
     return dummy(request)
 ''')
-    assert process.returncode == 0, process.stdout + process.stderr
+    assert_exit(process, 0)
     assert verify_dependency_result(out).status == 'pass'
 
 
 @pytest.mark.parametrize('worker_kind', ['thread', 'subprocess'])
 def test_cli_waits_for_background_mutation_before_post_check(runtime, tmp_path, monkeypatch, worker_kind):
     repo, out = runtime
-    source = make_source_fixture(repo, tmp_path / 'source')
+    source = make_source_fixture(repo, tmp_path / 'source', monkeypatch)
     victim = source / 'data.json'
-    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     monkeypatch.setenv('FIXTURE_WORKER_KIND', worker_kind)
     # Delay publication outside the stage to expose its unjoined worker.
     entrypoint = '''import time
@@ -1285,10 +1278,10 @@ def run_stage(request):
         subprocess.Popen([sys.executable, '-c', code], env=dict(os.environ, FIXTURE_FINISHED=str(Path(request.output_dir) / 'worker-finished')))
     return result
 ''', needs=SOURCE_NEEDS, entrypoint=entrypoint)
-    assert process.returncode == 1, process.stdout + process.stderr
+    assert_exit(process, 1)
     result = read_stage_result(out)
     assert result.status == 'fail' and str(victim) in result.message
-    check = read_json((out / '_execution/dependency_check.json'))
+    check = dependency_check(out)
     assert check['attempts'][str(source)]['status'] == 'tainted'
 
 
@@ -1297,7 +1290,6 @@ def run_stage(request):
 def test_control_rewrites_bind_fingerprinted_properties_only(runtime, tmp_path, monkeypatch, operation, control):
     repo, out = runtime
     source = make_source_fixture(repo, tmp_path / 'source', monkeypatch)
-    needs = SOURCE_NEEDS
     victim = source / '_execution' / control
     before = victim.stat()
     def faulty(request):
@@ -1311,16 +1303,15 @@ def test_control_rewrites_bind_fingerprinted_properties_only(runtime, tmp_path, 
             os.utime(victim, ns=(before.st_atime_ns, before.st_mtime_ns))
         return result
     install_stage(monkeypatch, repo, faulty)
-    result = run_task(repo, out, needs=needs)
+    result = run_task(repo, out, needs=SOURCE_NEEDS)
     assert result.status == 'pass', result.message
     assert victim.stat().st_mtime_ns == before.st_mtime_ns
     assert victim.stat().st_ctime_ns != before.st_ctime_ns
     later = tmp_path / 'later'
     initialize_attempt(repo, later)
     install_stage(monkeypatch, repo, dummy)
-    assert run_task(repo, later, needs=needs).status == 'pass'
+    assert run_task(repo, later, needs=SOURCE_NEEDS).status == 'pass'
 
-    # Late records bind bytes and modes; refusal must not repair them.
     changed = tmp_path / 'changed'
     initialize_attempt(repo, changed)
     def fingerprinted_change(request):
@@ -1331,23 +1322,22 @@ def test_control_rewrites_bind_fingerprinted_properties_only(runtime, tmp_path, 
             victim.write_bytes(victim.read_bytes() + b' ')
         return result
     install_stage(monkeypatch, repo, fingerprinted_change)
-    result = run_task(repo, changed, needs=needs)
+    result = run_task(repo, changed, needs=SOURCE_NEEDS)
     assert result.status == 'fail' and str(victim) in result.message
-    check = read_json((changed / '_execution/dependency_check.json'))
+    check = dependency_check(changed)
     assert check['attempts'][str(source)]['status'] == 'tainted'
     assert '_execution/' + control in check['attempts'][str(source)]['changed_paths']
     refused = tmp_path / 'refused'
     initialize_attempt(repo, refused)
     install_stage(monkeypatch, repo, dummy)
     with pytest.raises(ContractError, match='fingerprint|record'):
-        run_task(repo, refused, needs=needs)
+        run_task(repo, refused, needs=SOURCE_NEEDS)
 
 
 def test_nested_worker_mutation_cannot_outlive_publication(runtime, tmp_path, monkeypatch):
     repo, out = runtime
-    source = make_source_fixture(repo, tmp_path / 'source')
+    source = make_source_fixture(repo, tmp_path / 'source', monkeypatch)
     victim = source / 'data.json'
-    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     # Capture waits for the finite grandchild after its parent exits.
     body = '''import subprocess
 import sys
@@ -1374,15 +1364,14 @@ def run_stage(request):
     scratch.unlink()
     return dummy(request)
 ''', timeout=10)
-    assert process.returncode == 0, process.stdout + process.stderr
+    assert_exit(process, 0)
     assert verify_dependency_result(out).status == 'pass'
 
 
 def test_changed_fingerprint_fifo_is_refused_without_blocking(runtime, tmp_path, monkeypatch):
     repo, out = runtime
-    source = make_source_fixture(repo, tmp_path / 'source')
+    source = make_source_fixture(repo, tmp_path / 'source', monkeypatch)
     victim = source / '_execution/fingerprint.json'
-    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     def faulty(request):
         result = dummy(request)
         victim.unlink()
@@ -1391,7 +1380,6 @@ def test_changed_fingerprint_fifo_is_refused_without_blocking(runtime, tmp_path,
     install_stage(monkeypatch, repo, faulty)
     result = run_task(repo, out, needs=SOURCE_NEEDS)
     assert result.status == 'fail' and str(victim) in result.message
-    # The bounded probe must refuse this FIFO without a writer.
     process = refused_dependency_probe(source)
     assert 'fingerprint' in process.stdout
 
@@ -1406,7 +1394,7 @@ def run_stage(request):
     subprocess.Popen(['/bin/sh', '-c', 'sleep 1; grep -q stale "$1"', 'fixture', str(log)])
     return result
 ''')
-    assert process.returncode == 0, process.stdout + process.stderr
+    assert_exit(process, 0)
     assert verify_dependency_result(out).status == 'pass'
 
 
@@ -1442,10 +1430,10 @@ def test_changing_fingerprint_to_fifo_cannot_skip_post_check(runtime, tmp_path, 
     os.mkfifo(victim)
     return result
 """, needs=SOURCE_NEEDS, timeout=5)
-    assert process.returncode == 1, process.stdout + process.stderr
+    assert_exit(process, 1)
     result = read_stage_result(out)
     assert result.status == 'fail' and str(source / '_execution/fingerprint.json') in result.message
-    check = read_json((out / '_execution/dependency_check.json'))
+    check = dependency_check(out)
     assert check['attempts'][str(source)]['status'] == 'tainted'
 
 
@@ -1538,7 +1526,7 @@ def test_ignored_untracked_stage_code_is_refused(runtime):
     process = run_cli_fixture(repo, out, 'run_stage = dummy\n')
     assert git(repo, 'ls-files', 'src/oxyformer/dummy.py') == ''
     assert git(repo, 'check-ignore', 'src/oxyformer/dummy.py') == 'src/oxyformer/dummy.py'
-    assert process.returncode == 2, process.stdout + process.stderr
+    assert_exit(process, 2)
     assert not (out / 'value.json').exists()
 
 
@@ -1567,13 +1555,12 @@ def run_stage(request):
     safe_extract(victim, request.output_dir, 'unpacked')
     return result
 ''', needs={'source': ['payload.tar']}, timeout=5)
-    assert process.returncode == 1, process.stdout + process.stderr
+    assert_exit(process, 1)
     result = read_stage_result(out)
     assert result.status == 'fail' and str(source / 'payload.tar') in result.message
 
 
 def test_output_inside_transitive_attempt_is_refused_before_writing(runtime, tmp_path, monkeypatch):
-    from oxyformer.execution.integrity import fingerprint_tree
     repo, middle = runtime
     source = tmp_path / 'source'
     source.mkdir()
@@ -1666,7 +1653,6 @@ else:
 
 
 def test_output_containing_transitive_attempt_is_refused_before_writing(runtime, tmp_path, monkeypatch):
-    from oxyformer.execution.integrity import fingerprint_tree
     repo, middle = runtime
     out = tmp_path / 'consumer'
     initialize_attempt(repo, out)
@@ -1684,18 +1670,14 @@ def test_output_containing_transitive_attempt_is_refused_before_writing(runtime,
 def test_builder_alternate_approval_fifo_is_nonblocking(tmp_path):
     approval = tmp_path / 'approval.yaml'
     os.mkfifo(approval)
-    process = subprocess.run([sys.executable, str(Path(__file__).parents[1] / 'scripts/build_tasks.py'),
-                              '--spec', str(tmp_path / 'unused.json'), '--approvals', str(approval),
-                              '--out', str(tmp_path / 'out')], capture_output=True, text=True,
-                             env=dict(os.environ, PYTHONPATH=str(Path(__file__).parents[1] / 'src')),
-                             timeout=3)
+    process = build_tasks('--spec', tmp_path / 'unused.json', '--approvals', approval,
+                          '--out', tmp_path / 'out', timeout=3)
     assert process.returncode != 0
     assert str(approval) in process.stderr and 'regular' in process.stderr
     assert not (tmp_path / 'out').exists()
 
 
 def test_module_namespace_cannot_extend_beyond_checked_checkout(runtime, tmp_path):
-    from oxyformer.execution.identity import verify_module_origins
     repo, _ = runtime
     namespace = SimpleNamespace(__path__=[str(repo / 'src/oxyformer'), str(tmp_path)])
     with pytest.raises(ContractError, match='outside --repo'):
@@ -1730,9 +1712,8 @@ def test_locked_recipe_checks_scientific_identity_of_transitive_attempts(runtime
 @pytest.mark.parametrize('kind', ['final-coverage', 'anchor', 'refit-audit'])
 def test_builder_refuses_modified_checkout_approvals(runtime, tmp_path, spec, kind):
     repo, _ = runtime
-    original = Path(__file__).parents[1]
     (repo / 'scripts').mkdir()
-    shutil.copyfile(original / 'scripts/build_tasks.py', repo / 'scripts/build_tasks.py')
+    shutil.copyfile(ROOT / 'scripts/build_tasks.py', repo / 'scripts/build_tasks.py')
     commit(repo)
     spec.update(id='unapproved', kind=kind)
     spec_file = tmp_path / 'spec.json'
@@ -1741,10 +1722,7 @@ def test_builder_refuses_modified_checkout_approvals(runtime, tmp_path, spec, ki
     (repo / 'configs/approvals.yaml').write_text(yaml.safe_dump({
         'schema_version': 1, 'approved_by': 'fixture', 'owner_decisions': {
             'campaign_allocations': {'unapproved': {'kind': kind, 'gpu_hours': 9}}}}))
-    process = subprocess.run([sys.executable, str(repo / 'scripts/build_tasks.py'),
-                              '--spec', str(spec_file), '--out', str(tmp_path / 'plan')],
-                             env=dict(os.environ, PYTHONPATH=str(original / 'src')),
-                             capture_output=True, text=True, timeout=10)
+    process = build_tasks('--spec', spec_file, '--out', tmp_path / 'plan', root=repo, timeout=10)
     assert process.returncode != 0, 'builder accepted modified owner allocations'
     assert 'approvals' in process.stderr and 'HEAD' in process.stderr
     assert not (tmp_path / 'plan').exists()
@@ -1752,7 +1730,6 @@ def test_builder_refuses_modified_checkout_approvals(runtime, tmp_path, spec, ki
 
 @pytest.mark.parametrize('overlap', [False, True])
 def test_code_identity_does_not_refresh_upstream_git_index(runtime, tmp_path, monkeypatch, overlap):
-    from oxyformer.execution.integrity import fingerprint_tree
     repo, out = runtime
     source = tmp_path / 'source'
     source.mkdir()
@@ -1793,7 +1770,6 @@ def test_stage_cannot_publish_in_attempt_symlink_as_regular_artifact(runtime, mo
 
 @pytest.mark.parametrize('directory_link', [False, True])
 def test_dependency_file_rejects_symlink_before_resolving(tmp_path, directory_link):
-    from oxyformer.execution.runner import dependency_file
     (tmp_path / 'stored').mkdir()
     (tmp_path / 'stored/value.json').write_text('{}')
     if directory_link:
@@ -1814,7 +1790,6 @@ def test_dependency_root_symlink_is_not_a_directory_input(tmp_path):
 
 
 def test_regular_reader_rejects_symlink_ancestor(tmp_path):
-    from oxyformer.execution.integrity import read_regular
     (tmp_path / 'stored').mkdir()
     (tmp_path / 'stored/data.json').write_text('{}')
     (tmp_path / 'alias').symlink_to('stored', target_is_directory=True)
@@ -1846,9 +1821,8 @@ def test_stage_cannot_change_persisted_control_identity(runtime, monkeypatch, co
 @pytest.mark.parametrize('mutate', [False, True])
 def test_reserved_receipt_collision_preserves_upstream_failure(runtime, tmp_path, monkeypatch, control, kind, mutate):
     repo, out = runtime
-    source = make_source_fixture(repo, tmp_path / 'source')
+    source = make_source_fixture(repo, tmp_path / 'source', monkeypatch)
     victim = source / 'data.json'
-    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     def faulty(request):
         result = dummy(request)
         path = out / control if control == '_execution' else out / '_execution' / control
@@ -1866,7 +1840,7 @@ def test_reserved_receipt_collision_preserves_upstream_failure(runtime, tmp_path
     assert result.status == 'fail'
     collision = out / control if control == '_execution' else out / '_execution' / control
     assert str(victim if mutate else collision) in result.message
-    receipt = read_json((out / '_execution/dependency_check.json'))
+    receipt = dependency_check(out)
     assert ('data.json' in receipt['attempts'][str(source)]['changed_paths']) == mutate
     assert read_stage_result(out).status == 'fail'
     assert (source / 'receipts.json').read_text() == '{}'
@@ -1895,10 +1869,10 @@ def test_unwritable_control_directory_cannot_suppress_upstream_receipts(runtime,
     return result
 ''', needs=SOURCE_NEEDS)
         assert victim.read_text() == 'changed', process.stdout + process.stderr
-        assert process.returncode == 1, process.stdout + process.stderr
+        assert_exit(process, 1)
         result = read_stage_result(out)
         assert result.status == 'fail' and str(victim) in result.message
-        receipt = read_json((out / '_execution/dependency_check.json'))
+        receipt = dependency_check(out)
         assert 'extra/victim' in receipt['attempts'][str(source)]['changed_paths']
     finally:
         # Restore only this failed consumer's directory so pytest can clean up.
@@ -1932,7 +1906,6 @@ raise SystemExit(main(sys.argv[1:]))
 
 
 def test_unwritable_control_file_recovery_never_chmods_upstream(tmp_path):
-    from oxyformer.execution.integrity import _repair_control_directory
     upstream = tmp_path / 'upstream'
     upstream.mkdir()
     victim = upstream / 'file'
@@ -1999,7 +1972,7 @@ def test_deep_tree_preserves_detection_and_publication(runtime, tmp_path, monkey
         assert read_stage_result(out) == result
         if location == 'upstream':
             assert result.status == 'fail' and str(created[-1]) in result.message
-            check = read_json(out / '_execution/dependency_check.json')
+            check = dependency_check(out)
             assert created[-1].relative_to(source).as_posix() in check['attempts'][str(source)]['changed_paths']
             with pytest.raises(ContractError, match='fingerprint mismatch'):
                 verify_dependency_result(source)
@@ -2012,8 +1985,6 @@ def test_deep_tree_preserves_detection_and_publication(runtime, tmp_path, monkey
 
 
 def test_rewritten_upstream_publication_fails_changer_and_transitive_collector(runtime, tmp_path, monkeypatch):
-    from oxyformer.execution.integrity import FINGERPRINT, RESULT, publication_tree
-    from oxyformer.provenance import canonical_json
     repo, out = runtime
     source = tmp_path / 'source'
     source.mkdir()
@@ -2041,7 +2012,7 @@ def test_rewritten_upstream_publication_fails_changer_and_transitive_collector(r
     failed = run_task(repo, out, id='changing', needs={'middle': ['value.json']})
     assert failed.status == 'fail' and str(victim) in failed.message
     assert read_stage_result(out) == failed
-    check = read_json(out / '_execution/dependency_check.json')
+    check = dependency_check(out)
     assert check['status'] == 'fail'
     assert check['attempts'][str(source)]['status'] == 'tainted'
     assert 'undeclared' in check['attempts'][str(source)]['changed_paths']
@@ -2103,17 +2074,13 @@ def test_stage_cannot_replace_recorded_checkout_identity(runtime, monkeypatch, c
 
 
 def test_builder_existing_expansion_cannot_leave_mixed_task_manifest(tmp_path, spec):
-    root = Path(__file__).parents[1]
     spec_file = tmp_path / 'spec.json'
     spec_file.write_text(json.dumps(spec))
     out = tmp_path / 'plan'
     out.mkdir()
     old = {'previous_campaign': True}
     (out / 'expanded_units.json').write_text(json.dumps(old))
-    process = subprocess.run([sys.executable, str(root / 'scripts/build_tasks.py'),
-        '--spec', str(spec_file), '--out', str(out)],
-        env=dict(os.environ, PYTHONPATH=str(root / 'src'), CUDA_VISIBLE_DEVICES=''),
-        capture_output=True, text=True, timeout=30)
+    process = build_tasks('--spec', spec_file, '--out', out)
     assert process.returncode != 0
     assert read_json(out / 'expanded_units.json') == old
     assert not (out / 'task_manifest.json').exists(), 'new tasks were published beside an older expansion'
