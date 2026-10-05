@@ -318,12 +318,16 @@ def latent_states(config: SCMConfig):
     """Marginal states for one row; sampling separately shares causes by unit."""
     local = [(-1., .5), (1., .5)] if config.local_confounding != "none" else [(0., 1.)]
     regional = [(-1., .5), (1., .5)] if config.regional_confounding != "none" else [(0., 1.)]
-    illness = [(0., .7), (1., .3)] if config.has_illness else [(0., 1.)]
+    illness_probability = exact(.3)
+    illness = [(0., 1-illness_probability), (1., illness_probability)] if config.has_illness else [(0., 1.)]
     error = [(-config.exposure_error, .5), (config.exposure_error, .5)] if config.exposure_error else [(0., 1.)]
     error_size = exact(config.denominator_error)
     denom = [(1-error_size, .5), (1+error_size, .5)] if error_size else [(Fraction(1), 1.)]
     for states in product(local, regional, illness, error, denom):
-        yield LatentState(*(s[0] for s in states)), float(np.prod([s[1] for s in states]))
+        probability = Fraction(1)
+        for _, mass in states:
+            probability *= exact(mass)
+        yield LatentState(*(s[0] for s in states)), probability
 
 
 def adjustment_key(frame, row, state, config):
@@ -560,6 +564,10 @@ def exact_shift_intervals(components, delta):
 
     Derive widths and cutoffs before any rounding, so a shifted eligible dose
     remains in its origin component even when the law is narrower than an ULP.
+    This is a raw exact-geometry API: it does not serialize endpoints or delta
+    into binary64 records, so it retains non-binary64 real inputs as Fractions.
+    AssignmentLaw support and shared ShiftOrStayPolicy records separately
+    require lossless binary64 endpoints.
     This continuous truth geometry precedes serialization of observed doses.
     """
     validate_numeric(delta, "delta", "delta", allow_zero=True)
