@@ -56,13 +56,13 @@ starts Python with `-B`.
 
 Preserve existing code/runtime merge barriers. Add `atlas-inputs` to all nine
 shards and collection. The new input unit needs `runtime-probe`, `stage-runner-r7`,
-`atlas-tasks`, and `fetch-dem-r3`. Its declared outputs are `code_commit.txt`,
+`atlas-tasks-r2`, and `fetch-dem-r3`. Its declared outputs are `code_commit.txt`,
 `atlas_shards.json`, `raster_metadata.json`, and `run.log`.
 
 The nine shard plan needs are exactly `runtime-probe`, `exposure-service-r3`,
-`stage-runner-r7`, `fetch-census`, `fetch-dem-r3`, `atlas-tasks`, `atlas-inputs`.
+`stage-runner-r7`, `fetch-census`, `fetch-dem-r3`, `atlas-tasks-r2`, `atlas-inputs`.
 Collection keeps `runtime-probe`, `exposure-service-r3`, `stage-runner-r7`, all nine
-`atlas-*-r3` units listed above, `atlas-tasks`, and adds `atlas-inputs`.
+`atlas-*-r3` units listed above, `atlas-tasks-r2`, and adds `atlas-inputs`.
 
 The coordinator's acquisition variables point at containing attempts. For input
 publication and shards export
@@ -102,3 +102,15 @@ It changes no production verifier. Without it the probe repeats all full hashes.
 
 Acceptance is admission, not an atlas coverage verdict. Actual raster work and
 all existing scientific coverage gates remain required on the scheduled run.
+
+Observed receipt differences are tainted before parsing or refusal, including
+changes detected by the stable reader. Invalid first-time inputs and unrelated
+I/O failures refuse admission without inventing evidence of a mutation. The
+published request still hash-binds its acquisition snapshots for transitive use.
+
+On Weka, a control-file rename can leave the next directory stat reporting an
+older mtime/ctime; a later stat in the same scan then reports the current value.
+Publication retries this specific instability in its own `_execution` directory
+at most three times, requiring every recorded entry, byte, mode and size to match
+the original observation. It never replaces the content baseline to obtain a
+pass, and upstream fingerprinting does not use these retries.

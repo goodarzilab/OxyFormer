@@ -2460,3 +2460,177 @@ def test_run_serializes_real_owner_approvals_with_original_binding(runtime):
     assert config['input_sources'][str(approval)] == sha256(original).hexdigest()
     assert approval.read_bytes() == original
     assert_pass(verify_dependency_result(out))
+
+
+@mark.parametrize('transitive', [False, True])
+@mark.parametrize('replacement', ['complete', 'incomplete', 'invalid-json'])
+def test_receipt_reread_difference_taints_before_parsing(
+        runtime, acquisition, tmp_path, monkeypatch, transitive, replacement):
+    from oxyformer.execution import runner, integrity
+    repo, producer = runtime
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']}
+    assert_pass(run_task(repo, producer, needs=needs))
+    receipt = acquisition / 'receipts.json'
+    original_bytes = receipt.read_bytes()
+    original_tree = fingerprint_tree(acquisition)
+    original_read = runner.read_regular
+    observer_errors = []
+    def worker(request):
+        def interleaved_read(path):
+            if Path(path) == receipt:
+                value = json.loads(original_bytes)
+                value['note'] = 'faulty write between snapshot and reread'
+                if replacement == 'incomplete':
+                    value['status'] = 'incomplete'
+                receipt.write_text('{' if replacement == 'invalid-json' else json.dumps(value))
+            return original_read(path)
+        with monkeypatch.context() as observer:
+            observer.setattr(runner, 'read_regular', interleaved_read)
+            with raises((ContractError, ValueError)) as error:
+                if transitive:
+                    verify_dependency_result(producer)
+                else:
+                    runner.verify_acquisition(acquisition, 'receipts.json')
+            observer_errors.append(str(error.value))
+        receipt.write_bytes(original_bytes)
+        assert fingerprint_tree(acquisition) == original_tree
+        return dummy(request)
+    install_stage(monkeypatch, repo, worker)
+    active = new_attempt(repo, tmp_path / 'active')
+    if transitive:
+        monkeypatch.setenv('SWARM_DEP_DUMMY', str(producer))
+        needs = {'dummy': ['value.json']}
+    result = run_task(repo, active, needs=needs)
+    assert_failed(result, receipt)
+    assert str(receipt) in observer_errors[0]
+    marker = Path(str(integrity.publication_receipt(acquisition)) + '.tainted')
+    assert read_json(marker) == ['receipts.json']
+    assert read_check(active)['attempts'][str(acquisition)]['changed_paths'] == ['receipts.json']
+    with raises(ContractError, match='tainted'):
+        runner.verify_acquisition(acquisition, 'receipts.json')
+    with raises(ContractError, match='tainted'):
+        verify_dependency_result(producer)
+
+
+def test_transitive_acquisition_snapshot_is_hash_bound(runtime, acquisition, tmp_path, monkeypatch):
+    repo, producer = runtime
+    assert_pass(run_task(repo, producer, needs={'fetch-data': ['payload.tar', 'receipts.json']}))
+    request = StageRequest.from_json((producer / '_execution/request.json').read_text())
+    hashes = dict(zip(request.dependency_paths, request.dependency_hashes))
+    baseline = producer / '_execution/dependencies.json'
+    assert hashes[str(baseline)] == file_hash(baseline)
+    assert_pass(verify_dependency_result(producer))
+    monkeypatch.setenv('SWARM_DEP_DUMMY', str(producer))
+    assert_pass(run_task(repo, new_attempt(repo, tmp_path / 'consumer'), needs={'dummy': ['value.json']}))
+
+
+@mark.parametrize('failure', ['invalid-json', 'incomplete', 'io'])
+def test_unobserved_acquisition_errors_do_not_taint(runtime, acquisition, monkeypatch, failure):
+    from oxyformer.execution import runner, integrity
+    receipt = acquisition / 'receipts.json'
+    original = runner.read_regular
+    if failure == 'invalid-json':
+        receipt.write_text('{')
+    elif failure == 'incomplete':
+        receipt.write_text('{"status": "incomplete"}')
+    else:
+        # A transport failure is not evidence of changed acquisition bytes.
+        runner.verify_acquisition(acquisition, 'receipts.json')
+        def io_error(path):
+            if Path(path) == receipt:
+                raise OSError('synthetic I/O failure')
+            return original(path)
+        monkeypatch.setattr(runner, 'read_regular', io_error)
+    with raises((ContractError, ValueError, OSError)):
+        runner.verify_acquisition(acquisition, 'receipts.json')
+    assert not Path(str(integrity.publication_receipt(acquisition)) + '.tainted').exists()
+
+
+@mark.parametrize('mutate', [False, True])
+def test_publication_directory_timestamp_lag_preserves_content_baseline(runtime, monkeypatch, mutate):
+    """Weka may expose a pre-rename directory timestamp on the next lstat.
+
+    Emulate that observed lag after our own result replacement; an actual
+    artifact change in the same window must still fail against the old tree.
+    """
+    from oxyformer.execution import integrity
+    repo, out = runtime
+    original_replace = integrity._replace_control
+    original_lstat = Path.lstat
+    lag = False
+    def replace_control(root, relative, text):
+        nonlocal lag
+        original_replace(root, relative, text)
+        if relative == RESULT and json.loads(text)['payload']['status'] == 'pass':
+            lag = True
+            if mutate:
+                (out / 'value.json').write_text('faulty concurrent write')
+    def lstat(path, *args, **kwargs):
+        nonlocal lag
+        metadata = original_lstat(path, *args, **kwargs)
+        if lag and path == out / '_execution':
+            lag = False
+            values = {key: getattr(metadata, key) for key in dir(metadata) if key.startswith('st_')}
+            values['st_mtime_ns'] -= 5_000_000
+            values['st_ctime_ns'] -= 5_000_000
+            return SimpleNamespace(**values)
+        return metadata
+    monkeypatch.setattr(integrity, '_replace_control', replace_control)
+    monkeypatch.setattr(Path, 'lstat', lstat)
+    result = run_task(repo, out)
+    if mutate:
+        assert result.status == 'fail'
+        assert 'publication' in result.message
+    else:
+        assert_pass(result)
+        assert_pass(verify_dependency_result(out))
+
+
+def test_change_observed_inside_receipt_read_is_permanently_tainted(runtime, acquisition, tmp_path, monkeypatch):
+    from oxyformer.execution import runner, integrity
+    repo, producer = runtime
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']}
+    assert_pass(run_task(repo, producer, needs=needs))
+    receipt = acquisition / 'receipts.json'
+    saved = receipt.read_bytes()
+    original_read, original_fstat = runner.read_regular, os.fstat
+    def worker(request):
+        def raced_read(path):
+            if Path(path) != receipt:
+                return original_read(path)
+            calls = 0
+            def raced_fstat(fd):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    receipt.write_bytes(saved + b' ')
+                return original_fstat(fd)
+            with monkeypatch.context() as reader:
+                reader.setattr(os, 'fstat', raced_fstat)
+                return original_read(path)
+        with monkeypatch.context() as observer:
+            observer.setattr(runner, 'read_regular', raced_read)
+            with raises(ContractError, match='changed while reading') as error:
+                runner.verify_acquisition(acquisition, 'receipts.json')
+            assert str(receipt) in str(error.value)
+        receipt.write_bytes(saved)
+        return dummy(request)
+    install_stage(monkeypatch, repo, worker)
+    active = new_attempt(repo, tmp_path / 'active')
+    assert_failed(run_task(repo, active, needs=needs), receipt)
+    assert read_json(Path(str(integrity.publication_receipt(acquisition)) + '.tainted')) == ['receipts.json']
+    with raises(ContractError, match='tainted'):
+        verify_dependency_result(producer)
+
+
+def test_acquisition_snapshot_io_failure_refuses_without_taint(runtime, acquisition, monkeypatch):
+    from oxyformer.execution import runner, integrity
+    runner.verify_acquisition(acquisition, 'receipts.json')
+    def unreadable(root):
+        tree = fingerprint_tree(root)
+        tree['payload.tar'].update(sha256=None, error='OSError: synthetic transport failure')
+        return tree
+    monkeypatch.setattr(runner, 'fingerprint_tree', unreadable)
+    with raises(ContractError, match='unreadable'):
+        runner.verify_acquisition(acquisition, 'receipts.json')
+    assert not Path(str(integrity.publication_receipt(acquisition)) + '.tainted').exists()

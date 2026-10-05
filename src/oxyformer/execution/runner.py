@@ -15,7 +15,7 @@ from oxyformer.provenance import ContractError, canonical_json, relative_artifac
 from .integrity import (DEPENDENCY_CHECK, FINGERPRINT, RESULT, _replace_control, _repair_control_directory,
     post_execution_check, publish_result, record_taints,
     directory_path, read_regular, regular_file_stat, regular_file_hash as file_hash,
-    fingerprint_tree, changed_paths, publication_receipt,
+    fingerprint_tree, publication_receipt, InputChanged,
     verify_inputs, verify_result, verify_published_tree)
 from .identity import git_bytes, code_identity, environment_record, scientific_fingerprint, verify_recipe
 from .paths import atomic_json, atomic_write, output_path
@@ -85,23 +85,54 @@ def verify_acquisition(root, receipt_name, *, expected_tree=None):
     baseline = Path(str(authority) + '.acquisition')
     tree = fingerprint_tree(root)
 
-    def compare(expected, message):
-        changed = changed_paths(expected, tree)
-        record_taints({'attempts': {str(root): {'changed_paths': changed}}})
-        require(not changed, message)
+    def refuse_changes(changed, message):
+        if changed:
+            record_taints({'attempts': {str(root): {'changed_paths': sorted(set(changed))}}})
+            raise ContractError(message + '; changed paths: ' +
+                ', '.join(str(Path(root) / name) for name in sorted(set(changed))))
+
+    def compare(expected, message, actual=None):
+        actual = tree if actual is None else actual
+        changed = []
+        for name in expected.keys() | actual.keys():
+            before, after = expected.get(name), actual.get(name)
+            if after is not None and 'error' in after:
+                # An unreadable hash is unknown, not proof of different bytes.
+                # Keep positive evidence (missing entry, changed stat, or a
+                # reader's explicit observation) separate from I/O failures.
+                if after.get('changed') or (before is not None and
+                        (after.get('missing') or any(before.get(key) != after[key]
+                            for key in ('type', 'mode', 'size', 'target') if key in after))):
+                    changed.append(name)
+            elif before != after:
+                changed.append(name)
+        refuse_changes(changed, message)
+
+    refuse_changes([name for name, entry in tree.items() if entry.get('changed')],
+        'acquisition changed during fingerprinting (tainted)')
 
     if expected_tree is not None:
         compare(expected_tree, 'acquisition fingerprint differs from consumer baseline (tainted)')
     if os.path.lexists(baseline):
         compare(read_mapping(baseline)['entries'], f'acquisition fingerprint mismatch (tainted): {root}')
     require(not any('error' in entry for entry in tree.values()), 'acquisition fingerprint unreadable')
-    receipt_path = dependency_file(root, receipt_name)
-    dependency_file(root, 'payload.tar')
-    receipt_bytes = read_regular(receipt_path)
+    try:
+        receipt_path = dependency_file(root, receipt_name)
+        dependency_file(root, 'payload.tar')
+        receipt_bytes = read_regular(receipt_path)
+    except InputChanged as exc:
+        refuse_changes([str(exc.path.relative_to(root))], str(exc))
+        raise
+    except (OSError, ContractError):
+        # A file may disappear or change type after the snapshot. Recheck for
+        # evidence, but never turn an unrelated transport error into taint.
+        compare(tree, 'acquisition changed during verification (tainted)', fingerprint_tree(root))
+        raise
+    refuse_changes([receipt_name] if tree[receipt_name]['sha256'] != sha256(receipt_bytes).hexdigest() else [],
+        'acquisition receipt changed during verification (tainted)')
     receipt = json.loads(receipt_bytes)
     require(isinstance(receipt, dict), 'acquisition receipt must be a mapping')
     require(receipt.get('status') == 'complete', 'acquisition receipt is not complete')
-    require(tree[receipt_name]['sha256'] == sha256(receipt_bytes).hexdigest(), 'acquisition receipt changed during verification')
     require(tree['payload.tar']['sha256'] == receipt.get('payload_sha256'), 'acquisition payload hash mismatch')
     require(tree['payload.tar']['size'] == receipt.get('payload_bytes'), 'acquisition payload size mismatch')
     value = {'attempt': str(root), 'receipt': receipt_name, 'entries': tree}

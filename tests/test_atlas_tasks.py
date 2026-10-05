@@ -22,6 +22,12 @@ from oxyformer.provenance import ArtifactLineage, ArtifactRecord, ContractError,
 # These tests exercise the authorized runner change under the required unit
 # command too; the complete execution suite remains independently runnable.
 from test_execution import (runtime, acquisition, publication_authority,
+    test_change_observed_inside_receipt_read_is_permanently_tainted,
+    test_acquisition_snapshot_io_failure_refuses_without_taint,
+    test_publication_directory_timestamp_lag_preserves_content_baseline,
+    test_receipt_reread_difference_taints_before_parsing,
+    test_transitive_acquisition_snapshot_is_hash_bound,
+    test_unobserved_acquisition_errors_do_not_taint,
     test_complete_acquisition_without_stage_result_is_accepted,
     test_observed_acquisition_change_stays_tainted_after_restore,
     test_run_serializes_real_owner_approvals_with_original_binding,
