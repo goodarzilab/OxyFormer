@@ -21,7 +21,9 @@ from oxyformer.provenance import ArtifactLineage, ArtifactRecord, ContractError,
 
 # These tests exercise the authorized runner change under the required unit
 # command too; the complete execution suite remains independently runnable.
-from test_execution import (runtime, acquisition, publication_authority,
+from test_execution import (runtime, acquisition, acquisition_pair, publication_authority,
+    test_later_acquisition_error_cannot_erase_observed_mutation,
+    test_finalization_retains_earlier_changed_path_after_later_error,
     test_partial_acquisition_enumeration_preserves_observed_addition,
     test_successful_acquisition_reader_preserves_positive_difference,
     test_final_acquisition_io_failure_does_not_poison_future_consumers,

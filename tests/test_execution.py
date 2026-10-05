@@ -3013,3 +3013,113 @@ def test_partial_acquisition_enumeration_preserves_observed_addition(runtime, ac
     assert added.name in read_json(Path(str(integrity.publication_receipt(acquisition)) + '.tainted'))
     with raises(ContractError, match='tainted'):
         verify_dependency_result(producer)
+
+
+@pytest.fixture
+def acquisition_pair(runtime, acquisition, tmp_path, monkeypatch):
+    repo, out = runtime
+    second = tmp_path / 'second-acquisition'
+    shutil.copytree(acquisition, second)
+    registry = repo / 'configs/execution/stages.yaml'
+    value = yaml.safe_load(registry.read_text())
+    value['stages']['dummy']['acquisition_receipts']['fetch-other'] = 'receipts.json'
+    registry.write_text(yaml.safe_dump(value))
+    (out / 'code_commit.txt').write_text(commit(repo))
+    monkeypatch.setenv('SWARM_DEP_FETCH_OTHER', str(second))
+    return {'fetch-data': acquisition, 'fetch-other': second}
+
+
+@mark.parametrize('reverse', [False, True])
+def test_later_acquisition_error_cannot_erase_observed_mutation(
+        runtime, acquisition_pair, tmp_path, monkeypatch, reverse):
+    import errno
+    from oxyformer.execution import runner, integrity
+    repo, producer = runtime
+    roots = list(acquisition_pair.items())[:: -1 if reverse else 1]
+    needs = {name: ['payload.tar', 'receipts.json'] for name, _ in roots}
+    assert_pass(run_task(repo, producer, needs=needs))
+    snapshots = {str(root): fingerprint_tree(root) for _, root in roots}
+    first, later = (root for _, root in roots)
+    victim = first / 'payload.tar'
+    saved = victim.read_bytes()
+    marker = Path(str(integrity.publication_receipt(first)) + '.tainted')
+    later_baseline = Path(str(integrity.publication_receipt(later)) + '.acquisition')
+    original_read = integrity.read_regular
+    seen = []
+    def worker(request):
+        victim.write_bytes(b'X' + saved[1:])
+        def unavailable(path):
+            if Path(path) == later_baseline:
+                seen.append(read_json(marker) if marker.exists() else None)
+                raise OSError(errno.EIO, 'later baseline I/O failure', str(path))
+            return original_read(path)
+        try:
+            with monkeypatch.context() as observer:
+                observer.setattr(integrity, 'read_regular', unavailable)
+                with raises(OSError, match='later baseline I/O failure'):
+                    integrity.post_execution_check(snapshots)
+        finally:
+            victim.write_bytes(saved)
+        return dummy(request)
+    install_stage(monkeypatch, repo, worker)
+    active = run_task(repo, new_attempt(repo, tmp_path / 'active'), needs=needs)
+    assert seen == [['payload.tar']], 'taint must precede the later fallible read'
+    assert_failed(active, victim)
+    assert fingerprint_tree(first) == snapshots[str(first)]
+    assert read_json(marker) == ['payload.tar']
+    install_stage(monkeypatch, repo, dummy)
+    with raises(ContractError, match='tainted'):
+        run_task(repo, new_attempt(repo, tmp_path / 'future-direct'), needs=needs)
+    with raises(ContractError, match='tainted'):
+        runner.verify_dependency_result(producer)
+
+
+@mark.parametrize('failure', ['baseline', 'marker-write', 'marker-read'])
+def test_finalization_retains_earlier_changed_path_after_later_error(
+        runtime, acquisition_pair, tmp_path, monkeypatch, failure):
+    import errno
+    from oxyformer.execution import runner, integrity
+    repo, producer = runtime
+    needs = {name: ['payload.tar', 'receipts.json'] for name in acquisition_pair}
+    assert_pass(run_task(repo, producer, needs=needs))
+    first, later = acquisition_pair.values()
+    victim = first / 'payload.tar'
+    saved = {root: (root / 'payload.tar').read_bytes() for root in (first, later)}
+    first_marker = Path(str(integrity.publication_receipt(first)) + '.tainted')
+    later_receipt = integrity.publication_receipt(later)
+    target = Path(str(later_receipt) + ('.acquisition' if failure == 'baseline' else '.tainted'))
+    original_read, original_write = integrity.read_regular, integrity.atomic_json
+    seen = []
+    def inject(path):
+        if Path(path) == target:
+            seen.append(read_json(first_marker) if first_marker.exists() else None)
+            raise OSError(errno.EIO, 'later authority I/O failure', str(path))
+    def unavailable_read(path):
+        inject(path)
+        return original_read(path)
+    def unavailable_write(root, relative, value):
+        inject(Path(root) / relative)
+        return original_write(root, relative, value)
+    def worker(request):
+        victim.write_bytes(b'X' + saved[first][1:])
+        if failure != 'baseline':
+            (later / 'payload.tar').write_bytes(b'X' + saved[later][1:])
+        if failure == 'marker-write':
+            monkeypatch.setattr(integrity, 'atomic_json', unavailable_write)
+        else:
+            monkeypatch.setattr(integrity, 'read_regular', unavailable_read)
+            monkeypatch.setattr(runner, 'read_regular', unavailable_read)
+        return dummy(request)
+    install_stage(monkeypatch, repo, worker)
+    refused = run_task(repo, new_attempt(repo, tmp_path / 'active'), needs=needs)
+    assert seen == [['payload.tar']], 'earlier evidence must be durable before later authority I/O'
+    assert 'later authority I/O failure' in refused.message
+    assert_failed(refused, victim)
+    monkeypatch.setattr(integrity, 'read_regular', original_read)
+    monkeypatch.setattr(runner, 'read_regular', original_read)
+    monkeypatch.setattr(integrity, 'atomic_json', original_write)
+    for root, payload in saved.items():
+        (root / 'payload.tar').write_bytes(payload)
+    assert read_json(first_marker) == ['payload.tar']
+    with raises(ContractError, match='tainted'):
+        runner.verify_dependency_result(producer)
