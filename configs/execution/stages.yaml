@@ -9,13 +9,13 @@ schema_version: 1
 # Unit IDs and stage names differ: unit tract-gate runs tract-support-gate.
 stages:
   atlas-inputs:
-    module: oxyformer.execution.atlas_stage
+    module: oxyformer.exposure.tasks
     acquisition_receipts: {fetch-dem: receipts.json}
     needs:
       fetch-dem: [payload.tar, receipts.json]
     outputs: [atlas_shards.json, raster_metadata.json]
   exposure-atlas:
-    module: oxyformer.execution.atlas_stage
+    module: oxyformer.exposure.tasks
     acquisition_receipts: {fetch-census: receipts.json, fetch-dem: receipts.json}
     needs:
       atlas-inputs: [atlas_shards.json, raster_metadata.json]
@@ -23,7 +23,7 @@ stages:
       fetch-dem: [payload.tar, receipts.json]
     outputs: [exposure.parquet, quality.json, artifact_manifest.json]
   atlas-collect:
-    module: oxyformer.execution.atlas_stage
+    module: oxyformer.exposure.tasks
     needs:
       atlas-inputs: [atlas_shards.json, raster_metadata.json]
       atlas-new-england: [exposure.parquet, quality.json, artifact_manifest.json]
