@@ -17,7 +17,7 @@ from .integrity import (DEPENDENCY_CHECK, FINGERPRINT, RESULT, _replace_control,
     post_execution_check, publish_result, record_taints,
     directory_path, read_regular, regular_file_stat, regular_file_hash as file_hash,
     fingerprint_tree, publication_receipt, InputChanged, acquisition_read,
-    acquisition_changed_paths, verify_input_hash,
+    acquisition_changed_paths, verify_input_hash, authority_exists,
     verify_inputs, verify_result, verify_published_tree)
 from .identity import git_bytes, code_identity, environment_record, scientific_fingerprint, verify_recipe
 from .paths import atomic_json, atomic_write, output_path
@@ -85,7 +85,7 @@ def verify_acquisition(root, receipt_name, *, expected_tree=None):
     """
     relative_artifact_path(receipt_name)
     authority = publication_receipt(root, create=True)
-    require(not os.path.lexists(str(authority) + '.tainted'), f'tainted upstream fingerprint: {root}')
+    require(not authority_exists(str(authority) + '.tainted'), f'tainted upstream fingerprint: {root}')
     baseline = Path(str(authority) + '.acquisition')
     tree = fingerprint_tree(root)
 
@@ -104,7 +104,7 @@ def verify_acquisition(root, receipt_name, *, expected_tree=None):
 
     if expected_tree is not None:
         compare(expected_tree, 'acquisition fingerprint differs from consumer baseline (tainted)')
-    if os.path.lexists(baseline):
+    if authority_exists(baseline):
         compare(read_mapping(baseline)['entries'], f'acquisition fingerprint mismatch (tainted): {root}')
     require(not any('error' in entry for entry in tree.values()), 'acquisition fingerprint unreadable')
     # Establish valid first-time inputs before interpreting later path/type
@@ -148,7 +148,7 @@ def verify_acquisition(root, receipt_name, *, expected_tree=None):
         original = read_mapping(baseline)
         compare(original['entries'], f'acquisition fingerprint mismatch (tainted): {root}')
         require(original == value, f'acquisition baseline identity mismatch: {root}')
-    require(not os.path.lexists(str(authority) + '.tainted'), f'tainted upstream fingerprint: {root}')
+    require(not authority_exists(str(authority) + '.tainted'), f'tainted upstream fingerprint: {root}')
     return tree
 
 
@@ -419,7 +419,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         # this final snapshot. Such observed taints remain permanent.
         for root, detail in check['attempts'].items():
             marker = Path(str(publication_receipt(root)) + '.tainted')
-            if os.path.lexists(marker):
+            if authority_exists(marker):
                 observed = json.loads(read_regular(marker))
                 changed.extend(str(Path(root) / name) for name in observed)
                 detail['changed_paths'] = sorted(set(detail['changed_paths']) | set(observed))
@@ -461,7 +461,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
             except BaseException as exc:
                 result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
                     message=str(exc).strip() or type(exc).__name__)
-        return publish_result(out, result, owned_controls=True)
+        return publish_result(out, result, owned_controls=True, dependency_roots=dependency_trees)
     except BaseException as exc:
         message = 'stage finalization failed: ' + (str(exc).strip() or type(exc).__name__)
         if changed:

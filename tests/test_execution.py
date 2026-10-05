@@ -3123,3 +3123,109 @@ def test_finalization_retains_earlier_changed_path_after_later_error(
     assert read_json(first_marker) == ['payload.tar']
     with raises(ContractError, match='tainted'):
         runner.verify_dependency_result(producer)
+
+
+@mark.parametrize('boundary', ['publish', 'authority'])
+def test_taint_recorded_during_publication_refuses_release(runtime, acquisition, tmp_path, monkeypatch, boundary):
+    from oxyformer.execution import runner, integrity
+    repo, producer = runtime
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']}
+    assert_pass(run_task(repo, producer, needs=needs))
+    victim = acquisition / 'receipts.json'
+    saved = victim.read_bytes()
+    target = runner if boundary == 'publish' else integrity
+    name = 'publish_result' if boundary == 'publish' else 'record_publication'
+    original = getattr(target, name)
+    observed = []
+    def interleaved(root, result, **kwargs):
+        victim.write_bytes(b' ' + saved[1:])
+        try:
+            with raises(ContractError):
+                runner.verify_acquisition(acquisition, 'receipts.json')
+            observed.append(True)
+        finally:
+            victim.write_bytes(saved)
+        return original(root, result, **kwargs)
+    monkeypatch.setattr(target, name, interleaved)
+    result = run_task(repo, new_attempt(repo, tmp_path / 'active'), needs=needs)
+    assert observed == [True]
+    assert_failed(result, victim)
+    with raises(ContractError, match='tainted'):
+        verify_dependency_result(producer)
+
+
+def test_acquisition_authority_lookup_io_never_becomes_absence(runtime, acquisition, tmp_path, monkeypatch):
+    import errno
+    from oxyformer.execution import integrity
+    repo, producer = runtime
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']}
+    assert_pass(run_task(repo, producer, needs=needs))
+    baseline = Path(str(integrity.publication_receipt(acquisition)) + '.acquisition')
+    marker = Path(str(integrity.publication_receipt(acquisition)) + '.tainted')
+    snapshot = {str(acquisition): fingerprint_tree(acquisition)}
+    original_stat, original_lstat, original_scan = os.stat, os.lstat, os.scandir
+    observed = []
+    def unavailable_stat(path, *args, **kwargs):
+        if Path(path) == baseline:
+            raise OSError(errno.EIO, 'baseline lookup I/O failure', str(path))
+        return original_stat(path, *args, **kwargs)
+    def unavailable_lstat(path, *args, **kwargs):
+        if Path(path) == baseline:
+            raise OSError(errno.EIO, 'baseline lookup I/O failure', str(path))
+        return original_lstat(path, *args, **kwargs)
+    def unavailable_scan(path):
+        if Path(path) == acquisition:
+            raise OSError(errno.EIO, 'enumeration I/O failure', str(path))
+        return original_scan(path)
+    def worker(request):
+        with monkeypatch.context() as patch:
+            patch.setattr(os, 'lstat', unavailable_lstat)
+            patch.setattr(os, 'stat', unavailable_stat)
+            patch.setattr(os, 'scandir', unavailable_scan)
+            try:
+                integrity.post_execution_check(snapshot)
+            except OSError as exc:
+                observed.append(str(exc))
+        return dummy(request)
+    install_stage(monkeypatch, repo, worker)
+    result = run_task(repo, new_attempt(repo, tmp_path / 'active'), needs=needs)
+    assert not marker.exists(), 'unrelated lookup/enumeration EIO invented mutation evidence'
+    assert len(observed) == 1 and str(baseline) in observed[0]
+    assert_pass(result)
+    install_stage(monkeypatch, repo, dummy)
+    assert_pass(run_task(repo, new_attempt(repo, tmp_path / 'retry'), needs=needs))
+    assert_pass(verify_dependency_result(producer))
+
+
+@mark.parametrize('kind', ['acquisition', 'publication'])
+def test_authority_marker_io_cannot_hide_existing_taint(runtime, acquisition, monkeypatch, kind):
+    import errno
+    from oxyformer.execution import runner, integrity
+    repo, producer = runtime
+    result = run_task(repo, producer, needs={'fetch-data': ['payload.tar', 'receipts.json']})
+    assert_pass(result)
+    root = acquisition if kind == 'acquisition' else producer
+    victim = root / ('receipts.json' if kind == 'acquisition' else 'value.json')
+    snapshot = {str(root): fingerprint_tree(root)}
+    saved = victim.read_bytes()
+    victim.write_bytes(b'X' + saved[1:])
+    integrity.post_execution_check(snapshot)
+    victim.write_bytes(saved)
+    marker = Path(str(integrity.publication_receipt(root)) + '.tainted')
+    assert marker.exists()
+    original_stat, original_lstat = os.stat, os.lstat
+    def unavailable_stat(path, *args, **kwargs):
+        if Path(path) == marker:
+            raise OSError(errno.EIO, 'marker lookup I/O failure', str(path))
+        return original_stat(path, *args, **kwargs)
+    def unavailable_lstat(path, *args, **kwargs):
+        if Path(path) == marker:
+            raise OSError(errno.EIO, 'marker lookup I/O failure', str(path))
+        return original_lstat(path, *args, **kwargs)
+    monkeypatch.setattr(os, 'stat', unavailable_stat)
+    monkeypatch.setattr(os, 'lstat', unavailable_lstat)
+    with raises(OSError, match='marker lookup I/O failure'):
+        if kind == 'acquisition':
+            runner.verify_acquisition(root, 'receipts.json')
+        else:
+            integrity.verify_publication(root, result)

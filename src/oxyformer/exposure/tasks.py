@@ -22,6 +22,7 @@ from oxyformer.data.source_manifest import load_source, validate_shards
 from oxyformer.exposure.population_allocation import PRIMARY, FALLBACK, FALLBACK_CELLS, _validate_vertical_crs
 from oxyformer.contracts import StageResult
 from oxyformer.execution.paths import atomic_json, atomic_write
+from oxyformer.execution.integrity import read_regular
 from oxyformer.provenance import ArtifactLineage, ArtifactRecord, canonical_json, file_hash, require
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -38,7 +39,7 @@ SHARD_OUTPUTS = ['exposure.parquet', 'quality.json', 'artifact_manifest.json']
 def inspect_dem(acquisition, source=None):
     source = load_source('dem') if source is None else source
     acquisition = Path(acquisition)
-    receipt = json.loads((acquisition / 'receipts.json').read_text())
+    receipt = json.loads(read_regular(acquisition / 'receipts.json'))
     require(receipt.get('status') == 'complete' and receipt.get('manifest_id') == 'dem', 'DEM acquisition incomplete or wrong source')
     require(receipt['manifest_sha256'] == sha256(canonical_json(source).encode()).hexdigest(), 'DEM receipt differs from dem.json')
     resources = {r['id']: r for r in source['resources']}
