@@ -80,27 +80,38 @@ def verify_acquisition(root, receipt_name, *, expected_tree=None):
     the independent publication store retains the first validated tree and the
     same permanent taint markers used for stage publications.
     """
+    authority = publication_receipt(root, create=True)
+    require(not os.path.lexists(str(authority) + '.tainted'), f'tainted upstream fingerprint: {root}')
+    baseline = Path(str(authority) + '.acquisition')
+    tree = fingerprint_tree(root)
+
+    def compare(expected, message):
+        changed = changed_paths(expected, tree)
+        record_taints({'attempts': {str(root): {'changed_paths': changed}}})
+        require(not changed, message)
+
+    if expected_tree is not None:
+        compare(expected_tree, 'acquisition fingerprint differs from consumer baseline (tainted)')
+    if os.path.lexists(baseline):
+        compare(read_mapping(baseline)['entries'], f'acquisition fingerprint mismatch (tainted): {root}')
+    require(not any('error' in entry for entry in tree.values()), 'acquisition fingerprint unreadable')
     receipt_path = dependency_file(root, receipt_name)
     dependency_file(root, 'payload.tar')
     receipt_bytes = read_regular(receipt_path)
     receipt = json.loads(receipt_bytes)
     require(isinstance(receipt, dict), 'acquisition receipt must be a mapping')
     require(receipt.get('status') == 'complete', 'acquisition receipt is not complete')
-    authority = publication_receipt(root, create=True)
-    require(not os.path.lexists(str(authority) + '.tainted'), f'tainted upstream fingerprint: {root}')
-    tree = fingerprint_tree(root)
-    require(not any('error' in entry for entry in tree.values()), 'acquisition fingerprint unreadable')
     require(tree[receipt_name]['sha256'] == sha256(receipt_bytes).hexdigest(), 'acquisition receipt changed during verification')
     require(tree['payload.tar']['sha256'] == receipt.get('payload_sha256'), 'acquisition payload hash mismatch')
     require(tree['payload.tar']['size'] == receipt.get('payload_bytes'), 'acquisition payload size mismatch')
-    if expected_tree is not None:
-        require(not changed_paths(expected_tree, tree), 'acquisition fingerprint differs from consumer baseline')
-    baseline = Path(str(authority) + '.acquisition')
     value = {'attempt': str(root), 'receipt': receipt_name, 'entries': tree}
     try:
         atomic_json(baseline.parent, baseline.name, value)
     except FileExistsError:
-        require(read_mapping(baseline) == value, f'acquisition fingerprint mismatch (tainted): {root}')
+        original = read_mapping(baseline)
+        compare(original['entries'], f'acquisition fingerprint mismatch (tainted): {root}')
+        require(original == value, f'acquisition baseline identity mismatch: {root}')
+    require(not os.path.lexists(str(authority) + '.tainted'), f'tainted upstream fingerprint: {root}')
     return tree
 
 
@@ -141,7 +152,6 @@ def verify_dependency_result(root, *, expected_hash=None, trees=None, active=Non
                     require(Path(request.output_dir).resolve() == current, 'dependency attempt owner mismatch')
                     require(result.status == 'pass', 'dependency stage did not pass')
                     tree = verify_published_tree(current, result, expected)
-                    verify_result(result, request)
                     config = read_mapping(request.config_path)
                     hashes = dict(zip(request.dependency_paths, request.dependency_hashes))
                     parents = []
@@ -165,6 +175,7 @@ def verify_dependency_result(root, *, expected_hash=None, trees=None, active=Non
                             digest = hashes.get(str(parent / FINGERPRINT))
                             require(digest is not None, 'dependency fingerprint absent from published request')
                             parents.append((parent, digest, parent_unit, False))
+                    verify_result(result, request)
                     pending[current] = (result, tree)
                     stack.append((current, expected, unit, True))
                     stack.extend(reversed(parents))
@@ -279,14 +290,15 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         require(not out.is_relative_to(root) and not root.is_relative_to(out),
             f'output overlaps an upstream attempt: {root}')
         require(isinstance(needs[unit], list) and needs[unit], 'dependency requires explicit files')
-        for relative in needs[unit]:
-            files.append(dependency_file(root, relative))
         acquisition_receipt = settings.get('acquisition_receipts', {}).get(unit)
         if acquisition_receipt is not None:
             require(acquisition_receipt in needs[unit], 'acquisition receipt must be a declared input')
             require('payload.tar' in needs[unit], 'acquisition payload must be a declared input')
             dependency_trees[str(root)] = verify_acquisition(root, acquisition_receipt)
             acquisitions[unit] = acquisition_receipt
+        for relative in needs[unit]:
+            files.append(dependency_file(root, relative))
+        if acquisition_receipt is not None:
             continue
         require((root / '_execution/result.json').is_file(), f'stage receipt missing or not regular: {root / "_execution/result.json"}')
         result = verify_dependency_result(root, trees=dependency_trees, verified=verified_dependencies,
@@ -329,7 +341,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
             'locked approvals differ from fingerprinted repository config')
     config = {'stage': stage, 'settings': settings, 'approvals': approvals_value,
         'input_sources': sources, 'dependencies': {k: str(v) for k, v in deps.items()},
-        'acquisitions': acquisitions}
+        'acquisitions': acquisitions, 'yaml_timestamp_policy': 'preserve_scalar_text'}
     config_path = atomic_json(out, '_execution/config.json', config)
     task_path = atomic_json(out, '_execution/task.json', task)
     tree_path = atomic_json(out, '_execution/dependencies.json', dependency_trees)
@@ -361,6 +373,15 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     changed = []
     try:
         check = post_execution_check(dependency_trees)
+        # Another consumer may have observed a write that was restored before
+        # this final snapshot. Such observed taints remain permanent.
+        for root, detail in check['attempts'].items():
+            marker = Path(str(publication_receipt(root)) + '.tainted')
+            if os.path.lexists(marker):
+                observed = json.loads(read_regular(marker))
+                detail['changed_paths'] = sorted(set(detail['changed_paths']) | set(observed))
+                detail['status'] = 'tainted'
+                check['status'] = 'fail'
         changed = [str(Path(root) / name) for root, detail in check['attempts'].items()
             for name in detail['changed_paths']]
         record_taints(check)
