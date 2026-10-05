@@ -13,7 +13,11 @@ import pytest
 import torch
 import yaml
 
-from oxyformer.contracts import CovariateView, EstimandSpec, SplitManifest
+from oxyformer.contracts import (
+    ColumnSpec, CovariateView, DataManifest, EstimandSpec, SourceManifest,
+    SplitManifest, source_lineage_hash,
+)
+from oxyformer.data.loaders import LoadedData
 from oxyformer.data.feature_roles import FeatureRegistry, FeatureRule
 from oxyformer.design.policies import PolicyPairs
 from oxyformer.models import tabicl_comparator as icl
@@ -51,10 +55,16 @@ def fold():
                               uses=("nuisance", "context"), approval_id="fixture") for x in ("x0", "x1"))
     rules += (FeatureRule(name="county", role="county", endpoints=("synthetic",),
                           uses=("county_routing",), approval_id="fixture"),)
+    rules += tuple(FeatureRule(name=name, role=role, endpoints=("synthetic",),
+                               uses=(use,), approval_id="fixture")
+                   for name, role, use in (("id", "identifier", "linkage"),
+                                           ("a", "exposure", "score"),
+                                           ("y", "outcome", "score"),
+                                           ("weight", "outcome_metadata", "linkage")))
     registry = FeatureRegistry(registry_id="fixture", rules=rules)
     spec = EstimandSpec(endpoint="synthetic", target_id="synthetic", outcome_scale="years",
                         policy_id="fixture", weight_id="unit", adjustment_schema_hash=registry.content_hash,
-                        inference_unit="county", source_lineage_hash=digest("source"))
+                        inference_unit="county", source_lineage_hash=source_lineage_hash((synthetic_source(),)))
     ids = ("t0", "t1", "t2", "t3", "h0", "h1")
     lineage = ArtifactLineage(source_hashes=(digest("payload"),), unit_ids=ids + ("sealed",),
                               parent_hashes=(), split_hash=None, config_hash=digest("config"),
@@ -69,6 +79,37 @@ def fold():
     train = view(ids[:4], ((0., 1.), (1., 4.), (-1., 8.), (2., -1.)))
     held = view(ids[4:], ((10., 11.), (20., -2.)))
     return train, held, split
+
+
+def synthetic_source():
+    return SourceManifest(source_id="synthetic", version="1", uri="synthetic://fixture",
+                          payload_hash=digest("payload"), license_hash=digest("license"),
+                          schema_hash=digest("schema"), field_mapping=(("raw-x", "x0"),),
+                          mapping_status="reviewed", mapping_review_id="fixture")
+
+
+def training_data(view, a=None, y=None):
+    """Package existing synthetic cases in the privileged merged data contract."""
+    n = len(view.original_ids)
+    a = list(range(n)) if a is None else a
+    y = [1., 3., 7., 2.][:n] if y is None else y
+    schema = tuple(ColumnSpec(name=name, dtype=dtype) for name, dtype in (
+        ("id", "string"), ("a", "number"), ("y", "number"), ("x0", "number"), ("x1", "number")))
+    manifest = DataManifest(spec=view.spec, sources=(synthetic_source(),), schema=schema,
+                            registry=view.registry, original_ids=view.original_ids, id_field="id",
+                            exposure_field="a", outcome_field="y", weight_field=None,
+                            entity_graph_hash=digest("graph"), lineage=view.lineage)
+    rows = tuple((oid, float(ai), float(yi), *x)
+                 for oid, ai, yi, x in zip(view.original_ids, a, y, view.values))
+    return LoadedData(manifest=manifest, rows=rows)
+
+
+def select_loaded(data, ids):
+    """Subset/reorder whole original records while IDs and labels are still bound."""
+    by_id = dict(zip(data.manifest.original_ids, data.rows))
+    manifest = replace(data.manifest, original_ids=ids,
+                       lineage=replace(data.manifest.lineage, unit_ids=ids))
+    return LoadedData(manifest=manifest, rows=tuple(by_id[oid] for oid in ids))
 
 
 class MockEstimator:
@@ -135,7 +176,7 @@ def fitted(backend, fold, **kwargs):
     train, held, split = fold
     model = backend[0](**kwargs)
     y = [0., 1., 0., 1.] if model.family == "bernoulli" else [1., 3., 7., 2.]
-    return model.fit_outcome(train, split, 0, [0., 1., 2., 3.], y,
+    return model.fit_outcome(train, split, 0, training_data(train, [0., 1., 2., 3.], y),
                              sample_weight=np.ones(4), weight_semantics="unit")
 
 
@@ -179,7 +220,7 @@ def test_missing_or_corrupt_checkpoint_blocks_before_import(backend, fold, monke
     path = Path(model.checkpoint.path)
     path.write_bytes(b'wrong bytes')
     with pytest.raises(ContractError, match='checkpoint hash mismatch'):
-        model.fit_outcome(fold[0], fold[2], 0, np.arange(4), np.arange(4), sample_weight=np.ones(4), weight_semantics='unit')
+        model.fit_outcome(fold[0], fold[2], 0, training_data(fold[0], np.arange(4), np.arange(4)), sample_weight=np.ones(4), weight_semantics='unit')
     path.unlink()
     with pytest.raises(ContractError, match='local checkpoint missing'):
         model.checkpoint.verify()
@@ -221,24 +262,24 @@ assert 'tabicl' not in sys.modules and 'tabpfn' not in sys.modules
     ([1]*4, 'target'), ([0]*4, 'unit'), ([2]*4, 'unit'), ([1, 1, float('nan'), 1], 'unit')])
 def test_unsupported_sample_weights_are_not_discarded(backend, fold, weights, semantics):
     with pytest.raises(ContractError, match='unsupported.*weight'):
-        backend[0]().fit_outcome(fold[0], fold[2], 0, np.arange(4), np.arange(4),
+        backend[0]().fit_outcome(fold[0], fold[2], 0, training_data(fold[0], np.arange(4), np.arange(4)),
                                 sample_weight=weights, weight_semantics=semantics)
 
 
 def test_fold_context_is_exact_and_copied(backend, fold):
     train, held, split = fold
     a, y = np.arange(4.), np.arange(4.)
-    model = backend[0]().fit_outcome(train, split, 0, a, y, sample_weight=np.ones(4), weight_semantics='unit')
+    model = backend[0]().fit_outcome(train, split, 0, training_data(train, a, y), sample_weight=np.ones(4), weight_semantics='unit')
     before = query(model, held)
     a[:] = 1000; y[:] = 1000
     torch.testing.assert_close(query(model, held), before)
     assert model.training_ids == train.original_ids
     assert np.array_equal(model._estimator.preprocess_mean, np.column_stack((np.arange(4.), train.values)).mean(0))
     with pytest.raises(ContractError, match='already fitted'):
-        model.fit_outcome(train, split, 0, a, y, sample_weight=np.ones(4), weight_semantics='unit')
+        model.fit_outcome(train, split, 0, training_data(train, a, y), sample_weight=np.ones(4), weight_semantics='unit')
     with pytest.raises(ContractError, match='fold training IDs'):
-        backend[0]().fit_outcome(held, split, 0, [1, 2], [1, 2], sample_weight=[1, 1], weight_semantics='unit')
-    other = backend[0]().fit_outcome(held, split, 1, [1, 2], [20, 40], sample_weight=[1, 1], weight_semantics='unit')
+        backend[0]().fit_outcome(held, split, 0, training_data(held, [1, 2], [1, 2]), sample_weight=[1, 1], weight_semantics='unit')
+    other = backend[0]().fit_outcome(held, split, 1, training_data(held, [1, 2], [20, 40]), sample_weight=[1, 1], weight_semantics='unit')
     assert other.context_hash != model.context_hash
     assert other._estimator is not model._estimator
     torch.testing.assert_close(query(model, held), before)
@@ -271,7 +312,7 @@ def make_pairs(train):
 def test_origin_pair_semantics_and_weights(backend, fold):
     train, held, split = fold
     pairs = make_pairs(train)
-    model = backend[0](task='origin', family='bernoulli').fit_origin(train, split, 0, pairs, weight_semantics='unit')
+    model = backend[0](task='origin', family='bernoulli').fit_origin(train, split, 0, training_data(train), pairs, weight_semantics='unit')
     assert np.array_equal(model._estimator.x[:, 1:], np.tile(train.values, (2, 1)))
     assert np.array_equal(model._estimator.y, pairs.transformed)
     prob = query(model, held)
@@ -280,7 +321,7 @@ def test_origin_pair_semantics_and_weights(backend, fold):
     for weights in ((2.,)*8, (1.,)*7+(2.,)):
         with pytest.raises(ContractError, match='unsupported sample weights'):
             backend[0](task='origin', family='bernoulli').fit_origin(train, split, 0,
-                replace(pairs, origin_weights=weights), weight_semantics='unit')
+                training_data(train), replace(pairs, origin_weights=weights), weight_semantics='unit')
 
 
 def test_runtime_mismatch_on_fit_and_predict(backend, fold, monkeypatch):
@@ -302,7 +343,7 @@ def test_context_limits_and_query_compatibility(backend, fold):
     model = backend[0]()
     model.max_context_rows = 3
     with pytest.raises(ContractError, match='context limit'):
-        model.fit_outcome(fold[0], fold[2], 0, np.arange(4), np.arange(4), sample_weight=[1]*4, weight_semantics='unit')
+        model.fit_outcome(fold[0], fold[2], 0, training_data(fold[0], np.arange(4), np.arange(4)), sample_weight=[1]*4, weight_semantics='unit')
     model = fitted(backend, fold)
     held = fold[1]
     wrong = replace(held, spec=replace(held.spec, weight_id='survey'))
@@ -466,7 +507,7 @@ def test_integer_raw_x_is_valid_numeric_input(backend, fold):
 def test_numpy_integer_seed_is_canonicalized(backend, fold):
     prototype = backend[0]()
     model = type(prototype)(prototype.checkpoint, task='outcome', family='identity', seed=np.int64(11))
-    model.fit_outcome(fold[0], fold[2], 0, np.arange(4), np.arange(4),
+    model.fit_outcome(fold[0], fold[2], 0, training_data(fold[0], np.arange(4), np.arange(4)),
                       sample_weight=np.ones(4), weight_semantics='unit')
     assert type(model.seed) is int and model.seed == 11
 
@@ -504,7 +545,7 @@ def test_real_floating_query_representations(backend, fold, dtype):
 def test_origin_near_boundary_logits_before_query_cast(backend, fold, monkeypatch, dtype):
     train, held, split = fold
     model = backend[0](task='origin', family='bernoulli').fit_origin(
-        train, split, 0, make_pairs(train), weight_semantics='unit')
+        train, split, 0, training_data(train), make_pairs(train), weight_semantics='unit')
     held = replace(held, original_ids=('h0',), values=((10., 11.),),
                    lineage=replace(held.lineage, unit_ids=('h0',)))
     predict_proba = model._estimator.predict_proba
@@ -529,7 +570,7 @@ def test_origin_near_boundary_logits_before_query_cast(backend, fold, monkeypatc
 def test_origin_preserves_backend_precision_before_logit(backend, fold, monkeypatch, backend_dtype, near):
     train, held, split = fold
     model = backend[0](task='origin', family='bernoulli').fit_origin(
-        train, split, 0, make_pairs(train), weight_semantics='unit')
+        train, split, 0, training_data(train), make_pairs(train), weight_semantics='unit')
     p = np.nextafter(backend_dtype(near), backend_dtype(1. - near))
     probs = np.array([[p, 1 - p]], dtype=backend_dtype)  # Mock classes are [1, 0].
     monkeypatch.setattr(model._estimator, 'predict_proba', lambda row: probs.copy())
@@ -546,7 +587,7 @@ def test_origin_preserves_backend_precision_before_logit(backend, fold, monkeypa
 def test_origin_genuine_boundary_probability_still_blocks(backend, fold, monkeypatch, boundary, dtype):
     train, held, split = fold
     model = backend[0](task='origin', family='bernoulli').fit_origin(
-        train, split, 0, make_pairs(train), weight_semantics='unit')
+        train, split, 0, training_data(train), make_pairs(train), weight_semantics='unit')
     monkeypatch.setattr(model._estimator, 'predict_proba',
                         lambda row: np.array([[boundary, 1 - boundary]]))
     args = (torch.ones(2, 1, 1, dtype=dtype), held, torch.tensor(held.values), None, None)
@@ -580,7 +621,7 @@ def test_unsupported_target_scales_block_before_backend(backend, fold, monkeypat
     monkeypatch.setattr(model, '_make_estimator', record_backend)
     labels = [0, 1, 2, 3] if family == 'identity' else [0, 1, 0, 1]
     with pytest.raises(ContractError, match='unsupported outcome scale'):
-        model.fit_outcome(train, split, 0, np.arange(4.), labels,
+        model.fit_outcome(train, split, 0, training_data(train, np.arange(4.), labels),
                           sample_weight=np.ones(4), weight_semantics='unit')
     assert not calls and model._estimator is None
 
@@ -607,13 +648,13 @@ def test_extended_precision_nonunit_weights_are_not_discarded(backend, fold, dir
     if container == 'list':
         weights = list(weights)
     with pytest.raises(ContractError, match='unsupported.*weight'):
-        backend[0]().fit_outcome(fold[0], fold[2], 0, np.arange(4.), np.arange(4.),
+        backend[0]().fit_outcome(fold[0], fold[2], 0, training_data(fold[0], np.arange(4.), np.arange(4.)),
                                 sample_weight=weights, weight_semantics='unit')
 
 
 @pytest.mark.parametrize('dtype', [np.float32, np.float64, np.longdouble, np.int64])
 def test_exact_unit_weights_are_accepted(backend, fold, dtype):
-    model = backend[0]().fit_outcome(fold[0], fold[2], 0, np.arange(4.), np.arange(4.),
+    model = backend[0]().fit_outcome(fold[0], fold[2], 0, training_data(fold[0], np.arange(4.), np.arange(4.)),
                                     sample_weight=np.ones(4, dtype=dtype), weight_semantics='unit')
     assert model._estimator is not None
 
@@ -644,7 +685,7 @@ def test_unregistered_checkpoint_identity_blocks_before_fit(backend, fold, tmp_p
                              filename=alternate.name, path=str(alternate),
                              sha256=sha256(alternate.read_bytes()).hexdigest())
         type(model)(checkpoint, task='outcome', family='identity', seed=11).fit_outcome(
-            fold[0], fold[2], 0, np.arange(4.), np.arange(4.),
+            fold[0], fold[2], 0, training_data(fold[0], np.arange(4.), np.arange(4.)),
             sample_weight=np.ones(4), weight_semantics='unit')
     assert len(MockEstimator.instances) == fitted_before
 
@@ -685,7 +726,7 @@ def test_selected_checkpoint_identities_accept_local_provisioning_paths(tmp_path
 @pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float16, torch.float32,
                                    torch.float64, torch.int64, torch.bool])
 def test_exact_unit_tensor_weights_are_accepted(backend, fold, dtype):
-    model = backend[0]().fit_outcome(fold[0], fold[2], 0, np.arange(4.), [1., 3., 7., 2.],
+    model = backend[0]().fit_outcome(fold[0], fold[2], 0, training_data(fold[0], np.arange(4.), [1., 3., 7., 2.]),
                                     sample_weight=torch.ones(4, dtype=dtype), weight_semantics='unit')
     assert model._estimator is not None
 
@@ -696,7 +737,7 @@ def test_nonunit_bfloat16_weights_are_refused(backend, fold, direction):
     weights[1] = torch.nextafter(weights[1], torch.tensor(direction, dtype=weights.dtype))
     assert weights[1] != 1
     with pytest.raises(ContractError, match='unsupported.*weight'):
-        backend[0]().fit_outcome(fold[0], fold[2], 0, np.arange(4.), np.arange(4.),
+        backend[0]().fit_outcome(fold[0], fold[2], 0, training_data(fold[0], np.arange(4.), np.arange(4.)),
                                 sample_weight=weights, weight_semantics='unit')
 
 
@@ -714,7 +755,7 @@ def test_checkpoint_replacement_cannot_change_loaded_bytes(backend, fold, monkey
         loaded.append(backend_path.read_bytes())
         return MockEstimator()
     monkeypatch.setattr(model, '_make_estimator', replace_before_load)
-    model.fit_outcome(fold[0], fold[2], 0, np.arange(4.), np.arange(4.),
+    model.fit_outcome(fold[0], fold[2], 0, training_data(fold[0], np.arange(4.), np.arange(4.)),
                       sample_weight=np.ones(4), weight_semantics='unit')
     assert loaded == [registered_bytes]
     assert source.read_bytes() != registered_bytes
@@ -729,7 +770,186 @@ def test_corrupt_private_checkpoint_copy_blocks_and_is_removed(backend, fold, mo
     monkeypatch.setattr(icl, 'copyfile', corrupt_copy)
     monkeypatch.setattr(model, '_make_estimator', lambda *args: pytest.fail('must verify before loading'))
     with pytest.raises(ContractError, match='checkpoint hash mismatch'):
-        model.fit_outcome(fold[0], fold[2], 0, np.arange(4.), np.arange(4.),
+        model.fit_outcome(fold[0], fold[2], 0, training_data(fold[0], np.arange(4.), np.arange(4.)),
                           sample_weight=np.ones(4), weight_semantics='unit')
     assert len(destinations) == 1 and not destinations[0].exists()
+    assert model._estimator is None
+
+
+@pytest.mark.parametrize('label', ['a', 'y', 'both'])
+@pytest.mark.parametrize('case', ['wrong_fold', 'permuted', 'disjoint', 'duplicated', 'held_out'])
+def test_detached_label_paths_are_removed(backend, fold, label, case):
+    # Original round-3 reproduction plus independent treatment/outcome sentinels.
+    # In particular (t0,t1,t2) must never fit values from (t3,h0,h1).
+    train, _, split = fold
+    split = replace(split, fold_ids=(1, 1, 1, 0, 0, 0))
+    ids = ('t0', 't1', 't2')
+    train = replace(train, original_ids=ids, values=train.values[:3],
+                    lineage=replace(train.lineage, unit_ids=ids, split_hash=split.content_hash))
+    sentinel_a = {'t0': 1., 't1': 4., 't2': 9., 't3': 100., 'h0': 101., 'h1': 102.,
+                  'z0': 201., 'z1': 202., 'z2': 203.}
+    sentinel_y = {'t0': 37., 't1': -11., 't2': 62., 't3': 101., 'h0': 202., 'h1': 303.,
+                  'z0': -97., 'z1': 17., 'z2': 803.}
+    supplied_ids = {'wrong_fold': ('t3', 'h0', 'h1'), 'permuted': ('t2', 't0', 't1'),
+                    'disjoint': ('z0', 'z1', 'z2'), 'duplicated': ('t0', 't0', 't2'),
+                    'held_out': ('t0', 'h0', 't2')}[case]
+    a = [sentinel_a[i] for i in (supplied_ids if label in ('a', 'both') else ids)]
+    y = [sentinel_y[i] for i in (supplied_ids if label in ('y', 'both') else ids)]
+    model = backend[0]()
+    with pytest.raises((TypeError, ContractError)):
+        model.fit_outcome(train, split, 0, a, y, sample_weight=np.ones(3), weight_semantics='unit')
+    assert model._estimator is None
+
+
+@pytest.fixture
+def label_source(fold):
+    # These are independent, explicit source records, not arrays zipped to view IDs.
+    # A and Y have different permutations and held-out sentinel magnitudes.
+    train, held, split = fold
+    template = training_data(train).manifest
+    ids = ('h1', 't2', 't0', 'h0', 't3', 't1', 'z0', 'z1', 'z2', 'z3', 'sealed')
+    rows = (('h1', 101., 701., 20., -2.), ('t2', 9., 62., -1., 8.),
+            ('t0', 1., 37., 0., 1.), ('h0', 100., 901., 10., 11.),
+            ('t3', 16., -48., 2., -1.), ('t1', 4., -11., 1., 4.),
+            ('z0', 201., -97., 0., 1.), ('z1', 202., 17., 1., 4.),
+            ('z2', 203., 803., -1., 8.), ('z3', 204., -503., 2., -1.),
+            ('sealed', 1001., -703., 0., 1.))
+    manifest = replace(template, original_ids=ids, lineage=replace(template.lineage, unit_ids=ids))
+    return LoadedData(manifest=manifest, rows=rows)
+
+
+def sentinel_pairs(train):
+    doses = {'t0': 1., 't1': 4., 't2': 9., 't3': 16.}
+    a = tuple(doses[oid] for oid in train.original_ids)
+    n = len(a)
+    return PolicyPairs(policy_id=train.spec.policy_id, weight_id=train.spec.weight_id,
+                       original_ids=train.original_ids * 2, geography_ids=train.original_ids * 2,
+                       support_keys=('s',) * (2 * n), a_mmhg=a + tuple(x + 2 for x in a),
+                       transformed=(False,) * n + (True,) * n, origin_weights=(1.,) * (2 * n))
+
+
+def fit_source(model, train, split, data):
+    if model.task == 'outcome':
+        return model.fit_outcome(train, split, 0, data, sample_weight=np.ones(len(train.original_ids)),
+                                 weight_semantics='unit')
+    return model.fit_origin(train, split, 0, data, sentinel_pairs(train), weight_semantics='unit')
+
+
+@pytest.mark.parametrize('task', ['outcome', 'origin'])
+@pytest.mark.parametrize('ids', [('t0', 't1', 't2', 't3'), ('t3', 't0', 't2', 't1')])
+def test_loaded_source_aligns_a_and_y_independently(backend, fold, label_source, monkeypatch, task, ids):
+    train, _, split = fold
+    data = select_loaded(label_source, ids)
+    reads = []
+    column = LoadedData.column
+    def spy(self, name):
+        assert self is data
+        reads.append(name)
+        return column(self, name)
+    monkeypatch.setattr(LoadedData, 'column', spy)
+    model = backend[0](task=task, family='identity' if task == 'outcome' else 'bernoulli')
+    fit_source(model, train, split, data)
+    assert 'a' in reads
+    np.testing.assert_array_equal(model._estimator.x[:4, 0], [1., 4., 9., 16.])
+    np.testing.assert_array_equal(model._estimator.x[:4, 1:], [[0., 1.], [1., 4.], [-1., 8.], [2., -1.]])
+    if task == 'outcome':
+        assert 'y' in reads
+        np.testing.assert_array_equal(model._estimator.y, [37., -11., 62., -48.])
+    else:
+        assert 'y' not in reads  # Origin supervision never needs endpoint outcomes.
+        np.testing.assert_array_equal(model._estimator.x[4:, 0], [3., 6., 11., 18.])
+        np.testing.assert_array_equal(model._estimator.y, [0., 0., 0., 0., 1., 1., 1., 1.])
+
+
+@pytest.mark.parametrize('task', ['outcome', 'origin'])
+@pytest.mark.parametrize('case', ['wrong_fold', 'disjoint', 'duplicated', 'held_out', 'sealed', 'extra'])
+def test_loaded_source_rejects_nontraining_ids_before_label_read(backend, fold, label_source, monkeypatch, task, case):
+    train, _, split = fold
+    if case == 'wrong_fold':
+        split = replace(split, fold_ids=(1, 1, 1, 0, 0, 0))
+        train = replace(train, original_ids=('t0', 't1', 't2'), values=train.values[:3],
+                        lineage=replace(train.lineage, unit_ids=('t0', 't1', 't2'),
+                                        split_hash=split.content_hash))
+    ids = {'wrong_fold': ('t3', 'h0', 'h1'), 'disjoint': ('z0', 'z1', 'z2', 'z3'),
+           'duplicated': ('t0', 't0', 't2', 't3'), 'held_out': ('t0', 't1', 't2', 'h0'),
+           'sealed': ('t0', 't1', 't2', 'sealed'), 'extra': ('t0', 't1', 't2', 't3', 'h0')}[case]
+    monkeypatch.setattr(LoadedData, 'column', lambda *args: pytest.fail('invalid IDs reached column access'))
+    model = backend[0](task=task, family='identity' if task == 'outcome' else 'bernoulli')
+    with pytest.raises(ContractError, match='IDs|duplicate'):
+        # LoadedData/DataManifest themselves forbid duplicate source IDs.
+        data = select_loaded(label_source, ids)
+        fit_source(model, train, split, data)
+    assert model._estimator is None
+
+
+@pytest.mark.parametrize('task', ['outcome', 'origin'])
+def test_training_view_must_match_loaded_covariates(backend, fold, label_source, task):
+    train, _, split = fold
+    data = select_loaded(label_source, train.original_ids)
+    # An accidentally permuted X matrix with unchanged row IDs is also unsafe.
+    train = replace(train, values=train.values[::-1])
+    model = backend[0](task=task, family='identity' if task == 'outcome' else 'bernoulli')
+    with pytest.raises(ContractError, match='covariate.*match'):
+        fit_source(model, train, split, data)
+    assert model._estimator is None
+
+
+def test_origin_original_doses_must_match_source_ids(backend, fold, label_source):
+    train, _, split = fold
+    data = select_loaded(label_source, train.original_ids)
+    model = backend[0](task='origin', family='bernoulli')
+    with pytest.raises(ContractError, match='treatment.*match'):
+        model.fit_origin(train, split, 0, data, make_pairs(train), weight_semantics='unit')
+    assert model._estimator is None
+
+
+@pytest.mark.parametrize('task', ['outcome', 'origin'])
+def test_loaded_source_required_for_every_supervised_entry(backend, fold, task):
+    train, _, split = fold
+    model = backend[0](task=task, family='identity' if task == 'outcome' else 'bernoulli')
+    with pytest.raises(ContractError, match='LoadedData'):
+        fit_source(model, train, split, np.arange(4.))
+    assert model._estimator is None
+    if task == 'outcome':
+        with pytest.raises(TypeError):
+            model.fit_outcome(train, split, 0, a=np.arange(4), y=np.arange(4),
+                              sample_weight=np.ones(4), weight_semantics='unit')
+    else:
+        with pytest.raises(TypeError):
+            model.fit_origin(train, split, 0, make_pairs(train), weight_semantics='unit')
+
+
+@pytest.mark.parametrize('task', ['outcome', 'origin'])
+def test_source_weights_cannot_be_replaced_by_unit_fit_weights(backend, fold, label_source, task):
+    train, _, split = fold
+    data = select_loaded(label_source, train.original_ids)
+    manifest = replace(data.manifest, weight_field='weight',
+                       schema=data.manifest.schema + (ColumnSpec(name='weight', dtype='number'),))
+    data = LoadedData(manifest=manifest, rows=tuple(row + (2.,) for row in data.rows))
+    model = backend[0](task=task, family='identity' if task == 'outcome' else 'bernoulli')
+    with pytest.raises(ContractError, match='unsupported sample weights'):
+        fit_source(model, train, split, data)
+    assert model._estimator is None
+
+
+@pytest.mark.parametrize('task', ['outcome', 'origin'])
+def test_prediction_cannot_read_privileged_source(backend, fold, label_source, monkeypatch, task):
+    train, held, split = fold
+    data = select_loaded(label_source, train.original_ids)
+    model = backend[0](task=task, family='identity' if task == 'outcome' else 'bernoulli')
+    fit_source(model, train, split, data)
+    assert not any(isinstance(value, LoadedData) for value in vars(model).values())
+    monkeypatch.setattr(LoadedData, 'column', lambda *args: pytest.fail('prediction read privileged source'))
+    assert torch.isfinite(query(model, held)).all()
+
+
+@pytest.mark.parametrize('task', ['outcome', 'origin'])
+def test_permuted_training_view_is_still_refused(backend, fold, label_source, task):
+    train, _, split = fold
+    data = select_loaded(label_source, train.original_ids)
+    train = replace(train, original_ids=train.original_ids[::-1], values=train.values[::-1],
+                    lineage=replace(train.lineage, unit_ids=train.original_ids[::-1]))
+    model = backend[0](task=task, family='identity' if task == 'outcome' else 'bernoulli')
+    with pytest.raises(ContractError, match='fold training IDs'):
+        fit_source(model, train, split, data)
     assert model._estimator is None

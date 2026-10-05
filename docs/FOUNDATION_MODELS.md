@@ -125,10 +125,25 @@ not be silently encoded by this adapter. County/geography is not a predictor.
   Tensor weights are checked in Torch, including CPU bfloat16, without a NumPy
   conversion; NumPy weights retain their own dtype.
   Neither replication nor unweighted fitting substitutes for weighted training.
-- `fit_outcome` consumes exactly `split.training_ids(fold)` in order. `fit_origin`
-  consumes authoritative `PolicyPairs`: original rows then shifted rows, the same
-  origin weights and X on both copies, and matching policy/weight identities.
-  No labels from query views are accepted. Each fold needs a new adapter instance;
+- Both supervised entry points require privileged, training-only `LoadedData`:
+  `fit_outcome(view, split, fold, data, *, sample_weight, weight_semantics)` and
+  `fit_origin(view, split, fold, data, pairs, *, weight_semantics)`. There is no
+  detached treatment/outcome array path. The training view must contain exactly
+  `split.training_ids(fold)` in order. The source must contain exactly the same
+  unique IDs (source order may differ), matching estimand, source and entity-graph
+  identities, and identical approved covariate values when joined by original ID.
+  Full datasets containing held-out, sealed or excluded rows are refused before
+  supervised columns are accessed. Construct the training subset from whole
+  source records while IDs remain attached, retaining their source provenance;
+  never attach intended IDs to detached A/Y arrays. Existing `LoadedData` and
+  `DataManifest` constructors validate row IDs/order and reject duplicates.
+  The adapter reads named columns through `LoadedData.column` and aligns them to
+  the view's IDs. Outcome fitting reads A and Y; origin fitting reads A and checks
+  the original half of authoritative `PolicyPairs` against it, without reading
+  endpoint Y. Policy pairs still supply shifted doses and original/shifted labels,
+  with original rows then shifted rows, matching policy/weight identities, and
+  equal X on both copies. Source weights must also be unit weights, even when a
+  caller supplies all-one fit weights. No labels from query views are accepted. Each fold needs a new adapter instance;
   refits are rejected. Prediction views must contain only this fitted fold's
   held-out IDs; training-row predictions cannot enter this OOF interface. The
   context hash binds view, split, fold, training arrays,
@@ -162,10 +177,11 @@ not be silently encoded by this adapter. County/geography is not a predictor.
   1 while its logit remains finite; an actual backend 0 or 1 still blocks logits
   with the boundary-probability error, without clipping.
 
-Feature approvals, target-weight semantics, label alignment and authenticity of
-runtime manifests remain responsibilities of the trusted data/training producer.
-The adapters verify the merged view/split/spec boundaries; they cannot infer
-whether a caller falsely labeled population weights as unit weights.
+Feature approvals, source-record authenticity, policy transformations,
+weight semantics and runtime manifests remain responsibilities of the trusted
+producer. The adapters own the source-to-view label alignment and training-only
+checks. They do not retain LoadedData or pass it to prediction, and cannot infer
+whether a producer falsified source records or labeled a weighted target as unit.
 
 ## Fixed variants
 
