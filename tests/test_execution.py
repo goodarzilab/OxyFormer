@@ -2044,6 +2044,12 @@ def test_rewritten_upstream_publication_fails_changer_and_transitive_collector(r
         assert not (collector / 'value.json').exists()
 
 
+    direct = initialize_attempt(repo, tmp_path / 'direct-consumer')
+    with raises(ContractError, match='tainted|fingerprint'):
+        run_task(repo, direct, needs=SOURCE_NEEDS)
+    assert not (direct / 'value.json').exists()
+
+
 def test_deep_valid_dependency_lineage_does_not_exhaust_python_stack(runtime, tmp_path):
     repo, _ = runtime
     head = git(repo, 'rev-parse', 'HEAD')
@@ -2220,3 +2226,27 @@ def test_builder_existing_expansion_cannot_leave_mixed_task_manifest(tmp_path, s
     assert process.returncode != 0
     assert read_json(out / 'expanded_units.json') == old
     assert not (out / 'task_manifest.json').exists(), 'new tasks were published beside an older expansion'
+
+
+def test_unlocked_stage_rejects_alternative_owner_approvals(runtime, tmp_path):
+    repo, out = runtime
+    alternate = tmp_path / 'stale-approvals.yaml'
+    alternate.write_text(yaml.safe_dump({'schema_version': 1, 'approved_by': 'fixture',
+                                      'owner_decisions': {'unapproved': True}}))
+    with raises(ContractError, match='approvals'):
+        run('dummy', out, repo, task_file=task_file(out), approvals=alternate)
+    assert not (out / 'value.json').exists()
+
+
+def test_multiprocessing_socket_uses_attempt_cache_on_long_paths(runtime):
+    repo, out = runtime
+    assert len(str(out)) > 51
+    process = run_cli_fixture(repo, out, """from multiprocessing import Manager
+def run_stage(request):
+    with Manager() as manager:
+        values = manager.list([1, 2])
+        assert list(values) == [1, 2]
+    return dummy(request)
+""")
+    assert_exit(process, 0)
+    assert verify_dependency_result(out).status == 'pass'
