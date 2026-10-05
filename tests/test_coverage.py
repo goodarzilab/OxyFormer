@@ -203,14 +203,15 @@ def smoke_recipe(endpoint, frame):
         "inference": {"primary_bandwidth_km": 100, "county_locations": {"c": [0., 0.], "d": [5., 5.]}}}
 
 
-def test_draw_executes_once_and_numerical_failure_is_retained(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure", [FloatingPointError, np.linalg.LinAlgError, ValueError])
+def test_draw_executes_once_and_numerical_failure_is_retained(tmp_path, monkeypatch, failure):
     endpoint, frame = synthetic_endpoint(tmp_path)
     scenario = SCMConfig(name="null_effect", active_mechanisms=("null",), effect="null")
     draw = coverage.repetition_plan("failure-test", scenario.name, 1)[0]
     calls = []
     def fail(*args):
         calls.append(1)
-        raise FloatingPointError("injected estimator failure")
+        raise failure("injected estimator failure")
     monkeypatch.setattr(coverage, "estimate_repetition", fail)
     result = coverage.execute_draw(draw, frame, scenario, endpoint, smoke_recipe(endpoint, frame), tmp_path, float("inf"))
     assert calls == [1]
@@ -257,6 +258,7 @@ def test_complete_controller_counts_fifteen_fits_as_one_repetition(tmp_path, mon
     result = coverage.estimate_repetition(prepared, smoke_recipe(endpoint, frame), tmp_path, coverage.time.monotonic() + 60)
     assert calls == [(fold, seed) for fold in range(5) for seed in coverage.nested_cv.SEEDS]
     assert set(result) == set(coverage.METHODS)
+    assert all(type(value["value"]) is float and type(value["se"]) is float for value in result.values())
     assert result["one_step"]["value"] == 0
     # FP64 targeting centers and subtracts means around 50; one ULP there
     # bounds the observed two-femtounit cancellation residual on both builds.
@@ -321,3 +323,17 @@ def test_stage_atomically_retains_each_declared_draw(tmp_path, monkeypatch):
     assert len([r for r in result.artifacts if r.kind == "repetition"]) == 2
     assert coverage.run_stage(req).status == "blocked"
     assert len(calls) == 2  # An existing failed draw is never rerun until success.
+
+
+@pytest.mark.parametrize("failure", [KeyError, TypeError, OSError])
+def test_execution_faults_remain_incomplete_not_numerical(tmp_path, monkeypatch, failure):
+    endpoint, frame = synthetic_endpoint(tmp_path)
+    scenario = SCMConfig(name="null_effect", active_mechanisms=("null",), effect="null")
+    draw = coverage.repetition_plan("execution-fault", scenario.name, 1)[0]
+    def fail(*args):
+        raise failure("injected execution fault")
+    monkeypatch.setattr(coverage, "estimate_repetition", fail)
+    result = coverage.execute_draw(draw, frame, scenario, endpoint, smoke_recipe(endpoint, frame), tmp_path, float("inf"))
+    assert result["status"] == "incomplete"
+    assert result["draw"] == draw
+    assert "execution failure" in result["reason"]

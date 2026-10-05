@@ -311,9 +311,14 @@ def execute_draw(draw, frame, scenario, template, recipe, root, deadline):
             atomic_write(root, "observations.json", sample.observations.to_json())
             atomic_write(root, "observed_law_truth.json", sample.observed_law_truth.to_json())
             atomic_write(root, "structural_causal_truth.json", sample.structural_causal_truth.to_json())
-    except (FloatingPointError, ArithmeticError, RuntimeError, ContractError) as exc:
+    except (ArithmeticError, np.linalg.LinAlgError, ValueError, RuntimeError) as exc:
         # No draw is retried and no exception is silently relabeled as success.
         record.update(status="numerical_failure", reason=f"{type(exc).__name__}: {exc}")
+    except Exception as exc:
+        # Adapter, I/O and unexpected execution faults are not estimates of
+        # numerical failure probability. Retain the draw as incomplete so it
+        # cannot vanish or certify coverage. Process cancellation still escapes.
+        record.update(status="incomplete", reason=f"execution failure: {type(exc).__name__}: {exc}")
     record["wall_seconds"] = time.monotonic() - started
     return record
 
@@ -360,13 +365,15 @@ def run_stage(request: StageRequest) -> StageResult:
         require(seconds > 0, "positive batch budget required")
         root = Path(request.output_dir)
         root.mkdir(parents=True, exist_ok=True)
-        records = []
+        records, repetition_seconds = [], []
         for draw in draws:
+            draw_started = time.monotonic()
             destination = output_path(root, "repetitions/" + draw["repetition_id"])
             require(not destination.exists(), "repetition was already attempted; use declared continuation, never redraw")
             destination.mkdir(parents=True)
             record = execute_draw(draw, frame, scenario, template, recipe, destination, started + seconds)
             atomic_json(destination, "result.json", record)
+            repetition_seconds.append(time.monotonic() - draw_started)
             records.append(record)
         summary = summarize(records, draws, production_equivalent=production,
             null_scenario=scenario.effect == "null", expected_rejection=scenario.assignment == "atoms")
@@ -376,10 +383,11 @@ def run_stage(request: StageRequest) -> StageResult:
             "lock_hash": digest(lock) if lock else None, "batch_id": parameters.get("batch_id"),
             "scenario": scenario.to_dict()["payload"], "draws": draws, "records": records, "summary": summary,
             "certifies_production_coverage": False}
+        stamps = fingerprint()
         timing = {"wall_seconds": time.monotonic() - started, "gpu_seconds": 0., "device": "cpu",
             "production_equivalent": production, "recipe_hash": digest(recipe),
-            "complete_repetition_seconds": [r["wall_seconds"] for r in records if r["status"] == "success"],
-            "complete": summary["complete"], "all_successful": summary["counts"]["success"] == len(draws), **fingerprint()}
+            "complete_repetition_seconds": [seconds for r, seconds in zip(records, repetition_seconds) if r["status"] == "success"],
+            "complete": summary["complete"], "all_successful": summary["counts"]["success"] == len(draws), **stamps}
         return publish(request, {"result.json": result, "timing.json": timing},
             status="pass" if summary["complete"] else "fail",
             message="Declared repetitions accounted for; production coverage requires complete campaign collection"

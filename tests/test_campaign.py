@@ -10,7 +10,7 @@ from oxyformer.contracts import StageRequest
 from oxyformer.provenance import ContractError, canonical_json, file_hash
 from oxyformer.validation import campaign, coverage
 from oxyformer.validation.scm import SCMConfig
-from test_coverage import successful_records
+from test_coverage import successful_records, synthetic_endpoint
 
 STAMPS = {"scientific_fingerprint": {"algorithm": "tracked-science-v2", "sha256": "a" * 64},
           "environment_hash": "b" * 64}
@@ -45,8 +45,9 @@ def request(root, task, dependencies, approvals=None):
 
 def setup_lock(tmp_path, **changes):
     inputs = tmp_path / "inputs"
-    endpoint = write(inputs / "endpoint.json", {"synthetic": "endpoint"})
-    frame = write(inputs / "frame.json", {"synthetic": "frame"})
+    endpoint_record, frame_record = synthetic_endpoint(tmp_path)
+    endpoint = write(inputs / "endpoint.json", endpoint_record.to_dict())
+    frame = write(inputs / "frame.json", frame_record.to_dict())
     recipe = {"endpoint_hash": file_hash(endpoint), "frame_hash": file_hash(frame), "nested_cv": {},
               "inference": {"primary_bandwidth_km": 100, "county_locations": {"c": [0, 0], "d": [5, 5]}}}
     scenario = SCMConfig(name="null_effect", effect="null", active_mechanisms=("null",)).to_dict()["payload"]
@@ -56,7 +57,7 @@ def setup_lock(tmp_path, **changes):
         "draws": draws, "records": records})
     write(profile / "timing.json", {"production_equivalent": True, "complete": True, "all_successful": True,
         "recipe_hash": coverage.digest(recipe), "device": "cpu", "gpu_seconds": 0,
-        "complete_repetition_seconds": [10., 11.], **STAMPS})
+        "complete_repetition_seconds": [10., 11.], "wall_seconds": 25., **STAMPS})
     parameters = {"campaign_id": "test", "recipe": recipe, "scenario_family": [scenario],
         "final_repetitions": 1000, "screening_repetitions": 5, "repetitions_per_leaf": 25,
         "gpus": 0, "wall_seconds": 600, "profile_safety_factor": 2., "evaluation_namespace": "prospective-one",
@@ -233,3 +234,38 @@ def test_final_execution_is_blocked_by_failed_screening(tmp_path):
     result = coverage.run_stage(req)
     assert result.status == "blocked" and "screening did not admit" in result.message
     assert not list(Path(req.output_dir).glob("repetitions/*"))
+
+
+def test_lock_accepts_authenticated_noncanonical_input_serialization(tmp_path):
+    from test_coverage import synthetic_endpoint
+    req, task = setup_lock(tmp_path)
+    endpoint, frame = synthetic_endpoint(tmp_path)
+    (tmp_path / "inputs/endpoint.json").write_text(endpoint.to_json() + "\n")
+    (tmp_path / "inputs/frame.json").write_text(frame.to_json() + "\n")
+    recipe = task["parameters"]["recipe"]
+    recipe.update(endpoint_hash=endpoint.content_hash, frame_hash=frame.content_hash)
+    for name in ("result.json", "timing.json"):
+        path = tmp_path / "profile" / name
+        value = coverage.read_json(path)
+        value["recipe_hash"] = coverage.digest(recipe)
+        write(path, value)
+    write(Path(req.task_path), task)
+    req = replace(req, task_hash=file_hash(req.task_path), dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    result = campaign.run_stage(req)
+    assert result.status == "pass", result.message
+    result.verify(req)
+
+
+@pytest.mark.parametrize("seconds,status", [(250, "blocked"), (270, "pass")])
+def test_lock_accounts_for_measured_setup_overhead(tmp_path, seconds, status):
+    req, _ = setup_lock(tmp_path, profile_safety_factor=1., wall_seconds=seconds)
+    path = tmp_path / "profile/timing.json"
+    timing = coverage.read_json(path)
+    timing.update(wall_seconds=40., complete_repetition_seconds=[10., 10.])
+    write(path, timing)
+    req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    result = campaign.run_stage(req)
+    # 20 seconds of measured setup + 25 * 10-second repetitions need 270 s.
+    assert result.status == status
+    if status == "blocked":
+        assert "infeasible batch budget" in result.message
