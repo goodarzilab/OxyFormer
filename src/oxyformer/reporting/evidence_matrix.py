@@ -6,6 +6,7 @@ we verify identities, files, numerical criteria and full task coverage. Neither
 hashes nor a StageResult pass authenticate a human or prove identification.
 """
 from dataclasses import asdict
+from fractions import Fraction
 import math
 from pathlib import Path
 
@@ -264,7 +265,9 @@ def evaluate(bundle, manifest, receipts, approvals, config_hash):
             for method, metric in report["diagnostics"]["information"].items():
                 if method != "mtp_one_step" and method not in CV_TMLE_METHODS:
                     continue
-                passed = metric["positive_D"] and metric["s_max"] <= concentration["s_max_max"] and metric["G_eff"] >= concentration["g_eff_min"]
+                passed = (metric["positive_D"] and
+                          Fraction(metric["s_max_exact"]) <= Fraction(str(concentration["s_max_max"])) and
+                          Fraction(metric["G_eff_exact"]) >= Fraction(str(concentration["g_eff_min"])))
                 gates.append({"gate": f"influence_concentration:{method}", "status": "pass" if passed else "failed",
                               "reason": "approved county s_max/G_eff gate; never trim, cap or reweight post hoc"})
             report["approved_concentration_gate"] = concentration

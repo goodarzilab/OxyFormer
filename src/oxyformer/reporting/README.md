@@ -64,15 +64,18 @@ Scientific parameters are read at runtime from
 `owner_decisions.release_gates` and `owner_decisions.influence_concentration_gate`.
 Fixtures mirror the approved PR #18 parameters in the owner registry.
 The approved concentration definition is county-based: sum final contributions
-within county first, then square. County sums use `math.fsum` to retain small
-residuals under cancellation; the same accurate totals feed the merged cluster
-and spatial covariance formulas. Report D, s_max, G_eff and ranked counties for
+within county first, then square. County sums and concentration metrics use exact
+rational arithmetic on the supplied binary64 contributions. Exact `s_max_exact`
+and `G_eff_exact` ratios are compared with the owner's decimal thresholds, so
+rounding cannot change an inclusive boundary decision; no tolerance is added.
+Floating diagnostics and `D_scientific` are presentation values. County totals
+are converted once to floats for the unchanged merged cluster/spatial formulas. Report D, s_max, G_eff and ranked counties for
 one-step and CV-TMLE separately. State shares sum these county information
 shares and are descriptive. This uses the orchestrator's clarified PR #18 gate
 instead of inventing a state/block metric or a different information definition.
 Zero D fails this confirmatory gate, including a scientifically exact identity
 contrast. Positive D outside float64 range is preserved as `D_scientific`
-with a null numeric D; positivity is checked before squaring. The family alias
+with a null numeric D; positivity is determined from the exact county sums. The family alias
 `cv_tmle` and the merged likelihood-specific names use identical gates.
 Failure retains the point estimates as diagnostic-only; no trimming,
 ratio capping, reweighting or favorable-estimator selection is performed.
