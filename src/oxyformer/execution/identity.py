@@ -5,6 +5,7 @@ included. Other docs/** and *.md files are excluded. Everything else (including
 all src, configs, scripts, build metadata and scientific root scripts) is bound.
 """
 import importlib.metadata
+import importlib.util
 from hashlib import sha256
 from pathlib import Path
 import platform
@@ -34,8 +35,18 @@ def code_identity(repo, out):
             'code_commit.txt does not match cloned repository HEAD')
     require(not git(repo, 'status', '--porcelain', '--untracked-files=no'),
             'cloned repository has tracked modifications')
-    untracked = git(repo, 'ls-files', '--others', '--exclude-standard', '-z').split('\0')
-    require(not any(n and scientific_path(n) for n in untracked), 'untracked scientific code/config')
+    tracked = set(git(repo, 'ls-tree', '-r', '--name-only', '-z', head).split('\0'))
+    untracked = git(repo, 'ls-files', '--others', '-z').split('\0')
+    for name in filter(None, untracked):
+        if not scientific_path(name):
+            continue
+        try:
+            source = importlib.util.source_from_cache(name)
+        except ValueError:
+            source = None
+        # Ordinary Python caches of tracked sources are admissible. The worker
+        # compiles first-party source directly, so stale caches cannot supply code.
+        require(source in tracked, f'untracked scientific code/config: {name}')
     return head
 
 

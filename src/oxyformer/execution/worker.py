@@ -17,6 +17,7 @@ import sys
 from oxyformer.contracts import StageRequest, StageResult
 from oxyformer.provenance import require
 from .identity import verify_module_origins
+from .imports import install_tracked_imports
 from .integrity import read_regular, verify_inputs
 from .paths import atomic_write, isolated_caches
 
@@ -89,6 +90,7 @@ def stage_main(request_path, repository, module_name):
     request = StageRequest.from_json(read_regular(request_path))
     try:
         verify_inputs(request)
+        install_tracked_imports(repository, request.code_identity)
         caches = isolated_caches(request.output_dir)
         caches.__enter__()
         atexit.register(caches.__exit__, None, None, None)

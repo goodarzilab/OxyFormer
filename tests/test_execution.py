@@ -1676,3 +1676,129 @@ def test_output_inside_transitive_attempt_is_refused_before_writing(runtime, tmp
         run('dummy', nested, repo, deps_env=True, task_file=task)
     assert fingerprint_tree(source) == before
     assert not (nested / '_execution').exists()
+
+
+@pytest.mark.parametrize('timing', ['before-stage', 'during-stage'])
+def test_untracked_first_party_import_never_runs(runtime, tmp_path, monkeypatch, timing):
+    repo, out = runtime
+    marker = tmp_path / 'imported-untracked-code'
+    monkeypatch.setenv('IMPORT_SENTINEL', str(marker))
+    code = "from pathlib import Path\nimport os\nPath(os.environ['IMPORT_SENTINEL']).write_text('executed')\n"
+    with (repo / '.git/info/exclude').open('a') as stream:
+        stream.write('\n/src/oxyformer/stray.py\n')
+    if timing == 'before-stage':
+        (repo / 'src/oxyformer/stray.py').write_text(code)
+        body = 'import oxyformer.stray\nrun_stage = dummy\n'
+    else:
+        body = '''def run_stage(request):
+    import importlib
+    sibling = Path(__file__).with_name('stray.py')
+    sibling.write_text(%r)
+    importlib.invalidate_caches()
+    importlib.import_module('oxyformer.stray')
+    return dummy(request)
+''' % code
+    process = run_cli_fixture(repo, out, body)
+    assert not marker.exists(), 'untracked first-party import-time code executed'
+    assert process.returncode in (1, 2), process.stdout + process.stderr
+    assert not (out / 'value.json').exists()
+
+
+def test_stage_uses_tracked_source_instead_of_stale_bytecode(runtime, tmp_path, monkeypatch):
+    repo, out = runtime
+    marker = tmp_path / 'loaded-stale-bytecode'
+    monkeypatch.setenv('IMPORT_SENTINEL', str(marker))
+    entrypoint = '''import os,sys,py_compile
+from pathlib import Path
+from oxyformer.cli import main
+repo = Path(sys.argv[sys.argv.index('--repo') + 1])
+source = repo / 'src/oxyformer/dummy.py'
+original = source.read_bytes()
+prefix = b"from pathlib import Path; import os; Path(os.environ['IMPORT_SENTINEL']).write_text('stale')\\n"
+try:
+    source.write_bytes(prefix + original)
+    py_compile.compile(str(source), doraise=True,
+                       invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH)
+finally:
+    source.write_bytes(original)
+raise SystemExit(main())
+'''
+    process = run_cli_fixture(repo, out, 'run_stage = dummy\n', entrypoint=entrypoint)
+    assert process.returncode == 0, process.stdout + process.stderr
+    assert not marker.exists(), 'cached bytes outside the attested source executed'
+    assert (out / 'value.json').exists()
+
+
+@pytest.mark.parametrize('kind', ['tar', 'zip'])
+def test_archive_replacement_after_probe_is_nonblocking(tmp_path, kind):
+    archive = tmp_path / ('payload.' + kind)
+    if kind == 'tar':
+        with tarfile.open(archive, 'w') as handle:
+            member = tarfile.TarInfo('tiny.txt')
+            member.size = 2
+            handle.addfile(member, io.BytesIO(b'ok'))
+    else:
+        with zipfile.ZipFile(archive, 'w') as handle:
+            handle.writestr('tiny.txt', b'ok')
+    code = '''import os,sys,zipfile
+from pathlib import Path
+from oxyformer.execution.paths import safe_extract
+from oxyformer.provenance import ContractError
+archive = Path(sys.argv[1])
+original = zipfile.is_zipfile
+def replace_after_probe(value):
+    result = original(value)
+    archive.unlink()
+    os.mkfifo(archive)
+    return result
+zipfile.is_zipfile = replace_after_probe
+try:
+    safe_extract(archive, archive.parent, 'unpacked')
+except (ContractError, OSError) as exc:
+    assert str(archive) in str(exc), str(exc)
+else:
+    raise AssertionError('changed archive accepted')
+assert not (archive.parent / 'unpacked').exists()
+'''
+    process = subprocess.run([sys.executable, '-c', code, str(archive)],
+                             env=dict(os.environ, PYTHONPATH=str(Path(__file__).parents[1] / 'src')),
+                             capture_output=True, text=True, timeout=3)
+    assert process.returncode == 0, process.stdout + process.stderr
+
+
+def test_output_containing_transitive_attempt_is_refused(runtime, tmp_path, monkeypatch):
+    from oxyformer.execution.integrity import fingerprint_tree
+    repo, out = runtime
+    source = out / 'source'
+    source.mkdir()
+    (source / 'data.json').write_text('{}')
+    (source / 'receipts.json').write_text('{}')
+    publish_source_fixture(repo, source)
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
+    middle = tmp_path / 'middle'
+    middle.mkdir()
+    (middle / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    assert run('dummy', middle, repo, deps_env=True,
+               task_file=task_file(middle, needs={'data-unit': ['data.json', 'receipts.json']})).status == 'pass'
+    monkeypatch.setenv('SWARM_DEP_MIDDLE', str(middle))
+    task = task_file(out, needs={'middle': ['value.json']})
+    before = fingerprint_tree(source)
+    with pytest.raises(ContractError, match='overlap|upstream'):
+        run('dummy', out, repo, deps_env=True, task_file=task)
+    assert fingerprint_tree(source) == before
+    assert not (out / '_execution').exists()
+
+
+def test_tracked_package_resources_remain_available(runtime):
+    repo, out = runtime
+    package = repo / 'src/oxyformer/fixture_package'
+    package.mkdir()
+    (package / '__init__.py').write_text('')
+    (package / 'fixture.txt').write_text('tracked resource')
+    process = run_cli_fixture(repo, out, '''from importlib.resources import files
+def run_stage(request):
+    value = files('oxyformer.fixture_package').joinpath('fixture.txt').read_text()
+    assert value == 'tracked resource'
+    return dummy(request)
+''')
+    assert process.returncode == 0, process.stdout + process.stderr

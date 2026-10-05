@@ -55,52 +55,59 @@ def safe_extract(archive, root, relative, *, members=None, max_bytes=10 * 1024**
     if selected is not None:
         for name in selected:
             relative_artifact_path(name)
+    # Local import avoids a module cycle: integrity also uses atomic_write.
+    from .integrity import open_regular
     entries = []
-    is_zip = zipfile.is_zipfile(archive)
-    handle = zipfile.ZipFile(archive) if is_zip else tarfile.open(archive, 'r:*')
-    with handle:
-        seen = set()
-        total = 0
-        for item in handle.infolist() if is_zip else handle.getmembers():
-            name = (item.filename if is_zip else item.name).rstrip('/')
-            # tar -C directory -cf payload.tar . emits a root '.' directory
-            # and './file' names. Strip only leading './', never '..' or '/'.
-            while name.startswith('./'):
-                name = name[2:]
-            directory = item.is_dir() if is_zip else item.isdir()
-            if name != '.':
-                relative_artifact_path(name)
-            require(name not in seen, 'duplicate archive member')
-            seen.add(name)
-            if is_zip:
-                mode = item.external_attr >> 16
-                require((mode & 0o170000) in (0, 0o100000, 0o040000), 'archive special file')
-                size = item.file_size
-            else:
-                require(item.isfile() or directory, 'archive special file or link')
-                size = item.size
-            if name == '.':
-                require(directory, 'archive root entry must be a directory')
-                continue
-            if selected is None or name in selected:
-                total += size
-                require(total <= max_bytes, 'archive exceeds extraction byte limit')
-                entries.append((name, item, directory))
-        require(selected is None or selected <= seen, 'requested archive member missing')
-        target.mkdir(parents=True)
-        try:
-            for name, item, directory in entries:
-                dest = output_path(target, name)
-                if directory:
-                    dest.mkdir(parents=True, exist_ok=True)
-                else:
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    source = handle.open(item) if is_zip else handle.extractfile(item)
-                    with source, dest.open('xb') as sink:
-                        shutil.copyfileobj(source, sink)
-        except BaseException:
+    created = False
+    try:
+        with open_regular(archive) as stream:
+            is_zip = zipfile.is_zipfile(stream)
+            stream.seek(0)
+            handle = zipfile.ZipFile(stream) if is_zip else tarfile.open(fileobj=stream, mode='r:*')
+            with handle:
+                seen = set()
+                total = 0
+                for item in handle.infolist() if is_zip else handle.getmembers():
+                    name = (item.filename if is_zip else item.name).rstrip('/')
+                    # tar -C directory -cf payload.tar . emits a root '.' directory
+                    # and './file' names. Strip only leading './', never '..' or '/'.
+                    while name.startswith('./'):
+                        name = name[2:]
+                    directory = item.is_dir() if is_zip else item.isdir()
+                    if name != '.':
+                        relative_artifact_path(name)
+                    require(name not in seen, 'duplicate archive member')
+                    seen.add(name)
+                    if is_zip:
+                        mode = item.external_attr >> 16
+                        require((mode & 0o170000) in (0, 0o100000, 0o040000), 'archive special file')
+                        size = item.file_size
+                    else:
+                        require(item.isfile() or directory, 'archive special file or link')
+                        size = item.size
+                    if name == '.':
+                        require(directory, 'archive root entry must be a directory')
+                        continue
+                    if selected is None or name in selected:
+                        total += size
+                        require(total <= max_bytes, 'archive exceeds extraction byte limit')
+                        entries.append((name, item, directory))
+                require(selected is None or selected <= seen, 'requested archive member missing')
+                target.mkdir(parents=True)
+                created = True
+                for name, item, directory in entries:
+                    dest = output_path(target, name)
+                    if directory:
+                        dest.mkdir(parents=True, exist_ok=True)
+                    else:
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        source = handle.open(item) if is_zip else handle.extractfile(item)
+                        with source, dest.open('xb') as sink:
+                            shutil.copyfileobj(source, sink)
+    except BaseException:
+        if created:
             shutil.rmtree(target)
-            raise
+        raise
     return target
 
 

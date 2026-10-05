@@ -242,6 +242,11 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
             path = dependency_file(root, relative)
             if path not in files:
                 files.append(path)
+    # Recursive verification has now established the complete protected set.
+    # Admit writes only after checking every ancestor, in both directions.
+    for root in map(Path, dependency_trees):
+        require(not out.is_relative_to(root) and not root.is_relative_to(out),
+                f'output overlaps an upstream attempt: {root}')
     require(len(set(files)) == len(files), 'duplicate dependency files')
     for relative in task.get('outputs', []):
         require(not relative.startswith('_execution/'), 'reserved execution output')
