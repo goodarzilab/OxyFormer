@@ -7,7 +7,7 @@
   "production": {"outer_folds": [0, 1, 2, 3, 4], "inner_folds": [0, 1, 2], "seeds": [1103, 2207, 3301], "learning_rates": [0.0003, 0.001], "dropouts": [0, 0.1], "ssl_max_epochs": 30, "nuisance_max_epochs": 150, "minimum_final_repetitions_per_scenario": 1000},
   "templates": [
     {"kind": "primary", "stage": "primary", "variants": ["A0"], "dimensions": ["endpoint", "target", "outer_fold", "seed"], "owner_allocation_required": false},
-    {"kind": "ablation", "stage": "ablation", "variants": ["A1", "A2", "A3", "A4", "A5", "A6", "A7"], "dimensions": ["endpoint", "target", "variant", "outer_fold", "seed"], "owner_allocation_required": false},
+    {"kind": "ablation", "stage": "ablation", "variants": ["A1", "A2", "A3", "A4", "A5", "A6", "A7", "F0", "F1"], "unit_weight_only": ["A6", "A7", "F0", "F1"], "dimensions": ["endpoint", "target", "variant", "outer_fold", "seed"], "owner_allocation_required": false},
     {"kind": "screening", "stage": "coverage", "dimensions": ["scenario", "independent_repetition"], "after": "campaign-lock", "recipe_mutable": false, "owner_allocation_required": false},
     {"kind": "final-coverage", "stage": "coverage", "dimensions": ["scenario", "independent_repetition"], "after": "screening-collector", "owner_allocation_required": true},
     {"kind": "anchor", "stage": "anchor", "dimensions": ["endpoint", "target", "outer_fold", "seed"], "owner_allocation_required": true},
@@ -32,7 +32,7 @@
     "dispatcher approval-date JSON serialization",
     "dispatcher versus reporting and design task/config contracts",
     "nested runner is CPU-only; GPU timing cannot be assumed",
-    "A5-A7 require resumable signed-correction/foundation adapters",
+    "A5-A7 and F0-F1 require resumable signed-correction/foundation adapters",
     "coverage batching requires complete repetitions; interrupted repetitions lack cross-leaf continuation",
     "final-coverage, anchor and refit-audit allocations and scoped release approvals are absent"
   ],

@@ -64,7 +64,10 @@ def test_catalog_preserves_science_and_admission_boundaries():
         "primary-collector", "final-coverage-collector", "anchor-review", "audit-collect"}
     by_kind = {t["kind"]: t for t in value["templates"]}
     assert set(by_kind) == {"primary", "ablation", "screening", "final-coverage", "anchor", "refit-audit"}
-    assert by_kind["ablation"]["variants"] == [f"A{i}" for i in range(1, 8)]
+    variants = yaml.safe_load((ROOT / "configs/models/ablations.yaml").read_text())["variants"]
+    assert set(by_kind["ablation"]["variants"]) == set(variants) - {"A0", "A8", "B0", "D0"}
+    assert set(by_kind["ablation"]["unit_weight_only"]) == {
+        name for name, settings in variants.items() if settings.get("weights") == "unit_only"}
     assert by_kind["screening"]["after"] == "campaign-lock"
     assert by_kind["screening"]["recipe_mutable"] is False
     for kind in ("final-coverage", "anchor", "refit-audit"):
