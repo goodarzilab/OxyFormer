@@ -89,6 +89,22 @@ def validate_draws(rows):
     require(len(set(seeds)) == len(seeds), "duplicate simulation seeds")
 
 
+def validate_success(record, *, null_scenario):
+    """Validate numerical output before it can become an atomic success record."""
+    finite(record["truth"], "observed-law truth")
+    finite(record["causal_truth"], "structural truth")
+    error = finite(record["truth_integration_error"], "truth-integration error")
+    require(error >= 0, "negative truth-integration error")
+    require(set(record["estimates"]) == set(METHODS), "incomplete estimator results")
+    for estimate in record["estimates"].values():
+        finite(estimate["value"], "estimate")
+        require(finite(estimate["se"], "standard error") >= 0, "negative standard error")
+        for se in estimate.get("spatial_se", {}).values():
+            require(finite(se, "spatial standard error") >= 0, "negative spatial standard error")
+    if null_scenario:
+        require(abs(record["truth"]) <= error, "null scenario has nonzero observed-law truth")
+
+
 def summarize(records, declared, *, production_equivalent, null_scenario, expected_rejection=False):
     """Never infer the denominator from the successful subset.
 
@@ -105,16 +121,7 @@ def summarize(records, declared, *, production_equivalent, null_scenario, expect
         require(identity in expected and record["draw"] == expected[identity], "undeclared or changed repetition")
         require(record["status"] in STATUSES, "unknown repetition status")
         if record["status"] == "success":
-            finite(record["truth"], "observed-law truth")
-            finite(record["causal_truth"], "structural truth")
-            error = finite(record["truth_integration_error"], "truth-integration error")
-            require(error >= 0, "negative truth-integration error")
-            require(set(record["estimates"]) == set(METHODS), "incomplete estimator results")
-            for estimate in record["estimates"].values():
-                finite(estimate["value"], "estimate")
-                require(finite(estimate["se"], "standard error") >= 0, "negative standard error")
-            if null_scenario:
-                require(abs(record["truth"]) <= error, "null scenario has nonzero observed-law truth")
+            validate_success(record, null_scenario=null_scenario)
         observed[identity] = record
     n = len(declared)
     counts = {status: sum(r["status"] == status for r in records) for status in sorted(STATUSES)}
@@ -305,10 +312,15 @@ def execute_draw(draw, frame, scenario, template, recipe, root, deadline):
             if estimates is not None:
                 uncertainty = sample.integration_uncertainty
                 error = (uncertainty.observed_absolute_difference or 0.) + (uncertainty.quadrature_tail_absolute_bound or 0.) + (uncertainty.truth_serialization_absolute_bound or 0.)
-                record.update(status="success", reason="complete production procedure", estimates=estimates,
-                    truth=sample.observed_law_truth.value, causal_truth=sample.structural_causal_truth.value,
-                    truth_integration_error=error, integration_uncertainty=uncertainty.to_dict(),
-                    observation_hash=sample.observations.content_hash)
+                successful = {**record, "status": "success", "reason": "complete production procedure",
+                    "estimates": estimates, "truth": sample.observed_law_truth.value,
+                    "causal_truth": sample.structural_causal_truth.value, "truth_integration_error": error,
+                    "integration_uncertainty": uncertainty.to_dict(), "observation_hash": sample.observations.content_hash}
+                # Keep the original serializable failure record until every
+                # numerical field has been checked. NaN/inf must not escape to
+                # atomic JSON publication or abort aggregation of other draws.
+                validate_success(successful, null_scenario=scenario.effect == "null")
+                record = successful
             atomic_write(root, "observations.json", sample.observations.to_json())
             atomic_write(root, "observed_law_truth.json", sample.observed_law_truth.to_json())
             atomic_write(root, "structural_causal_truth.json", sample.structural_causal_truth.to_json())
@@ -388,9 +400,9 @@ def _run_batch(request: StageRequest, started: float) -> StageResult:
             destination = output_path(root, "repetitions/" + draw["repetition_id"])
             require(not destination.exists(), "repetition was already attempted; use declared continuation, never redraw")
             destination.mkdir(parents=True)
-            # A locked leaf's wall budget is a planning estimate. Slurm owns
-            # the hard limit; a late draw is retained instead of truncated here.
-            deadline = math.inf if lock else started + seconds
+            # Production profiling and locked leaves use planning estimates.
+            # Slurm owns the hard limit; late complete draws remain counted.
+            deadline = started + seconds if mode == "smoke" else math.inf
             record = execute_draw(draw, frame, scenario, template, recipe, destination, deadline)
             atomic_json(destination, "result.json", record)
             repetition_seconds.append(time.monotonic() - draw_started)

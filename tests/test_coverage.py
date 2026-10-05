@@ -353,7 +353,8 @@ def test_execution_runtime_error_cannot_be_tolerated_as_numerical_failure(tmp_pa
     assert result["counts"]["numerical_failure"] == 0
 
 
-def test_profile_measures_final_publication_and_verification(tmp_path, monkeypatch):
+@pytest.mark.parametrize("budget", [1000, 60])
+def test_profile_measures_final_publication_and_verification(tmp_path, monkeypatch, budget):
     from test_campaign import request, STAMPS
     endpoint, frame = synthetic_endpoint(tmp_path)
     inputs = tmp_path / "inputs"
@@ -365,7 +366,7 @@ def test_profile_measures_final_publication_and_verification(tmp_path, monkeypat
     task = {"id": "simulation-smoke", "stage": "simulation-smoke", "parameters": {
         "mode": "profile", "recipe": recipe,
         "scenario": {"name": "null_effect", "effect": "null", "active_mechanisms": ["null"]},
-        "draws": coverage.repetition_plan("measured-publication", "null_effect", 2), "wall_seconds": 1000,
+        "draws": coverage.repetition_plan("measured-publication", "null_effect", 2), "wall_seconds": budget,
         "endpoint_input": {"dependency": "input", "path": "endpoint.json"},
         "frame_input": {"dependency": "input", "path": "frame.json"}}}
     req = request(tmp_path / "request", task, {"input": inputs})
@@ -382,6 +383,8 @@ def test_profile_measures_final_publication_and_verification(tmp_path, monkeypat
     monkeypatch.setattr(coverage.StageRequest, "verify_inputs", delayed_preflight)
     def estimate(*args):
         deadlines.append(args[-1])
+        if clock[0] + 10. > args[-1]:
+            return None
         clock[0] += 10.
         return {method: {"value": 0., "se": 1.} for method in coverage.METHODS}
     def stamp():
@@ -398,8 +401,57 @@ def test_profile_measures_final_publication_and_verification(tmp_path, monkeypat
     assert result.status == "pass", result.message
     result.verify(req)
     timing = json.loads((Path(req.output_dir) / "timing.json").read_text())
-    assert deadlines == [1000., 1000.]  # Public-entry preflight consumes the same budget.
+    assert deadlines == [float("inf"), float("inf")]  # Planning estimates do not truncate profiles.
     assert timing["wall_seconds"] == 77.  # Includes preflight and normal leaf publication/verification.
     assert timing["complete_repetition_seconds"] == [10., 10.]
     assert timing["setup_seconds"] == 55.
     assert timing["publication_verification_seconds"] == 2.
+
+
+@pytest.mark.parametrize("field,bad", [("value", float("nan")), ("se", float("inf")),
+                                     ("spatial_se", float("nan")), ("se", -1.)])
+def test_nonfinite_estimator_outputs_are_retained_as_numerical_failures(tmp_path, monkeypatch, field, bad):
+    from test_campaign import request, STAMPS
+    endpoint, frame = synthetic_endpoint(tmp_path)
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    (inputs / "endpoint.json").write_text(endpoint.to_json())
+    (inputs / "frame.json").write_text(frame.to_json())
+    draws = coverage.repetition_plan("nonfinite-stage", "null_effect", 3)
+    task = {"id": "simulation-smoke", "stage": "simulation-smoke", "parameters": {
+        "mode": "smoke", "recipe": smoke_recipe(endpoint, frame),
+        "scenario": {"name": "null_effect", "active_mechanisms": ["null"], "effect": "null"},
+        "draws": draws, "wall_seconds": 60,
+        "endpoint_input": {"dependency": "input", "path": "endpoint.json"},
+        "frame_input": {"dependency": "input", "path": "frame.json"}}}
+    req = request(tmp_path / "request", task, {"input": inputs})
+    calls = []
+    def estimate(*args):
+        calls.append(1)
+        result = {m: {"value": 0., "se": 1., "spatial_se": {"50": 1., "100": 1., "200": 1.}}
+                  for m in coverage.METHODS}
+        if len(calls) == 1:
+            if field == "spatial_se":
+                result["one_step"][field]["50"] = bad
+            else:
+                result["one_step"][field] = bad
+        return result
+    monkeypatch.setattr(coverage, "estimate_repetition", estimate)
+    monkeypatch.setattr(campaign, "fingerprint", lambda: deepcopy(STAMPS))
+    result = coverage.run_stage(req)
+    assert result.status == "pass", result.message
+    result.verify(req)
+    assert len(calls) == 3
+    root = Path(req.output_dir)
+    aggregate = coverage.read_json(root / "result.json")
+    summary = aggregate["summary"]
+    assert summary["counts"]["numerical_failure"] == 1
+    assert summary["counts"]["success"] == 2
+    assert summary["declared_repetitions"] == 3
+    assert summary["numerical_failure_upper"] == pytest.approx(coverage.binomial_bound(1, 3, side="upper"))
+    failure = coverage.read_json(root / "repetitions" / draws[0]["repetition_id"] / "result.json")
+    assert failure["status"] == "numerical_failure" and failure["estimates"] == {}
+    assert "invalid" in failure["reason"] or "negative" in failure["reason"]
+    assert (root / "runtime.json").is_file()
+    assert coverage.run_stage(req).status == "blocked"
+    assert len(calls) == 3  # Never redraw the failed sample to obtain a success.
