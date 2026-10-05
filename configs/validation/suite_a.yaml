@@ -1,3 +1,8 @@
+# Validation platform note: the required standard and CI CPU environments use
+# extended-precision longdouble. Frozen inherited tests contain 1e-400 literals
+# and precision-sensitive expectations, so those historical fixtures are not a
+# native binary64-longdouble test campaign. Explicit binary64 arithmetic
+# exercises are separate diagnostics; they do not claim another-host execution.
 # Input-type contract (all domain endpoints denote their exact binary values):
 # Exact built-in int/float and concrete NumPy integer/floating scalar types
 # of every width are accepted. Subclasses and numeric/array protocol objects

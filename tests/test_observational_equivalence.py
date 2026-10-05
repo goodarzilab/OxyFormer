@@ -231,3 +231,20 @@ def test_fifth_attempt_numpy_integer_interventions(dose):
                     for y, d, s in zip(world.factual_y, [int(dose), 0], world.h_s)]
         for container in (list, tuple, lambda x: np.array(x, dtype=object)):
             assert_array_equal(world.intervene(container([dose, 0.])), expected)
+
+
+def test_resumed_location_fit_is_informative_but_cannot_select_causal_world():
+    pair = observational_equivalence_pair(n_geographies=17, cluster_size=2,
+                                         c=1.5, tau=4., noise_sd=0., seed=41)
+    def diagnostic(records):
+        # Explicit diagnostic use of location; never a primary nuisance fit.
+        design = np.column_stack([np.ones(len(records.a)),
+                                  np.asarray(records.frame.x)[:, 0],
+                                  np.asarray(records.frame.coordinates)[:, 0]])
+        return np.linalg.lstsq(design, np.asarray(records.y), rcond=None)[0]
+    first = run_estimator(diagnostic, pair.m0.observations)
+    second = run_estimator(diagnostic, pair.mtau.observations)
+    assert_allclose(first, [50., .25, 1.5], rtol=0., atol=1e-12)
+    assert_array_equal(first, second)
+    assert pair.m0.structural_causal_truth.value == 0.
+    assert pair.mtau.structural_causal_truth.value == pytest.approx(6.4)

@@ -2487,3 +2487,73 @@ def test_seventh_round2_tiny_slope_quantile_retains_local_draw(monkeypatch):
     law = AssignmentLaw(frame(1, 1), 0, LatentState(local=-1.), config(), ((0., smallest),))
     at = law.quantile_coordinates(0, .25)
     assert at.anchor+at.unit*exact(at.values.item()) == Fraction(smallest)/4
+
+
+@pytest.mark.parametrize('field,nested', [('coordinates', False), ('coordinates', True),
+                                         ('x', False), ('x', True), ('weights', False)])
+def test_resumed_frame_captures_containers_before_protocols(field, nested):
+    class Tripwire(list):
+        def __iter__(self):
+            raise RuntimeError('unapproved iteration')
+    f = frame(1, 1)
+    value = getattr(f, field)
+    if nested:
+        value = (Tripwire(value[0]),)
+    else:
+        value = Tripwire(value)
+    with pytest.raises(ContractError, match='exact|numeric'):
+        replace(f, **{field: value})
+
+
+@pytest.mark.parametrize('sign', [-1, 1])
+@pytest.mark.parametrize('u', [.25, .75, float(np.nextafter(1., 0.))])
+def test_resumed_subnormal_quantile_preserves_normalized_draw(sign, u, monkeypatch):
+    from fractions import Fraction
+    from oxyformer.validation.scm import exact
+    q = float(np.nextafter(0., 1.))
+    monkeypatch.setattr(np, 'longdouble', np.float64)
+    law = AssignmentLaw(frame(1, 1), 0, LatentState(local=sign), config(), ((0., 2*q),))
+    at = law.quantile_coordinates(0, u)
+    dose = at.anchor + at.unit*exact(at.values.item())
+    expected = Fraction(2*q)*(1-Fraction(u) if sign > 0 else Fraction(u))
+    assert dose == expected
+    assert 0 <= dose <= Fraction(2*q)
+
+
+@pytest.mark.parametrize('seed,selected', [(2, False), (38, True)])
+def test_resumed_subnormal_full_generation(seed, selected, monkeypatch):
+    q = float(np.nextafter(0., 1.))
+    f = replace(frame(1, 1), coordinates=((0., 0.),), columns=(), x=((),))
+    c = config(local_confounding='omitted' if selected else 'measured',
+               regional_confounding='omitted' if selected else 'none',
+               selected_outcome=selected, noise_sd=0.)
+    p = policy(((0., q if selected else 2*q),))
+    monkeypatch.setattr(np, 'longdouble', np.float64)
+    result = generate_suite_a(f, c, p, seed=seed)
+    assert result.observed_law_truth.value == result.structural_causal_truth.value == 0.
+
+
+def test_resumed_selected_tail_default_matches_independent_exponential_bound():
+    from decimal import Decimal, localcontext
+    f = replace(frame(1, 1), coordinates=((1000., 0.),), columns=(), x=((),))
+    c = config('null', beta=0., noise_sd=0., assignment='near_deterministic',
+               near_scale=.25, extreme_ratios=True, selected_outcome=True,
+               survey_inclusion=True, missing_biomarkers=True)
+    sample = generate_suite_a(f, c, policy(((650., 10010.),)))
+    # Assignment is uniform: the +4 Laplace slope cancels the -4 tilt.
+    # For these negative logits, product(sigmoid(z)) / exp(sum(z)) lies
+    # between 1 - sum(exp(z)) and 1, with sum(exp(z)) < 2e-28.
+    # Integrating the exponential envelope is an independent closed form.
+    with localcontext() as context:
+        context.prec = 90
+        dec = Decimal.from_float
+        slope = dec(.2)+dec(.12)+dec(.1)
+        width = Decimal(9360)
+        mass = sum((prior*(Decimal(2)+dec(.7)-illness*(dec(1.2)+dec(.8))
+                           -slope*Decimal(650)).exp()
+                    for illness, prior in [(0, 1-dec(.3)), (1, dec(.3))]), Decimal(0))
+        mass *= (1-(-slope*width).exp())/(slope*width)
+        reference_log_mass = float(mass.ln())
+    assert sample.integration_uncertainty.selected_log_mass_fraction == pytest.approx(reference_log_mass, abs=4e-13)
+    assert sample.structural_causal_truth.value == 0.
+    assert abs(sample.observed_law_truth.value) < 1e-12
