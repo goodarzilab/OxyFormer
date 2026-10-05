@@ -152,7 +152,9 @@ class RasterSampler:
                 self.datasets.append((ds, transform, inverse))
                 self.identities.append(tile.identity(ds.crs))
             return self
-        except Exception:
+        except BaseException:
+            # __exit__ is not called when entry fails. Unwind acquired resources
+            # even for interruption, then propagate it unchanged.
             self.stack.close()
             raise
 

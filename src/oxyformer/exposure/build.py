@@ -75,7 +75,7 @@ def build_exposure(source_manifests, geography, allocation_spec):
     rows = []
     with RasterSampler(source_manifests.dem_tiles, allocation_spec.placement_crs) as sampler:
         quality['dem_tiles'] = sampler.identities
-        for tract_id, tract in blocks.groupby('tract_id', sort=True):
+        for tract_id, tract in blocks.groupby('tract_id', sort=True, observed=True):
             for scenario in allocation_spec.scenarios:
                 pressures, deficits, quantile_blocks = [], [], []
                 missing_mass = []

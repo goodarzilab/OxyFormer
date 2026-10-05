@@ -959,3 +959,52 @@ def test_stage_coverage_failure_still_declares_accounting_artifacts(tmp_path, sh
     assert frame.population.eq(100).all() and frame.missing_population.eq(60).all()
     assert frame.pressure_mmhg.isna().all()
     assert json.loads((out / 'artifact_manifest.json').read_text())['status'] == 'fail'
+
+
+@pytest.mark.parametrize('old_default', [False, True])
+def test_unused_categorical_tracts_do_not_create_empty_exposure_rows(tmp_path, monkeypatch, old_default):
+    tile = write_raster(tmp_path / 'categorical.tif', [0])
+    geography = blocks(pop=(100, 0)).iloc[:1].copy()
+    geography['tract_id'] = pd.Categorical(['01001000100'], categories=['01001000100', '01001000200'])
+    if old_default:
+        # pandas 3 changed observed's default. Exercise the documented 2.x
+        # default on the mandated runtime without installing another pandas.
+        original = pd.DataFrame.groupby
+        def groupby(frame, *args, **kwargs):
+            kwargs.setdefault('observed', False)
+            return original(frame, *args, **kwargs)
+        monkeypatch.setattr(pd.DataFrame, 'groupby', groupby)
+    result, qc = build_exposure(sources(tile), geography, SPEC)
+    assert set(result.tract_id) == {'01001000100'}
+    assert result.block_count.eq(1).all() and result.population.eq(100).all()
+    assert result.pressure_mmhg.eq(760).all() and qc['population'] == 100
+
+
+@pytest.mark.parametrize('interruption', [KeyboardInterrupt, SystemExit, GeneratorExit])
+def test_sampler_entry_interruption_closes_rasters_and_restores_gdal(tmp_path, monkeypatch, interruption):
+    first = replace(write_raster(tmp_path / 'first.tif'), resource_id='a')
+    second = replace(write_raster(tmp_path / 'second.tif'), resource_id='b')
+    probe = write_raster(tmp_path / 'probe.tif', [0, 0])
+    with rasterio.Env(GDAL_TIFF_INTERNAL_MASK=False):
+        with rasterio.open(probe.path, 'r+') as ds:
+            ds.write_mask(np.zeros((1, 2), dtype='uint8'))
+    assert Path(probe.path + '.msk').exists()
+    original = rasterio.open
+    opened = []
+    def interrupted_open(path, *args, **kwargs):
+        if str(path) == second.path:
+            raise interruption('during second open')
+        ds = original(path, *args, **kwargs)
+        opened.append(ds)
+        return ds
+    monkeypatch.setattr(rasterio, 'open', interrupted_open)
+    sampler = RasterSampler((first, second), SPEC.placement_crs)
+    try:
+        with pytest.raises(interruption, match='during second open'):
+            sampler.__enter__()
+        with original(probe.path) as ds:
+            external_mask_honored = ds.read(1, masked=True).mask.all()
+        assert opened[0].closed and external_mask_honored
+    finally:
+        # Keep pre-fix reproductions from leaking GDAL state into other tests.
+        sampler.stack.close()
