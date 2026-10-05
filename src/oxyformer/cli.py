@@ -18,8 +18,11 @@ def main(argv=None):
     args = vars(parser.parse_args(argv))
     args.pop('command')
     from oxyformer.execution.runner import run
+    from oxyformer.execution.identity import verify_module_origins
     try:
-        result = run(**args, report=lambda value: print(f'stage returned {value.status}: {value.message}', flush=True))
+        verify_module_origins(args['repo'])
+        result = run(**args, report=lambda value: print(f'stage returned {value.status}: {value.message}', flush=True),
+                     validate_imports=lambda: verify_module_origins(args['repo']))
     except (ValueError, OSError, KeyError, TypeError, subprocess.CalledProcessError) as exc:
         print(f'blocked: {exc}', file=sys.stderr)
         return 2

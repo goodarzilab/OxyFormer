@@ -14,6 +14,8 @@ set -euo pipefail
 git clone --depth 1 --branch dev https://github.com/goodarzilab/OxyFormer.git "$SWARM_UNIT_DIR/src"
 git -C "$SWARM_UNIT_DIR/src" rev-parse HEAD > "$SWARM_UNIT_DIR/code_commit.txt"
 export PYTHONPATH="$SWARM_UNIT_DIR/src/src"
+if [[ -n "${TASK_MANIFEST:-}" && "$TASK_MANIFEST" != /* ]]; then TASK_MANIFEST="$PWD/$TASK_MANIFEST"; fi
+cd "$SWARM_UNIT_DIR/src"
 args=(--stage "$STAGE" --repo "$SWARM_UNIT_DIR/src" --out "$SWARM_UNIT_DIR" --deps-env
       --approvals "$SWARM_UNIT_DIR/src/configs/approvals.yaml")
 if [[ -n "${TASK_MANIFEST:-}" ]]; then args+=(--task "$TASK_MANIFEST"); fi

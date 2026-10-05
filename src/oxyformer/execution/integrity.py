@@ -19,8 +19,8 @@ PUBLICATION_EXCLUSIONS = (FINGERPRINT, RESULT)
 
 
 def _stable(metadata):
-    # Times/inodes detect concurrent changes while reading; they are deliberately
-    # not persistent fingerprint fields. Reading can update atime harmlessly.
+    # Identity/times detect changes during the read. Persisted mtime/ctime also
+    # expose restored writes; atime is excluded because ordinary reads change it.
     return (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_size,
             metadata.st_mtime_ns, metadata.st_ctime_ns)
 
@@ -46,7 +46,8 @@ def fingerprint_tree(root, *, exclude=()):
             before = path.lstat()
             kind = stat.S_IFMT(before.st_mode)
             entry.update(type=kind, mode=stat.S_IMODE(before.st_mode),
-                         size=before.st_size, sha256=None, target=None)
+                         size=before.st_size, sha256=None, target=None,
+                         mtime_ns=before.st_mtime_ns, ctime_ns=before.st_ctime_ns)
             if stat.S_ISLNK(kind):
                 entry['target'] = os.readlink(path)
             elif stat.S_ISREG(kind):
@@ -97,8 +98,15 @@ def post_execution_check(before):
             'attempts': attempts}
 
 
+def publication_view(entries):
+    # Publishing the two control records necessarily changes their parent
+    # directory's timestamps. Its entries, type, mode and size remain bound.
+    return {name: (dict(entry, mtime_ns=None, ctime_ns=None) if name == '_execution' else entry)
+            for name, entry in entries.items() if name not in PUBLICATION_EXCLUSIONS}
+
+
 def publication_tree(root):
-    return fingerprint_tree(root, exclude=PUBLICATION_EXCLUSIONS)
+    return publication_view(fingerprint_tree(root))
 
 
 def _replace_control(root, relative, text):
@@ -138,7 +146,10 @@ def publish_result(root, result):
             errors = [str(root / name) for name, entry in entries.items() if 'error' in entry]
             require(not errors, 'publication fingerprint unreadable: ' + ', '.join(errors))
             value = {'schema_version': 1, 'attempt': str(root),
-                     'excluded': list(PUBLICATION_EXCLUSIONS), 'entries': entries}
+                     'excluded': list(PUBLICATION_EXCLUSIONS), 'entries': entries,
+                     'stage_result': result.to_dict(),
+                     'control_modes': {name: stat.S_IMODE((root / name).lstat().st_mode)
+                                       for name in PUBLICATION_EXCLUSIONS}}
             _replace_control(root, FINGERPRINT, canonical_json(value))
             if publication_tree(root) == entries:
                 break
@@ -176,11 +187,32 @@ def verify_published_tree(root, result, expected_hash=None):
     raw = path.read_bytes()
     require(sha256(raw).hexdigest() == records[0].sha256, 'dependency fingerprint hash mismatch')
     value = json.loads(raw)
-    require(isinstance(value, dict) and set(value) == {'schema_version', 'attempt', 'excluded', 'entries'}
+    require(isinstance(value, dict) and set(value) == {
+                'schema_version', 'attempt', 'excluded', 'entries', 'stage_result', 'control_modes'}
             and value['schema_version'] == 1 and value['attempt'] == str(root)
             and value['excluded'] == list(PUBLICATION_EXCLUSIONS)
             and isinstance(value['entries'], dict), 'invalid dependency fingerprint record')
-    changed = changed_paths(value['entries'], publication_tree(root))
+    original_result = replace(result, artifacts=tuple(a for a in result.artifacts if a.path != FINGERPRINT))
+    require(original_result.to_dict() == value['stage_result'], 'dependency result record changed since publication')
+    require(bool(original_result.artifacts) and
+            records[0].lineage == original_result.artifacts[0].lineage,
+            'dependency fingerprint artifact lineage changed since publication')
+    actual = fingerprint_tree(root)
+    changed = changed_paths(value['entries'], publication_view(actual))
+    # The late records cannot hash themselves. Bind the result's canonical
+    # contents through the embedded original StageResult, and bind the manifest
+    # through its published ArtifactRecord. Check type/mode and the same read.
+    for name in PUBLICATION_EXCLUSIONS:
+        entry = actual.get(name, {})
+        if ('error' in entry or entry.get('type') != stat.S_IFREG or
+                entry.get('mode') != value['control_modes'].get(name)):
+            changed.append(name)
+    require(actual.get(FINGERPRINT, {}).get('sha256') == records[0].sha256,
+            'dependency fingerprint changed during verification')
+    require(actual.get(RESULT, {}).get('sha256') == sha256(result.to_json().encode()).hexdigest(),
+            'dependency result record changed during verification')
     require(not changed, 'dependency fingerprint mismatch (tainted): ' +
-            ', '.join(str(root / name) for name in changed))
-    return records[0].sha256
+            ', '.join(str(root / name) for name in sorted(set(changed))))
+    # This is the exact tree that passed publication comparison, including
+    # the late controls, not a second unverified read that can rebase a race.
+    return actual
