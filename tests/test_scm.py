@@ -1399,3 +1399,165 @@ def test_amplified_small_effect_families_match_independent_contrasts(family, bet
                               registration_probability=registration), policy())
     assert result.observed_law_truth.value == pytest.approx(expected, abs=1e-12, rel=1e-12)
     assert result.structural_causal_truth.value == pytest.approx(expected, abs=1e-12, rel=1e-12)
+
+
+def test_orchestrator_near_center_zero_truth_regression():
+    from fractions import Fraction
+    error, beta = .9999999999999999, 1e-20
+    result = generate_suite_a(frame(1, 1), config('sign_changing', beta=beta,
+                              assignment='near_deterministic', near_scale=1e-100,
+                              denominator_error=error), policy())
+    expected = float(Fraction(beta)*Fraction(2, 5)/(1-Fraction(error)**2))
+    # The symmetric law is centered at five. Omitted shifted-tail mass is
+    # exp(-3e100); even the maximum bounded quadratic contrast makes its
+    # contribution negligible relative to 1e-8 (and to the tighter check here).
+    assert expected == pytest.approx(.000018014398509481982, rel=1e-15)
+    assert result.observed_law_truth.value == pytest.approx(expected, abs=1e-12, rel=0)
+    assert result.structural_causal_truth.value == pytest.approx(expected, abs=1e-12, rel=0)
+
+
+def test_orchestrator_large_center_amplified_quadratic_contrast():
+    from fractions import Fraction
+    error, delta = .9999999999999999, .02
+    result = generate_suite_a(frame(1, 1), config('sign_changing', beta=200.,
+                              assignment='near_deterministic', near_scale=1e-100,
+                              denominator_error=error), policy(((9995., 10005.),), delta=delta),
+                              tolerance=10000.)
+    d = Fraction(delta)
+    expected = float(20*(19990*d+d*d)/(1-Fraction(error)**2))
+    # The mean local offset is zero and the nonshifted tail is exp(-4.98e100).
+    assert abs(result.observed_law_truth.value-expected) <= 10000.
+    assert abs(result.structural_causal_truth.value-expected) <= 10000.
+
+
+@pytest.mark.parametrize('regional', [False, True])
+def test_independent_denominator_mixture_cannot_invent_a_null_contrast(regional):
+    c = config('null', denominator_error=.9999999999999999, local_confounding='omitted',
+               local_strength=0., regional_confounding='omitted' if regional else 'none',
+               regional_strength=0.)
+    result = generate_suite_a(frame(1, 1), c, policy())
+    assert result.observed_law_truth.value == result.structural_causal_truth.value == 0.
+
+
+def test_denominator_exact_product_serialization_avoids_double_rounding():
+    from fractions import Fraction
+    error = float(Fraction(2**52+2**48+11305, 2**61))
+    result = generate_suite_a(frame(8, 1), config('null', denominator_error=error), policy(), seed=0)
+    expected = {float(100*(1-Fraction(error))), float(100*(1+Fraction(error)))}
+    assert float(100*(1+Fraction(error))).hex() == '0x1.90d4800000023p+6'
+    assert set(result.observations.observed_denominator) == expected
+    for y, events, denominator in zip(result.observations.y, result.observations.registered_events,
+                                      result.observations.observed_denominator):
+        assert y == events/denominator
+
+
+def test_amplified_sine_contrast_at_phase_boundary_has_independent_decimal_reference():
+    from fractions import Fraction
+    from decimal import localcontext
+    error, delta = .9999999999999999, .02
+    requested = float(np.pi-.01)
+    lo, hi = requested-.1, requested+.1
+    center = lo+(hi-lo)*.5  # The inherited declared float center.
+    with localcontext() as context:
+        context.prec = 140
+        difference = _decimal_sine((Fraction(center)+Fraction(delta))/2)-_decimal_sine(Fraction(center)/2)
+        expected = float(Fraction(difference)*200/(1-Fraction(error)**2))
+    result = generate_suite_a(frame(1, 1), config('nonlinear', beta=200.,
+                              assignment='near_deterministic', near_scale=1e-100,
+                              denominator_error=error), policy(((lo, hi),), delta=delta))
+    assert result.observed_law_truth.value == pytest.approx(expected, abs=1e-8, rel=0)
+    assert result.structural_causal_truth.value == pytest.approx(expected, abs=1e-8, rel=0)
+
+
+def _decimal_sin_cos_reduced(value):
+    from decimal import Decimal, localcontext
+    from fractions import Fraction
+    with localcontext() as context:
+        context.prec = 140
+        halves = 0
+        while abs(value) > Fraction(1, 2):
+            value /= 2
+            halves += 1
+        sine = _decimal_sine(value)
+        cosine = (Decimal(1)-sine*sine).sqrt()
+        for _ in range(halves):
+            sine, cosine = 2*sine*cosine, cosine*cosine-sine*sine
+        return sine, cosine
+
+
+def test_round2_sine_local_variation_survives_large_anchor_amplification():
+    from fractions import Fraction
+    from decimal import Decimal, localcontext
+    center = float(np.pi-.5+2*np.pi*1591)
+    scale, error = 1e-16, .9999999999999999
+    f = replace(frame(1, 1), columns=tuple(f'x{i}' for i in range(10)), x=((100.,)*10,))
+    with localcontext() as context:
+        context.prec = 140
+        sine, cosine = _decimal_sin_cos_reduced(Fraction(center)/2+Fraction(1, 4))
+        quarter_sine = _decimal_sine(Fraction(1, 4))
+        ratio = Fraction(scale)/2
+        b = Decimal(ratio.numerator)/Decimal(ratio.denominator)
+        # Exact one-sided Laplace transform. Truncation error exp(-1e16) is
+        # negligible even after the <1e18 endpoint multiplier.
+        integral = quarter_sine*(cosine+b*sine)/(1+b*b)
+        expected = float(200*Fraction(integral)/(1-Fraction(error)**2))
+    result = generate_suite_a(f, config('nonlinear', beta=200., assignment='near_deterministic',
+                              near_scale=scale, denominator_error=error),
+                              policy(((center-1, center+1),), delta=1.))
+    assert result.observed_law_truth.value == pytest.approx(expected, abs=1e-8, rel=0)
+    assert result.structural_causal_truth.value == pytest.approx(expected, abs=1e-8, rel=0)
+
+
+def test_round2_weighted_null_posterior_has_exact_zero_truth():
+    f = replace(frame(2, 1), weights=(1., 1e-22), coordinates=((0., 0.), (float(np.log(4)), 0.)))
+    c = config('null', assignment='near_deterministic', near_scale=1., denominator_error=.9999999999999999)
+    result = generate_suite_a(f, c, policy())
+    assert result.observed_law_truth.value == result.structural_causal_truth.value == 0.
+
+
+def test_round2_large_center_linear_contrast_uses_exact_shift():
+    from fractions import Fraction
+    error, delta = .9999999999999999, .02
+    result = generate_suite_a(frame(1, 1), config(beta=1., assignment='near_deterministic',
+                              near_scale=1e-100, denominator_error=error),
+                              policy(((9995., 10005.),), delta=delta), tolerance=.1, max_order=32)
+    expected = float(Fraction(delta)/(1-Fraction(error)**2))
+    assert result.observed_law_truth.value == pytest.approx(expected, abs=.1, rel=0)
+    assert result.structural_causal_truth.value == pytest.approx(expected, abs=.1, rel=0)
+
+
+def test_rational_conversion_rounds_once_without_decimal_integer_limits():
+    from fractions import Fraction
+    from oxyformer.validation.scm import wide
+    one = np.longdouble(1)
+    neighbour = np.nextafter(one, np.longdouble(np.inf))
+    middle = (Fraction(*one.as_integer_ratio())+Fraction(*neighbour.as_integer_ratio()))/2
+    epsilon = Fraction(1, 2**20000)
+    assert wide(middle-epsilon) == one
+    assert wide(middle+epsilon) == neighbour
+    assert wide(-middle+epsilon) == -one
+    assert wide(-middle-epsilon) == -neighbour
+
+
+def test_smooth_response_retains_the_supplied_extended_dose_precision():
+    from fractions import Fraction
+    from oxyformer.validation.scm import effect, wide
+    values = np.array([np.longdouble(10000), np.longdouble(10000)+np.longdouble(.02)])
+    a, b = (Fraction(*v.as_integer_ratio()) for v in values)
+    expected = wide(20*((b-5)**2-(a-5)**2))
+    response = effect(values, config('sign_changing', beta=200.))
+    assert abs(response[1]-response[0]-expected) < 1e-8
+
+
+def test_rational_conversion_ties_and_subnormal_spacing():
+    from fractions import Fraction
+    from oxyformer.validation.scm import wide
+    tiny = np.nextafter(np.longdouble(0), np.longdouble(1))
+    unit = Fraction(*tiny.as_integer_ratio())
+    assert wide(unit/2) == 0
+    assert wide(unit*Fraction(3, 2)) == 2*tiny
+    assert wide(unit*Fraction(5, 2)) == 2*tiny
+    one = Fraction(1)
+    spacing = Fraction(*np.nextafter(np.longdouble(1), np.longdouble(2)).as_integer_ratio())-one
+    assert wide(one+spacing/2) == 1
+    assert wide(one+3*spacing/2) == np.longdouble(1)+2*wide(spacing)

@@ -20,7 +20,7 @@ from oxyformer.validation.analytic_truth import UniformShiftTruth
 from oxyformer.validation.scm import (
     AssignmentLaw, CovariateFrame, LatentState, SCMConfig, adjustment_key,
     latent_states, observation_probabilities, observation_log_probability, structural_mean, validate_count_rates, count_event_rate,
-    LocalCoordinates, exact, exact_shift_intervals, wide, observation_transition_points, effect, _count_baseline,
+    LocalCoordinates, exact, exact_shift_intervals, wide, observation_transition_points, _count_baseline, _sine_bounds,
     validate_numeric, validate_policy_domain, validate_seed, REGISTERED_NUMERIC_BOX, NUMERIC_DOMAIN, NUMERIC_MARGIN,
 )
 
@@ -212,6 +212,11 @@ def _groups(frame, config, policy):
         if not (frame.outcome_available[row] and frame.biomarker_available[row]) or frame.weights[row] == 0:
             continue
         for state, probability in latent_states(config):
+            # D is independent of assignment, selection and every adjustment
+            # variable. E[1/D] = 1/(1-error**2) exactly. Marginalize it before
+            # posterior normalization, so its common baseline cannot amplify
+            # normalization residuals into a false null contrast.
+            state = replace(state, denominator_factor=1-exact(config.denominator_error)**2)
             key = adjustment_key(frame,row,state,config)
             identity = (frame.coordinates[row],state)
             terms = groups.setdefault(key,{})
@@ -306,15 +311,40 @@ def _posterior_mean(at, terms, frame, config):
     return np.sum(weights*means, axis=0)
 
 
-def _effect_values(at, term, config):
-    return effect(at.rounded()-wide(term.law.error)-config.migration*term.state.illness, config)
-
-
 def _causal_contrast(factual, shifted, term, config):
-    # The dose-independent baseline cancels algebraically, before any rounding
-    # or denominator amplification can erase a small, meaningful intervention.
-    change = _effect_values(shifted, term, config)-_effect_values(factual, term, config)
-    return config.registration_probability*change/wide(term.state.denominator_factor)
+    """Evaluate the complete contrast on exact retained local doses.
+
+    Polynomial contrasts are rational. Sine contrasts refine the same certified
+    enclosures used by count-rate validation, with scaling BEFORE rounding.
+    Baselines never enter this expression. These pointwise calculations do not
+    turn the quadrature convergence diagnostic into a certified error bound.
+    """
+    delta = shifted.anchor-factual.anchor
+    multiplier = exact(config.registration_probability)*exact(config.beta)/term.state.denominator_factor
+    if config.effect == "null" or multiplier == 0 or delta == 0:
+        return np.zeros(len(factual.values), dtype=np.longdouble)
+    if config.effect == "linear":
+        return np.full(len(factual.values), wide(multiplier*delta), dtype=np.longdouble)
+    origin = factual.anchor-term.law.error-exact(config.migration)*exact(term.state.illness)
+    if config.effect == "sign_changing":
+        constant = multiplier*delta*(2*(origin-5)+delta)/10
+        slope = multiplier*delta*factual.unit/5
+        return np.array([wide(constant+slope*exact(v)) for v in factual.values], dtype=np.longdouble)
+    values = []
+    for local in factual.values:
+        dose = origin+factual.unit*exact(local)
+        bits = 80
+        while True:
+            first = _sine_bounds(dose/2, bits) if dose else (0, 0)
+            second = _sine_bounds((dose+delta)/2, bits) if dose+delta else (0, 0)
+            lower, upper = sorted((multiplier*(second[0]-first[1]),
+                                   multiplier*(second[1]-first[0])))
+            lower, upper = wide(lower), wide(upper)
+            if lower == upper:
+                values.append(lower)
+                break
+            bits *= 2
+    return np.array(values, dtype=np.longdouble)
 
 
 def _posterior_contrast(factual, shifted, terms, frame, config):
@@ -329,10 +359,14 @@ def _posterior_contrast(factual, shifted, terms, frame, config):
     baseline_change = np.sum(difference*centered[:, None], axis=0)
     effect_change = np.zeros(len(factual.values), dtype=np.longdouble)
     for i, term in enumerate(terms):
-        factual_effect = (config.registration_probability*_effect_values(factual, term, config)
-                          /wide(term.state.denominator_factor))
+        # Cancel the common factual response as well as the common affine
+        # baseline. Independent denominator marginalization gives every term
+        # the same multiplier; only error/migration can change its dose.
+        displacement = (terms[0].law.error-term.law.error+exact(config.migration)
+                        *(exact(terms[0].state.illness)-exact(term.state.illness)))
+        centered_effect = _causal_contrast(factual, factual.shifted(displacement), terms[0], config)
         effect_change += (shifted_weights[i]*_causal_contrast(factual, shifted, term, config)
-                          +difference[i]*factual_effect)
+                          +difference[i]*centered_effect)
     return baseline_change+effect_change
 
 
