@@ -1346,8 +1346,14 @@ def test_isolated_output_alias_remains_releasable(case, tmp_path, monkeypatch, r
     assert run_stage(request) == result
 
 
-@pytest.mark.parametrize('document', ['approvals', 'config'])
+@pytest.mark.parametrize('document', ['approvals', 'config', 'estimate_ids'])
 def test_utf8_reporting_inputs_release_under_ascii_locale(case, tmp_path, monkeypatch, document):
+    if document == 'estimate_ids':
+        b, m, r = case
+        ids = tuple('r\u00e9gion-' + str(i) for i in range(len(b.original_ids)))
+        b = replace(b, original_ids=ids, estimates=tuple(
+            replace(e, original_ids=ids, lineage=replace(e.lineage, unit_ids=ids)) for e in b.estimates))
+        case = b, m, r
     repository = tmp_path / 'synthetic-repository'
     request = repository_request(case, tmp_path, monkeypatch, repository)
     task = json.loads(Path(request.task_path).read_text())

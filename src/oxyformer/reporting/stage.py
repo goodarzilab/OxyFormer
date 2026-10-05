@@ -147,9 +147,11 @@ def _write_report(request, report, bundle):
 def request_main(argv=None):
     """Shared explicit v2 entry point for legacy report/asset scripts."""
     import argparse
+    import sys
     parser = argparse.ArgumentParser(description="Build isolated, gated OxyFormer v2 reporting artifacts")
     parser.add_argument("--v2-request", type=Path, required=True)
     args = parser.parse_args(argv)
     result = run_stage(StageRequest.from_json(args.v2_request.read_text(encoding="utf-8")))
-    print(result.to_json())
+    # StageResult is a UTF-8 JSON protocol, independent of terminal locale.
+    sys.stdout.buffer.write((result.to_json() + "\n").encode("utf-8"))
     return 0 if result.status == "pass" else 1

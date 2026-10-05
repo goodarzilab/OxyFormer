@@ -178,6 +178,7 @@ Valid derived diagnostics also remain visible when approval metadata is refused.
 
 Reporting config, owner approvals and request text are decoded as UTF-8
 independently of the runtime locale, matching canonical artifact text.
+The CLI writes the StageResult as UTF-8 bytes so non-ASCII lineage IDs also survive.
 Subset ESS uses raw target masses and exact ratio products before the final
 diagnostic rounding. Signed subset mass and concentration likewise use exact
 correction products before normalization. Thus a tiny full-target mass can round
