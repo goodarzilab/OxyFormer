@@ -2046,3 +2046,67 @@ def test_fifth_round1_illness_draw_uses_exact_bernoulli_bits(offset, ill, monkey
     monkeypatch.setattr(np.random, 'default_rng', BoundaryRNG)
     observed = _sample_observations(frame(1, 1), config(migration=1., noise_sd=0.), policy(), 0)
     assert observed.y[0] == pytest.approx(50+observed.a[0]+int(ill), abs=1e-12)
+
+
+@pytest.mark.parametrize('selection', ['survey', 'flag'])
+def test_fifth_round2_selection_precision_matches_weakest_arithmetic(selection):
+    from fractions import Fraction
+    from decimal import Decimal, localcontext
+    if selection == 'survey':
+        h = .6270819457658744
+        lower, upper, delta, scale = 10000-h, 10000+h, .64, 1e-20
+        mechanisms = dict(survey_inclusion=True)
+        illness_states = (0,)
+    else:
+        lower, upper, delta, scale = 9998., 10002., 2., float(np.nextafter(0., 1.))
+        mechanisms = dict(selected_outcome=True)
+        illness_states = (0, 1)
+    with localcontext() as context:
+        context.prec = 120
+        def dec(value):
+            q = Fraction(value)
+            return Decimal(q.numerator)/Decimal(q.denominator)
+        terms = []
+        for local in (-1, 1):
+            for ill in illness_states:
+                # Independent finite-mode limit: Laplace tails and sigmoid
+                # saturation corrections are far below 1e-100 in these fixtures.
+                center = Fraction(lower+(upper-lower)*float(expit(.2*local-.2*ill)))
+                prior = ((Fraction(.3) if ill else 1-Fraction(.3))/2
+                         if selection == 'flag' else Fraction(1, 2))
+                logit = (1-Fraction(.2)*center-Fraction(1.2)*ill if selection == 'flag'
+                         else Fraction(.7)-Fraction(.12)*center+Fraction(.5)*local)
+                cutoff = Fraction(upper)-Fraction(delta)
+                moved = Fraction(1) if center < cutoff else Fraction(1, 2) if center == cutoff else Fraction(0)
+                contrast = (200*(1-local)-2*ill)*moved
+                terms.append((prior, logit, contrast))
+        reference_log = max(z for _, z, _ in terms)
+        weights = [dec(p)*dec(z-reference_log).exp() for p, z, _ in terms]
+        reference = float(sum(w*dec(t[2]) for w, t in zip(weights, terms))/sum(weights))
+    f = replace(frame(1, 1), coordinates=((0., 0.),), columns=(), x=((),))
+    c = config('null', local_confounding='omitted', local_strength=200,
+               assignment='near_deterministic', near_scale=scale, noise_sd=0., **mechanisms)
+    result = generate_suite_a(f, c, policy(((lower, upper),), delta=delta),
+                              tolerance=1e-12, max_order=32)
+    assert result.observed_law_truth.value == pytest.approx(reference, abs=1e-12, rel=0)
+    assert result.structural_causal_truth.value == 0.
+
+
+def test_fifth_round2_recipe_declares_disabled_zero_exceptions(tmp_path):
+    import yaml
+    from oxyformer.validation.scm import NUMERIC_DOMAIN
+    recipe = yaml.safe_load((Path(__file__).parents[1]/'configs/validation/suite_a.yaml').read_text())
+    expected = ['delta', 'denominator_error', 'exposure_error', 'migration', 'noise_sd', 'weight']
+    assert recipe['numeric_domain']['zero_exceptions'] == expected
+    assert NUMERIC_DOMAIN['noise_sd'][0] > 0
+    assert config(noise_sd=np.longdouble(0)).noise_sd == 0.
+    path = tmp_path/'recipe.yaml'
+    # Existing v1 recipes used the documented zero exception without this
+    # explicit metadata list; those same valid recipes remain accepted.
+    del recipe['numeric_domain']['zero_exceptions']
+    path.write_text(yaml.safe_dump(recipe))
+    assert len(load_suite_a(path)) == 14
+    recipe['numeric_domain']['zero_exceptions'] = [name for name in expected if name != 'noise_sd']
+    path.write_text(yaml.safe_dump(recipe))
+    with pytest.raises(ContractError, match='numeric_domain'):
+        load_suite_a(path)

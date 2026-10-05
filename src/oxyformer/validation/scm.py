@@ -53,6 +53,10 @@ _expanded_numeric_box.update({
     "intervention_dose": (-1e308, 1e308),
 })
 NUMERIC_DOMAIN = MappingProxyType(_expanded_numeric_box)
+# These positive-magnitude intervals also admit zero when the named mechanism
+# is disabled (or a weight/shift is zero). In particular noise_sd=0 is supported.
+NUMERIC_ZERO_EXCEPTIONS = ("delta", "denominator_error", "exposure_error",
+                           "migration", "noise_sd", "weight")
 del _expanded_numeric_box
 
 
@@ -249,7 +253,7 @@ class SCMConfig(Immutable):
         for name in ("near_scale", "noise_sd", "exposure_error", "migration",
                      "registration_probability", "denominator_error"):
             validate_numeric(getattr(self, name), name, name,
-                             allow_zero=name not in ("near_scale", "registration_probability"))
+                             allow_zero=name in NUMERIC_ZERO_EXCEPTIONS)
         normalize_record_numbers(self)
         Immutable.__post_init__(self)
         expected = {self.effect}
