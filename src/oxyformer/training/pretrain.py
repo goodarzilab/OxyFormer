@@ -249,23 +249,29 @@ class MaskedReconstructor(nn.Module):
 
 
 def reconstruction_totals(predictions, batch: FeatureBatch, features):
+    # Keep elementwise objectives in the training dtype, but accumulate before
+    # averaging in float64: a representable mean can have an overflowing sum.
     sums, counts = [], []
     for j, feature in enumerate(features):
         valid = batch.masked[:, j] & ~batch.missing[:, j] & ~batch.padding[:, j]
-        count = int(valid.sum())
+        count = float(valid.sum().item())
         counts.append(count)
         if not count:
-            sums.append(predictions[j].sum() * 0)
+            sums.append(predictions[j][:0].sum(dtype=torch.float64))
         elif feature.kind == "numeric":
             sums.append(F.huber_loss(predictions[j][valid, 0], batch.numeric_values[valid, j],
-                                     reduction="sum", delta=1.0))
+                                     reduction="none", delta=1.0).sum(dtype=torch.float64))
         else:
             sums.append(F.cross_entropy(predictions[j][valid], batch.categorical_values[valid, j],
-                                        reduction="sum"))
+                                        reduction="none").sum(dtype=torch.float64))
     return sums, counts
 
 
 def balanced_loss(sums, counts, families):
+    # Python floats (checkpointed validation totals) are already binary64.
+    # Retain that precision through both feature and family averaging.
+    sums = [value.to(torch.float64) if isinstance(value, torch.Tensor) else float(value)
+            for value in sums]
     contributions = []
     for family in families:
         observed = [sums[j] / counts[j] for j in family if counts[j]]
@@ -287,7 +293,8 @@ def scientific_code_fingerprint() -> str:
 
 
 def environment_identity(device: torch.device) -> tuple[tuple[str, str], ...]:
-    packages = sorted((d.metadata["Name"], d.version) for d in importlib.metadata.distributions())
+    packages = sorted((d.metadata["Name"] or "<missing-name>", d.version or "<missing-version>")
+                      for d in importlib.metadata.distributions())
     values = {"python": platform.python_version(), "platform": platform.platform(),
               "machine": platform.machine(), "torch": str(torch.__version__),
               "default_dtype": str(torch.get_default_dtype()),
@@ -452,7 +459,7 @@ def _run(view, settings, config, seed, features, preprocessing, identity,
     require(bool((~train_batch.missing).any()), "no observed fitting targets")
     require(bool((~validation_batch.missing).any()), "no observed stopping targets")
     progress = {"epoch": 0, "step": 0, "phase": "train", "validation_cursor": 0,
-                "validation_sums": [0.0] * len(features), "validation_counts": [0] * len(features),
+                "validation_sums": [0.0] * len(features), "validation_counts": [0.0] * len(features),
                 "best_loss": None, "bad_epochs": 0, "history": []}
     best_model = None
     controller = _controller_state(config.controller_state)
@@ -486,6 +493,7 @@ def _run(view, settings, config, seed, features, preprocessing, identity,
             sums, counts = reconstruction_totals(model(masked), masked, features)
             loss = balanced_loss(sums, counts, family_indices)
             if loss is not None:
+                loss = loss.to(train_batch.numeric_values.dtype)
                 require(bool(torch.isfinite(loss)), "nonfinite SSL loss")
                 loss.backward()
                 optimizer.step()
@@ -521,7 +529,7 @@ def _run(view, settings, config, seed, features, preprocessing, identity,
                 else:
                     sampler.finish_epoch()
                     progress.update(phase="train", validation_cursor=0,
-                                    validation_sums=[0.0] * len(features), validation_counts=[0] * len(features))
+                                    validation_sums=[0.0] * len(features), validation_counts=[0.0] * len(features))
         slice_batches += 1
     state = {"model": model.state_dict(), "best_model": best_model,
              "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(),
