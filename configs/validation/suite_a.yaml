@@ -35,6 +35,15 @@
 numeric_domain:
   id: suite-a-100x-v1
   margin: 100.0
+  # Union these disabled values with the positive intervals in supported_box.
+  # noise_sd=0 is a deliberate noiseless simulation, not an invalid scale.
+  zero_exceptions:
+  - delta
+  - denominator_error
+  - exposure_error
+  - migration
+  - noise_sd
+  - weight
   registered_box:
     dose:
     - 0.0
