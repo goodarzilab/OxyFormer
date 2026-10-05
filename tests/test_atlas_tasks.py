@@ -26,6 +26,7 @@ from test_execution import (runtime, acquisition, acquisition_pair, publication_
     test_taint_recorded_during_publication_refuses_release,
     test_acquisition_authority_lookup_io_never_becomes_absence,
     test_authority_marker_io_cannot_hide_existing_taint,
+    test_reader_evidence_survives_later_binding_io,
     test_finalization_retains_earlier_changed_path_after_later_error,
     test_partial_acquisition_enumeration_preserves_observed_addition,
     test_successful_acquisition_reader_preserves_positive_difference,
@@ -374,3 +375,28 @@ def test_initial_invalid_dem_member_digest_refuses_without_taint(runtime, acquis
         inspect_dem(acquisition, source)
     assert not Path(str(integrity.publication_receipt(acquisition)) + '.tainted').exists()
     assert_pass(runner.verify_dependency_result(producer))
+
+
+def test_dem_gdal_uses_verified_descriptor_during_directory_replacement(tmp_path, monkeypatch):
+    acquisition = tmp_path / 'acquisition'; acquisition.mkdir()
+    replacement = tmp_path / 'replacement'; replacement.mkdir()
+    parked = tmp_path / 'parked'
+    source, rid = synthetic_dem(acquisition, nodata=-32767.0)
+    synthetic_dem(replacement, nodata=-12345.0)
+    original_open = rasterio.open
+    observed = []
+    def interleaved(uri, *args, **kwargs):
+        acquisition.rename(parked)
+        replacement.rename(acquisition)
+        try:
+            dataset = original_open(uri, *args, **kwargs)
+            observed.append(dataset.nodata)
+            return dataset
+        finally:
+            acquisition.rename(replacement)
+            parked.rename(acquisition)
+    monkeypatch.setattr(rasterio, 'open', interleaved)
+    inspected = inspect_dem(acquisition, source)
+    assert observed == [-32767.0], 'GDAL consumed the unverified pathname replacement'
+    assert inspected['raster_metadata'][rid]['nodata'] == -32767.0
+    assert inspected['dem_payload_sha256'] == file_hash(acquisition / 'payload.tar')

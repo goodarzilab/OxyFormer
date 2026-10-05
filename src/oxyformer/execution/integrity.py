@@ -2,6 +2,7 @@
 Ignore timestamps/inodes across snapshots; retain observed acquisition changes.
 """
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import replace
 from hashlib import sha256
 import errno
@@ -20,6 +21,7 @@ FINGERPRINT = "_execution/fingerprint.json"
 RESULT = "_execution/result.json"
 DEPENDENCY_CHECK = "_execution/dependency_check.json"
 PUBLICATION_EXCLUSIONS = (FINGERPRINT, RESULT)
+_ACQUISITION_READS = ContextVar('acquisition_reads', default=())
 
 
 def publication_receipt(root, *, create=False):
@@ -102,6 +104,9 @@ def _acquisition_binding(path):
         Path.home() / 'oxyformer-swarm/state/publications'))
     if not store.is_absolute() or path.is_relative_to(store):
         return None
+    for root, entries in reversed(_ACQUISITION_READS.get()):
+        if path.is_relative_to(root):
+            return root, str(path.relative_to(root)), entries
     for root in (path, *path.parents):
         if store.is_relative_to(root):
             continue
@@ -146,23 +151,31 @@ def acquisition_read(path, *, kind=stat.S_IFREG):
     use. Resource/transport errors do not establish mutation. Never rescan an
     observed absence: restoration before that rescan would erase the evidence.
     """
+    # Prepare authority before observing input, and share it with nested
+    # readers/comparisons. Never discover it after positive evidence exists.
+    binding = _acquisition_binding(path)
+    token = None
+    if binding is not None:
+        token = _ACQUISITION_READS.set((*_ACQUISITION_READS.get(), (binding[0], binding[2])))
     try:
         yield
     except (OSError, InputTypeError, InputChanged) as exc:
         if (isinstance(exc, (InputTypeError, InputChanged))
                 or exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.EISDIR)):
-            binding = _acquisition_binding(path)
             if binding is not None and binding[2].get(binding[1], {}).get('type') == kind:
                 _taint_observation(binding)
         raise
+    finally:
+        if token is not None:
+            _ACQUISITION_READS.reset(token)
 
 
 def verify_input_hash(path, expected, *, hash_file=None):
     """A wrong request digest is not evidence that the acquisition changed."""
     with acquisition_read(path):
         actual = (regular_file_hash if hash_file is None else hash_file)(path)
-    observe_acquisition(path, digest=actual)
-    require(actual == expected, f'input hash mismatch: {path}')
+        observe_acquisition(path, digest=actual)
+        require(actual == expected, f'input hash mismatch: {path}')
     return actual
 
 
@@ -238,7 +251,7 @@ def open_regular(path):
 def read_regular(path):
     with open_regular(path) as stream:
         raw = stream.read()
-    observe_acquisition(path, digest=sha256(raw).hexdigest())
+        observe_acquisition(path, digest=sha256(raw).hexdigest())
     return raw
 
 
@@ -247,8 +260,8 @@ def regular_file_hash(path):
     with open_regular(path) as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b''):
             digest.update(chunk)
-    value = digest.hexdigest()
-    observe_acquisition(path, digest=value)
+        value = digest.hexdigest()
+        observe_acquisition(path, digest=value)
     return value
 
 
