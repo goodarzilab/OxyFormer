@@ -4,11 +4,13 @@ ESS(v) = (sum v)^2 / sum(v^2) is used only for nonnegative target weights w
 or ratio weights w*r. Signed w*(r-1) is not a sampling weight: report signed
 mass, absolute mass and absolute concentration, never an ordinary weight ESS.
 """
+from fractions import Fraction
+
 import numpy as np
 
 from oxyformer.design.policies import fp64_vector
 from oxyformer.estimation.influence import normalized_weights
-from oxyformer.provenance import nonempty, require
+from oxyformer.provenance import ContractError, nonempty, require
 
 
 def weight_diagnostics(values):
@@ -28,6 +30,29 @@ def signed_diagnostics(values):
     return {"signed_sum": float(v.sum()), "absolute_mass": mass,
             "max_absolute_share": float(np.abs(v).max() / mass) if mass else None,
             "ess": None, "ess_reason": "Signed correction is not a sampling weight."}
+
+
+
+def _functional_expectations(weights, ratios, observed, shifted):
+    """Round only final expectations, after exact binary64 products and sums.
+
+    A finite basis can have very large, canceling weighted contributions. Raw
+    target masses also avoid overflow or rounding in a floating normalization.
+    This evaluates the same weighted expectations without changing a tolerance.
+    """
+    masses = [Fraction.from_float(float(w)) for w in weights]
+    total = sum(masses, Fraction(0))
+    ratio_masses = [w * Fraction.from_float(float(r)) for w, r in zip(masses, ratios)]
+
+    def expectation(mass, column):
+        value = sum((w * Fraction.from_float(float(f)) for w, f in zip(mass, column)), Fraction(0)) / total
+        try:
+            return float(value)
+        except OverflowError as exc:
+            raise ContractError("nonfinite functional balance expectation") from exc
+
+    return (np.array([expectation(ratio_masses, column) for column in observed.T]),
+            np.array([expectation(masses, column) for column in shifted.T]))
 
 
 def overlap_report(weights, ratios, observed, shifted, names, f_a, f_d):
@@ -61,7 +86,7 @@ def overlap_report(weights, ratios, observed, shifted, names, f_a, f_d):
                          "target_weights": target, "ratio_weights": ratio,
                          "signed_correction": signed_diagnostics((q * (r - 1))[mask]),
                          "ratio_p99": p99, "warnings": warnings}
-    left, right = (q * r) @ fa, q @ fd
+    left, right = _functional_expectations(weights, r, fa, fd)
     require(bool(np.isfinite(left).all() and np.isfinite(right).all()), "nonfinite functional balance")
     shift = float(q @ (d - a))
     require(np.isfinite(shift), "nonfinite achieved shift")
