@@ -164,3 +164,59 @@ def test_continuation_round2_integer_intervention_domain_edge():
             assert pair.world0.intervene([dose])[0] == pair.world0.factual_y[0]
         with pytest.raises(ContractError,match='outside supported numeric domain'):
             pair.world0.intervene([sign*(edge+1)])
+
+
+def test_fifth_attempt_mixed_intervention_preserves_integer_before_promotion():
+    import math
+    from fractions import Fraction
+    y = math.ldexp(1., 1022) + math.ldexp(3., 970)
+    tau = math.ldexp(3., 969)
+    c = float(Fraction(y) / Fraction(6.369616873214543))
+    pair = observational_equivalence_pair(n_geographies=1, cluster_size=2,
+            seed=0, noise_sd=0., c=c, tau=tau)
+    doses = [2**53+3, 0.]
+    expected = [float(Fraction(y0)+Fraction(tau)*(Fraction(d)-Fraction(s)))
+                for y0, d, s in zip(pair.worldtau.factual_y, doses, pair.worldtau.h_s)]
+    assert expected[0] == np.finfo(float).max
+    for container in (list, tuple, lambda x: np.array(x, dtype=object)):
+        assert_array_equal(pair.worldtau.intervene(container(doses)), expected)
+
+
+def test_fifth_attempt_seeded_paired_type_and_edge_sweep():
+    from fractions import Fraction
+    from oxyformer.provenance import ContractError
+    from oxyformer.validation.generators import PairedWorld
+    rng = np.random.default_rng(5042026)
+    world = PairedWorld(structural_effect=np.int64(2), factual_location_effect=np.float32(1),
+                        baseline=np.array([50., 50.]), h_s=[np.int16(1), np.longdouble(1)],
+                        epsilon=(0, 0.), factual_y=[52, np.float64(52)])
+    for integer in rng.integers(-100, 100, size=12):
+        for value in (int(integer), float(integer), integer, np.float32(integer),
+                      np.float64(integer), np.longdouble(integer)):
+            q = Fraction(int(value))
+            expected = [float(Fraction(52)+2*(q-1)), 50.]
+            for container in (list, tuple, lambda x: np.array(x, dtype=object), np.array):
+                assert_array_equal(world.intervene(container([value, 0.])), expected)
+    null = PairedWorld(structural_effect=0, factual_location_effect=1, baseline=(50, 50),
+                      h_s=(1, 1), epsilon=(0, 0), factual_y=(51, 51))
+    for sign in (-1, 1):
+        edge = np.longdouble(sign*1e308)
+        for value in (np.nextafter(edge, -np.longdouble('inf')), edge,
+                      np.nextafter(edge, np.longdouble('inf'))):
+            q = Fraction(*value.as_integer_ratio())
+            for container in (list, tuple, lambda x: np.array(x, dtype=object)):
+                if abs(q) <= Fraction(1e308):
+                    assert_array_equal(null.intervene(container([value, 0.])), [51, 51])
+                else:
+                    with pytest.raises(ContractError, match='domain'):
+                        null.intervene(container([value, 0.]))
+    for name, edge in (('c', 1e307), ('tau', 1e300), ('noise_sd', 100.)):
+        for value in (np.nextafter(np.longdouble(edge), np.longdouble(0)), np.longdouble(edge),
+                      np.nextafter(np.longdouble(edge), np.longdouble('inf'))):
+            q = Fraction(*value.as_integer_ratio())
+            if q <= Fraction(edge) and Fraction(float(value)) == q:
+                pair = observational_equivalence_pair(n_geographies=1, cluster_size=1, **{name: value})
+                assert pair.m0.observations == pair.mtau.observations
+            else:
+                with pytest.raises(ContractError, match='domain|without loss'):
+                    observational_equivalence_pair(n_geographies=1, cluster_size=1, **{name: value})

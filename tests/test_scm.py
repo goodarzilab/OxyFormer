@@ -1758,3 +1758,199 @@ def test_continuation_round2_zero_sine_midpoint_terminates(assignment, monkeypat
 def test_continuation_round2_numpy_controls(tolerance,order):
     result = generate_suite_a(frame(1,1),config('null'),policy(),tolerance=tolerance,max_order=order)
     assert result.observed_law_truth.value == 0.
+
+
+def test_fifth_attempt_longdouble_tolerance_is_admitted():
+    ordinary = generate_suite_a(frame(1, 1), config('null'), policy(), tolerance=1e-8)
+    extended = generate_suite_a(frame(1, 1), config('null'), policy(),
+                                tolerance=np.longdouble('1e-8'))
+    assert ordinary.observed_law_truth.value == extended.observed_law_truth.value == 0.
+    assert extended.structural_causal_truth.value == 0.
+
+
+# Bounded deterministic input-contract inventory. Fraction is the independent
+# reference; these checks exercise API results, admission, and serialization.
+def _fifth_numeric_variants(value):
+    from fractions import Fraction
+    reference = Fraction(value)
+    with np.errstate(over="ignore", under="ignore"):
+        candidates = [float(value), np.float16(value), np.float32(value),
+                      np.float64(value), np.longdouble(value)]
+    if not isinstance(value, Fraction):
+        candidates.insert(0, value)
+    if reference.denominator == 1:
+        candidates.append(int(value))
+        for kind in (np.int8, np.int16, np.int32, np.int64, np.uint8,
+                     np.uint16, np.uint32, np.uint64):
+            if np.iinfo(kind).min <= value <= np.iinfo(kind).max:
+                candidates.append(kind(value))
+    for candidate in candidates:
+        if isinstance(candidate, (int, np.integer)):
+            represented = Fraction(int(candidate))
+        elif np.isfinite(candidate):
+            represented = Fraction(*candidate.as_integer_ratio())
+        else:
+            continue
+        if represented == reference:
+            yield candidate
+
+
+def test_fifth_attempt_seeded_entrypoint_type_sweep():
+    from fractions import Fraction
+    from oxyformer.validation.generators import observational_equivalence_pair
+    from oxyformer.validation.scm import exact_shift_intervals, validate_policy_domain
+    rng = np.random.default_rng(20261005)
+    for raw in rng.integers(1, 5, size=4):
+        value = int(raw)
+        baseline = config(beta=value, noise_sd=0.)
+        fixed = replace(frame(1, 1), coordinates=((value, 0),), x=((value, None),), weights=(value,))
+        expected_pair = observational_equivalence_pair(n_geographies=1, cluster_size=1,
+                            seed=value, c=value, tau=value, noise_sd=0)
+        for number in _fifth_numeric_variants(value):
+            cfg = config(beta=number, noise_sd=np.float32(0))
+            assert cfg.to_json() == baseline.to_json()
+            for container in (list, tuple, lambda x: np.array(x, dtype=object), np.array):
+                actual = replace(frame(1, 1), coordinates=container([container([number, 0.])]),
+                                 x=container([container([number, None])]), weights=container([number]))
+                assert actual.to_json() == fixed.to_json()
+                endpoints = container([container([number, 10.])])
+                assert exact_shift_intervals(endpoints, number) == ((Fraction(value), Fraction(10-value)),)
+                law = AssignmentLaw(actual, np.int32(0), LatentState(), cfg, endpoints)
+                assert law.contains(container([number, 10.])).all()
+                assert np.isfinite(law.log_density(container([number, 10.]))).all()
+            # A policy artifact exposes authoritative serialized values. Its
+            # constructor belongs to design/policies.py, outside this unit.
+            pol = policy(delta=float(number))
+            validate_policy_domain(pol)
+            pair = observational_equivalence_pair(n_geographies=np.float32(1), cluster_size=np.int64(1),
+                                seed=number, c=number, tau=number, noise_sd=np.longdouble(0))
+            assert pair == expected_pair
+            state = LatentState(local=number/number, regional=np.int64(0), illness=np.float32(1),
+                                error=np.longdouble(0), denominator_factor=number/number)
+            assert state.denominator_factor == Fraction(1)
+    # Run the actual integration, not only a helper: all exactly equal controls
+    # give the same observations and the independent uniform-shift truth 3.2.
+    expected = None
+    for control in _fifth_numeric_variants(32):
+        result = generate_suite_a(frame(1, 1), config(beta=2), policy(),
+                                  seed=control, max_order=control, tolerance=np.longdouble(2)**-20)
+        assert result.observed_law_truth.value == pytest.approx(3.2, abs=1e-13)
+        assert result.structural_causal_truth.value == pytest.approx(3.2, abs=1e-13)
+        if expected is None:
+            expected = result
+        assert result == expected
+
+
+def test_fifth_attempt_all_domain_edges_and_nextafter_type_sweep():
+    from fractions import Fraction
+    from oxyformer.validation.scm import NUMERIC_DOMAIN, validate_numeric
+    rng = np.random.default_rng(548903)
+    inventory = list(NUMERIC_DOMAIN.items())
+    rng.shuffle(inventory)
+    count = 0
+    for kind, (lower, upper) in inventory:
+        lo, hi = Fraction(lower), Fraction(upper)
+        for edge in (lower, upper):
+            for scalar_type in (np.float32, np.float64, np.longdouble):
+                with np.errstate(over='ignore', under='ignore'):
+                    represented_edge = scalar_type(edge)
+                    neighbours = (np.nextafter(represented_edge, scalar_type('-inf')),
+                                  represented_edge,
+                                  np.nextafter(represented_edge, scalar_type('inf')))
+                for value in neighbours:
+                    finite = np.isfinite(value)
+                    expected = finite and lo <= Fraction(*value.as_integer_ratio()) <= hi
+                    variants = [value]
+                    if finite:
+                        # Include Python float/int only when they denote the
+                        # identical reference, never compare rounded variants.
+                        variants.extend(_fifth_numeric_variants(Fraction(*value.as_integer_ratio())))
+                    for variant in variants:
+                        for container in (lambda x: x, lambda x: [x, lower],
+                                          lambda x: (x, lower),
+                                          lambda x: np.array([x, lower], dtype=object),
+                                          lambda x: np.array([x])):
+                            values = container(variant)
+                            if expected:
+                                captured = validate_numeric(values, kind, kind)
+                                first = next(iter(captured.flat))
+                                if isinstance(first, (int, np.integer)):
+                                    actual = Fraction(int(first))
+                                else:
+                                    actual = Fraction(*first.as_integer_ratio())
+                                assert actual == Fraction(*value.as_integer_ratio())
+                            else:
+                                with pytest.raises(ContractError):
+                                    validate_numeric(values, kind, kind)
+                            count += 1
+    assert count > 3000
+
+
+def test_fifth_attempt_record_edges_are_checked_before_narrowing():
+    from fractions import Fraction
+    from oxyformer.validation.scm import NUMERIC_DOMAIN, exact_shift_intervals
+    fields = {'beta': 'coefficient', 'local_strength': 'coefficient',
+              'regional_strength': 'coefficient', 'near_scale': 'near_scale',
+              'noise_sd': 'noise_sd', 'exposure_error': 'exposure_error', 'migration': 'migration',
+              'registration_probability': 'registration_probability', 'denominator_error': 'denominator_error'}
+    for field, kind in fields.items():
+        lower, upper = NUMERIC_DOMAIN[kind]
+        if field in ('registration_probability', 'denominator_error'):
+            upper = 1.
+        for edge in (lower, upper):
+            for value in (np.nextafter(np.longdouble(edge), -np.longdouble('inf')),
+                          np.longdouble(edge), np.nextafter(np.longdouble(edge), np.longdouble('inf'))):
+                q = Fraction(*value.as_integer_ratio())
+                valid = Fraction(lower) <= q <= Fraction(upper)
+                valid &= field != 'denominator_error' or q < 1
+                exact64 = Fraction(float(value)) == q
+                if valid and exact64:
+                    assert getattr(config(**{field: value}), field) == float(value)
+                else:
+                    with pytest.raises(ContractError, match='domain|without loss|denominator'):
+                        config(**{field: value})
+    for field, kind in (('coordinates', 'coordinate'), ('x', 'covariate'), ('weights', 'weight')):
+        for edge in NUMERIC_DOMAIN[kind]:
+            for value in (np.nextafter(np.longdouble(edge), -np.longdouble('inf')),
+                          np.longdouble(edge), np.nextafter(np.longdouble(edge), np.longdouble('inf'))):
+                q = Fraction(*value.as_integer_ratio())
+                lo, hi = map(Fraction, NUMERIC_DOMAIN[kind])
+                args = {field: [value] if field == 'weights' else [[value, 0.]]}
+                if lo <= q <= hi and Fraction(float(value)) == q:
+                    replace(frame(1, 1), **args)
+                else:
+                    with pytest.raises(ContractError, match='domain|without loss'):
+                        replace(frame(1, 1), **args)
+    # Raw policy geometry keeps longdouble precision even when a JSON policy
+    # cannot store the same endpoints. No preceding homogeneous array conversion.
+    lower = np.nextafter(np.longdouble(-1), np.longdouble(0))
+    assert exact_shift_intervals([[lower, 10]], np.int64(2)) == ((Fraction(*lower.as_integer_ratio()), Fraction(8)),)
+
+
+def test_fifth_attempt_control_edges_retain_exact_numbers():
+    from fractions import Fraction
+    from oxyformer.validation.scm import validate_seed, integer_scalar
+    for seed in (0, 2**64-1):
+        for value in _fifth_numeric_variants(seed):
+            assert validate_seed(value) == seed
+    for seed in (-1, 2**64, np.longdouble('0.5'), True):
+        with pytest.raises(ContractError):
+            validate_seed(seed)
+    for value in _fifth_numeric_variants(32):
+        assert integer_scalar(value, 'max_order') == 32
+    # Empty targets validate controls without spending thousands of decimal
+    # digits integrating a requested extended-range tolerance.
+    f = replace(frame(1, 1), outcome_available=(False,))
+    for tolerance in (np.nextafter(np.longdouble(0), np.longdouble(1)),
+                      np.finfo(np.longdouble).max, np.longdouble('1e-8'), 10**1000):
+        sample = generate_suite_a(f, config('null'), policy(), tolerance=tolerance)
+        assert sample.observed_law_truth.status == 'empty_target'
+    for tolerance in (0, -1, np.longdouble('nan'), np.longdouble('inf'), True):
+        with pytest.raises(ContractError):
+            generate_suite_a(f, config('null'), policy(), tolerance=tolerance)
+    for factor in (np.nextafter(np.longdouble(0), np.longdouble(1)),
+                   np.nextafter(np.longdouble(2), np.longdouble(0))):
+        assert LatentState(denominator_factor=factor).denominator_factor == Fraction(*factor.as_integer_ratio())
+    for factor in (0, 2, np.nextafter(np.longdouble(2), np.longdouble('inf'))):
+        with pytest.raises(ContractError):
+            LatentState(denominator_factor=factor)
