@@ -88,6 +88,8 @@ def _profile(request, config, reference, scenario, recipe, stamps):
     timing = read_json(timing_path)
     require(result["mode"] == "profile" and result["scenario"] == scenario, "profile scenario mismatch")
     require(result["recipe_hash"] == timing["recipe_hash"] == digest(recipe), "profile recipe drift")
+    require(timing.get("measurement_scope") == "complete_stage_return",
+            "profiling must include final publication and verification")
     require(timing["production_equivalent"] is True and timing["complete"] is True
             and timing["all_successful"] is True, "complete production profiling required")
     require(timing["device"] == "cpu" and timing["gpu_seconds"] == 0, "merged nested runner supports CPU only")
@@ -128,6 +130,11 @@ def build_lock(request, config, task):
     count = integer(parameters["final_repetitions"], "final repetitions", MIN_REPETITIONS)
     screen_count = integer(parameters["screening_repetitions"], "screening repetitions", 1)
     batch_size = integer(parameters["repetitions_per_leaf"], "repetitions per leaf", 1)
+    # Reject infeasible declarations using integer arithmetic before allocating
+    # seed dictionaries or expanded units, even for an accidentally huge count.
+    for repetitions in (screen_count, count):
+        leaves = len(scenarios) * ((repetitions + batch_size - 1) // batch_size)
+        require(leaves <= 40, "campaign instance exceeds forty leaves; profile a feasible batching plan")
     require(parameters["gpus"] == 0, "merged nested_cv runner has no GPU device interface; GPU profile cannot be assumed")
     wall_seconds = integer(parameters["wall_seconds"], "leaf wall seconds", 1)
     factor = finite(parameters["profile_safety_factor"], "profile safety factor")

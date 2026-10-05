@@ -168,7 +168,7 @@ def read_json(path):
     return json.loads(Path(path).read_text())
 
 
-def publish(request, values, *, status, message):
+def publish(request, values, *, status, message, extra_artifacts=()):
     root = Path(request.output_dir)
     root.mkdir(parents=True, exist_ok=True)
     lineage = ArtifactLineage(source_hashes=(request.config_hash, request.task_hash),
@@ -183,6 +183,7 @@ def publish(request, values, *, status, message):
     for path in sorted((root / "repetitions").glob("*/result.json")):
         records.append(ArtifactRecord(path=str(path.relative_to(root)), kind="repetition",
                                      sha256=file_hash(path), lineage=lineage))
+    records.extend(extra_artifacts)
     if "artifact_manifest.json" not in values:
         path = atomic_json(root, "artifact_manifest.json", {"request_hash": request.content_hash,
             "artifacts": [r.to_dict() for r in records]})
@@ -311,7 +312,7 @@ def execute_draw(draw, frame, scenario, template, recipe, root, deadline):
             atomic_write(root, "observations.json", sample.observations.to_json())
             atomic_write(root, "observed_law_truth.json", sample.observed_law_truth.to_json())
             atomic_write(root, "structural_causal_truth.json", sample.structural_causal_truth.to_json())
-    except (ArithmeticError, np.linalg.LinAlgError, ValueError, RuntimeError) as exc:
+    except (ArithmeticError, np.linalg.LinAlgError, ValueError) as exc:
         # No draw is retried and no exception is silently relabeled as success.
         record.update(status="numerical_failure", reason=f"{type(exc).__name__}: {exc}")
     except Exception as exc:
@@ -323,7 +324,7 @@ def execute_draw(draw, frame, scenario, template, recipe, root, deadline):
     return record
 
 
-def run_stage(request: StageRequest) -> StageResult:
+def _run_batch(request: StageRequest) -> StageResult:
     from oxyformer.validation.campaign import load_lock, validate_recipe, validate_leaf_task, fingerprint
     started = time.monotonic()
     try:
@@ -389,6 +390,7 @@ def run_stage(request: StageRequest) -> StageResult:
         stamps = ({k: lock[k] for k in ("scientific_fingerprint", "environment_hash")}
                   if lock else fingerprint())
         timing = {"wall_seconds": time.monotonic() - started, "gpu_seconds": 0., "device": "cpu",
+            "measurement_scope": "before_final_publication",
             "production_equivalent": production, "recipe_hash": digest(recipe),
             "complete_repetition_seconds": [seconds for r, seconds in zip(records, repetition_seconds) if r["status"] == "success"],
             "complete": summary["complete"], "all_successful": summary["counts"]["success"] == len(draws), **stamps}
@@ -398,3 +400,46 @@ def run_stage(request: StageRequest) -> StageResult:
                 if summary["complete"] else "Incomplete batch; all declared draws retained")
     except (ContractError, KeyError, TypeError, ValueError, OSError) as exc:
         return StageResult(request_hash=request.content_hash, status="blocked", artifacts=(), message=str(exc) or type(exc).__name__)
+
+
+
+def run_stage(request: StageRequest) -> StageResult:
+    """Time profiling from outside the normal batch handler's complete return.
+
+    A timing file cannot measure its own final publication. A profile therefore
+    executes the ordinary batch handler in an owned child directory, waits for
+    its complete artifact publication and verification, then publishes the
+    measured receipt at the requested root. The profiler's administrative
+    publication is not work performed by ordinary screening/final leaves.
+    """
+    started = time.monotonic()
+    try:
+        request.verify_inputs()
+        task = read_json(request.task_path)
+        if task.get("parameters", {}).get("mode") != "profile":
+            return _run_batch(request)
+        root = Path(request.output_dir)
+        root.mkdir(parents=True, exist_ok=True)
+        destination = output_path(root, "_profiled")
+        require(not destination.exists(), "profile already attempted; never rerun failed draws")
+        destination.mkdir()
+        profiled_request = replace(request, output_dir=str(destination))
+        completed = _run_batch(profiled_request)
+        if not completed.artifacts:
+            return StageResult(request_hash=request.content_hash, status=completed.status,
+                               artifacts=(), message=completed.message)
+        completed.verify(profiled_request)
+        elapsed = time.monotonic() - started
+        result = read_json(destination / "result.json")
+        timing = read_json(destination / "timing.json")
+        timing.update(wall_seconds=elapsed, measurement_scope="complete_stage_return",
+                      profiled_request_hash=profiled_request.content_hash)
+        result["profiled_request_hash"] = profiled_request.content_hash
+        extra = tuple(replace(a, path="_profiled/" + a.path) for a in completed.artifacts)
+        return publish(request, {"result.json": result, "timing.json": timing,
+            "profile_receipt.json": {"request": profiled_request.to_dict(), "result": completed.to_dict()}},
+            status=completed.status, message="Production profile measured through complete stage return; " + completed.message,
+            extra_artifacts=extra)
+    except (ContractError, KeyError, TypeError, ValueError, OSError) as exc:
+        return StageResult(request_hash=request.content_hash, status="blocked", artifacts=(),
+                           message=str(exc) or type(exc).__name__)
