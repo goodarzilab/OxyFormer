@@ -23,7 +23,9 @@
 # the exact-location pair and shared reference inputs. Widen every magnitude
 # bound by AT LEAST 100x using exact expansion and outward binary rounding. Zero remains valid for signed quantities and disabled
 # mechanisms, zero weights and identity shifts. Probability constraints still
-# apply. Wider axes retain the inherited successful numerical stress tests:
+# apply. The independently fixed positive shift floor remains the exact
+# binary64 value 0.02 (with zero for identity), as in the inherited contract.
+# Wider axes retain the inherited successful numerical stress tests:
 # tiny near scales/weights use scaled/log arithmetic; paired interventions use
 # exact rational arithmetic. These extensions do not widen nonlinear-response
 # coefficients or the positive shift floor. This is not all-float64 support.
@@ -118,7 +120,7 @@ numeric_domain:
     - -10010.0
     - 10010.0
     delta:
-    - 0.019999999999999997
+    - 0.02
     - 200.0
     near_scale:
     - 5.0e-324
