@@ -199,14 +199,26 @@ def fit_affine(logits, weights, *, original_ids, fold_ids, partitions,
             # Fit exactly the normalization used by the public FP32 map,
             # including its overflow-safe subtraction on opposite extremes.
             x = coordinates.logits(z)
-            parameter = torch.zeros(2, dtype=torch.float32, device=z.device, requires_grad=True)
-            optimizer = torch.optim.LBFGS([parameter], lr=1., max_iter=100,
+            # Line-search dot products and cubic interpolation need wider
+            # temporaries than the realized head. Keep a FP64 optimizer work
+            # vector, but round every trial coefficient and score to FP32.
+            # Scale a large initial slope score into optimizer coordinates.
+            # Without this, a meaningful logit change may require a raw step
+            # far below LBFGS's step tolerance. A power of two changes units,
+            # preserving the same FP32 head and the registered objective.
+            initial_score = _weighted_score(((.5 - labels).double() * x.double()).mean(1), mass[:, 0])
+            exponent = max(0, math.frexp(abs(initial_score))[1])
+            step_units = torch.tensor([math.ldexp(1., -exponent), 1.],
+                                      dtype=torch.float64, device=z.device)
+            working = torch.zeros(2, dtype=torch.float64, device=z.device, requires_grad=True)
+            optimizer = torch.optim.LBFGS([working], lr=1., max_iter=100,
                                          tolerance_grad=1e-7, tolerance_change=1e-9,
                                          line_search_fn="strong_wolfe")
 
             def closure():
                 optimizer.zero_grad()
                 with torch.no_grad():
+                    parameter = (working * step_units).float()
                     calibrated = parameter[0] * x + parameter[1]
                     loss = _weighted_mean(F.binary_cross_entropy_with_logits(
                         calibrated, labels, reduction="none"), mass)
@@ -215,14 +227,15 @@ def fit_affine(logits, weights, *, original_ids, fold_ids, partitions,
                     # Form scores before reducing raw weights: casting tiny
                     # normalized mass to FP32 first loses large x * mass terms.
                     scores = ((residual * x.double()).mean(1), residual.mean(1))
-                    parameter.grad = parameter.new_tensor([
-                        _weighted_score(score, mass[:, 0]) for score in scores])
-                require(bool(torch.isfinite(parameter.grad).all()), "nonfinite affine gradient")
+                    working.grad = parameter.new_tensor([
+                        _weighted_score(score, mass[:, 0]) for score in scores]).double() * step_units
+                require(bool(torch.isfinite(working.grad).all()), "nonfinite affine gradient")
                 return loss
 
             optimizer.step(closure)
-            slope = float(parameter[0].detach())
-            intercept = float(parameter[1].detach())
+            parameter = (working.detach() * step_units).float()
+            slope = float(parameter[0])
+            intercept = float(parameter[1])
     require(math.isfinite(slope) and math.isfinite(intercept), "nonfinite affine coefficients")
     # A slope below one can bring an overflowing normalized input back into
     # range, but the public FP32 map validates after that intermediate. Move

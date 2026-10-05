@@ -380,3 +380,32 @@ def test_power_of_two_calibration_coordinates_preserve_small_slope_transfer(scal
     torch.testing.assert_close(fitted.ratios(z), baseline.ratios(core))
     restored = AffineCalibration.from_json(fitted.to_json())
     assert torch.equal(restored.logits(refit), fitted.logits(refit))
+
+
+@pytest.mark.parametrize('magnitude', [1e12, 1e22, 1e32])
+def test_mixed_scale_nonseparable_calibration_keeps_line_search_finite(magnitude):
+    from oxyformer.training.calibration import AffineCalibration
+    ids = tuple('abcdefgh')
+    folds = (0, 0, 1, 1, 2, 2, 2, 2)
+    partitions = tuple(CalibrationPartition(fold=fold,
+        evaluation_ids=tuple(oid for oid, f in zip(ids, folds) if f == fold),
+        fitting_ids=tuple(oid for oid, f in zip(ids, folds) if f != fold),
+        checkpoint_ids=(), frozen_epochs=1) for fold in range(3))
+    large = float(torch.tensor(magnitude, dtype=torch.float32))
+    z = torch.tensor([[-1., 1.], [1., -1.], [0., 0.], [0., 0.],
+                      [-large, large], [-large, large], [-large, large], [large, -large]])
+    weights = [1.] * 4 + [1e-4] * 4
+    provenance = lineage(ids)
+    feasible = AffineCalibration(slope=float(torch.log(torch.tensor(3.))) / large,
+        intercept=0., class_prior=.5, original_ids=ids, partitions=partitions, lineage=provenance)
+    expected_loss = pair_metrics(feasible.logits(z), weights)[0]
+    constant_loss = pair_metrics(torch.zeros_like(z), weights)[0]
+    assert expected_loss < constant_loss - 1e-5
+    fitted = fit_affine(z, weights, original_ids=ids, fold_ids=folds, partitions=partitions,
+                        outer_training_ids=ids, lineage=provenance)
+    assert fitted.logits(z).dtype == fitted.ratios(z).dtype == torch.float32
+    actual_loss = pair_metrics(fitted.logits(z), weights)[0]
+    # Loss observations are computed in FP32; retain its default tolerances.
+    torch.testing.assert_close(torch.tensor(actual_loss, dtype=torch.float32),
+                               torch.tensor(expected_loss, dtype=torch.float32))
+    assert actual_loss < constant_loss - 1e-5
