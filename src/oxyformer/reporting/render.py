@@ -32,7 +32,7 @@ def render_forest(report):
              '<text x="12" y="46">All point estimates; covariance and spatial sensitivity intervals require the full report.</text>']
     for i, e in enumerate(rows):
         y = 80 + 42 * i
-        x = 650 + 250 * e["value"] / bound
+        x = 650 + 250 * (e["value"] / bound)
         parts.extend([f'<text x="12" y="{y}">{escape(e["method"])}: {e["value"]:.6g} {escape(e["spec"]["outcome_scale"])}</text>',
                       f'<circle cx="{x}" cy="{y-4}" r="4"/>'])
     parts.append('</svg>')

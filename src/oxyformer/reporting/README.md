@@ -160,3 +160,12 @@ complete derived record is checked for finite JSON values before attachment to
 an evaluation or refusal report. A nonfinite derived value fails the scientific
 report instead of reaching publication as released evidence; authenticated
 estimates and sensitivities remain publishable with the failure reason.
+
+Functional-balance expectations use exact products and sums of the supplied
+binary64 target masses, ratios and basis values, divided by the exact total
+target mass. Only the final expectations are rounded to binary64. Thus large
+positive and negative contributions can cancel before rounding or overflow;
+no tolerance or overlap threshold is relaxed. A truly unrepresentable final
+diagnostic still fails finite-record validation. Forest coordinates divide by
+the plotting bound before scaling, so every finite point remains drawable.
+Valid derived diagnostics also remain visible when approval metadata is refused.

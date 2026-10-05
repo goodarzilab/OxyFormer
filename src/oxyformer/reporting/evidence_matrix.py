@@ -214,8 +214,8 @@ def evaluate(bundle, manifest, receipts, approvals, config_hash):
     gates.append(primary_input_consistency(bundle.estimates))
     scope = {k: report[k] for k in ("stage", "bundle_hash", "manifest_hash", "receipts_hash", "config_hash")}
     try:
-        owner = approval_owner(approvals)
         report["diagnostics"] = summarize(bundle, manifest)
+        owner = approval_owner(approvals)
         # Keep the existing common-split requirement for every bundled estimator,
         # but record failure after computing diagnostics rather than discarding them.
         splits = {e.lineage.split_hash for e in bundle.estimates}

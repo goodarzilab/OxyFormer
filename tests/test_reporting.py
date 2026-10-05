@@ -1208,3 +1208,50 @@ def test_nonfinite_balance_difference_keeps_authenticated_estimates(case, tmp_pa
     assert any('nonfinite' in gate['reason'] for gate in report['gates'])
     for name in ('report.html', 'estimators.svg'):
         assert all(e.method in (root / name).read_text() for e in b.estimates)
+
+
+def test_finite_balanced_products_must_not_overflow_before_cancellation(case, tmp_path, monkeypatch):
+    b, m, r = case
+    n = len(b.original_ids)
+    b = replace(b, balance_basis_id='f(A,X)=1e308*X*1[A=3]', balance_names=('scaled interaction',),
+                observed_exposure=(3., 3.) + (1.,) * (n - 2),
+                shifted_exposure=(5., 5.) + (3.,) * (n - 2),
+                ratios=((100., 100.) + (0.,) * (n - 2),) * len(b.seed_ids),
+                balance_observed=((1e308,), (-1e308,)) + ((0.,),) * (n - 2),
+                balance_shifted=((0.,),) * n)
+    report = evaluate_case((b, m, r))
+    assert report['state'] == 'released'
+    for overlap in report['diagnostics']['overlap_by_seed'].values():
+        assert overlap['functional_balance'] == [dict(function='scaled interaction',
+                ratio_expectation=0., shifted_expectation=0., difference=0.)]
+        # The unchanged binary64 weighted mean may round by a few ulps.
+        assert overlap['achieved_shift'] == pytest.approx(2., rel=0., abs=4 * np.spacing(2.))
+        assert 'ratio p99 > 10' in overlap['subsets']['all']['warnings']
+    request = make_request(tmp_path, (b, m, r), monkeypatch)
+    result = run_stage(request)
+    assert result.status == 'pass'
+    result.verify(request)
+    saved = json.loads((Path(request.output_dir) / 'report.json').read_text())
+    assert saved['releasable']
+
+
+def test_forest_coordinates_remain_finite_for_finite_estimates(case):
+    import xml.etree.ElementTree as ET
+    b, _, _ = case
+    estimates = [replace(e, value=value).to_dict()['payload']
+                 for e, value in zip(b.estimates, (-1e306, 1e306))]
+    report = dict(state='failed', evidence_label='diagnostic-only', estimators=estimates)
+    root = ET.fromstring(render_forest(report))
+    coordinates = [float(node.attrib['cx']) for node in root.findall('{http://www.w3.org/2000/svg}circle')]
+    assert coordinates == [400., 900.]
+
+
+def test_invalid_approval_metadata_keeps_derived_diagnostics(case, tmp_path, monkeypatch):
+    request = make_request(tmp_path, case, monkeypatch, {'owner_decisions': []})
+    result = run_stage(request)
+    assert result.status == 'fail'
+    result.verify(request)
+    report = json.loads((Path(request.output_dir) / 'report.json').read_text())
+    assert not report['releasable']
+    assert report['diagnostics'] == json.loads(canonical_json(summarize(case[0], case[1])))
+    assert len(report['estimators']) == 2
