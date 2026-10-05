@@ -951,3 +951,241 @@ def test_positive_count_rate_survives_exact_covariate_baseline_cancellation():
         assert (mean > 0).all()
     result = generate_suite_a(f, c, policy())
     assert result.observed_law_truth.value == result.structural_causal_truth.value == 0.
+
+
+def test_round2_positive_count_law_survives_quadratic_cross_term_cancellation():
+    from fractions import Fraction
+    square = (Fraction(-.1)-5)**2
+    residual = 4*square-100
+    parts = []
+    for _ in range(3):
+        parts.append(float(residual))
+        residual -= Fraction(parts[-1])
+    assert residual == 0
+    x = (-100., -100., 100., *parts, 4e-20)
+    assert 50+sum(map(Fraction, x))/4-square == Fraction(4e-20)/4 > 0
+    f = replace(frame(1, 1), coordinates=((0., 0.),),
+                columns=tuple(f"x{i}" for i in range(len(x))), x=(x,))
+    c = config("sign_changing", beta=-10., registration_probability=.65, noise_sd=0.)
+    result = generate_suite_a(f, c, policy(((-.1, 0.),), delta=.02))
+    assert result.observations.registered_events[0] >= 0
+    assert result.integration_uncertainty.converged
+
+
+def _count_frame_with_exact_baseline(value):
+    """Encode a dyadic test baseline in supported stored float covariates."""
+    from fractions import Fraction
+    residual, values = 4*value, [-100., -100.]
+    while residual:
+        part = float(max(Fraction(-100), min(Fraction(100), residual)))
+        assert part != 0
+        values.append(part)
+        residual -= Fraction(part)
+    return replace(frame(1, 1), coordinates=((0., 0.),),
+                   columns=tuple(f"x{i}" for i in range(len(values))), x=(tuple(values),))
+
+
+@pytest.mark.parametrize("margin", [-1e-20, 0., 1e-20])
+def test_exact_count_quadratic_boundary_accepts_zero_and_rejects_negative(margin):
+    from fractions import Fraction
+    from oxyformer.validation.scm import count_event_rate, validate_count_rates
+    baseline = (Fraction(-.1)-5)**2+Fraction(margin)
+    f = _count_frame_with_exact_baseline(baseline)
+    c = config("sign_changing", beta=-10., registration_probability=.65)
+    if margin < 0:
+        with pytest.raises(ContractError, match="negative event rate"):
+            validate_count_rates(f, c, policy(((-.1, 0.),), delta=.02))
+        with pytest.raises(ContractError, match="negative event rate"):
+            count_event_rate(Fraction(-.1), f, 0, LatentState(), c)
+    else:
+        validate_count_rates(f, c, policy(((-.1, 0.),), delta=.02))
+        assert count_event_rate(Fraction(-.1), f, 0, LatentState(), c) == margin
+
+
+@pytest.mark.parametrize("effect,beta,dose", [("null", 1., 0.), ("linear", -1., .1),
+                                               ("sign_changing", 10., 5.)])
+@pytest.mark.parametrize("margin", [-1e-20, 0., 1e-20])
+def test_count_rate_combines_all_stored_affine_and_polynomial_terms(effect, beta, dose, margin):
+    from fractions import Fraction
+    from oxyformer.validation.scm import count_event_rate
+    state = LatentState(local=-1., regional=1., illness=1., denominator_factor=1.2)
+    c = config(effect, beta=beta, local_confounding="omitted", local_strength=.1,
+               regional_confounding="omitted", regional_strength=.2, migration=.3,
+               registration_probability=.65, denominator_error=.2)
+    adjusted = Fraction(dose)-Fraction(.3)
+    response = {"null": Fraction(0), "linear": Fraction(beta)*adjusted,
+                "sign_changing": Fraction(beta)*(adjusted-5)**2/10}[effect]
+    # /10 may introduce a factor five; use beta=10 for the quadratic so this
+    # stored baseline is dyadic, just like the finite input representation.
+    baseline = Fraction(margin)-response+Fraction(.1)-Fraction(.2)-2
+    f = _count_frame_with_exact_baseline(baseline)
+    if margin < 0:
+        with pytest.raises(ContractError, match="negative event rate"):
+            count_event_rate(dose, f, 0, state, c)
+    else:
+        assert count_event_rate(dose, f, 0, state, c, poisson_intensity=True) == float(100*Fraction(margin))
+
+
+def _decimal_sine(value):
+    # Independent direct Taylor evaluation at 140 decimal digits; test arguments
+    # are at most 1/2, with a final term far below the tested sign margins.
+    from decimal import Decimal, localcontext
+    with localcontext() as context:
+        context.prec = 140
+        x = Decimal(value.numerator)/Decimal(value.denominator)
+        term = total = x
+        for n in range(1, 100):
+            term *= -x*x/Decimal((2*n)*(2*n+1))
+            total += term
+        return +total
+
+
+@pytest.mark.parametrize("margin", [-1e-20, 1e-20])
+def test_sine_count_endpoint_sign_uses_enclosure_before_rounding(margin):
+    from fractions import Fraction
+    from oxyformer.validation.scm import count_event_rate, validate_count_rates
+    sine = _decimal_sine(Fraction(1, 2))
+    # Store four float expansion terms, accurately enough that the independent
+    # reference differs from the mathematical sine by less than 1e-60.
+    remainder, terms = Fraction(sine), []
+    for _ in range(4):
+        terms.append(float(remainder))
+        remainder -= Fraction(terms[-1])
+    assert abs(remainder) < Fraction(1, 10**60)
+    baseline = sum(map(Fraction, terms))+Fraction(margin)
+    f = _count_frame_with_exact_baseline(baseline)
+    c = config("nonlinear", beta=-1., registration_probability=.65)
+    if margin < 0:
+        with pytest.raises(ContractError, match="negative event rate"):
+            validate_count_rates(f, c, policy(((0., 1.),), delta=.02))
+        with pytest.raises(ContractError, match="negative event rate"):
+            count_event_rate(1., f, 0, LatentState(), c)
+    else:
+        validate_count_rates(f, c, policy(((0., 1.),), delta=.02))
+        reference = float(baseline-Fraction(sine))
+        assert count_event_rate(1., f, 0, LatentState(), c) == pytest.approx(reference, rel=1e-15, abs=0)
+
+
+@pytest.mark.parametrize("beta", [-1., 1.])
+@pytest.mark.parametrize("margin", [-1e-20, 0., 1e-20])
+def test_sine_count_interior_extrema_are_exact(beta, margin):
+    from fractions import Fraction
+    from oxyformer.validation.scm import validate_count_rates
+    f = _count_frame_with_exact_baseline(1+Fraction(margin))
+    c = config("nonlinear", beta=beta, registration_probability=.65)
+    p = policy(((0., 10.),), delta=.02)
+    if margin < 0:
+        with pytest.raises(ContractError, match="negative event rate"):
+            validate_count_rates(f, c, p)
+    else:
+        validate_count_rates(f, c, p)
+
+
+def test_sine_phase_membership_respects_exact_endpoints_and_periods():
+    from fractions import Fraction
+    from oxyformer.validation.scm import _contains_sine_minimum, _pi_bounds, count_event_rate
+    # Rational enclosure from an independent decimal expansion, separate from the
+    # Machin identity implementation. Exercise both signs and remote periods.
+    pi_lo = Fraction("3.14159265358979323846264338327950288419716939937510")
+    pi_hi = pi_lo+Fraction(1, 10**50)
+    lo, hi = _pi_bounds(192)
+    assert pi_lo < lo < hi < pi_hi
+    for q in (-3185, -1, 1, 3185):
+        a, b = sorted((q*pi_lo, q*pi_hi))
+        beta = -1 if q % 4 == 1 else 1
+        assert _contains_sine_minimum(a, b, beta)
+        assert not _contains_sine_minimum(a-Fraction(1, 100), a, beta)
+        assert not _contains_sine_minimum(b, b+Fraction(1, 100), beta)
+    # A rounded pi is rational, so 1-sin(pi_float/2) is strictly positive;
+    # a float/libm response would commonly collapse it to zero.
+    f = _count_frame_with_exact_baseline(Fraction(1))
+    c = config("nonlinear", beta=-1., registration_probability=.65)
+    rate = count_event_rate(np.pi, f, 0, LatentState(), c)
+    assert 1e-34 < rate < 1e-32
+
+
+@pytest.mark.parametrize("value", [-10010., -1., 0., 1., 10010.])
+def test_certified_sine_bounds_agree_with_independent_small_angle_reference(value):
+    from fractions import Fraction
+    from oxyformer.validation.scm import _sine_bounds
+    # Double-angle independent decimal complex multiplication after reducing
+    # the argument. It does not use the production integer interval arithmetic.
+    from decimal import Decimal, localcontext
+    x = Fraction(value)
+    halves = 0
+    while abs(x) > Fraction(1, 2):
+        x /= 2
+        halves += 1
+    with localcontext() as context:
+        context.prec = 140
+        sine = _decimal_sine(x)
+        cosine = (1-sine*sine).sqrt()  # positive on this small-angle interval
+        for _ in range(halves):
+            sine, cosine = 2*sine*cosine, cosine*cosine-sine*sine
+        reference = Fraction(sine)
+    lo, hi = _sine_bounds(Fraction(value), 192)
+    assert lo <= reference <= hi
+    assert hi-lo < Fraction(1, 10**50)
+
+
+@pytest.mark.parametrize("error", [0., .4])
+def test_count_sampler_retains_local_dose_and_scales_after_exact_cancellation(error, monkeypatch):
+    from fractions import Fraction
+    from oxyformer.validation.scm import LocalCoordinates
+    import oxyformer.validation.generators as generators
+    original_rng = np.random.default_rng
+    intensities = []
+    class RecordingRNG:
+        def __init__(self, seed):
+            self.delegate = original_rng(seed)
+        def __getattr__(self, name):
+            return getattr(self.delegate, name)
+        def poisson(self, intensity):
+            intensities.append(intensity)
+            return 0
+    def fixed_local_draw(self, index, u):
+        return LocalCoordinates(Fraction(5)+self.error, Fraction(1e-100), np.asarray(.75, dtype=np.longdouble))
+    monkeypatch.setattr(generators.np.random, "default_rng", RecordingRNG)
+    monkeypatch.setattr(AssignmentLaw, "quantile_coordinates", fixed_local_draw)
+    f = _count_frame_with_exact_baseline(Fraction(0))
+    c = config("sign_changing", beta=10., exposure_error=error,
+               registration_probability=.65, denominator_error=.2)
+    observations = generators._sample_observations(f, c, policy(), 42)
+    expected = float(100*(Fraction(1e-100)*Fraction(3, 4))**2)
+    assert intensities == [expected]
+    assert expected > 0
+    assert observations.a[0] in (float(Fraction(5)+Fraction(error)), float(Fraction(5)-Fraction(error)))
+
+
+@pytest.mark.parametrize("near_scale", [5e-324, 1e-100, .05, 1000.])
+@pytest.mark.parametrize("coordinate", [-1000., 0., 1000.])
+def test_count_draw_keeps_exact_support_at_domain_scale_extremes(near_scale, coordinate):
+    from fractions import Fraction
+    f = replace(frame(1, 1), coordinates=((coordinate, 0.),))
+    c = config("null", assignment="near_deterministic", near_scale=near_scale,
+               registration_probability=.65, exposure_error=.4)
+    law = AssignmentLaw(f, 0, LatentState(error=.4), c, ((-.1, 0.),))
+    class EndpointRNG:
+        def __init__(self, index, u):
+            self.index, self.u = index, u
+        def choice(self, *args, **kwargs):
+            return self.index
+        def random(self):
+            return self.u
+    for index in range(len(law.pieces)):
+        for u in (0., np.nextafter(0., 1.), .5, np.nextafter(1., 0.)):
+            observed, true = law.sample_count_dose(EndpointRNG(index, u))
+            assert Fraction(-.1) <= true <= 0
+            assert observed == float(true+Fraction(.4))
+
+
+@pytest.mark.parametrize("error", [0., .4])
+def test_count_atoms_retain_exact_boundary_and_expected_design_rejection(error):
+    from fractions import Fraction
+    sample = generate_suite_a(frame(200), config("null", assignment="atoms",
+                             registration_probability=.65, exposure_error=error), policy(), seed=7)
+    boundaries = (float(Fraction(error)), float(-Fraction(error)))
+    assert sum(a in boundaries for a in sample.observations.a) >= 50
+    assert any(a not in boundaries for a in sample.observations.a)
+    assert sample.observed_law_truth.status == sample.structural_causal_truth.status == "design_rejected"
+    assert sample.observed_law_truth.value is sample.structural_causal_truth.value is None
