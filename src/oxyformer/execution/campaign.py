@@ -247,7 +247,7 @@ UNIT_SCHEMA = {
     'slice_required': ['gpus', 'wall_seconds'],
     'limits': {'leaves': 40, 'gpu_hours_per_leaf': 4, 'id_length': 32, 'arrays': False},
     'dependency_environment': 'SWARM_DEP_' + '<uppercase ID; nonalphanumeric replaced by underscore>',
-    'stage_receipts': 'Stage inputs require a verified passing StageResult; only registry acquisition_receipts may name a source receipt format.',
+    'stage_receipts': 'Every input attempt requires a passing StageResult binding _execution/fingerprint.json; acquisition_receipts additionally requires the source receipt.',
     'slurm_accounting': 'GPU-hours use whole-minute limits; campaign admission compares integer GPU-seconds to the decimal owner allocation.',
     'concrete_strings': 'String fields may not contain curly braces or template markers; nested JSON values must be mappings/lists.',
     'locked_stages': 'Registry requires_recipe or a campaign field makes recipe_lock mandatory.',
