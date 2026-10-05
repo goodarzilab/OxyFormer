@@ -757,10 +757,11 @@ class LocalCoordinates:
 
     def rounded(self):
         values = np.asarray(self.values)
-        if values.dtype == object:
-            return np.asarray([wide(self.anchor+self.unit*exact(v)) for v in values.flat],
-                              dtype=np.longdouble).reshape(values.shape)
-        return wide(self.anchor)+wide(self.unit)*self.values
+        # Even native local values can cancel an endpoint when the rational
+        # anchor and unit are rounded separately. Materialize their complete
+        # affine value first, then perform the single requested rounding.
+        return np.asarray([wide(self.anchor+self.unit*exact(v)) for v in values.flat],
+                          dtype=np.longdouble).reshape(values.shape)
 
     def shifted(self, delta):
         return replace(self, anchor=self.anchor+exact(delta))
@@ -968,7 +969,13 @@ class AssignmentLaw:
         return np.exp(self.log_density(a_observed))
 
     def quantile_coordinates(self, piece_index, u):
-        """Conditional inverse transform, also used before draw serialization."""
+        """Invert conditional distance from the density peak.
+
+        A positive-rate piece uses its survival probability in exposure order:
+        u=0 is the upper peak and u=1 is the lower boundary. Reversing a uniform
+        probability preserves the specified density. Negative-rate pieces run
+        from their lower peak to the upper boundary.
+        """
         piece_index = bounded_index(piece_index, len(self.pieces), "piece index")
         p = self.pieces[piece_index]
         captured = numeric_array(u, "quantile probabilities")
@@ -994,7 +1001,10 @@ class AssignmentLaw:
             t = np.asarray(-np.log1p(-u*(-np.expm1(-extent))))
         outside = np.asarray([not np.isfinite(v) or exact(v) > exact_extent
                               for v in t.flat], dtype=bool).reshape(t.shape)
-        retain = outside | (u == 1) | ((u > 0) & (t < np.finfo(np.longdouble).tiny))
+        # Near-one draws amplify rounding of the component mass inside
+        # log1p. Binary64-subnormal draws also need retention on wider hosts:
+        # subsequent denominator scaling must not expose a rounded inverse.
+        retain = outside | (u == 1) | (u > .875) | ((u > 0) & (t < np.finfo(float).tiny))
         if retain.any():
             values = np.empty(t.shape, dtype=object)
             for index in np.ndindex(t.shape):
