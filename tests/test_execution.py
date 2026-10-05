@@ -1916,3 +1916,72 @@ def test_dependency_parent_alias_remains_usable(tmp_path):
     alias.symlink_to(parent, target_is_directory=True)
     assert resolve_dependencies(['source'], {'SWARM_DEP_SOURCE': str(alias / 'attempt')}) == {
         'source': source}
+
+
+def test_replaced_output_root_cannot_redirect_runner_receipts(runtime, tmp_path, monkeypatch):
+    from oxyformer.execution.integrity import fingerprint_tree
+    repo, out = runtime
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'data.json').write_text('{}')
+    (source / 'receipts.json').write_text('{}')
+    publish_source_fixture(repo, source)
+    before = fingerprint_tree(source)
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
+    process = run_cli_fixture(repo, out, '''def run_stage(request):
+    result = dummy(request)
+    root = Path(request.output_dir)
+    root.rename(root.with_name(root.name + '.saved'))
+    root.symlink_to(Path(os.environ['SWARM_DEP_DATA_UNIT']), target_is_directory=True)
+    return result
+''', needs={'data-unit': ['data.json', 'receipts.json']})
+    assert fingerprint_tree(source) == before, 'runner-owned receipts were redirected upstream'
+    assert process.returncode == 1, process.stdout + process.stderr
+    receipt = out.with_name(out.name + '.saved') / '_execution/result.json'
+    assert StageResult.from_json(receipt.read_text()).status == 'fail'
+
+
+def test_cache_isolation_lasts_through_module_global_finalizers(runtime, tmp_path, monkeypatch):
+    repo, out = runtime
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'cache').mkdir()
+    (source / 'data.json').write_text('{}')
+    (source / 'receipts.json').write_text('{}')
+    publish_source_fixture(repo, source)
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
+    monkeypatch.setenv('HF_HOME', str(source / 'cache'))
+    process = run_cli_fixture(repo, out, '''class FinalCacheWrite:
+    def __init__(self):
+        self.environment = os.environ
+        self.open = open
+    def __del__(self):
+        with self.open(self.environment['HF_HOME'] + '/late.bin', 'w') as stream:
+            stream.write('cache-finalized')
+cleanup = FinalCacheWrite()
+run_stage = dummy
+''', needs={'data-unit': ['data.json', 'receipts.json']})
+    assert not (source / 'cache/late.bin').exists(), 'runner restored the upstream cache before finalization'
+    assert process.returncode == 0, process.stdout + process.stderr
+    assert (out / '_execution/cache/hf_home/late.bin').read_text() == 'cache-finalized'
+
+
+def test_non_utf8_upstream_filename_gets_changed_path_receipt(runtime, tmp_path, monkeypatch):
+    repo, out = runtime
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'data.json').write_text('{}')
+    (source / 'receipts.json').write_text('{}')
+    publish_source_fixture(repo, source)
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
+    process = run_cli_fixture(repo, out, '''def run_stage(request):
+    result = dummy(request)
+    with open(os.fsencode(os.environ['SWARM_DEP_DATA_UNIT']) + b'/\\xff', 'wb') as stream:
+        stream.write(b'changed')
+    return result
+''', needs={'data-unit': ['data.json', 'receipts.json']})
+    assert process.returncode == 1, process.stdout + process.stderr
+    result = StageResult.from_json((out / '_execution/result.json').read_text())
+    assert result.status == 'fail'
+    check = json.loads((out / '_execution/dependency_check.json').read_text())
+    assert os.fsdecode(b'\xff') in check['attempts'][str(source)]['changed_paths']
