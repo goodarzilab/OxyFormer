@@ -92,7 +92,7 @@ def numeric_scalar(value, name):
     return exact(value)
 
 
-def numeric_array(values, name):
+def numeric_array(values, name, *, allow_fraction=False):
     # dtype=object captures each supplied scalar. An already-created numeric
     # ndarray supplies its stored values; information lost by its caller cannot
     # be reconstructed here. Never call bare asarray before this boundary.
@@ -102,7 +102,8 @@ def numeric_array(values, name):
         from oxyformer.provenance import ContractError
         raise ContractError(f"{name} must be a rectangular numeric sequence") from exc
     for value in array.flat:
-        numeric_scalar(value, name)
+        if not (allow_fraction and isinstance(value, Fraction)):
+            numeric_scalar(value, name)
     return array
 
 
@@ -152,7 +153,7 @@ def normalize_record_numbers(record):
                            convert(getattr(record, field.name), hints[field.name], field.name))
 
 
-def validate_numeric(values, kind, name, *, allow_zero=False):
+def validate_numeric(values, kind, name, *, allow_zero=False, allow_fraction=False):
     """Refuse unsupported raw inputs using exact, per-element comparisons.
 
     Domain edges are the exact binary values of NUMERIC_DOMAIN. Zero is an
@@ -161,7 +162,7 @@ def validate_numeric(values, kind, name, *, allow_zero=False):
     so consumers never repeat an implicit NumPy promotion after validation.
     """
     lower, upper = NUMERIC_DOMAIN[kind]
-    array = numeric_array(values, name)
+    array = numeric_array(values, name, allow_fraction=allow_fraction)
     lower, upper = exact(lower), exact(upper)
     valid = all(lower <= exact(v) <= upper or (allow_zero and exact(v) == 0)
                 for v in array.flat)
@@ -170,9 +171,9 @@ def validate_numeric(values, kind, name, *, allow_zero=False):
     return array
 
 
-def validate_components(components):
+def validate_components(components, *, allow_fraction=False):
     require(len(components) > 0, "SCM assignment needs nonempty support")
-    validate_numeric(components, "dose", "support endpoints")
+    validate_numeric(components, "dose", "support endpoints", allow_fraction=allow_fraction)
     require(all(exact(lo) < exact(hi) for lo, hi in components), "invalid support component")
     require(all(exact(first[1]) < exact(second[0]) for first, second in zip(components, components[1:])),
             "support components must be sorted and separated")
@@ -593,14 +594,15 @@ def exact_shift_intervals(components, delta):
     Derive widths and cutoffs before any rounding, so a shifted eligible dose
     remains in its origin component even when the law is narrower than an ULP.
     This is a raw exact-geometry API: it does not serialize endpoints or delta
-    into binary64 records, so it retains non-binary64 real inputs as Fractions.
+    into binary64 records. It accepts the standard Python/NumPy real scalars
+    and explicit Fraction inputs, retaining non-binary64 values as Fractions.
     AssignmentLaw support and shared ShiftOrStayPolicy records separately
     require lossless binary64 endpoints.
     This continuous truth geometry precedes serialization of observed doses.
     """
-    validate_numeric(delta, "delta", "delta", allow_zero=True)
+    validate_numeric(delta, "delta", "delta", allow_zero=True, allow_fraction=True)
     if len(components):
-        validate_components(components)
+        validate_components(components, allow_fraction=True)
     shift = exact(delta)
     if shift == 0:
         return ()

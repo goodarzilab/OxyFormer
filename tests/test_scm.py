@@ -2221,3 +2221,31 @@ def test_sixth_round1_magnitude_expansion_rounds_outward(kind):
     if kind == 'exposure_error':
         assert float(Fraction(NUMERIC_DOMAIN['dose'][1])+Fraction(upper)) == 10050.
     config(**{kind: admitted})
+
+
+@pytest.mark.parametrize('components,tolerance', [
+    (((-10000., -9000.),), np.longdouble('1e-1000')),
+    (((0., 10.),), np.longdouble('1e-100')),
+])
+def test_sixth_round2_selected_mass_precision_survives_convergence(components, tolerance):
+    f = replace(frame(1, 1), columns=(), x=((),))
+    # Identity makes both contrasts exactly zero, so only the selected-mass
+    # criterion can distinguish these not-yet-converged quadrature orders.
+    with pytest.raises(ContractError, match='truth integration did not converge'):
+        generate_suite_a(f, config('null', survey_inclusion=True, noise_sd=0),
+                         policy(components, delta=0), tolerance=tolerance, max_order=32)
+
+
+@pytest.mark.parametrize('fractional', [False, True])
+def test_sixth_round2_exact_geometry_accepts_fraction_inputs(fractional):
+    from fractions import Fraction
+    from oxyformer.validation.scm import exact_shift_intervals
+    lo, hi, delta = ((Fraction(1, 3), Fraction(10, 3), Fraction(2, 7)) if fractional
+                     else (Fraction(0), Fraction(3), Fraction(1)))
+    assert exact_shift_intervals(((lo, hi),), delta) == ((lo, hi-delta),)
+    assert exact_shift_intervals(np.array([[lo, np.int64(4)]], dtype=object), delta) == ((lo, 4-delta),)
+    with pytest.raises(ContractError, match='supported numeric domain'):
+        exact_shift_intervals(((Fraction(0), Fraction(10010)+Fraction(1, 10**30)),), delta)
+    # This exception belongs to raw rational geometry, not JSON records.
+    with pytest.raises(ContractError, match='numeric'):
+        config(beta=Fraction(1))
