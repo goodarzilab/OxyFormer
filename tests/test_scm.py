@@ -2206,7 +2206,7 @@ def test_sixth_round1_latent_error_type_is_checked_before_absolute_value(value):
         LatentState(error=value)
 
 
-@pytest.mark.parametrize('kind', ['delta', 'noise_sd', 'migration', 'registration_probability',
+@pytest.mark.parametrize('kind', ['noise_sd', 'migration', 'registration_probability',
                                   'exposure_error', 'denominator_error'])
 def test_sixth_round1_magnitude_expansion_rounds_outward(kind):
     from fractions import Fraction
@@ -2220,7 +2220,4 @@ def test_sixth_round1_magnitude_expansion_rounds_outward(kind):
     validate_numeric(admitted, kind, kind)
     if kind == 'exposure_error':
         assert float(Fraction(NUMERIC_DOMAIN['dose'][1])+Fraction(upper)) == 10050.
-    if kind == 'delta':
-        config().validate_policy(policy(delta=float(admitted)), frame(1, 1))
-    else:
-        config(**{kind: admitted})
+    config(**{kind: admitted})

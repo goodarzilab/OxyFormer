@@ -61,6 +61,8 @@ _expanded_numeric_box = {name: _expanded_bounds(name, bounds)
 # Pair coefficients/doses use exact rational intervention arithmetic, unlike
 # nonlinear SCM responses. No attempt to support every float64 box is made.
 _expanded_numeric_box.update({
+    # Independently fixed positive-shift floor, including its binary endpoint.
+    "delta": (.02, 200.),
     "dose": (-10010., 10010.),
     # Binary64 recorded endpoints include the outward-rounded error bound near 40.
     "recorded_exposure": (-10050., 10050.),
