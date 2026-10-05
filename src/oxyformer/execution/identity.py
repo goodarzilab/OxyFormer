@@ -40,8 +40,8 @@ def verified_checkout(repo):
     repo = Path(repo).resolve(strict=True)
     require(Path(git(repo, 'rev-parse', '--show-toplevel')).resolve() == repo,
             'repo must be repository root')
-    require(not git(repo, 'status', '--porcelain', '--untracked-files=no'),
-            'cloned repository has tracked modifications')
+    changes = git(repo, 'status', '--porcelain', '--untracked-files=no')
+    require(not changes, 'cloned repository has tracked modifications: ' + changes)
     untracked = git(repo, 'ls-files', '--others', '-z').split('\0')
     extra = sorted(n for n in untracked if n and scientific_path(n))
     require(not extra, 'untracked scientific code/config (including ignored files): ' + ', '.join(extra))

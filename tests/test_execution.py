@@ -2072,26 +2072,34 @@ def test_deep_valid_dependency_lineage_does_not_exhaust_python_stack(runtime, tm
     assert verify_dependency_result(parent).status == 'pass'
 
 
-def test_stage_cannot_replace_recorded_checkout_identity(runtime, monkeypatch):
+@pytest.mark.parametrize('commit_change', [True, False])
+def test_stage_cannot_replace_recorded_checkout_identity(runtime, monkeypatch, commit_change):
     import runpy
     repo, out = runtime
     original = git(repo, 'rev-parse', 'HEAD')
     def replacement(request):
         result = dummy(request)
         (repo / 'src/science.py').write_text('value = 2\n')
-        replacement_head = commit(repo)
-        (out / 'code_commit.txt').write_text(replacement_head)
+        if commit_change:
+            replacement_head = commit(repo)
+            (out / 'code_commit.txt').write_text(replacement_head)
         value = runpy.run_path(str(repo / 'src/science.py'))['value']
         (out / 'value.json').write_text(json.dumps({'value': value}))
         return replace(result, artifacts=(replace(result.artifacts[0], sha256=file_hash(out / 'value.json')),))
     install_stage(monkeypatch, repo, replacement)
     result = run_task(repo, out, deps_env=False)
-    assert git(repo, 'rev-parse', 'HEAD') != original
+    assert (git(repo, 'rev-parse', 'HEAD') != original) == commit_change
     assert read_json(out / 'value.json') == {'value': 2}
     request = StageRequest.from_json((out / '_execution/request.json').read_text())
     assert request.code_identity == original
     assert read_json(out / '_execution/identity.json')['head'] == original
     assert result.status == 'fail', 'replacement checkout passed under the original recorded identity'
+    assert read_stage_result(out) == result
+    if commit_change:
+        assert 'code identity changed' in result.message
+        assert original in result.message and git(repo, 'rev-parse', 'HEAD') in result.message
+    else:
+        assert 'tracked modifications' in result.message and 'src/science.py' in result.message
 
 
 def test_builder_existing_expansion_cannot_leave_mixed_task_manifest(tmp_path, spec):
