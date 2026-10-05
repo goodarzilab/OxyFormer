@@ -220,3 +220,14 @@ def test_fifth_attempt_seeded_paired_type_and_edge_sweep():
             else:
                 with pytest.raises(ContractError, match='domain|without loss'):
                     observational_equivalence_pair(n_geographies=1, cluster_size=1, **{name: value})
+
+
+@pytest.mark.parametrize('dose', [np.int64(-(2**63)), np.int64(2**63-1), np.uint64(2**64-1)])
+def test_fifth_attempt_numpy_integer_interventions(dose):
+    from fractions import Fraction
+    pair = observational_equivalence_pair(n_geographies=1, cluster_size=2, seed=0)
+    for world in (pair.world0, pair.worldtau):
+        expected = [float(Fraction(y)+Fraction(world.structural_effect)*(Fraction(d)-Fraction(s)))
+                    for y, d, s in zip(world.factual_y, [int(dose), 0], world.h_s)]
+        for container in (list, tuple, lambda x: np.array(x, dtype=object)):
+            assert_array_equal(world.intervene(container([dose, 0.])), expected)
