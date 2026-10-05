@@ -137,8 +137,7 @@ def runtime(tmp_path, monkeypatch):
     (repo / 'src/oxyformer/dummy.py').write_text('# synthetic module origin for injected stage fixtures\n')
     (repo / 'README.md').write_text('fixture\n')
     (repo / 'configs/execution/stages.yaml').write_text(yaml.safe_dump({
-        'schema_version': 1, 'stages': {'dummy': {'module': 'oxyformer.dummy',
-        'acquisition_receipts': {'data-unit': 'receipts.json'}}}}))
+        'schema_version': 1, 'stages': {'dummy': {'module': 'oxyformer.dummy'}}}))
     (repo / 'configs/approvals.yaml').write_text('schema_version: 1\napproved_by: fixture\n')
     git(repo, 'init', '-q')
     commit(repo)
@@ -651,6 +650,11 @@ def test_campaign_lock_uses_unit_id_distinct_from_stage_name(runtime, tmp_path, 
 
 def test_acquisition_exemption_requires_declared_source_receipt(runtime, tmp_path, monkeypatch):
     repo, out = runtime
+    registry = repo / 'configs/execution/stages.yaml'
+    value = yaml.safe_load(registry.read_text())
+    value['stages']['dummy']['acquisition_receipts'] = {'data-unit': 'receipts.json'}
+    registry.write_text(yaml.safe_dump(value))
+    (out / 'code_commit.txt').write_text(commit(repo))
     source = tmp_path / 'source'
     source.mkdir()
     (source / 'data.json').write_text('{}')
@@ -2317,3 +2321,79 @@ def run_stage(request):
 """)
     assert_exit(process, 0)
     assert_pass(verify_dependency_result(out))
+
+
+@pytest.fixture
+def acquisition(runtime, tmp_path, monkeypatch):
+    repo, out = runtime
+    registry = repo / 'configs/execution/stages.yaml'
+    value = yaml.safe_load(registry.read_text())
+    value['stages']['dummy']['acquisition_receipts'] = {'fetch-data': 'receipts.json'}
+    registry.write_text(yaml.safe_dump(value))
+    (out / 'code_commit.txt').write_text(commit(repo))
+    root = tmp_path / 'acquisition'
+    root.mkdir()
+    (root / 'payload.tar').write_bytes(b'synthetic acquisition bytes')
+    atomic_json(root, 'receipts.json', {'status': 'complete', 'payload_sha256': file_hash(root / 'payload.tar'),
+        'payload_bytes': (root / 'payload.tar').stat().st_size})
+    monkeypatch.setenv('SWARM_DEP_FETCH_DATA', str(root))
+    return root
+
+
+def test_complete_acquisition_without_stage_result_is_accepted(runtime, acquisition):
+    repo, out = runtime
+    before = fingerprint_tree(acquisition)
+    result = run_task(repo, out, needs={'fetch-data': ['payload.tar', 'receipts.json']})
+    assert_pass(result)
+    assert fingerprint_tree(acquisition) == before
+    assert not (acquisition / '_execution').exists()
+    assert_pass(verify_dependency_result(out))
+
+
+@mark.parametrize('damage, error', [('payload', 'payload hash'), ('incomplete', 'not complete')])
+def test_acquisition_rejects_tampering_and_incomplete_receipt(runtime, acquisition, damage, error):
+    repo, out = runtime
+    if damage == 'payload':
+        (acquisition / 'payload.tar').write_bytes(b'changed')
+    else:
+        receipt = read_json(acquisition / 'receipts.json')
+        receipt['status'] = 'incomplete'
+        (acquisition / 'receipts.json').write_text(json.dumps(receipt))
+    with raises(ContractError, match=error):
+        run_task(repo, out, needs={'fetch-data': ['payload.tar', 'receipts.json']})
+
+
+@mark.parametrize('transitive', [False, True])
+def test_acquisition_mutation_taints_direct_and_transitive_consumers(runtime, acquisition, tmp_path, monkeypatch, transitive):
+    repo, out = runtime
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']}
+    assert_pass(run_task(repo, out, needs=needs))
+    later = new_attempt(repo, tmp_path / 'later')
+    if transitive:
+        monkeypatch.setenv('SWARM_DEP_DUMMY', str(out))
+        needs = {'dummy': ['value.json']}
+    def mutate(request):
+        (acquisition / 'new-unlisted-file').write_text('faulty write')
+        return dummy(request)
+    install_stage(monkeypatch, repo, mutate)
+    result = run_task(repo, later, needs=needs)
+    assert_failed(result, acquisition / 'new-unlisted-file')
+    assert 'new-unlisted-file' in read_check(later)['attempts'][str(acquisition)]['changed_paths']
+    with raises(ContractError, match='tainted'):
+        verify_dependency_result(out)
+    retry = new_attempt(repo, tmp_path / 'retry')
+    with raises(ContractError, match='tainted'):
+        run_task(repo, retry, needs={'fetch-data': ['payload.tar', 'receipts.json']})
+
+
+def test_acquisition_cannot_be_rebaselined_after_receipt_and_payload_change(runtime, acquisition, tmp_path):
+    repo, out = runtime
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']}
+    assert_pass(run_task(repo, out, needs=needs))
+    (acquisition / 'payload.tar').write_bytes(b'new bytes')
+    (acquisition / 'receipts.json').write_text(json.dumps({'status': 'complete',
+        'payload_sha256': file_hash(acquisition / 'payload.tar'), 'payload_bytes': 9}))
+    with raises(ContractError, match='fingerprint mismatch'):
+        run_task(repo, new_attempt(repo, tmp_path / 'new'), needs=needs)
+    with raises(ContractError, match='input hash mismatch|consumer baseline'):
+        verify_dependency_result(out)

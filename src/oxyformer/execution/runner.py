@@ -1,6 +1,7 @@
 """Detect upstream state changes after worker exit; never repair upstream.
 Managed outputs are confined; general write prevention is deferred to ARC-1339.
 """
+from hashlib import sha256
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,7 @@ from oxyformer.provenance import ContractError, canonical_json, relative_artifac
 from .integrity import (DEPENDENCY_CHECK, FINGERPRINT, RESULT, _replace_control, _repair_control_directory,
     post_execution_check, publish_result, record_taints,
     directory_path, read_regular, regular_file_stat, regular_file_hash as file_hash,
+    fingerprint_tree, changed_paths, publication_receipt,
     verify_inputs, verify_result, verify_published_tree)
 from .identity import git_bytes, code_identity, environment_record, scientific_fingerprint, verify_recipe
 from .paths import atomic_json, atomic_write, output_path
@@ -63,6 +65,37 @@ def dependency_file(root, relative):
     return path
 
 
+def verify_acquisition(root, receipt_name, *, expected_tree=None):
+    """Bind a complete acquisition to a create-once external tree baseline.
+
+    Acquisition producers predate StageResult. Never write into their attempts;
+    the independent publication store retains the first validated tree and the
+    same permanent taint markers used for stage publications.
+    """
+    receipt_path = dependency_file(root, receipt_name)
+    dependency_file(root, 'payload.tar')
+    receipt_bytes = read_regular(receipt_path)
+    receipt = json.loads(receipt_bytes)
+    require(isinstance(receipt, dict), 'acquisition receipt must be a mapping')
+    require(receipt.get('status') == 'complete', 'acquisition receipt is not complete')
+    authority = publication_receipt(root, create=True)
+    require(not os.path.lexists(str(authority) + '.tainted'), f'tainted upstream fingerprint: {root}')
+    tree = fingerprint_tree(root)
+    require(not any('error' in entry for entry in tree.values()), 'acquisition fingerprint unreadable')
+    require(tree[receipt_name]['sha256'] == sha256(receipt_bytes).hexdigest(), 'acquisition receipt changed during verification')
+    require(tree['payload.tar']['sha256'] == receipt.get('payload_sha256'), 'acquisition payload hash mismatch')
+    require(tree['payload.tar']['size'] == receipt.get('payload_bytes'), 'acquisition payload size mismatch')
+    if expected_tree is not None:
+        require(not changed_paths(expected_tree, tree), 'acquisition fingerprint differs from consumer baseline')
+    baseline = Path(str(authority) + '.acquisition')
+    value = {'attempt': str(root), 'receipt': receipt_name, 'entries': tree}
+    try:
+        atomic_json(baseline.parent, baseline.name, value)
+    except FileExistsError:
+        require(read_mapping(baseline) == value, f'acquisition fingerprint mismatch (tainted): {root}')
+    return tree
+
+
 def verify_dependency_result(root, *, expected_hash=None, trees=None, active=None, verified=None,
     output_dir=None):
     """Verify the complete lineage with an explicit postorder traversal."""
@@ -108,9 +141,22 @@ def verify_dependency_result(root, *, expected_hash=None, trees=None, active=Non
                         parent = Path(parent)
                         require(parent.is_absolute(), 'dependency publication path must be absolute')
                         parent = directory_path(parent)
-                        digest = hashes.get(str(parent / FINGERPRINT))
-                        require(digest is not None, 'dependency fingerprint absent from published request')
-                        parents.append((parent, digest, parent_unit, False))
+                        acquisition = config.get('acquisitions', {}).get(parent_unit)
+                        if acquisition is not None:
+                            if output_dir is not None:
+                                require(not output_dir.is_relative_to(parent) and not parent.is_relative_to(output_dir),
+                                    f'output overlaps an upstream attempt: {parent}')
+                            snapshots = read_mapping(current / '_execution/dependencies.json')
+                            require(str(parent) in snapshots, 'acquisition baseline absent from published request')
+                            require(str(current / '_execution/dependencies.json') in hashes,
+                                'acquisition baseline not bound to published request')
+                            acquisition_tree = verify_acquisition(parent, acquisition, expected_tree=snapshots[str(parent)])
+                            if trees is not None:
+                                trees[str(parent)] = acquisition_tree
+                        else:
+                            digest = hashes.get(str(parent / FINGERPRINT))
+                            require(digest is not None, 'dependency fingerprint absent from published request')
+                            parents.append((parent, digest, parent_unit, False))
                     pending[current] = (result, tree)
                     stack.append((current, expected, unit, True))
                     stack.extend(reversed(parents))
@@ -220,6 +266,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     published_hashes = {}
     dependency_trees = {}
     verified_dependencies = {}
+    acquisitions = {}
     for unit, root in deps.items():
         require(not out.is_relative_to(root) and not root.is_relative_to(out),
             f'output overlaps an upstream attempt: {root}')
@@ -229,6 +276,10 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         acquisition_receipt = settings.get('acquisition_receipts', {}).get(unit)
         if acquisition_receipt is not None:
             require(acquisition_receipt in needs[unit], 'acquisition receipt must be a declared input')
+            require('payload.tar' in needs[unit], 'acquisition payload must be a declared input')
+            dependency_trees[str(root)] = verify_acquisition(root, acquisition_receipt)
+            acquisitions[unit] = acquisition_receipt
+            continue
         require((root / '_execution/result.json').is_file(), f'stage receipt missing or not regular: {root / "_execution/result.json"}')
         result = verify_dependency_result(root, trees=dependency_trees, verified=verified_dependencies,
             output_dir=out)
@@ -269,7 +320,8 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         require(file_hash(approvals_file) == file_hash(repo / 'configs/approvals.yaml'),
             'locked approvals differ from fingerprinted repository config')
     config = {'stage': stage, 'settings': settings, 'approvals': approvals_value,
-        'input_sources': sources, 'dependencies': {k: str(v) for k, v in deps.items()}}
+        'input_sources': sources, 'dependencies': {k: str(v) for k, v in deps.items()},
+        'acquisitions': acquisitions}
     config_path = atomic_json(out, '_execution/config.json', config)
     task_path = atomic_json(out, '_execution/task.json', task)
     tree_path = atomic_json(out, '_execution/dependencies.json', dependency_trees)
