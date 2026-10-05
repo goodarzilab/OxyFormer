@@ -2110,3 +2110,91 @@ def test_fifth_round2_recipe_declares_disabled_zero_exceptions(tmp_path):
     path.write_text(yaml.safe_dump(recipe))
     with pytest.raises(ContractError, match='numeric_domain'):
         load_suite_a(path)
+
+
+@pytest.mark.parametrize('value', [1e100, -1e100,
+    np.nextafter(10050., np.inf), np.nextafter(-10050., -np.inf)])
+def test_sixth_recorded_exposure_constructor_rejects_outside_envelope(value):
+    from oxyformer.validation.generators import observational_equivalence_pair
+    observations = observational_equivalence_pair(n_geographies=1, cluster_size=1).m0.observations
+    with pytest.raises(ContractError, match='recorded exposure.*supported numeric domain'):
+        replace(observations, a=(value,))
+
+
+@pytest.mark.parametrize('field,value', [
+    ('measured_x', ((101.,),)), ('registered_events', (-1,)),
+    ('observed_denominator', (0.,)), ('observed_denominator', (201.,)),
+])
+def test_sixth_observed_fields_enforce_their_own_domains(field, value):
+    from oxyformer.validation.generators import observational_equivalence_pair
+    observations = observational_equivalence_pair(n_geographies=1, cluster_size=1).m0.observations
+    observations = replace(observations, measured_columns=('local_confounder',), measured_x=((1.,),),
+                           registered_events=(1,), observed_denominator=(100.,))
+    with pytest.raises(ContractError, match='domain|nonnegative|denominator'):
+        replace(observations, **{field: value})
+
+
+def test_sixth_recorded_exposure_edges_preserve_error_shifted_outputs():
+    from oxyformer.validation.generators import observational_equivalence_pair, _sample_observations
+    observations = observational_equivalence_pair(n_geographies=1, cluster_size=1).m0.observations
+    for edge in (-10050., 10050.):
+        for value in _fifth_numeric_variants(edge):
+            result = replace(observations, a=(value,))
+            assert result.a == (edge,)
+            assert ObservedRecords.from_json(result.to_json()) == result
+        inward = np.nextafter(edge, 0.)
+        assert replace(observations, a=(inward,)).a == (inward,)
+    # The primitive support bound is 10010; recorded values may exceed it.
+    for lo, hi in ((10000., 10010.), (-10010., -10000.)):
+        result = _sample_observations(frame(20, 1), config(exposure_error=40.),
+                                      policy(((lo, hi),)), 20261005)
+        assert any(abs(a) > 10010 for a in result.a)
+        assert all(-10050 <= a <= 10050 for a in result.a)
+
+
+@pytest.mark.parametrize('tolerance', [np.longdouble('1e-400'),
+    np.nextafter(np.longdouble(0), np.longdouble(1)), np.longdouble('1e-8')])
+def test_sixth_tail_allowance_stays_positive_at_every_accepted_scale(tolerance):
+    from decimal import Decimal, localcontext
+    from fractions import Fraction
+    from oxyformer.validation.generators import _groups, _quadrature_tail_budget
+    f, c, p = frame(1, 1), config(), policy()
+    groups = _groups(f, c, p)
+    allowance = _quadrature_tail_budget(f, c, p, groups, tolerance)
+    assert allowance > 0
+    # No selection penalty: cutoff is extra. Independent analytic calculation
+    # uses C=2*(50 + beta*(0+10+delta))=124, not the implementation's result.
+    cutoff = next(iter(groups.values()))[0].law.tail_decay
+    with localcontext() as context:
+        context.prec = 100
+        relative = 2*(-Decimal(cutoff.numerator)/Decimal(cutoff.denominator)).exp()
+        reference = Fraction(248*relative/(1-relative))
+    actual = Fraction(allowance)
+    assert reference <= actual <= reference*(1+Fraction(1, 10**60))
+    assert actual < Fraction(*tolerance.as_integer_ratio())/16
+
+
+def test_sixth_tolerance_floor_is_declared_with_registered_margin():
+    import yaml
+    from fractions import Fraction
+    from oxyformer.validation.scm import MIN_INTEGRATION_TOLERANCE
+    recipe = yaml.safe_load((Path(__file__).parents[1]/'configs/validation/suite_a.yaml').read_text())
+    controls = recipe['numeric_domain']['integration_tolerance']
+    assert Fraction(controls['minimum']) == MIN_INTEGRATION_TOLERANCE
+    assert Fraction(controls['registered']) >= 100*MIN_INTEGRATION_TOLERANCE
+    assert MIN_INTEGRATION_TOLERANCE > 0
+
+
+def test_sixth_tail_floor_and_binary64_display_are_separate():
+    from oxyformer.validation.scm import MIN_INTEGRATION_TOLERANCE
+    from oxyformer.validation.generators import _groups, _quadrature_tail_budget
+    f, c, p = frame(1, 1), config('null'), policy()
+    # The private helper receives exact fractions from the public adapter.
+    with pytest.raises(ContractError, match='integration tolerance.*domain'):
+        _quadrature_tail_budget(f, c, p, _groups(f, c, p), MIN_INTEGRATION_TOLERANCE/2)
+    bound = _quadrature_tail_budget(f, c, p, _groups(f, c, p), MIN_INTEGRATION_TOLERANCE)
+    assert 0 < bound < MIN_INTEGRATION_TOLERANCE/16
+    sample = generate_suite_a(f, c, p, tolerance=np.longdouble('1e-400'), max_order=32)
+    assert sample.observed_law_truth.value == sample.structural_causal_truth.value == 0.
+    assert sample.integration_uncertainty.quadrature_tail_absolute_bound == np.nextafter(0., 1.)
+    assert sample.integration_uncertainty.converged

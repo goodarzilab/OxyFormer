@@ -47,6 +47,8 @@ _expanded_numeric_box = {
 # nonlinear SCM responses. No attempt to support every float64 box is made.
 _expanded_numeric_box.update({
     "dose": (-10010., 10010.),
+    # Recorded dose includes the maximum signed exposure error of 40.
+    "recorded_exposure": (-10050., 10050.),
     "near_scale": (float(np.nextafter(0., 1.)), 1000.),
     "weight": (float(np.nextafter(0., 1.)), 1.7e308),
     "paired_c": (-1e307, 1e307), "paired_tau": (-1e300, 1e300),
@@ -58,6 +60,10 @@ NUMERIC_DOMAIN = MappingProxyType(_expanded_numeric_box)
 NUMERIC_ZERO_EXCEPTIONS = ("delta", "denominator_error", "exposure_error",
                            "migration", "noise_sd", "weight")
 del _expanded_numeric_box
+# Exact decimal floor, below every IEEE binary64/extended/quad subnormal.
+# Keep the inherited smallest-longdouble controls; no binary64 tolerance floor.
+MIN_INTEGRATION_TOLERANCE = Fraction(1, 10**5000)
+INTEGRATION_TOLERANCE_DOMAIN = MappingProxyType({"minimum": "1e-5000", "registered": 1e-8})
 
 
 def numeric_scalar(value, name):

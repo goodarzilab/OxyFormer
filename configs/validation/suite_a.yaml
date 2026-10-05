@@ -11,7 +11,7 @@
 # already-serialized values. In contrast, exact_shift_intervals is a raw
 # rational geometry helper: it retains supported real endpoints/delta exactly
 # and never serializes them into binary64 records.
-# Intervention doses and positive integration tolerances retain their exact
+# Intervention doses and integration tolerances >= 1e-5000 retain their exact
 # supplied values and need not fit binary64. Seeds, row indices, pair sizes and
 # max_order accept any supported scalar type representing an exact integer.
 # Counts/seeds keep their existing bounds; integration max_order is at least 32.
@@ -31,10 +31,30 @@
 # supports have endpoints in [0,10], delta=2; near centers lie within supports.
 # Coefficient box covers beta and local/regional strengths. Paired c and tau
 # have separate bounds because they use a different response implementation.
-# Gaussian innovations and computed responses are outputs, not bounded inputs.
+# Public constructor field domains: primitive config/frame/pair coefficients,
+# supports, coordinates, X and weights use their named box plus physical signs.
+# ObservedRecords.a uses recorded_exposure (true support plus signed error),
+# measured_x uses covariate; registered_events are nonnegative exact integers;
+# serialized observed_denominator is in (0,200], including a rounded upper end.
+# Every floating record field is finite and losslessly binary64-representable;
+# integer fields retain exact integers;
+# flags are booleans, names/IDs are strings, optional values admit None, and
+# aligned fields retain their schema's shapes. Frame validation is recursive.
+# Gaussian innovations, baselines, computed outcomes and truths are outputs:
+# their domain is finite binary64, not the primitive support/coefficient box.
+# Integration diagnostics likewise retain finite binary64 display values.
+# LocalCoordinates/QuadraturePiece are internal arithmetic carriers, with
+# rational geometry and array nodes/weights, not serialized simulator inputs.
+# The tolerance floor is an exact decimal string, below IEEE extended/quad
+# subnormals and more than 100x below the registered default for every recipe.
+# Internal tail allowances use rational arithmetic with a directed Decimal
+# exponential bound; only the display bound is rounded upward to binary64.
 numeric_domain:
   id: suite-a-100x-v1
   margin: 100.0
+  integration_tolerance:
+    minimum: "1e-5000"
+    registered: 1.0e-8
   # Union these disabled values with the positive intervals in supported_box.
   # noise_sd=0 is a deliberate noiseless simulation, not an invalid scale.
   zero_exceptions:
@@ -91,6 +111,9 @@ numeric_domain:
     - 0.0
     - 10.0
   supported_box:
+    recorded_exposure:
+    - -10050.0
+    - 10050.0
     dose:
     - -10010.0
     - 10010.0
