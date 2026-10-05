@@ -26,7 +26,8 @@ PYTHON = "/mnt/weka/home/hgoodarzi/envs/oxyformer/bin/python"
 # launch failure that runs no tests nor a rewritten status file can pass a failing run. Termination signals are
 # forwarded to srun, which cancels the job step and lets its trap remove the compute-node copy; the shared copy is
 # removed in finally, and this host's staging directories whose owner process is gone are swept (one without an owner
-# record yet is left alone for a day, since it may still be starting). SIGKILL cannot be intercepted:
+# record yet is left alone for a day, since it may still be starting; PID reuse can only delay a sweep). Slurm job
+# variables are cleared before pytest so the suite sees the same environment as an in-place run. SIGKILL cannot be intercepted:
 # an uncatchable kill may leave a copy until the next sweep (shared) or the node's /tmp cleanup (compute node).
 # The Slurm time limit is generous because the merge operator's --verification-timeout bounds the whole run.
 SHARED_TMP = "/mnt/weka/home/hgoodarzi/oxyformer-swarm/verify-tmp"
@@ -35,6 +36,7 @@ HOST = socket.gethostname()
 JOB = (
     'set -u; d=$(mktemp -d /tmp/v-XXXXXX); trap \'rm -rf "$d"\' EXIT HUP INT TERM; '
     'cp -a "$STAGED" "$d/tree" && cd "$d/tree" || exit 97; '
+    'for v in $(compgen -e); do case "$v" in SLURM_*|SRUN_*) unset "$v";; esac; done; '
     'env -u RESULT -u STAGED "$PYTHON" -m pytest -q; rc=$?; echo "$rc" > "$RESULT"; exit $rc'
 )
 
@@ -66,11 +68,7 @@ def _sweep_stale():
             shutil.rmtree(path, ignore_errors=True)
 
 
-os.makedirs(SHARED_TMP, exist_ok=True)
-_sweep_stale()
-work = tempfile.mkdtemp(prefix="merge-verify-", dir=SHARED_TMP)
-Path(work, "owner").write_text(f"{HOST} {os.getpid()}\n")
-child = None
+work = child = None
 
 
 def _stop(signum, frame):
@@ -79,10 +77,15 @@ def _stop(signum, frame):
     raise SystemExit(1)
 
 
-for _sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGQUIT):
+HANDLED = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGQUIT)
+for _sig in HANDLED:
     signal.signal(_sig, _stop)
 status = srun_status = None
 try:
+    os.makedirs(SHARED_TMP, exist_ok=True)
+    _sweep_stale()
+    work = tempfile.mkdtemp(prefix="merge-verify-", dir=SHARED_TMP)
+    Path(work, "owner").write_text(f"{HOST} {os.getpid()}\n")
     staged = os.path.join(work, "tree")
     result = os.path.join(work, "pytest-exit-status")
     shutil.copytree(os.getcwd(), staged, symlinks=True)
@@ -90,14 +93,21 @@ try:
             "--mem=32G", "--time=12:00:00", "--export=ALL", "--chdir=/tmp", "--job-name=oxyformer-merge-verify"]
     env = dict(os.environ, PYTHONPATH="src", CUDA_VISIBLE_DEVICES="", STAGED=staged, PYTHON=PYTHON, RESULT=result)
     env.pop("SLURM_EXIT_ERROR", None)
-    child = subprocess.Popen(srun + ["bash", "-c", JOB], env=env)
+    # Block handled signals while srun starts so a signal cannot arrive before the child is tracked.
+    signal.pthread_sigmask(signal.SIG_BLOCK, HANDLED)
+    try:
+        # The child must not inherit the blocked mask, or srun could not receive the forwarded SIGTERM.
+        child = subprocess.Popen(srun + ["bash", "-c", JOB], env=env,
+                                 preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_UNBLOCK, HANDLED))
+    finally:
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, HANDLED)
     srun_status = child.wait()
     try:
         status = int(Path(result).read_text().strip())
     except (OSError, ValueError):
         status = None  # pytest never reported: launch, allocation or copy failure
 finally:
-    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT, signal.SIGQUIT):
+    for sig in HANDLED:
         signal.signal(sig, signal.SIG_IGN)  # cleanup must not be interrupted
     if child is not None and child.poll() is None:
         child.terminate()
@@ -105,5 +115,6 @@ finally:
             child.wait(timeout=60)
         except subprocess.TimeoutExpired:
             child.kill()
-    shutil.rmtree(work, ignore_errors=True)
+    if work is not None:
+        shutil.rmtree(work, ignore_errors=True)
 sys.exit(0 if status in (0, 5) and srun_status == status else 1)
