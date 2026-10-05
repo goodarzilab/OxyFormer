@@ -2607,9 +2607,10 @@ def test_change_observed_inside_receipt_read_is_permanently_tainted(runtime, acq
             calls = 0
             def raced_fstat(fd):
                 nonlocal calls
-                calls += 1
-                if calls == 2:
-                    receipt.write_bytes(saved + b' ')
+                if original_fstat(fd).st_ino == receipt.stat().st_ino:
+                    calls += 1
+                    if calls == 2:
+                        receipt.write_bytes(saved + b' ')
                 return original_fstat(fd)
             with monkeypatch.context() as reader:
                 reader.setattr(os, 'fstat', raced_fstat)
@@ -2748,3 +2749,235 @@ def test_publication_entries_exclude_stat_timestamps(runtime, monkeypatch):
     entries = read_json(out / FINGERPRINT)['entries']
     assert entries['_execution'].keys() == {'type', 'mode', 'size', 'sha256', 'target'}
     assert all(not any('time' in key for key in entry) for entry in entries.values())
+
+
+@mark.parametrize('error', ['ENOTDIR', 'ELOOP'])
+@mark.parametrize('transitive', [False, True])
+def test_fingerprint_postread_namespace_error_keeps_restored_observation(
+        runtime, acquisition, tmp_path, monkeypatch, error, transitive):
+    from oxyformer.execution import runner, integrity
+    repo, producer = runtime
+    holder = tmp_path / 'source-holder'
+    holder.mkdir()
+    acquisition.rename(holder / 'acquisition')
+    acquisition = holder / 'acquisition'
+    monkeypatch.setenv('SWARM_DEP_FETCH_DATA', str(acquisition))
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']}
+    assert_pass(run_task(repo, producer, needs=needs))
+    victim = acquisition / 'payload.tar'
+    original_lstat = Path.lstat
+    original_tree = fingerprint_tree(acquisition)
+    def worker(request):
+        calls = 0
+        def race(path, *args, **kwargs):
+            nonlocal calls
+            if path == victim:
+                calls += 1
+                if calls == 2:  # after the file has already been hashed
+                    parked = tmp_path / 'parked-holder'
+                    holder.rename(parked)
+                    if error == 'ENOTDIR':
+                        holder.write_text('faulty directory replacement')
+                    else:
+                        holder.symlink_to(holder.name)
+                    try:
+                        return original_lstat(path, *args, **kwargs)
+                    finally:
+                        holder.unlink()
+                        parked.rename(holder)
+            return original_lstat(path, *args, **kwargs)
+        with monkeypatch.context() as observer:
+            observer.setattr(Path, 'lstat', race)
+            with raises(ContractError):
+                if transitive:
+                    verify_dependency_result(producer)
+                else:
+                    runner.verify_acquisition(acquisition, 'receipts.json')
+        assert fingerprint_tree(acquisition) == original_tree
+        return dummy(request)
+    install_stage(monkeypatch, repo, worker)
+    active = new_attempt(repo, tmp_path / 'active')
+    result = run_task(repo, active, needs=needs)
+    assert_failed(result, victim)
+    assert 'payload.tar' in read_json(Path(str(integrity.publication_receipt(acquisition)) + '.tainted'))
+    with raises(ContractError, match='tainted'):
+        verify_dependency_result(producer)
+
+
+@mark.parametrize('nested', [False, True])
+def test_unvisited_acquisition_entries_are_not_deletions(runtime, acquisition, tmp_path, monkeypatch, nested):
+    import errno
+    from oxyformer.execution import runner, integrity
+    repo, producer = runtime
+    directory = acquisition
+    if nested:
+        directory = acquisition / 'notes'
+        directory.mkdir()
+        (directory / 'unlisted.txt').write_text('stable extra entry')
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']}
+    assert_pass(run_task(repo, producer, needs=needs))
+    before = fingerprint_tree(acquisition)
+    original_scandir = os.scandir
+    def unavailable(path):
+        if Path(path) == directory:
+            raise OSError(errno.EIO, 'synthetic directory enumeration failure', str(path))
+        return original_scandir(path)
+    with monkeypatch.context() as observer:
+        observer.setattr(os, 'scandir', unavailable)
+        with raises(ContractError):
+            runner.verify_acquisition(acquisition, 'receipts.json')
+    assert fingerprint_tree(acquisition) == before
+    assert not Path(str(integrity.publication_receipt(acquisition)) + '.tainted').exists()
+    assert_pass(run_task(repo, new_attempt(repo, tmp_path / 'retry'), needs=needs))
+
+
+def test_dependency_check_after_acquisition_verification_taints(runtime, acquisition, tmp_path, monkeypatch):
+    from oxyformer.execution import runner, integrity
+    repo, producer = runtime
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']}
+    assert_pass(run_task(repo, producer, needs=needs))
+    victim = acquisition / 'receipts.json'
+    saved, mode = victim.read_bytes(), victim.stat().st_mode & 0o777
+    original_verify, original_dependency = runner.verify_acquisition, runner.dependency_file
+    def worker(request):
+        armed = False
+        def verify(*args, **kwargs):
+            nonlocal armed
+            result = original_verify(*args, **kwargs)
+            armed = True
+            return result
+        def dependency(root, relative):
+            if armed and Path(root) / relative == victim:
+                victim.unlink()
+                try:
+                    return original_dependency(root, relative)
+                finally:
+                    victim.write_bytes(saved)
+                    victim.chmod(mode)
+            return original_dependency(root, relative)
+        with monkeypatch.context() as observer:
+            observer.setattr(runner, 'verify_acquisition', verify)
+            observer.setattr(runner, 'dependency_file', dependency)
+            with raises((OSError, ContractError)):
+                run_task(repo, new_attempt(repo, tmp_path / 'observer'), needs=needs)
+        return dummy(request)
+    install_stage(monkeypatch, repo, worker)
+    active = new_attempt(repo, tmp_path / 'active')
+    assert_failed(run_task(repo, active, needs=needs), victim)
+    assert read_json(Path(str(integrity.publication_receipt(acquisition)) + '.tainted')) == ['receipts.json']
+    with raises(ContractError, match='tainted'):
+        verify_dependency_result(producer)
+
+
+@mark.parametrize('verifier', ['runner', 'contract', 'binding'])
+def test_acquisition_hash_observation_survives_restore(runtime, acquisition, tmp_path, monkeypatch, verifier):
+    from oxyformer.execution import runner, integrity
+    repo, producer = runtime
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']}
+    assert_pass(run_task(repo, producer, needs=needs))
+    bound_request = StageRequest.from_json((producer / '_execution/request.json').read_text())
+    victim = acquisition / 'receipts.json'
+    saved = victim.read_bytes()
+    original_hash = runner.file_hash
+    def worker(request):
+        if verifier == 'binding':
+            def interleaved_hash(path):
+                if Path(path) != victim:
+                    return original_hash(path)
+                victim.write_bytes(b' ' + saved[1:])
+                try:
+                    return original_hash(path)
+                finally:
+                    victim.write_bytes(saved)
+            with monkeypatch.context() as observer:
+                observer.setattr(runner, 'file_hash', interleaved_hash)
+                install_stage(observer, repo, dummy)
+                try:
+                    observed = run_task(repo, new_attempt(repo, tmp_path / 'observer'), needs=needs)
+                    assert observed.status == 'fail'
+                except ContractError:
+                    pass
+        else:
+            victim.write_bytes(b' ' + saved[1:])
+            try:
+                with raises(ContractError, match='input hash mismatch'):
+                    if verifier == 'runner':
+                        integrity.verify_inputs(bound_request)
+                    else:
+                        bound_request.verify_inputs()
+            finally:
+                victim.write_bytes(saved)
+        return dummy(request)
+    install_stage(monkeypatch, repo, worker)
+    assert_failed(run_task(repo, new_attempt(repo, tmp_path / 'active'), needs=needs), victim)
+    assert read_json(Path(str(integrity.publication_receipt(acquisition)) + '.tainted')) == ['receipts.json']
+    with raises(ContractError, match='tainted'):
+        verify_dependency_result(producer)
+
+
+def test_wrong_request_digest_is_not_an_acquisition_mutation(runtime, acquisition):
+    from oxyformer.execution import integrity
+    repo, producer = runtime
+    assert_pass(run_task(repo, producer, needs={'fetch-data': ['payload.tar', 'receipts.json']}))
+    request = StageRequest.from_json((producer / '_execution/request.json').read_text())
+    request = replace(request, dependency_hashes=('0' * 64,) + request.dependency_hashes[1:])
+    for verify in (lambda: integrity.verify_inputs(request), request.verify_inputs):
+        with raises(ContractError, match='input hash mismatch'):
+            verify()
+        assert not Path(str(integrity.publication_receipt(acquisition)) + '.tainted').exists()
+    assert_pass(verify_dependency_result(producer))
+
+
+def test_final_acquisition_io_failure_does_not_poison_future_consumers(runtime, acquisition, tmp_path, monkeypatch):
+    import errno
+    from oxyformer.execution import integrity
+    repo, producer = runtime
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']}
+    assert_pass(run_task(repo, producer, needs=needs))
+    original = os.scandir
+    def worker(request):
+        def unavailable(path):
+            if Path(path) == acquisition:
+                raise OSError(errno.EIO, 'synthetic directory enumeration failure', str(path))
+            return original(path)
+        monkeypatch.setattr(os, 'scandir', unavailable)
+        return dummy(request)
+    install_stage(monkeypatch, repo, worker)
+    refused = run_task(repo, new_attempt(repo, tmp_path / 'unreadable'), needs=needs)
+    assert_failed(refused, acquisition)
+    assert 'unreadable' in refused.message
+    monkeypatch.setattr(os, 'scandir', original)
+    assert not Path(str(integrity.publication_receipt(acquisition)) + '.tainted').exists()
+    install_stage(monkeypatch, repo, dummy)
+    assert_pass(run_task(repo, new_attempt(repo, tmp_path / 'retry'), needs=needs))
+    assert_pass(verify_dependency_result(producer))
+
+
+@mark.parametrize('reader', ['stat', 'bytes', 'hash'])
+def test_successful_acquisition_reader_preserves_positive_difference(runtime, acquisition, tmp_path, monkeypatch, reader):
+    from oxyformer.execution import integrity
+    repo, producer = runtime
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']}
+    assert_pass(run_task(repo, producer, needs=needs))
+    victim = acquisition / 'receipts.json'
+    saved, mode = victim.read_bytes(), victim.stat().st_mode & 0o777
+    def worker(request):
+        if reader == 'stat':
+            victim.chmod(mode ^ 0o020)
+        else:
+            victim.write_bytes(b' ' + saved[1:])  # same size, different observed bytes
+        try:
+            try:
+                {'stat': integrity.regular_file_stat, 'bytes': integrity.read_regular,
+                    'hash': integrity.regular_file_hash}[reader](victim)
+            except ContractError:
+                pass
+        finally:
+            victim.write_bytes(saved)
+            victim.chmod(mode)
+        return dummy(request)
+    install_stage(monkeypatch, repo, worker)
+    assert_failed(run_task(repo, new_attempt(repo, tmp_path / 'active'), needs=needs), victim)
+    assert read_json(Path(str(integrity.publication_receipt(acquisition)) + '.tainted')) == ['receipts.json']
+    with raises(ContractError, match='tainted'):
+        verify_dependency_result(producer)

@@ -16,7 +16,8 @@ from oxyformer.provenance import ContractError, canonical_json, relative_artifac
 from .integrity import (DEPENDENCY_CHECK, FINGERPRINT, RESULT, _replace_control, _repair_control_directory,
     post_execution_check, publish_result, record_taints,
     directory_path, read_regular, regular_file_stat, regular_file_hash as file_hash,
-    fingerprint_tree, publication_receipt, InputChanged,
+    fingerprint_tree, publication_receipt, InputChanged, acquisition_read,
+    acquisition_changed_paths, verify_input_hash,
     verify_inputs, verify_result, verify_published_tree)
 from .identity import git_bytes, code_identity, environment_record, scientific_fingerprint, verify_recipe
 from .paths import atomic_json, atomic_write, output_path
@@ -69,9 +70,10 @@ def read_mapping(path, *, expected_bytes=None):
 def dependency_file(root, relative):
     relative_artifact_path(relative)
     path = Path(root) / relative
-    regular_file_stat(path)
-    require(path.resolve(strict=True).is_relative_to(root), f'dependency file escapes attempt: {path}')
-    return path
+    with acquisition_read(path):
+        regular_file_stat(path)
+        require(path.resolve(strict=True).is_relative_to(root), f'dependency file escapes attempt: {path}')
+        return path
 
 
 def verify_acquisition(root, receipt_name, *, expected_tree=None):
@@ -95,21 +97,7 @@ def verify_acquisition(root, receipt_name, *, expected_tree=None):
 
     def compare(expected, message, actual=None):
         actual = tree if actual is None else actual
-        changed = []
-        for name in expected.keys() | actual.keys():
-            before, after = expected.get(name), actual.get(name)
-            if after is not None and 'error' in after:
-                # An unreadable hash is unknown, not proof of different bytes.
-                # Keep positive evidence (missing entry, changed stat, or a
-                # reader's explicit observation) separate from I/O failures.
-                known = {key: after[key] for key in ('type', 'mode', 'size', 'target', 'sha256')
-                    if key in after and (key not in ('target', 'sha256') or after[key] is not None)}
-                if (before is None or after.get('changed') or after.get('missing')
-                        or any(before.get(key) != value for key, value in known.items())):
-                    changed.append(name)
-            elif before != after:
-                changed.append(name)
-        refuse_changes(changed, message)
+        refuse_changes(acquisition_changed_paths(expected, actual), message)
 
     refuse_changes([name for name, entry in tree.items() if entry.get('changed')],
         'acquisition changed during fingerprinting (tainted)')
@@ -332,6 +320,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     deps = resolve_dependencies(needs) if needs else {}
     files = []
     published_hashes = {}
+    acquisition_hashes = {}
     dependency_trees = {}
     verified_dependencies = {}
     acquisitions = {}
@@ -346,7 +335,10 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
             dependency_trees[str(root)] = verify_acquisition(root, acquisition_receipt)
             acquisitions[unit] = acquisition_receipt
         for relative in needs[unit]:
-            files.append(dependency_file(root, relative))
+            path = dependency_file(root, relative)
+            files.append(path)
+            if acquisition_receipt is not None:
+                acquisition_hashes[path] = dependency_trees[str(root)][relative]['sha256']
         if acquisition_receipt is not None:
             continue
         require((root / '_execution/result.json').is_file(), f'stage receipt missing or not regular: {root / "_execution/result.json"}')
@@ -399,7 +391,8 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         task_path=str(task_path), task_hash=file_hash(task_path),
         dependency_paths=tuple(map(str, files)),
         dependency_hashes=tuple(published_hashes[p] if p in published_hashes
-            else file_hash(p) for p in files),
+            else verify_input_hash(p, acquisition_hashes[p], hash_file=file_hash)
+            if p in acquisition_hashes else file_hash(p) for p in files),
         output_dir=str(out), code_identity=head)
     atomic_write(out, '_execution/request.json', request.to_json())
     environment = environment_record()
@@ -442,7 +435,9 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         _replace_control(out, DEPENDENCY_CHECK, canonical_json(check))
         if check['status'] == 'fail':
             result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
-                message='upstream attempt tainted; changed paths: ' + ', '.join(changed))
+                message=('upstream attempt tainted; changed paths: ' + ', '.join(changed)) if changed
+                else 'upstream fingerprint unreadable: ' + ', '.join(root for root, detail in
+                    check['attempts'].items() if detail['status'] == 'unreadable'))
         else:
             try:
                 sys.stdout.flush()
