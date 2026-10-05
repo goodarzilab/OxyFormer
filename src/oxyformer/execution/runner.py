@@ -40,6 +40,14 @@ def resolve_dependencies(ids, environ=None):
     return result
 
 
+class _JsonSafeLoader(yaml.SafeLoader):
+    """Keep YAML date spellings JSON-compatible without changing source bytes."""
+
+
+_JsonSafeLoader.add_constructor('tag:yaml.org,2002:timestamp',
+    lambda loader, node: loader.construct_scalar(node))
+
+
 def read_mapping(path, *, expected_bytes=None):
     path = Path(path)
     raw = read_regular(path)
@@ -50,7 +58,7 @@ def read_mapping(path, *, expected_bytes=None):
     except json.JSONDecodeError:
         require(path.suffix.lower() != '.json', f'invalid JSON: {path}')
         try:
-            value = yaml.safe_load(text)
+            value = yaml.load(text, Loader=_JsonSafeLoader)
         except yaml.YAMLError as yaml_error:
             raise ContractError(f'invalid YAML: {path}') from yaml_error
     require(isinstance(value, dict), f'expected mapping: {path}')

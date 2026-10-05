@@ -15,8 +15,8 @@ import yaml
 
 from oxyformer.contracts import StageRequest, StageResult
 from oxyformer.data.source_manifest import load_source
-from oxyformer.execution import atlas_stage
-from oxyformer.execution.atlas_tasks import ROOT, TASK_FILE, build_tasks, inspect_dem, PRIMARY, FALLBACK
+from oxyformer.exposure import tasks as atlas_stage
+from oxyformer.exposure.tasks import ROOT, TASK_FILE, build_tasks, inspect_dem, PRIMARY, FALLBACK
 from oxyformer.provenance import ArtifactLineage, ArtifactRecord, ContractError, canonical_json, file_hash
 
 # These tests exercise the authorized runner change under the required unit
@@ -32,7 +32,7 @@ from test_execution import (runtime, acquisition, publication_authority,
 
 
 def tasks():
-    return json.loads((ROOT / TASK_FILE).read_text())
+    return yaml.safe_load((ROOT / TASK_FILE).read_text())
 
 
 def inspected_fixture():
@@ -185,7 +185,34 @@ def test_all_eleven_tasks_admit_through_runner(tmp_path, monkeypatch):
     inspected = inspected_fixture()
     inspected['dem_payload_sha256'] = file_hash(roots[1] / 'payload.tar')
     monkeypatch.setattr(atlas_stage, 'inspect_dem', lambda acquisition: deepcopy(inspected))
-    admit = runpy.run_path(str(ROOT / 'scripts/admit_atlas_tasks.py'))['admit']
+    admit = runpy.run_path(str(ROOT / 'scripts/build_atlas_tasks.py'))['admit']
     results = admit(repo, tmp_path / 'admission', *roots)
     assert len(results) == 11
     assert all(r['status'] == 'pass' for r in results)
+
+
+def test_yaml_owner_dates_remain_json_serializable(tmp_path):
+    from oxyformer.execution.runner import read_mapping
+    path = tmp_path / 'approvals.yaml'
+    path.write_text('schema_version: 1\napproved_on: 2026-10-04\n')
+    assert json.loads(canonical_json(read_mapping(path)))['approved_on'] == '2026-10-04'
+    # Do not mutate PyYAML globally; other consumers retain their old behavior.
+    import datetime
+    assert isinstance(yaml.safe_load(path.read_text())['approved_on'], datetime.date)
+
+
+def test_admission_hash_cache_refuses_changed_payload(tmp_path):
+    import runpy
+    import os
+    from oxyformer.execution import integrity
+    frozen = runpy.run_path(str(ROOT / 'scripts/build_atlas_tasks.py'))['frozen_acquisitions']
+    root = tmp_path / 'source'; root.mkdir()
+    payload = root / 'payload.tar'; payload.write_bytes(b'original')
+    before = payload.stat()
+    expected = file_hash(payload)
+    with pytest.raises(ContractError, match='frozen acquisition changed'):
+        with frozen([root]):
+            assert integrity.regular_file_hash(payload) == expected
+            payload.write_bytes(b'mutation')
+            os.utime(payload, ns=(before.st_atime_ns, before.st_mtime_ns))
+            integrity.regular_file_hash(payload)
