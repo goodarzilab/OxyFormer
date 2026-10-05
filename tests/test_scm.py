@@ -2249,3 +2249,115 @@ def test_sixth_round2_exact_geometry_accepts_fraction_inputs(fractional):
     # This exception belongs to raw rational geometry, not JSON records.
     with pytest.raises(ContractError, match='numeric'):
         config(beta=Fraction(1))
+
+
+class _SeventhFloat(float):
+    def as_integer_ratio(self):
+        return (0, 1)
+
+
+class _SeventhInt(int):
+    def __int__(self):
+        return 0
+
+
+class _SeventhNumpyFloat(np.float64):
+    def as_integer_ratio(self):
+        return (0, 1)
+
+
+class _SeventhNumpyInt(np.int64):
+    def __int__(self):
+        return 0
+
+
+@pytest.mark.parametrize('value', [_SeventhFloat(1.5e308), _SeventhInt(10**100),
+                                    _SeventhFloat(1), _SeventhInt(1),
+                                    _SeventhNumpyFloat(1), _SeventhNumpyInt(1)])
+def test_seventh_exact_scalar_types_reject_subclasses(value):
+    from oxyformer.validation.scm import numeric_scalar, exact_shift_intervals
+    from oxyformer.validation.generators import PairedWorld
+    world = PairedWorld(structural_effect=1., factual_location_effect=0.,
+                        baseline=(0.,), h_s=(0.,), epsilon=(0.,), factual_y=(0.,))
+    for run in (lambda: numeric_scalar(value, 'value'),
+                lambda: config(beta=value),
+                lambda: replace(frame(1, 1), weights=(value,)),
+                lambda: LatentState(denominator_factor=value),
+                lambda: exact_shift_intervals(((0., 10.),), value),
+                lambda: generate_suite_a(frame(1, 1), config('null'), policy(), tolerance=value),
+                lambda: world.intervene([value]),
+                lambda: world.intervene(np.array([value], dtype=object))):
+        with pytest.raises(ContractError, match='numeric|exact.*type'):
+            run()
+
+
+def test_seventh_array_protocols_and_subclasses_are_rejected_before_coercion():
+    from oxyformer.validation.scm import numeric_array
+    class PretendArray:
+        def __array__(self, *args, **kwargs):
+            pytest.fail('unapproved array protocol executed')
+    class Subarray(np.ndarray):
+        pass
+    class Sublist(list):
+        pass
+    class PretendNumber:
+        def __float__(self):
+            pytest.fail('unapproved float protocol executed')
+    for value in (PretendArray(), PretendNumber(), np.array([1.]).view(Subarray),
+                  [np.array([1.]).view(Subarray)], Sublist([1.])):
+        with pytest.raises(ContractError, match='numeric|exact.*type'):
+            numeric_array(value, 'value')
+
+
+@pytest.mark.parametrize('lo,hi,beta', [(0., 10000., 1.), (-10010., 10010., 1.),
+                                      (-10010., -10., -2.)])
+def test_seventh_wide_sine_converges_at_default_controls(lo, hi, beta):
+    import math
+    # Integral of beta*(sin((a+2)/2)-sin(a/2)) over [lo,hi-2].
+    expected = 2*beta/(hi-lo)*(math.cos((lo+2)/2)-math.cos(hi/2)
+                                -math.cos(lo/2)+math.cos((hi-2)/2))
+    result = generate_suite_a(frame(1, 1), config('nonlinear', beta=beta),
+                              policy(((lo, hi),)), seed=0)
+    assert result.observed_law_truth.value == pytest.approx(expected, abs=1e-10, rel=0)
+    assert result.structural_causal_truth.value == pytest.approx(expected, abs=1e-10, rel=0)
+    assert result.integration_uncertainty.converged
+    assert result.integration_uncertainty.order <= 256
+
+
+def test_seventh_latent_denominator_rejects_unrepresentable_positive_values():
+    from fractions import Fraction
+    smallest = Fraction(*np.nextafter(np.longdouble(0), np.longdouble(1)).as_integer_ratio())
+    for value in (Fraction(1, 10**5000), smallest/2, smallest*(1-Fraction(1, 2**100))):
+        with pytest.raises(ContractError, match='latent denominator.*domain'):
+            LatentState(denominator_factor=value)
+    f = replace(frame(1, 1), x=((-100., -100.),))
+    from oxyformer.validation.scm import structural_mean
+    with np.errstate(all='raise'):
+        value = structural_mean([0.], f, 0, LatentState(denominator_factor=smallest), config('null'))
+    assert value[0] == 0
+
+
+def test_seventh_structural_mean_refuses_output_overflow():
+    from oxyformer.validation.scm import structural_mean
+    smallest = np.nextafter(np.longdouble(0), np.longdouble(1))
+    with pytest.raises(ContractError, match='structural mean.*representable'):
+        structural_mean([0.], frame(1, 1), 0,
+                        LatentState(denominator_factor=smallest), config('null'))
+
+
+@pytest.mark.parametrize('helper', ['effect', 'structural_mean', 'observation_probabilities',
+                                    'observation_log_probability', 'wide', 'quantile_coordinates'])
+def test_seventh_helpers_reject_numeric_subclasses(helper):
+    import oxyformer.validation.scm as scm
+    value = _SeventhFloat(1.)
+    f, c, state = frame(1, 1), config(), LatentState()
+    calls = {
+        'effect': lambda: scm.effect([value], c),
+        'structural_mean': lambda: scm.structural_mean([value], f, 0, state, c),
+        'observation_probabilities': lambda: scm.observation_probabilities([value], state, c),
+        'observation_log_probability': lambda: scm.observation_log_probability([value], state, c),
+        'wide': lambda: scm.wide(value),
+        'quantile_coordinates': lambda: AssignmentLaw(f, 0, state, c, ((0., 10.),)).quantile_coordinates(0, value),
+    }
+    with pytest.raises(ContractError, match='numeric|exact.*type'):
+        calls[helper]()

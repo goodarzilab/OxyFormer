@@ -83,26 +83,49 @@ MIN_INTEGRATION_TOLERANCE = Fraction(1, 10**5000)
 INTEGRATION_TOLERANCE_DOMAIN = MappingProxyType({"minimum": "1e-5000", "registered": 1e-8})
 
 
+# Enumerate concrete NumPy types, never subclasses or numeric protocols.
+_INTEGER_TYPES = frozenset((int, np.int8, np.int16, np.int32, np.int64,
+                            np.uint8, np.uint16, np.uint32, np.uint64,
+                            np.intp, np.uintp, np.longlong, np.ulonglong))
+_FLOAT_TYPES = frozenset((float, np.float16, np.float32, np.float64, np.longdouble))
+MIN_DENOMINATOR_FACTOR = Fraction(1, 1 << (np.finfo(np.longdouble).nmant
+                                         - np.finfo(np.longdouble).minexp))
+LATENT_DENOMINATOR_DOMAIN = MappingProxyType({
+    "minimum": "smallest_positive_longdouble", "maximum_exclusive": 2})
+
+
 def numeric_scalar(value, name):
-    """Read a raw real scalar exactly, before any container/dtype promotion."""
-    require(isinstance(value, (int, float, np.integer, np.floating))
-            and not isinstance(value, (bool, np.bool_)), f"{name} must be numeric")
-    require(isinstance(value, (int, np.integer)) or bool(np.isfinite(value)),
+    """Read an approved concrete real scalar before conversion or promotion."""
+    require(type(value) in _INTEGER_TYPES | _FLOAT_TYPES,
+            f"{name} must be numeric: exact built-in or NumPy scalar type required")
+    require(type(value) in _INTEGER_TYPES or bool(np.isfinite(value)),
             f"{name} must be finite")
     return exact(value)
 
 
 def numeric_array(values, name, *, allow_fraction=False):
-    # dtype=object captures each supplied scalar. An already-created numeric
-    # ndarray supplies its stored values; information lost by its caller cannot
-    # be reconstructed here. Never call bare asarray before this boundary.
+    # Validate original containers/leaves before np.asarray can discard a
+    # subclass or invoke an unapproved __array__/numeric conversion protocol.
+    def inspect(value):
+        if type(value) in (list, tuple):
+            for child in value:
+                inspect(child)
+        elif type(value) is np.ndarray:
+            require(value.dtype.kind in "iufO", f"{name} must be a numeric array")
+            for child in value.flat:
+                inspect(child)
+        elif not (allow_fraction and type(value) is Fraction):
+            numeric_scalar(value, name)
+    inspect(values)
+    # dtype=object preserves mixed scalar precision; an existing ndarray owns
+    # its stored values, including any promotion its caller already performed.
     try:
         array = np.asarray(values, dtype=object)
     except (TypeError, ValueError) as exc:
         from oxyformer.provenance import ContractError
         raise ContractError(f"{name} must be a rectangular numeric sequence") from exc
     for value in array.flat:
-        if not (allow_fraction and isinstance(value, Fraction)):
+        if not (allow_fraction and type(value) is Fraction):
             numeric_scalar(value, name)
     return array
 
@@ -139,7 +162,7 @@ def normalize_record_numbers(record):
             return integer_scalar(value, name)
         args = get_args(annotation)
         if get_origin(annotation) is tuple:
-            require(isinstance(value, (tuple, list, np.ndarray)), f"{name} must be a sequence")
+            require(type(value) in (tuple, list, np.ndarray), f"{name} must be an exact sequence type")
             if len(args) == 2 and args[1] is Ellipsis:
                 return tuple(convert(v, args[0], name) for v in value)
             require(len(value) == len(args), f"{name} has wrong tuple length")
@@ -336,10 +359,12 @@ class LatentState:
         numeric_scalar(self.error, "latent exposure error")
         validate_numeric(abs(self.error), "exposure_error", "latent exposure error", allow_zero=True)
         factor = self.denominator_factor
-        if not isinstance(factor, Fraction):
+        if type(factor) is not Fraction:
             numeric_scalar(factor, "latent denominator factor")
         factor = exact(factor)
-        require(0 < factor < 2, "invalid latent denominator factor")
+        require(MIN_DENOMINATOR_FACTOR <= factor < 2,
+                "invalid latent denominator factor outside supported numeric domain: "
+                "[smallest positive longdouble, 2)")
         object.__setattr__(self, "denominator_factor", factor)
 
 
@@ -374,6 +399,7 @@ def adjustment_key(frame, row, state, config):
 def effect(a, config):
     # Keep the retained dose precision through the bounded nonlinear response;
     # converting here to float64 loses supported shifts at large centers.
+    a = numeric_array(a, "effect doses")
     a = np.asarray(a, dtype=np.longdouble)
     if config.effect == "null":
         return np.zeros_like(a)
@@ -386,13 +412,17 @@ def effect(a, config):
 
 
 def structural_mean(a_true, frame, row, state, config):
+    a_true = np.asarray(numeric_array(a_true, "structural doses"), dtype=np.longdouble)
     # Cancel the complete dose-independent affine expression before rounding.
     # Even bounded X can leave a tiny positive baseline after large cancellation.
     baseline = (Fraction(50) + sum((exact(v) for v in frame.x[row] if v is not None), Fraction(0))/4
                 + exact(config.local_strength)*exact(state.local)
                 + exact(config.regional_strength)*exact(state.regional) + 2*exact(state.illness))
     mean = wide(baseline) + effect(np.asarray(a_true) - config.migration * state.illness, config)
-    return config.registration_probability * mean / wide(state.denominator_factor)
+    with np.errstate(over="ignore", invalid="ignore"):
+        result = config.registration_probability * mean / wide(state.denominator_factor)
+    require(bool(np.isfinite(result).all()), "structural mean is not representable as finite longdouble")
+    return result
 
 
 def effect_fraction(dose, config, bits=256):
@@ -570,7 +600,7 @@ def _validate_count_interval(lower, upper, frame, row, state, config):
 
 def observation_probabilities(a_observed, state, config):
     """Factual observation mechanisms; independent of outcome noise given state."""
-    a = np.asarray(a_observed)
+    a = numeric_array(a_observed, "observed doses").astype(float)
     flag = expit(1 - .2*a - 1.2*state.illness) if config.selected_outcome else np.ones_like(a, dtype=float)
     survey = expit(.7 - .12*a + .5*state.local) if config.survey_inclusion else np.ones_like(a, dtype=float)
     bio = expit(1 - .1*a - .8*state.illness) if config.missing_biomarkers else np.ones_like(a, dtype=float)
@@ -578,14 +608,15 @@ def observation_probabilities(a_observed, state, config):
 
 
 def exact(value):
-    """Exact geometry of a declared float, not a decimal reinterpretation."""
-    if isinstance(value, Fraction):
+    """Exact value of an approved scalar, or an explicit internal Fraction."""
+    if type(value) is Fraction:
         return value
-    if isinstance(value, (int, np.integer)):
+    if type(value) in _INTEGER_TYPES:
         return Fraction(int(value))
-    if hasattr(value, "as_integer_ratio"):
-        return Fraction(*value.as_integer_ratio())
-    return Fraction(value)
+    require(type(value) in _FLOAT_TYPES,
+            "value must be numeric: exact built-in or NumPy scalar type required")
+    require(bool(np.isfinite(value)), "value must be finite")
+    return Fraction(*value.as_integer_ratio())
 
 
 def exact_shift_intervals(components, delta):
@@ -618,7 +649,9 @@ def wide(value):
     The spacing floor also handles subnormal results without double rounding.
     """
     if not isinstance(value, Fraction):
+        numeric_scalar(value, "wide value")
         return np.longdouble(value)
+    require(type(value) is Fraction, "wide value requires exact Fraction type")
     if value == 0:
         return np.longdouble(0)
     numerator, denominator = abs(value.numerator), value.denominator
@@ -715,7 +748,7 @@ class _ExponentialPiece:
 
 def observation_log_probability(a_observed, state, config):
     """Selected-law weights without underflow of positive logistic probabilities."""
-    a = np.asarray(a_observed, dtype=float)
+    a = numeric_array(a_observed, "observed doses").astype(float)
     value = np.zeros_like(a)
     if config.selected_outcome:
         value += log_expit(1-.2*a-1.2*state.illness)
@@ -823,7 +856,7 @@ class AssignmentLaw:
     def quantile_coordinates(self, piece_index, u):
         """Conditional inverse transform, also used before draw serialization."""
         p = self.pieces[piece_index]
-        u = np.asarray(u,dtype=np.longdouble)
+        u = np.asarray(numeric_array(u, "quantile probabilities"), dtype=np.longdouble)
         if p.rate == 0:
             return LocalCoordinates(p.lower+self.error,p.upper-p.lower,u)
         extent = wide(abs(p.rate)*(p.upper-p.lower))

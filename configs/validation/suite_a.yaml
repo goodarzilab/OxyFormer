@@ -1,5 +1,7 @@
 # Input-type contract (all domain endpoints denote their exact binary values):
-# Python int/float and NumPy integer/floating scalars of every width are accepted.
+# Exact built-in int/float and concrete NumPy integer/floating scalar types
+# of every width are accepted. Subclasses and numeric/array protocol objects
+# are refused BEFORE coercion; containers must be exact list, tuple or ndarray.
 # Lists, tuples and arrays may mix these types; each supplied element is captured
 # before NumPy promotion and checked exactly. Existing numeric arrays supply
 # their stored values; callers must use object arrays to retain mixed precision.
@@ -10,7 +12,8 @@
 # objects come from the authoritative ShiftOrStayPolicy API and supply its
 # already-serialized values. In contrast, exact_shift_intervals is a raw
 # rational geometry helper: it additionally admits explicit Fraction inputs,
-# retaining supported real endpoints/delta exactly
+# and LatentState.denominator_factor additionally admits exact Fraction values,
+# never Fraction subclasses. Geometry retains supported real endpoints/delta exactly
 # and never serializes them into binary64 records.
 # Intervention doses and integration tolerances >= 1e-5000 retain their exact
 # supplied values and need not fit binary64. Seeds, row indices, pair sizes and
@@ -52,11 +55,20 @@
 # subnormals and more than 100x below the registered default for every recipe.
 # Precise selected log masses and their expm1 differences remain rational
 # through convergence; relative-mass display values are rounded upward.
+# Latent denominators lie in [smallest_positive_longdouble, 2), with exact
+# admission before rounding. structural_mean refuses nonfinite output instead
+# of emitting NaN/inf. Normal generated factors are at least 2**-53.
+# Nonlinear response quadrature partitions all support components into exact
+# spans <= 16 (phase span <= 8), in addition to assignment/selection cutoffs.
+# The complete declared support endpoint box remains supported.
 # Internal tail allowances use rational arithmetic with a directed Decimal
 # exponential bound; only the display bound is rounded upward to binary64.
 numeric_domain:
   id: suite-a-100x-v1
   margin: 100.0
+  latent_denominator:
+    minimum: smallest_positive_longdouble
+    maximum_exclusive: 2
   integration_tolerance:
     minimum: "1e-5000"
     registered: 1.0e-8
