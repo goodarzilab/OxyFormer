@@ -176,3 +176,12 @@ no tolerance or overlap threshold is relaxed. A truly unrepresentable final
 diagnostic still fails finite-record validation. Forest coordinates divide by
 the plotting bound before scaling, so every finite point remains drawable.
 Valid derived diagnostics also remain visible when approval metadata is refused.
+
+Achieved shifts also use exact target-weighted subtraction and summation before
+rounding, so opposing finite shifts can cancel without intermediate overflow.
+Target and ratio ESS use exact raw masses and products; normalizing tiny positive
+masses first cannot erase a low-ESS warning. Signed-correction concentration uses
+exact normalized products, retaining relative concentration even when a displayed
+absolute mass rounds to zero. These calculations keep the same formulas and
+warning thresholds. Aggregate dependency-list mismatches refuse release only
+after an individually hash-bound bundle has been retained for diagnostic display.

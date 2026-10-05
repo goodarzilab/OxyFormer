@@ -1361,3 +1361,62 @@ def test_report_isolation_allows_missing_protected_leaves_and_dotdot(case, tmp_p
     assert result.status == 'pass', result.message
     result.verify(request)
     assert list((tmp_path / 'detour').iterdir()) == []
+
+
+def test_finite_achieved_shift_cancels_before_overflow(case, tmp_path, monkeypatch):
+    b, m, receipts = case
+    n = len(b.original_ids)
+    b = replace(b, observed_exposure=(-1e308, 1e308) + (0.,) * (n - 2),
+                shifted_exposure=(1e308, -1e308) + (0.,) * (n - 2))
+    report = evaluate_case((b, m, receipts))
+    assert report['state'] == 'released'
+    for overlap in report['diagnostics']['overlap_by_seed'].values():
+        assert overlap['achieved_shift'] == 0.
+        assert overlap['moved_fraction'] == .05
+    request = make_request(tmp_path, (b, m, receipts), monkeypatch)
+    result = run_stage(request)
+    assert result.status == 'pass'
+    result.verify(request)
+
+
+@pytest.mark.parametrize('weights,ratios', [
+    ((1.,) * 40, (2.**-1074,) + (0.,) * 39),
+    ((2.**-1074,) + (1.,) * 39, (1.,) + (0.,) * 39),
+    ((2.**-1074,) + (1.,) * 39, (2.**-1074,) + (0.,) * 39),
+])
+def test_positive_ratio_mass_keeps_ess_warning(weights, ratios):
+    report = overlap_report(weights, ratios, (1.,) * 40, (3.,) * 40,
+                            ('constant',), ((1.,),) * 40, ((1.,),) * 40)
+    for subset in report['subsets'].values():
+        assert subset['ratio_weights'] == {'ess': 1., 'ess_fraction': .025, 'max_share': 1.}
+        assert 'ratio ESS < 25% of subset records' in subset['warnings']
+
+
+def test_small_target_mass_keeps_signed_concentration():
+    report = overlap_report((2.**-1074,) + (1.,) * 39, (2.,) + (1.,) * 39,
+                            (1.,) * 40, (3.,) * 40, ('constant',), ((1.,),) * 40, ((1.,),) * 40)
+    for subset in report['subsets'].values():
+        assert subset['signed_correction']['max_absolute_share'] == 1.
+        assert subset['signed_correction']['ess'] is None
+
+
+@pytest.mark.parametrize('role', ['manifest', 'receipts', 'approvals', 'extra'])
+def test_dependency_list_mismatch_keeps_authenticated_estimates(case, tmp_path, monkeypatch, role):
+    b, _, _ = case
+    request = make_request(tmp_path, case, monkeypatch)
+    task = json.loads(Path(request.task_path).read_text())
+    dependencies = dict(zip(request.dependency_paths, request.dependency_hashes))
+    if role == 'extra':
+        extra = tmp_path / 'extra.json'
+        extra.write_text('{}')
+        dependencies[str(extra)] = file_hash(extra)
+    else:
+        del dependencies[task[role]]
+    request = replace(request, dependency_paths=tuple(dependencies), dependency_hashes=tuple(dependencies.values()))
+    result = run_stage(request)
+    assert result.status == 'fail'
+    result.verify(request)
+    report = json.loads((Path(request.output_dir) / 'report.json').read_text())
+    assert not report['releasable'] and report['evidence_label'] == 'diagnostic-only'
+    assert report['estimators'] == [e.to_dict()['payload'] for e in b.estimates]
+    assert report['bundle_hash'] == b.content_hash

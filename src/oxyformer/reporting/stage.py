@@ -87,11 +87,11 @@ def run_stage(request: StageRequest) -> StageResult:
         task = require_container(json.loads(task_bytes), dict, "reporting task")
         require(set(task) == {"bundle", "manifest", "receipts", "approvals"}, "invalid reporting task fields")
         dependencies = dict(zip(request.dependency_paths, request.dependency_hashes))
-        require(set(task.values()) == set(dependencies), "report task/dependency paths mismatch")
         bundle = read_artifact(task["bundle"], ReportBundle, dependencies[task["bundle"]])
         report["bundle_hash"] = bundle.content_hash
         report["estimators"] = [e.to_dict()["payload"] for e in bundle.estimates]
         report["sensitivities"] = sensitivity_records(bundle)
+        require(set(task.values()) == set(dependencies), "report task/dependency paths mismatch")
         manifest = read_artifact(task["manifest"], ExpectedTasks, dependencies[task["manifest"]])
         report["manifest_hash"] = manifest.content_hash
         report["diagnostics"] = summarize(bundle, manifest)
