@@ -1,0 +1,17 @@
+# Frozen plan section 10. All production transformer candidates retain raw X.
+selection: registered_comparisons_without_effect_direction_selection
+raw_x_bypass: complete_approved_covariates
+variants:
+  A0: {label: full_oxyformer_v2, ssl: true, pma: true, outcome: query, correction: origin}
+  A1: {label: no_ssl, ssl: false, pma: true, outcome: query, correction: origin}
+  A2: {label: no_county_pma, ssl: true, pma: false, outcome: query, correction: origin, retain_county_offsets: true}
+  A3: {label: early_treatment_fusion, ssl: true, pma: true, outcome: early, correction: early}
+  A4: {label: varying_coefficient, ssl: true, pma: true, outcome: varying, correction: varying}
+  A5: {label: signed_riesz, ssl: true, pma: true, outcome: query, correction: signed_riesz}
+  A6: {label: tabiclv2_outcome_only, outcome: tabicl, correction: origin, weights: unit_only}
+  A7: {label: tabiclv2_full_nuisance, outcome: tabicl, correction: tabicl, weights: unit_only}
+  F0: {label: tabpfn_v2_outcome_only, outcome: tabpfn, correction: origin, weights: unit_only}
+  F1: {label: tabpfn_v2_full_nuisance, outcome: tabpfn, correction: tabpfn, weights: unit_only}
+  A8: {label: endpoint_sharing, status: months_2_3_only}
+  B0: {label: conventional_calibration, status: calibration_only}
+  D0: {label: location_red_team, status: diagnostic_only}
