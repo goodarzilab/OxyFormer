@@ -455,3 +455,77 @@ def test_nonfinite_estimator_outputs_are_retained_as_numerical_failures(tmp_path
     assert (root / "runtime.json").is_file()
     assert coverage.run_stage(req).status == "blocked"
     assert len(calls) == 3  # Never redraw the failed sample to obtain a success.
+
+
+@pytest.mark.parametrize("field", ["observed_absolute_difference", "quadrature_tail_absolute_bound",
+                                   "truth_serialization_absolute_bound", "converged"])
+def test_truth_error_components_must_be_available(tmp_path, monkeypatch, field):
+    endpoint, frame = synthetic_endpoint(tmp_path)
+    scenario = SCMConfig(name="null_effect", active_mechanisms=("null",), effect="null")
+    sample = coverage.generate_suite_a(frame, scenario, endpoint.policy)
+    broken = replace(sample, integration_uncertainty=replace(sample.integration_uncertainty,
+                     **{field: False if field == "converged" else None}))
+    monkeypatch.setattr(coverage, "generate_suite_a", lambda *args, **kwargs: broken)
+    calls = []
+    def estimate(*args):
+        calls.append(1)
+        return {m: {"value": 0., "se": 1.} for m in coverage.METHODS}
+    monkeypatch.setattr(coverage, "estimate_repetition", estimate)
+    draws, records = successful_records()
+    records[0] = coverage.execute_draw(draws[0], frame, scenario, endpoint,
+                                       smoke_recipe(endpoint, frame), tmp_path, float("inf"))
+    summary = summarize(draws, records)
+    assert not summary["coverage_pass"], "Unavailable error components cannot become zero-error coverage"
+    assert records[0]["status"] == "incomplete"
+    assert records[0]["estimates"] == {}
+    assert summary["declared_repetitions"] == 1000
+    assert calls == []
+
+
+def test_profile_adapter_mismatch_is_incomplete(tmp_path, monkeypatch):
+    from test_campaign import request, STAMPS
+    endpoint, frame = synthetic_endpoint(tmp_path)
+    frame = replace(frame, x=((.2,),) * len(frame.original_ids))
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    (inputs / "endpoint.json").write_text(endpoint.to_json())
+    (inputs / "frame.json").write_text(frame.to_json())
+    recipe = smoke_recipe(endpoint, frame)
+    recipe["nested_cv"] = {}
+    task = {"id": "simulation-smoke", "stage": "simulation-smoke", "parameters": {
+        "mode": "profile", "recipe": recipe,
+        "scenario": {"name": "null_effect", "active_mechanisms": ["null"], "effect": "null"},
+        "draws": coverage.repetition_plan("mismatched-adapter", "null_effect", 1), "wall_seconds": 60,
+        "endpoint_input": {"dependency": "input", "path": "endpoint.json"},
+        "frame_input": {"dependency": "input", "path": "frame.json"}}}
+    req = request(tmp_path / "request", task, {"input": inputs})
+    monkeypatch.setattr(campaign, "fingerprint", lambda: deepcopy(STAMPS))
+    def no_fitting(*args):
+        raise AssertionError("adapter mismatch must precede fitting")
+    monkeypatch.setattr(coverage, "estimate_repetition", no_fitting)
+    result = coverage.run_stage(req)
+    assert result.status == "fail", result.message
+    result.verify(req)
+    aggregate = coverage.read_json(Path(req.output_dir) / "result.json")
+    assert aggregate["summary"]["counts"]["incomplete"] == 1
+    assert aggregate["summary"]["counts"]["numerical_failure"] == 0
+    assert "fixed-X template drift" in aggregate["records"][0]["reason"]
+    assert (Path(req.output_dir) / "_profiled/runtime.json").is_file()
+
+
+@pytest.mark.parametrize("failure", [OSError, ValueError])
+def test_failed_publication_does_not_expose_success_estimates(tmp_path, monkeypatch, failure):
+    endpoint, frame = synthetic_endpoint(tmp_path)
+    scenario = SCMConfig(name="null_effect", active_mechanisms=("null",), effect="null")
+    draw = coverage.repetition_plan("failed-publication", scenario.name, 1)[0]
+    monkeypatch.setattr(coverage, "estimate_repetition", lambda *args:
+                        {m: {"value": 0., "se": 1.} for m in coverage.METHODS})
+    def fail_write(*args):
+        raise failure("injected publication fault")
+    monkeypatch.setattr(coverage, "atomic_write", fail_write)
+    record = coverage.execute_draw(draw, frame, scenario, endpoint, smoke_recipe(endpoint, frame),
+                                   tmp_path, float("inf"))
+    assert record["status"] == "incomplete"
+    assert record["estimates"] == {}
+    assert "truth" not in record
+    assert "injected publication fault" in record["reason"]

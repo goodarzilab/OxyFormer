@@ -297,40 +297,57 @@ def estimate_repetition(endpoint, recipe, root, deadline):
     return result
 
 
+class NumericalFailure(Exception):
+    """A numerical computation failed, distinct from adapter or I/O faults."""
+
+
+def numerical_call(operation, *args, **kwargs):
+    try:
+        return operation(*args, **kwargs)
+    except (ArithmeticError, np.linalg.LinAlgError, ValueError) as exc:
+        raise NumericalFailure(f"{type(exc).__name__}: {exc}") from exc
+
+
 def execute_draw(draw, frame, scenario, template, recipe, root, deadline):
     started = time.monotonic()
     record = {"draw": draw, "status": "incomplete", "reason": "budget exhausted", "estimates": {}}
     if started >= deadline:
         return {**record, "wall_seconds": 0.}
     try:
-        sample = generate_suite_a(frame, scenario, template.policy, seed=draw["seed"])
+        sample = numerical_call(generate_suite_a, frame, scenario, template.policy, seed=draw["seed"])
         if sample.observed_law_truth.status in ("design_rejected", "empty_target"):
             record.update(status="eligibility_rejection", reason=sample.observed_law_truth.reason)
         else:
+            # Adapter consistency and available truth are prerequisites, not
+            # estimates of numerical failure probability. Keep their failures
+            # outside the numerical-operation boundary.
             endpoint = bind_observations(template, sample.observations)
-            estimates = estimate_repetition(endpoint, recipe, root, deadline)
+            uncertainty = sample.integration_uncertainty
+            require(uncertainty.converged, "truth integration diagnostics are not converged")
+            components = [finite(getattr(uncertainty, name), "truth error " + name) for name in
+                ("observed_absolute_difference", "quadrature_tail_absolute_bound", "truth_serialization_absolute_bound")]
+            require(all(value >= 0 for value in components), "negative truth-integration error component")
+            error = numerical_call(math.fsum, components)
+            estimates = numerical_call(estimate_repetition, endpoint, recipe, root, deadline)
+            successful = None
             if estimates is not None:
-                uncertainty = sample.integration_uncertainty
-                error = (uncertainty.observed_absolute_difference or 0.) + (uncertainty.quadrature_tail_absolute_bound or 0.) + (uncertainty.truth_serialization_absolute_bound or 0.)
+                require(set(estimates) == set(METHODS), "incomplete estimator results")
                 successful = {**record, "status": "success", "reason": "complete production procedure",
                     "estimates": estimates, "truth": sample.observed_law_truth.value,
                     "causal_truth": sample.structural_causal_truth.value, "truth_integration_error": error,
                     "integration_uncertainty": uncertainty.to_dict(), "observation_hash": sample.observations.content_hash}
-                # Keep the original serializable failure record until every
-                # numerical field has been checked. NaN/inf must not escape to
-                # atomic JSON publication or abort aggregation of other draws.
-                validate_success(successful, null_scenario=scenario.effect == "null")
-                record = successful
+                numerical_call(validate_success, successful, null_scenario=scenario.effect == "null")
             atomic_write(root, "observations.json", sample.observations.to_json())
             atomic_write(root, "observed_law_truth.json", sample.observed_law_truth.to_json())
             atomic_write(root, "structural_causal_truth.json", sample.structural_causal_truth.to_json())
-    except (ArithmeticError, np.linalg.LinAlgError, ValueError) as exc:
-        # No draw is retried and no exception is silently relabeled as success.
-        record.update(status="numerical_failure", reason=f"{type(exc).__name__}: {exc}")
+            # A failed publication never leaves estimates in a failure record.
+            if successful is not None:
+                record = successful
+    except NumericalFailure as exc:
+        record.update(status="numerical_failure", reason=str(exc))
     except Exception as exc:
-        # Adapter, I/O and unexpected execution faults are not estimates of
-        # numerical failure probability. Retain the draw as incomplete so it
-        # cannot vanish or certify coverage. Process cancellation still escapes.
+        # No retry or substitution. Cancellation escapes; ordinary contract,
+        # adapter and publication faults remain incomplete and forbid passage.
         record.update(status="incomplete", reason=f"execution failure: {type(exc).__name__}: {exc}")
     record["wall_seconds"] = time.monotonic() - started
     return record
