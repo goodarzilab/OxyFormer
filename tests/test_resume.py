@@ -521,3 +521,27 @@ def test_latched_request_stays_pending_and_fresh_request_allows_resume(tmp_path)
     resumed = pretrain(view, split, replace(config, output_dir=str(tmp_path / "fresh"),
                                            predecessor=repeated, stop_request=CheckpointRequest()), 1103)
     assert resumed.complete and resumed.step > repeated.step
+
+
+def test_environment_identity_retains_unnamed_distributions_deterministically(monkeypatch):
+    import importlib.metadata
+    import oxyformer.training.pretrain as module
+    from email.message import Message
+
+    class Distribution:
+        def __init__(self, name, version):
+            self.metadata = Message()
+            if name is not None:
+                self.metadata["Name"] = name
+            self.version = version
+
+    distributions = [Distribution("named", "1"), Distribution(None, "2"),
+                     Distribution(None, "1")]
+    monkeypatch.setattr(importlib.metadata, "distributions", lambda: iter(distributions))
+    first = module.environment_identity(torch.device("cpu"))
+    distributions.reverse()
+    assert module.environment_identity(torch.device("cpu")) == first
+    distributions[0].version = "3"
+    assert module.environment_identity(torch.device("cpu")) != first
+    distributions.pop(0)
+    assert module.environment_identity(torch.device("cpu")) != first

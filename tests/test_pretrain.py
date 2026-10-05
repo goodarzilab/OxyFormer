@@ -237,3 +237,52 @@ def test_tokenizer_cross_unit_overflow_is_refused_before_attempt(tmp_path):
     with pytest.raises(ContractError, match="merged tokenizer.*nonfinite"):
         pretrain(view, split, config, 1103)
     assert not Path(config.output_dir).exists()
+
+
+def test_finite_large_stopping_loss_does_not_overflow_before_averaging(tmp_path):
+    view, split, config = make_case(tmp_path)
+    values = [0., 2e-38] * 3 + [1.] * 4
+    view = replace(view, columns=("part",), values=tuple((value,) for value in values))
+    settings = replace(config.settings, feature_kinds=(("part", "numeric"),),
+                       families=(("part",),), batch_size=4, mask_rate=1., max_epochs=1)
+    config = replace(config, settings=settings)
+    fitting = replace(view, original_ids=view.original_ids[:6], values=view.values[:6],
+                      lineage=replace(view.lineage, unit_ids=view.original_ids[:6]))
+    features = fit_preprocessing(fitting, settings)
+    batch = family_mask(FeatureTokenizer(features).prepare(view), ((0,),), 1.)
+    assert torch.isfinite(batch.numeric_values).all()
+    expected = torch.nn.functional.huber_loss(
+        torch.zeros(4, dtype=torch.float64), batch.numeric_values[6:, 0].double(),
+        reduction="mean")
+    assert torch.isfinite(expected.float())
+    artifact = pretrain(view, split, config, 1103)
+    assert artifact.complete
+    state = load_checkpoint(artifact, artifact.identity)
+    assert state["progress"]["history"] == pytest.approx([expected.item()])
+
+
+@pytest.mark.parametrize("kind", ["numeric", "categorical"])
+def test_reconstruction_totals_preserve_large_finite_mean_and_gradients(kind):
+    from oxyformer.models.tokens import FeatureBatch
+    feature = FeatureSpec(name="x", kind=kind, categories=("a",) if kind == "categorical" else ())
+    zeros = torch.zeros((4, 1), dtype=torch.bool)
+    batch = FeatureBatch(torch.arange(1), torch.full((4, 1), 1e38),
+                         torch.zeros((4, 1), dtype=torch.long), zeros, ~zeros, zeros)
+    prediction = (torch.zeros(4, 1) if kind == "numeric" else
+                  torch.tensor([[-1e38, 0.]] * 4)).requires_grad_()
+    sums, counts = reconstruction_totals([prediction], batch, (feature,))
+    loss = balanced_loss(sums, counts, ((0,),)).to(prediction.dtype)
+    assert torch.isfinite(loss)
+    assert loss.item() == pytest.approx(1e38)
+    loss.backward()
+    expected_gradient = (torch.full((4, 1), -.25) if kind == "numeric" else
+                         torch.tensor([[-.25, .25]] * 4))
+    torch.testing.assert_close(prediction.grad, expected_gradient, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("families", [((0, 1),), ((0,), (1,))])
+def test_family_balancing_avoids_overflow_between_finite_means(families):
+    sums = [torch.tensor(3e38), torch.tensor(3e38)]
+    loss = balanced_loss(sums, [1, 1], families).float()
+    assert torch.isfinite(loss)
+    assert loss.item() == pytest.approx(3e38)
