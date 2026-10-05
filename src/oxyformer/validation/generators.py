@@ -80,6 +80,7 @@ class IntegrationUncertainty(Immutable):
     selected_mass_fraction: float | None = None
     selected_mass_relative_difference: float | None = None
     # Retains positive mass when the ordinary display fraction underflows.
+    quadrature_tail_absolute_bound: float | None = None
     selected_log_mass_fraction: float | None = None
     grouped_mass_relative_error: float | None = None
     # Differences between nested orders are diagnostics, not certified bounds.
@@ -370,6 +371,56 @@ def _posterior_contrast(factual, shifted, terms, frame, config):
     return baseline_change+effect_change
 
 
+def _quadrature_tail_budget(frame, config, policy, groups, tolerance):
+    """Bound omitted contrast and normalization error before quadrature.
+
+    sigmoid(z) >= exp(min(z,0)-1) bounds selection below over the complete
+    recorded support. A mixture of exponential panels truncated K decay units
+    from each panel peak omits at most 2*exp(-K) of its assignment probability.
+    If C bounds the absolute contrast and r bounds omitted selected probability,
+    normalizing the retained measure changes its mean by at most 2*C*r/(1-r).
+    This tail bound supplements, rather than replaces, doubled-order diagnostics.
+    """
+    terms = [t for group in groups.values() for t in group]
+    penalty = exact(0)
+    response = exact(0)
+    for term in terms:
+        upper = max(p.upper for p in term.law.pieces)+term.law.error
+        state = term.state
+        logits = []
+        if config.selected_outcome:
+            logits.append(1-exact(.2)*upper-exact(1.2)*exact(state.illness))
+        if config.survey_inclusion:
+            logits.append(exact(.7)-exact(.12)*upper+exact(.5)*exact(state.local))
+        if config.missing_biomarkers:
+            logits.append(1-exact(.1)*upper-exact(.8)*exact(state.illness))
+        penalty = max(penalty, sum(1+max(-z, 0) for z in logits))
+        dose_bound = (max(abs(p.lower) for p in term.law.pieces)
+                      +max(abs(p.upper) for p in term.law.pieces)
+                      +2*exact(config.exposure_error)+exact(config.migration)+exact(policy.delta_mmhg))
+        effect_bound = abs(exact(config.beta))
+        if config.effect == "null":
+            effect_bound = exact(0)
+        elif config.effect == "linear":
+            effect_bound *= dose_bound
+        elif config.effect == "sign_changing":
+            effect_bound *= (dose_bound+5)**2/10
+        response = max(response, exact(config.registration_probability)
+                       *(abs(_count_baseline(frame, term.row, state, config))+effect_bound)
+                       /state.denominator_factor)
+    contrast = max(2*response, exact(1))
+    # Integer ceilings with generous slack keep the cutoff conservative despite
+    # rounding in logarithms. No exponentiation of tiny selection probabilities.
+    budget_log = min(np.log(wide(tolerance))-np.log(wide(contrast))-np.log(wide(16)),
+                     np.log(wide(1e-12)))
+    extra = int(np.ceil(-budget_log))+4
+    cutoff = penalty+extra
+    for term in terms:
+        term.law.tail_decay = cutoff
+    relative = 2*np.exp(-wide(extra))
+    return float(2*wide(contrast)*relative/(1-relative))
+
+
 def _integrate(frame, config, policy, groups, order, boundaries_by_key, eligible_by_key):
     mean_contrasts = np.zeros(2,dtype=np.longdouble)
     log_mass = -np.inf
@@ -467,6 +518,7 @@ def generate_suite_a(frame: CovariateFrame, config: SCMConfig, policy: ShiftOrSt
     require(grouped_error <= 1e-10, "grouped origin/latent mass was not preserved")
     boundaries = {key:_integration_breakpoints(terms,dict(policy.components_by_key)[key[1]],policy.delta_mmhg,config,eligible_by_key[key[1]])
                   for key,terms in groups.items()}
+    tail_bound = _quadrature_tail_budget(frame, config, policy, groups, tolerance)
     order = 16
     previous, previous_log_mass, _ = _integrate(frame,config,policy,groups,order,boundaries,eligible_by_key)
     while order*2 <= max_order:
@@ -474,18 +526,19 @@ def generate_suite_a(frame: CovariateFrame, config: SCMConfig, policy: ShiftOrSt
         values, log_mass, mass_error = _integrate(frame,config,policy,groups,order,boundaries,eligible_by_key)
         difference = np.abs(values-previous)
         mass_difference = float(abs(np.expm1(log_mass-previous_log_mass)))
-        converged = bool(np.max(difference) <= tolerance and mass_difference <= tolerance and mass_error <= 1e-10)
+        converged = bool(np.max(difference)+tail_bound <= tolerance and mass_difference <= tolerance and mass_error <= 1e-10)
         if converged:
             break
         previous,previous_log_mass = values,log_mass
     require(converged, "truth integration did not converge; increase max_order")
     observed = TruthArtifact(kind="observed_law", value=float(values[0]), status="integrated", target=_OBSERVED_TARGET, **common)
     causal = TruthArtifact(kind="structural_causal", value=float(values[1]), status="integrated", target=_CAUSAL_TARGET, **common)
-    uncertainty = IntegrationUncertainty(method="law-scaled Gauss-Legendre with independent unit-mass check, doubled order",
+    uncertainty = IntegrationUncertainty(method="exact local panels, bounded exponential tails, unit-mass check, doubled order",
         observed_absolute_difference=float(difference[0]), causal_absolute_difference=float(difference[1]),
         order=order, converged=True, assignment_mass_error=float(mass_error),
         selected_mass_fraction=float(np.exp(log_mass)), selected_mass_relative_difference=mass_difference,
-        selected_log_mass_fraction=float(log_mass), grouped_mass_relative_error=grouped_error)
+        selected_log_mass_fraction=float(log_mass), grouped_mass_relative_error=grouped_error,
+        quadrature_tail_absolute_bound=tail_bound)
     return GeneratedSample(observations, observed, causal, uncertainty)
 
 
@@ -515,7 +568,7 @@ class PairedWorld(Immutable):
 
     def intervene(self, a):
         validate_numeric(a, "intervention_dose", "intervention doses")
-        dose = np.asarray(a, dtype=float)
+        dose = np.asarray(a)
         require(dose.shape == (len(self.h_s),) and np.isfinite(dose).all(), "intervention alignment")
         tau = exact(self.structural_effect)
         try:
