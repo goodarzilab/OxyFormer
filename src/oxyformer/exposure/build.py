@@ -20,11 +20,14 @@ identities in the eight missing cells. Acquisition readiness is owned upstream.
 """
 from dataclasses import asdict, dataclass
 from hashlib import sha256
+from fractions import Fraction
 import json
 import math
 from pathlib import Path
 import platform
 import tempfile
+import tarfile
+import zipfile
 import numpy as np
 import pandas as pd
 import rasterio
@@ -88,11 +91,15 @@ def build_exposure(source_manifests, geography, allocation_spec):
                     if pop:
                         full_area = block.geometry.area
                         require(math.isfinite(full_area) and full_area > 0, 'block has invalid projected area')
-                        density = pop / full_area
+                        # Retain the exact ratio until each finite placement mass
+                        # is formed; an intermediate density can overflow.
+                        mass_scale = Fraction(pop) / Fraction(full_area)
                         for xy, areas in placement_batches(block.geometry, scenario, allocation_spec):
                             areas_total.append(float(math.fsum(areas)))
                             z, reason = sampler.sample(xy)
-                            weights = np.array([float(pop)]) if scenario == 'centroid' else density * areas
+                            weights = (np.array([float(pop)]) if scenario == 'centroid' else
+                                       np.fromiter((float(mass_scale * Fraction(float(area))) for area in areas),
+                                                   dtype=float, count=len(areas)))
                             require(np.isfinite(weights).all() and (weights > 0).all(),
                                     'positive placement mass is zero or nonfinite')
                             weights_total.append(float(math.fsum(weights)))
@@ -234,11 +241,14 @@ def _collect(request, task, config, groups):
     for binding in task['shards']:
         manifest = _json(_dependency(request, binding['manifest']))
         require(manifest['kind'] == 'exposure-atlas' and manifest['status'] == 'pass', 'shard did not pass')
+        require(isinstance(manifest['shard_ids'], list) and len(manifest['shard_ids']) == 1,
+                'shard manifest requires exactly one shard ID')
         sid = manifest['shard_ids'][0]
         require(manifest['shard_ids'] == [sid] and sid in groups and sid not in seen, 'overlapping or unexpected shards')
         seen.add(sid)
         require(manifest['shard_manifest_hash'] == request.dependency_hashes[task['shard_manifest']], 'shard inventory changed')
         for name, role in (('exposure.parquet', 'exposure'), ('quality.json', 'quality')):
+            _dependency(request, binding[role])
             require(manifest['files'][name] == request.dependency_hashes[binding[role]], 'shard artifact hash mismatch')
         quality = _json(_dependency(request, binding['quality']))
         frame = pd.read_parquet(_dependency(request, binding['exposure']))
@@ -316,5 +326,6 @@ def run_stage(request: StageRequest) -> StageResult:
         return result
     except FileNotFoundError as exc:
         return StageResult(request_hash=request.content_hash, status='blocked', artifacts=(), message=str(exc))
-    except (ValueError, KeyError, TypeError, OSError, ProjError, rasterio.errors.RasterioError) as exc:
+    except (ValueError, KeyError, TypeError, OSError, ProjError, rasterio.errors.RasterioError,
+            tarfile.TarError, zipfile.BadZipFile) as exc:
         return StageResult(request_hash=request.content_hash, status='fail', artifacts=(), message=str(exc))

@@ -755,3 +755,56 @@ def test_object_population_rejects_invalid_values(tmp_path, invalid):
     geography['population'] = pd.Series([invalid, 60], dtype=object)
     with pytest.raises(ValueError, match='invalid Census population'):
         build_exposure(sources(tile), geography, SPEC)
+
+
+@pytest.mark.parametrize('height', [0, -9999])
+def test_finite_placement_mass_with_subnormal_block_area(tmp_path, height):
+    tile = write_raster(tmp_path / 'tiny.tif', [height])
+    geography = blocks(pop=(1, 0)).iloc[:1].copy()
+    geography.loc[0, 'geometry'] = box(0, 0, 1e-312, 100)
+    result, qc = build_exposure(sources(tile), geography, replace(SPEC, scenarios=('distributed',)))
+    assert result.population.iloc[0] == qc['population'] == 1
+    if height == 0:
+        assert result.pressure_mmhg.iloc[0] == 760
+        assert result.missing_population.iloc[0] == 0
+    else:
+        assert result.missing_population.iloc[0] == qc['blocks'][0]['nodata'] == 1
+        assert result.pressure_mmhg.isna().all()
+
+
+@pytest.mark.parametrize('kind', ['index', 'empty_shard_ids'])
+def test_malformed_collection_returns_failed_result(tmp_path, shard_fixture, kind):
+    inventory, paths = shard_fixture
+    if kind == 'empty_shard_ids':
+        manifest = json.loads(paths[0].read_text())
+        manifest['shard_ids'] = []
+        paths[0].write_text(canonical_json(manifest))
+    req = collect_request(tmp_path / 'malformed-collection', inventory, paths)
+    if kind == 'index':
+        task = json.loads(Path(req.task_path).read_text())
+        task['shards'][0]['exposure'] = len(req.dependency_paths)
+        Path(req.task_path).write_text(canonical_json(task))
+        req = replace(req, task_hash=file_hash(req.task_path))
+    result = run_stage(req)
+    assert result.status == 'fail' and result.artifacts == ()
+    assert not (Path(req.output_dir) / 'atlas.parquet').exists()
+
+
+@pytest.mark.parametrize('kind', ['zip', 'tar'])
+def test_verified_malformed_archive_returns_failed_result(tmp_path, shard_fixture, kind):
+    inventory, _ = shard_fixture
+    directory = tmp_path / 'malformed-input'
+    bzip, szip = write_census_archives(directory)
+    szip.write_bytes(b'invalid ZIP bytes')
+    receipt, payload = acquisition(directory, 'census', [('blocks_01', bzip), ('sf1_al', szip)])
+    if kind == 'tar':
+        payload.write_bytes(b'invalid TAR bytes')
+        doc = json.loads(receipt.read_text())
+        doc['payload_sha256'] = file_hash(payload)
+        receipt.write_text(canonical_json(doc))
+    task = json.loads((tmp_path / 'shard-AL/task.json').read_text())
+    req = request(tmp_path / 'malformed-shard', 'exposure-atlas', task,
+                  [inventory, receipt, payload, tmp_path / 'dem-receipt.json', tmp_path / 'dem.tar'])
+    result = run_stage(req)
+    assert result.status == 'fail' and result.artifacts == ()
+    assert not (Path(req.output_dir) / 'exposure.parquet').exists()
