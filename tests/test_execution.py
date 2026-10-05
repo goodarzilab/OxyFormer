@@ -554,12 +554,20 @@ from oxyformer.execution.paths import atomic_json
     (out / 'code_commit.txt').write_text(commit(repo))
     task = task_file(out)
     env = dict(os.environ, PYTHONPATH=str(repo / 'src'), CUDA_VISIBLE_DEVICES='')
-    process = subprocess.run([sys.executable, '-m', 'oxyformer.cli', 'run-stage',
-                              '--stage', 'dummy', '--repo', str(repo), '--out', str(out),
-                              '--task', str(task)], cwd=tmp_path, env=env, text=True, capture_output=True)
-    assert process.returncode == 0, process.stdout + process.stderr
+    with (out / 'run.log').open('w') as log:
+        process = subprocess.run([sys.executable, '-m', 'oxyformer.cli', 'run-stage',
+                                  '--stage', 'dummy', '--repo', str(repo), '--out', str(out),
+                                  '--task', str(task)], cwd=tmp_path, env=env, text=True,
+                                 stdout=log, stderr=subprocess.STDOUT)
+    assert process.returncode == 0, (out / 'run.log').read_text()
     assert list((repo / 'src/oxyformer/__pycache__').glob('*.pyc'))
     assert git(repo, 'status', '--porcelain', '--untracked-files=all') == ''
+    from oxyformer.execution.runner import verify_dependency_result
+    assert verify_dependency_result(out).status == 'pass'
+    with (out / 'run.log').open('a') as log:
+        log.write('unexpected late log write')
+    with pytest.raises(ContractError, match='fingerprint mismatch.*run.log'):
+        verify_dependency_result(out)
 
 
 def test_locked_primary_stage_cannot_omit_recipe(runtime):
@@ -903,3 +911,73 @@ def test_post_execution_check_names_proc_fd_chmod(runtime, tmp_path, monkeypatch
     assert receipt['attempts'][str(upstream)]['changed_paths'] == ['undeclared']
     assert file_hash(victim) == before and victim.stat().st_mode & 0o100
     assert not (tmp_path / '.oxyformer-integrity').exists()
+
+
+@pytest.mark.parametrize('when', ['before-consumer', 'during-consumer'])
+def test_transitive_upstream_metadata_cannot_escape_detection(runtime, tmp_path, monkeypatch, when):
+    repo, middle = runtime
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'data.json').write_text('{}')
+    (source / 'receipts.json').write_text('{}')
+    publish_source_fixture(repo, source)
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
+    assert run('dummy', middle, repo, deps_env=True,
+               task_file=task_file(middle, needs={'data-unit': ['data.json', 'receipts.json']})).status == 'pass'
+    later = tmp_path / 'later'
+    later.mkdir()
+    (later / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    monkeypatch.setenv('SWARM_DEP_MIDDLE', str(middle))
+    task = task_file(later, needs={'middle': ['value.json']})
+    victim = source / 'data.json'
+    if when == 'before-consumer':
+        victim.chmod(victim.stat().st_mode ^ 0o100)
+        with pytest.raises(ContractError, match='fingerprint'):
+            run('dummy', later, repo, deps_env=True, task_file=task)
+        assert not (later / 'value.json').exists()
+    else:
+        def faulty(request):
+            result = dummy(request)
+            victim.chmod(victim.stat().st_mode ^ 0o100)
+            return result
+        monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty))
+        result = run('dummy', later, repo, deps_env=True, task_file=task)
+        assert result.status == 'fail'
+        assert str(victim) in result.message
+
+
+def test_consumer_binds_published_fingerprint_digest(runtime, tmp_path, monkeypatch):
+    from oxyformer.execution.integrity import FINGERPRINT
+    repo, out = runtime
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'data.json').write_text('{}')
+    (source / 'receipts.json').write_text('{}')
+    published = publish_source_fixture(repo, source)
+    expected = next(a.sha256 for a in published.artifacts if a.path == FINGERPRINT)
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
+    assert run('dummy', out, repo, deps_env=True,
+               task_file=task_file(out, needs={'data-unit': ['data.json', 'receipts.json']})).status == 'pass'
+    request = StageRequest.from_json((out / '_execution/request.json').read_text())
+    assert dict(zip(request.dependency_paths, request.dependency_hashes))[str(source / FINGERPRINT)] == expected
+    # Alter the publication record itself; its original result digest must win.
+    (source / FINGERPRINT).write_text('{}')
+    later = tmp_path / 'later'
+    later.mkdir()
+    (later / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    with pytest.raises(ContractError, match='fingerprint hash mismatch'):
+        run('dummy', later, repo, deps_env=True,
+            task_file=task_file(later, needs={'data-unit': ['data.json', 'receipts.json']}))
+
+
+def test_unsealed_acquisition_cannot_become_a_new_baseline(runtime, tmp_path, monkeypatch):
+    repo, out = runtime
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'data.json').write_text('{}')
+    (source / 'receipts.json').write_text('{}')
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
+    with pytest.raises(ContractError, match='stage receipt missing'):
+        run('dummy', out, repo, deps_env=True,
+            task_file=task_file(out, needs={'data-unit': ['data.json', 'receipts.json']}))
+    assert not (source / '_execution').exists()

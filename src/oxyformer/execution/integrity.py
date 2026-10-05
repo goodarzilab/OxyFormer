@@ -157,7 +157,7 @@ def publish_result(root, result):
         return failed
 
 
-def verify_published_tree(root, result):
+def verify_published_tree(root, result, expected_hash=None):
     """Read the recorded baseline, hash-check it, then compare current entries.
 
     The expected digest comes from the producer's passing StageResult, never
@@ -168,6 +168,8 @@ def verify_published_tree(root, result):
     records = [record for record in result.artifacts if record.path == FINGERPRINT]
     require(len(records) == 1 and records[0].kind == 'attempt_fingerprint',
             'dependency publication fingerprint missing')
+    require(expected_hash is None or records[0].sha256 == expected_hash,
+            'dependency published fingerprint identity changed')
     path = root / FINGERPRINT
     require(not path.is_symlink() and path.resolve().is_relative_to(root),
             'dependency fingerprint escapes attempt')
