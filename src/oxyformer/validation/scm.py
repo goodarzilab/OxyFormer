@@ -148,6 +148,12 @@ def integer_scalar(value, name):
     return int(rational)
 
 
+def bounded_index(value, size, name):
+    index = integer_scalar(value, name)
+    require(0 <= index < size, f"invalid {name}")
+    return index
+
+
 def normalize_record_numbers(record):
     """Normalize raw numbers/sequences before Immutable's JSON coercion.
 
@@ -195,7 +201,9 @@ def validate_numeric(values, kind, name, *, allow_zero=False, allow_fraction=Fal
 
 
 def validate_components(components, *, allow_fraction=False):
-    require(len(components) > 0, "SCM assignment needs nonempty support")
+    components = numeric_array(components, "support endpoints", allow_fraction=allow_fraction)
+    require(components.ndim == 2 and components.shape[1] == 2 and len(components) > 0,
+            "SCM assignment needs nonempty support endpoint pairs")
     validate_numeric(components, "dose", "support endpoints", allow_fraction=allow_fraction)
     require(all(exact(lo) < exact(hi) for lo, hi in components), "invalid support component")
     require(all(exact(first[1]) < exact(second[0]) for first, second in zip(components, components[1:])),
@@ -390,6 +398,7 @@ def adjustment_key(frame, row, state, config):
     Coarse region/county routing is conditioned on. No exact coordinates,
     geography IDs, latent illness or omitted causes enter.
     """
+    row = bounded_index(row, len(frame.original_ids), "frame row")
     return (frame.x[row], frame.support_keys[row],
             state.local if config.local_confounding == "measured" else None,
             state.regional if config.regional_confounding == "measured" else None,
@@ -480,6 +489,7 @@ def sampled_mean(dose, frame, row, state, config):
 
 
 def _count_baseline(frame, row, state, config):
+    row = bounded_index(row, len(frame.original_ids), "frame row")
     return (Fraction(50) + sum((exact(v) for v in frame.x[row] if v is not None), Fraction(0))/4
             + exact(config.local_strength)*exact(state.local)
             + exact(config.regional_strength)*exact(state.regional) + 2*exact(state.illness))
@@ -706,14 +716,23 @@ def directed_bound(value, *, upward):
 
     Compare each candidate as a rational, including the adjacent float, so the
     decision does not depend on the rounding in numerator/denominator division.
-    All simulator geometry lies within longdouble's finite exponent range.
+    Infinite sentinels represent cuts beyond the finite local-coordinate range;
+    their direction preserves the exact membership decision.
     """
+    limit = np.finfo(np.longdouble).max
+    if value > exact(limit):
+        return np.longdouble(np.inf) if upward else limit
+    if value < -exact(limit):
+        return -limit if upward else np.longdouble(-np.inf)
     rounded = wide(value)
     direction = np.longdouble(np.inf if upward else -np.inf)
     while (exact(rounded) < value if upward else exact(rounded) > value):
         rounded = np.nextafter(rounded, direction)
     while True:
-        neighbour = np.nextafter(rounded, -direction)
+        with np.errstate(over="ignore"):
+            neighbour = np.nextafter(rounded, -direction)
+        if not np.isfinite(neighbour):
+            return rounded
         if (exact(neighbour) < value if upward else exact(neighbour) > value):
             return rounded
         rounded = neighbour
@@ -755,6 +774,15 @@ class QuadraturePiece:
     log_weights: np.ndarray
 
 
+def _log_positive(value):
+    """Log of a positive rational without overflowing/underflowing its value."""
+    value = exact(value)
+    require(value > 0, "logarithm needs a positive value")
+    exponent = value.numerator.bit_length()-value.denominator.bit_length()
+    unit = Fraction(2)**exponent
+    return np.log(wide(value/unit))+exponent*np.log(np.longdouble(2))
+
+
 @dataclass(frozen=True)
 class _ExponentialPiece:
     lower: Fraction
@@ -769,10 +797,17 @@ class _ExponentialPiece:
 
     @property
     def log_integral(self):
+        width = self.upper-self.lower
         if self.rate == 0:
-            return np.log(wide(self.upper-self.lower))
-        extent = wide(abs(self.rate)*(self.upper-self.lower))
-        return np.log(-np.expm1(-extent))-np.log(wide(abs(self.rate)))
+            return _log_positive(width)
+        with np.errstate(over="ignore", under="ignore"):
+            extent = wide(abs(self.rate)*width)
+        if extent <= 1:
+            # At zero represented extent, expm1(-x)/(-x) rounds to one.
+            # Retain the physical width rather than divide two underflows.
+            correction = np.log(-np.expm1(-extent)/extent) if extent else 0
+            return _log_positive(width)+correction
+        return np.log(-np.expm1(-extent))-_log_positive(abs(self.rate))
 
 
 def observation_log_probability(a_observed, state, config):
@@ -816,8 +851,7 @@ class AssignmentLaw:
     """
     def __init__(self, frame, row, state, config, components):
         validate_components(components)
-        row = integer_scalar(row, "frame row")
-        require(0 <= row < len(frame.original_ids), "invalid frame row")
+        row = bounded_index(row, len(frame.original_ids), "frame row")
         components = tuple(tuple(binary64_scalar(v, "support endpoint") for v in c) for c in components)
         self.tail_decay = Fraction(128)
         self.components = components
@@ -884,11 +918,19 @@ class AssignmentLaw:
 
     def quantile_coordinates(self, piece_index, u):
         """Conditional inverse transform, also used before draw serialization."""
+        piece_index = bounded_index(piece_index, len(self.pieces), "piece index")
         p = self.pieces[piece_index]
         u = np.asarray(numeric_array(u, "quantile probabilities"), dtype=np.longdouble)
         if p.rate == 0:
             return LocalCoordinates(p.lower+self.error,p.upper-p.lower,u)
-        extent = wide(abs(p.rate)*(p.upper-p.lower))
+        exact_extent = abs(p.rate)*(p.upper-p.lower)
+        with np.errstate(over="ignore", under="ignore"):
+            extent = wide(exact_extent)
+        if extent == 0:
+            # The normalized quantile rounds to its uniform limit when the
+            # entire physical decay span underflows. Retain the local draw.
+            return LocalCoordinates(p.peak+self.error, p.upper-p.lower,
+                                    -u if p.rate > 0 else u)
         t = -np.log1p(-u*(-np.expm1(-extent)))
         return LocalCoordinates(p.peak+self.error,1/abs(p.rate),(-t if p.rate > 0 else t))
 
@@ -918,6 +960,8 @@ class AssignmentLaw:
         units. Only the remainder beyond tail_decay is omitted; the harness sets
         that cutoff from a response bound, selection lower bound and tolerance.
         """
+        order = integer_scalar(order, "quadrature order")
+        require(order >= 1, "quadrature order must be positive")
         nodes, weights = leggauss(order)
         values = (nodes.astype(np.longdouble)+1)/2
         rules = []
@@ -927,7 +971,7 @@ class AssignmentLaw:
             for left, right in zip(edges[:-1], edges[1:]):
                 if p.rate == 0:
                     coordinates = LocalCoordinates(left, right-left, values)
-                    log_weights = (np.log(wide((right-left)/(p.upper-p.lower))/2)
+                    log_weights = (_log_positive((right-left)/(2*(p.upper-p.lower)))
                                    +np.log(weights)+p.log_probability)
                     rules.append(QuadraturePiece(coordinates, log_weights))
                     continue
@@ -947,7 +991,7 @@ class AssignmentLaw:
                     coordinates = LocalCoordinates(anchor, unit, values)
                     base = self.kernel_at(p, anchor)
                     log_weights = (wide(base)+wide(p.rate*unit)*values
-                                   +np.log(wide(unit)/2)+np.log(weights)-self.log_normalizer)
+                                   +_log_positive(unit/2)+np.log(weights)-self.log_normalizer)
                     rules.append(QuadraturePiece(coordinates, log_weights))
                     offset += width
         return tuple(rules)

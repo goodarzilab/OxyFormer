@@ -580,6 +580,14 @@ def _quadrature_tail_budget(frame, config, policy, groups, tolerance):
     # safeguard, not a claim that nested quadrature certifies total error.
     digits = max(0., (np.log(wide(contrast))-(math.log(tolerance.numerator)-math.log(tolerance.denominator)))/np.log(wide(10)))
     precision = int(np.ceil(digits))+40 if digits > np.finfo(float).precision-4 else 0
+    # A finite logarithm can itself exceed the native floating range for a
+    # subnormal scale on binary64-longdouble hosts. Keep such exact kernels
+    # in the Decimal integration path; do not form all-minus-infinity panels.
+    limit = exact(np.finfo(np.longdouble).max)
+    if any(abs(term.law.kernel_at(piece, endpoint+term.law.error)) > limit
+           for term in terms for piece in term.law.pieces
+           for endpoint in (piece.lower, piece.upper)):
+        precision = max(precision, int(np.ceil(digits))+40)
     for term in terms:
         term.law.tail_decay = cutoff
         term.precision = precision

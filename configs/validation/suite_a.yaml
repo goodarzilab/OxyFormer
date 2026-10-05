@@ -19,6 +19,9 @@
 # supplied values and need not fit binary64. Seeds, row indices, pair sizes and
 # max_order accept any supported scalar type representing an exact integer.
 # Counts/seeds keep their existing bounds; integration max_order is at least 32.
+# Response/adjustment row indices and assignment-piece indices use the same
+# concrete integer adapter and nonnegative alignment bounds. Standalone
+# quadrature orders likewise accept exact integral scalars, with order >= 1.
 # Domain/physical sign checks never use a value rounded from a raw input.
 # Integration convergence includes the exact displacement from rounding the
 # computed truth to its binary64 artifact; no output-ULP tolerance floor applies.
@@ -51,6 +54,9 @@
 # Integration diagnostics likewise retain finite binary64 display values.
 # LocalCoordinates/QuadraturePiece are internal arithmetic carriers, with
 # rational geometry and array nodes/weights, not serialized simulator inputs.
+# The tolerance bound does not add scalar input types: Fraction tolerances
+# are refused even for atoms/empty targets. It is a bound on admitted values,
+# not a promise that its decimal endpoint has an admitted scalar representation.
 # The tolerance floor is an exact decimal string, below IEEE extended/quad
 # subnormals and more than 100x below the registered default for every recipe.
 # Precise selected log masses and their expm1 differences remain rational
@@ -65,6 +71,8 @@
 # Nonlinear response quadrature partitions all support components into exact
 # spans <= 16 (phase span <= 8), in addition to assignment/selection cutoffs.
 # The complete declared support endpoint box remains supported.
+# Assignment normalization/panel masses take logs of scaled positive rationals;
+# subnormal scales remain positive even when longdouble has binary64 range.
 # Internal tail allowances use rational arithmetic with a directed Decimal
 # exponential bound; only the display bound is rounded upward to binary64.
 numeric_domain:
