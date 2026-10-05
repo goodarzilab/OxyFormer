@@ -56,3 +56,17 @@ def environment_record():
             'platform': platform.platform(),
             'packages': sorted((d.metadata['Name'], d.version)
                                for d in importlib.metadata.distributions() if d.metadata['Name'])}
+
+
+def verify_module_origins(repo, modules=None):
+    """Attest Python source locations as well as the supplied Git checkout."""
+    root = Path(repo).resolve(strict=True) / 'src'
+    if modules is None:
+        modules = [module for name, module in list(sys.modules.items())
+                   if name == 'oxyformer' or name.startswith('oxyformer.')]
+    for module in modules:
+        location = getattr(module, '__file__', None)
+        if location is None and getattr(module, '__path__', None) is not None:
+            continue  # a namespace package; its loaded children are checked
+        require(isinstance(location, str) and Path(location).resolve(strict=True).is_relative_to(root),
+                f'loaded oxyformer module outside --repo: {location}')

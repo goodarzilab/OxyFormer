@@ -77,6 +77,7 @@ def stage_command(task):
         f'git clone --depth 1 --branch dev {REMOTE} "$SWARM_UNIT_DIR/src"',
         'git -C "$SWARM_UNIT_DIR/src" rev-parse HEAD > "$SWARM_UNIT_DIR/code_commit.txt"',
         'export PYTHONPATH="$SWARM_UNIT_DIR/src/src"',
+        'cd "$SWARM_UNIT_DIR/src"',
         f'printf %s {encoded} > "$SWARM_UNIT_DIR/task.json"',
         f'exec {PYTHON} -m oxyformer.cli run-stage --stage {shlex.quote(task["stage"])} '
         '--repo "$SWARM_UNIT_DIR/src" --out "$SWARM_UNIT_DIR" --deps-env '

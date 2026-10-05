@@ -20,7 +20,8 @@ from oxyformer.contracts import StageRequest, StageResult
 from oxyformer.provenance import ContractError, file_hash, relative_artifact_path, require
 from .integrity import (FINGERPRINT, fingerprint_tree, post_execution_check,
                         publish_result, verify_published_tree)
-from .identity import code_identity, environment_record, scientific_fingerprint, verify_recipe
+from .identity import (code_identity, environment_record, scientific_fingerprint,
+                       verify_module_origins, verify_recipe)
 from .paths import atomic_json, atomic_write, isolated_caches, output_path
 
 
@@ -85,7 +86,7 @@ def verify_dependency_result(root, *, expected_hash=None, trees=None, active=Non
         result = StageResult.from_json(result_file.read_text())
         require(Path(request.output_dir).resolve() == root, 'dependency attempt owner mismatch')
         require(result.status == 'pass', 'dependency stage did not pass')
-        verify_published_tree(root, result, expected_hash)
+        tree = verify_published_tree(root, result, expected_hash)
         result.verify(request)
         # The request binds this dependency map and each parent's fingerprint
         # digest. Verify the entire recorded lineage, not just direct inputs.
@@ -100,9 +101,6 @@ def verify_dependency_result(root, *, expected_hash=None, trees=None, active=Non
             verify_dependency_result(parent, expected_hash=expected, trees=trees,
                                      active=active, verified=verified)
         if trees is not None:
-            tree = fingerprint_tree(root)
-            unreadable = [str(root / name) for name, entry in tree.items() if 'error' in entry]
-            require(not unreadable, 'dependency fingerprint unreadable: ' + ', '.join(unreadable))
             trees[str(root)] = tree
         verified[root] = result
         return result
@@ -151,7 +149,7 @@ def verify_continuation(task, deps):
     verify_dependency_result(deps[predecessor])
 
 
-def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, approvals=None, report=None):
+def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, approvals=None, report=None, validate_imports=None):
     out = Path(out).absolute()
     require(out.is_dir() and not out.is_symlink(), 'output must be an existing attempt directory')
     out = out.resolve(strict=True)
@@ -289,7 +287,12 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
                                      message=str(exc).strip() or type(exc).__name__)
             else:
                 require(callable(getattr(module, 'run_stage', None)), 'stage has no run_stage(StageRequest)')
+                verify_module_origins(repo, [module])
+                if validate_imports is not None:
+                    validate_imports()
                 result = module.run_stage(request)
+                if validate_imports is not None:
+                    validate_imports()
         require(isinstance(result, StageResult), 'stage did not return StageResult')
         result.verify(request)
         require(all(not (out / a.path).resolve().is_relative_to(repo) for a in result.artifacts),
