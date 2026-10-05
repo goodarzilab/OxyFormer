@@ -401,3 +401,39 @@ def test_invalid_feature_kind_is_rejected_by_merged_immutable(tmp_path, route):
             payload = json.loads(config.settings.to_json())
             payload["payload"]["feature_kinds"] = kinds
             SSLSettings.from_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize("magnitude", [5e-162, 2e-160, 1e160])
+def test_population_moments_rescale_before_variance(tmp_path, magnitude):
+    import statistics
+    view, _, config = make_case(tmp_path)
+    values = [0., magnitude] * 5
+    view = replace(view, values=tuple((value, row[1], row[2])
+                                     for value, row in zip(values, view.values)))
+    feature = fit_preprocessing(view, config.settings)[0]
+    assert feature.mean == statistics.mean(values)
+    assert feature.scale == statistics.pstdev(values)
+
+
+def test_subnormal_variance_accepts_finite_float32_stopping_target(tmp_path):
+    view, split, config = make_case(tmp_path)
+    names = tuple(f"x{i}" for i in range(30))
+    registry = replace(view.registry, rules=tuple(
+        FeatureRule(name=name, role="predictor", endpoints=("synthetic",),
+                    uses=("ssl", "nuisance"), approval_id="synthetic-fixture") for name in names))
+    spec = replace(view.spec, adjustment_schema_hash=registry.content_hash)
+    split = replace(split, spec=spec)
+    values = tuple(((0. if i % 2 == 0 else 5e-162,) + ((float(i % 2)),) * 29)
+                   if i < 6 else (8e-124,) + (.5,) * 29 for i in range(10))
+    view = replace(view, spec=spec, registry=registry, columns=names, values=values)
+    settings = replace(config.settings, feature_kinds=tuple((name, "numeric") for name in names),
+                       families=tuple((name,) for name in names), batch_size=4,
+                       max_epochs=1, mask_rate=1.)
+    reference_target = (8e-124 - 2.5e-162) / 2.5e-162
+    assert torch.isfinite(torch.tensor(reference_target, dtype=torch.float32))
+    artifact = pretrain(view, split, replace(config, settings=settings), 1103)
+    assert artifact.complete
+    state = load_checkpoint(artifact, artifact.identity)
+    feature = FeatureSpec.from_json(state["preprocessing"][0])
+    assert feature.mean == 2.5e-162 and feature.scale == 2.5e-162
+    assert state["progress"]["history"][0] == pytest.approx(reference_target / 30)

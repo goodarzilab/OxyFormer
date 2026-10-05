@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from io import BytesIO
 import json
+import math
 import os
 from pathlib import Path
 import random
@@ -184,9 +185,22 @@ def _decode(node, archive, used: set):
     name = f"tensors/{value}.npy"
     require(name not in used, "duplicate tensor reference")
     used.add(name)
-    array = np.load(BytesIO(archive.read(name)), allow_pickle=False)
-    require(type(array) is np.ndarray and array.dtype.kind in "biuf", "unsafe tensor dtype")
-    return torch.from_numpy(array.copy())
+    # Parse only the bounded header before constructing any array. np.load
+    # allocates from the shape before checking that the tensor payload exists.
+    payload = archive.read(name)
+    stream = BytesIO(payload)
+    version = np.lib.format.read_magic(stream)
+    require(version in ((1, 0), (2, 0)), "unsupported checkpoint tensor format")
+    reader = (np.lib.format.read_array_header_1_0 if version == (1, 0)
+              else np.lib.format.read_array_header_2_0)
+    shape, fortran_order, dtype = reader(stream)
+    require(dtype.kind in "biuf" and dtype.itemsize > 0, "unsafe tensor dtype")
+    require(all(dimension >= 0 for dimension in shape), "invalid checkpoint tensor size")
+    # Python integers cannot wrap when multiplying hostile dimensions.
+    size = math.prod(shape) * dtype.itemsize
+    require(size == len(payload) - stream.tell(), "checkpoint tensor size mismatch")
+    array = np.frombuffer(payload, dtype=dtype, offset=stream.tell())
+    return torch.from_numpy(array.reshape(shape, order="F" if fortran_order else "C").copy())
 
 
 def model_state_hash(state: dict) -> str:
@@ -277,6 +291,8 @@ def load_checkpoint(artifact: CheckpointArtifact, expected_identity: CheckpointI
         require(all(info.compress_type == zipfile.ZIP_STORED and
                     info.compress_size == info.file_size for info in archive.infolist()),
                 "compressed checkpoint members are unsupported")
+        require(all(0 <= info.file_size <= artifact.byte_size for info in archive.infolist()),
+                "checkpoint member size exceeds trusted artifact size")
         metadata_bytes = archive.read("metadata.json")
         metadata = json.loads(metadata_bytes)
         require(canonical_json(metadata).encode() == metadata_bytes, "noncanonical checkpoint metadata")

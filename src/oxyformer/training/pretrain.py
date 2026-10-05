@@ -191,13 +191,25 @@ def _population_moments(values):
     if all(value == values[0] for value in values):
         # True constancy must not become tiny variance through rounded summation.
         return float(values[0]), 1.0
-    # Preserve ordinary NumPy bits, but own its ambient warning/error policy.
+    # Move the largest magnitude into [1, 2) with an exact binary scale.
+    # Squaring unscaled deviations can produce a nonzero but badly rounded
+    # subnormal variance, so scaling must precede *every* variance computation.
+    exponent = math.frexp(max(abs(value) for value in values))[1] - 1
     with np.errstate(all="ignore"):
-        mean, scale = float(np.mean(values)), float(np.std(values))
-    if not math.isfinite(mean) or not math.isfinite(scale) or scale == 0.0:
-        # The stdlib accumulates exact rational moments and avoids squaring in
-        # float64. This is ddof=0, with no clipping or change of transformation.
-        mean, scale = float(statistics.mean(values)), float(statistics.pstdev(values))
+        original = np.asarray(values, dtype=np.float64)
+        scaled = np.ldexp(original, -exponent)
+        exact_scaling = np.array_equal(np.ldexp(scaled, exponent), original)
+        if exact_scaling:
+            mean = math.ldexp(float(np.mean(scaled)), exponent)
+            scale = math.ldexp(float(np.std(scaled)), exponent)
+        else:
+            # A range wider than binary64 can retain tiny residual means after
+            # cancellation. Keep the binary rescaling exact with rationals and
+            # undo it on the mean before converting back to float.
+            factor = Fraction(2) ** exponent
+            scaled = [Fraction(value) / factor for value in values]
+            mean = float(statistics.mean(scaled) * factor)
+            scale = math.ldexp(float(statistics.pstdev(scaled)), exponent)
     require(math.isfinite(mean) and math.isfinite(scale) and scale > 0,
             "population moments are not representable")
     return mean, scale

@@ -628,3 +628,34 @@ def test_checkpoint_read_stays_bounded_if_file_grows_after_stat(tmp_path, monkey
     monkeypatch.setattr(Path, "open", guarded_open)
     with pytest.raises(ContractError, match="size|hash"):
         load_checkpoint(replace(first, path=str(candidate)), first.identity)
+
+
+@pytest.mark.parametrize("shape", [(100000000000000,), (2**32, 2**32)])
+def test_npy_shape_is_bounded_before_array_allocation(tmp_path, monkeypatch, shape):
+    from io import BytesIO
+    import math
+    import zipfile
+
+    view, split, config = make_case(tmp_path)
+    first = pretrain(view, split, replace(config, max_batches=1), 1103)
+    header = BytesIO()
+    np.lib.format.write_array_header_1_0(header, {
+        "descr": "<f8", "fortran_order": False, "shape": shape})
+    archive = BytesIO()
+    with zipfile.ZipFile(first.path) as source, zipfile.ZipFile(archive, "w") as output:
+        for name in source.namelist():
+            output.writestr(name, header.getvalue() if name == "tensors/0.npy" else source.read(name))
+    data = archive.getvalue()
+    path = tmp_path / "oversized-header.ofc"
+    path.write_bytes(data)
+    descriptor = replace(first, path=str(path), sha256=sha256(data).hexdigest(), byte_size=len(data))
+    original_array = np.ndarray
+
+    def bounded_array(shape, *args, **kwargs):
+        count = math.prod(shape) if isinstance(shape, tuple) else int(shape)
+        assert count <= len(data), "NPY header requested an allocation beyond trusted archive bytes"
+        return original_array(shape, *args, **kwargs)
+
+    monkeypatch.setattr(np, "ndarray", bounded_array)
+    with pytest.raises(ContractError, match="tensor.*size"):
+        load_checkpoint(descriptor, descriptor.identity)
