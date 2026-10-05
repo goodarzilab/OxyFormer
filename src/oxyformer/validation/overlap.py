@@ -59,7 +59,7 @@ def _signed_weight_diagnostics(weights, ratios, total_weight):
 
 
 def _functional_expectations(weights, ratios, observed, shifted):
-    """Round only final expectations, after exact binary64 products and sums.
+    """Round only final expectations and differences after exact arithmetic.
 
     A finite basis can have very large, canceling weighted contributions. Raw
     target masses also avoid overflow or rounding in a floating normalization.
@@ -70,14 +70,20 @@ def _functional_expectations(weights, ratios, observed, shifted):
     ratio_masses = [w * Fraction.from_float(float(r)) for w, r in zip(masses, ratios)]
 
     def expectation(mass, column):
-        value = sum((w * Fraction.from_float(float(f)) for w, f in zip(mass, column)), Fraction(0)) / total
+        return sum((w * Fraction.from_float(float(f)) for w, f in zip(mass, column)), Fraction(0)) / total
+
+    def rounded(value):
         try:
             return float(value)
         except OverflowError as exc:
-            raise ContractError("nonfinite functional balance expectation") from exc
+            raise ContractError("nonfinite functional balance diagnostic") from exc
 
-    return (np.array([expectation(ratio_masses, column) for column in observed.T]),
-            np.array([expectation(masses, column) for column in shifted.T]))
+    left = [expectation(ratio_masses, column) for column in observed.T]
+    right = [expectation(masses, column) for column in shifted.T]
+    # Subtraction is part of the scientific diagnostic. Rounding each operand
+    # first can invent overflow even when the exact difference is representable.
+    difference = np.array([rounded(l - v) for l, v in zip(left, right)])
+    return np.array([rounded(v) for v in left]), np.array([rounded(v) for v in right]), difference
 
 
 def overlap_report(weights, ratios, observed, shifted, names, f_a, f_d):
@@ -113,14 +119,14 @@ def overlap_report(weights, ratios, observed, shifted, names, f_a, f_d):
                          "target_weights": target, "ratio_weights": ratio,
                          "signed_correction": _signed_weight_diagnostics(w[mask], r[mask], total_weight),
                          "ratio_p99": p99, "warnings": warnings}
-    left, right = _functional_expectations(weights, r, fa, fd)
-    require(bool(np.isfinite(left).all() and np.isfinite(right).all()), "nonfinite functional balance")
+    left, right, difference = _functional_expectations(weights, r, fa, fd)
+    require(bool(np.isfinite(left).all() and np.isfinite(right).all() and np.isfinite(difference).all()), "nonfinite functional balance")
     shift = float(q @ (d - a))
     require(np.isfinite(shift), "nonfinite achieved shift")
     return {"moved_fraction": float(q @ moved), "affected_fraction": float(q @ affected),
             "achieved_shift": shift, "subsets": subsets,
             "functional_balance": [dict(function=n, ratio_expectation=float(l), shifted_expectation=float(v),
-                                         difference=float(l - v)) for n, l, v in zip(names, left, right)],
+                                         difference=float(delta)) for n, l, v, delta in zip(names, left, right, difference)],
             "formulas": {"ess": "(sum v)^2 / sum(v^2), v>=0; target v=w, ratio v=w*r",
                          "signed": "c_i=(w_i/W)*(r_i-1); max(abs(c))/sum(abs(c)); no ESS",
                          "balance": "E_T[r*f(A,X)] versus E_T[f(d(A,X),X)]"},

@@ -1426,3 +1426,51 @@ def test_signed_subset_concentration_survives_normalization_underflow(ratio_scal
         assert signed['signed_sum'] == signed['absolute_mass']
     else:
         assert signed['absolute_mass'] == 0.  # global mass is below binary64
+
+
+@pytest.mark.parametrize('sign', [-1., 1.])
+def test_finite_exact_balance_difference_must_not_overflow_after_rounding(case, tmp_path, monkeypatch, sign):
+    b, m, r = case
+    bound = float.fromhex('0x1.fffffffffffffp+1023')
+    spacing = 2. ** 971
+    b = replace(b, balance_basis_id='frozen large-scale piecewise function of A,X',
+        balance_names=('large finite balance',),
+        ratios=((2.,) * 20 + (1.,) * 20,) * len(b.seed_ids),
+        balance_observed=((sign * bound,),) * 10 + ((sign * (bound - spacing),),) * 10 + ((sign,),) * 20,
+        balance_shifted=((-sign * spacing,),) * 20 + ((sign * 2.,),) * 20)
+    report = evaluate_case((b, m, r))
+    assert report['state'] == 'released', report['gates']
+    for overlap in report['diagnostics']['overlap_by_seed'].values():
+        balance = overlap['functional_balance'][0]
+        assert balance['ratio_expectation'] == sign * bound
+        assert balance['shifted_expectation'] == -sign * spacing / 2
+        assert balance['difference'] == sign * bound
+    request = make_request(tmp_path, (b, m, r), monkeypatch)
+    result = run_stage(request)
+    assert result.status == 'pass'
+    result.verify(request)
+    saved = json.loads((Path(request.output_dir) / 'report.json').read_text(encoding='utf-8'))
+    assert saved['state'] == 'released'
+
+
+@pytest.mark.parametrize('status,expected', [('fail', 'failed'), ('blocked', 'blocked'), ('pass', 'missing')])
+def test_upstream_negative_status_survives_absent_output(case, tmp_path, monkeypatch, status, expected):
+    b, m, r = case
+    first = r.items[0]
+    shutil.rmtree(first.request.output_dir)
+    artifacts = first.result.artifacts if status == 'pass' else ()
+    message = 'synthetic upstream scientific stop'
+    first = replace(first, result=replace(first.result, status=status, artifacts=artifacts, message=message))
+    r = replace(r, items=(first,) + r.items[1:])
+    report = evaluate_case((b, m, r))
+    gate = next(g for g in report['gates'] if g.get('task_id') == first.task_id)
+    assert gate['status'] == expected
+    if status != 'pass':
+        assert message in gate['reason']
+    assert report['state'] == expected
+    assert not report['releasable']
+    assert len(report['estimators']) == 2
+    request = make_request(tmp_path, (b, m, r), monkeypatch)
+    result = run_stage(request)
+    assert result.status == ('fail' if status == 'fail' else 'blocked')
+    result.verify(request)

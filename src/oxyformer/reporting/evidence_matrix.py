@@ -252,6 +252,11 @@ def evaluate(bundle, manifest, receipts, approvals, config_hash):
                     verified_coverage.append(receipt)
             except FileNotFoundError:
                 status, reason = "missing", "upstream input or artifact file absent"
+                if receipt.result.status != "pass":
+                    # An authenticated negative receipt is still a scientific
+                    # stop when its producer never created an output directory.
+                    status = {"fail": "failed", "blocked": "blocked"}[receipt.result.status]
+                    reason = f"{receipt.result.message}; {reason}"
             gates.append({"gate": task.gate, "task_id": task.task_id, "status": status, "reason": reason})
         evidence_gates, report["coverage_evidence"] = coverage_evidence(bundle, manifest, verified_coverage)
         gates.extend(evidence_gates)

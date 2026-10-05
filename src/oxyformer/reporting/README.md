@@ -186,3 +186,10 @@ to zero without erasing a subset's scale-independent ESS or concentration.
 These remain diagnostics; no scientific acceptance threshold is changed.
 Immutable publication requires same-directory hard-link support in output_dir;
 an unavailable publication primitive returns failure without artifact references.
+
+Functional balance differences are formed from the exact expectations before
+rounding each published diagnostic to binary64. A truly unrepresentable
+expectation or difference still refuses release and retains authenticated
+estimates. Missing output files do not erase an authenticated upstream failed
+or blocked receipt's status and explanation; a passing receipt with missing
+output remains missing and cannot release.
