@@ -49,7 +49,9 @@ def exposure_design_inputs():
         names = [f"b{i:02}" for i in range(10)]
         sealed = set(sorted(names, key=lambda b: sha256(canonical_json([1103, county, b]).encode()).hexdigest())[:2])
         for block, name in enumerate(names):
-            for dose in (range(12) if name in sealed else range(1, 11)):
+            # High-altitude synthetic bins keep the approved 300 m relief
+            # screen while needing only four interior doses per subblock.
+            for dose in (range(100, 106) if name in sealed else range(101, 105)):
                 oid = f"{county}-{name}-{dose:02}"
                 # Invert the fixed formula only to place a synthetic exposure
                 # gradient inside each bin; the forward service computes A.
