@@ -20,7 +20,7 @@ from oxyformer.validation.analytic_truth import UniformShiftTruth
 from oxyformer.validation.scm import (
     AssignmentLaw, CovariateFrame, LatentState, SCMConfig, adjustment_key,
     latent_states, observation_probabilities, observation_log_probability, structural_mean, validate_count_rates, count_event_rate,
-    LocalCoordinates, exact, exact_shift_intervals, wide, observation_transition_points,
+    LocalCoordinates, exact, exact_shift_intervals, wide, observation_transition_points, effect, _count_baseline,
     validate_numeric, validate_policy_domain, validate_seed, REGISTERED_NUMERIC_BOX, NUMERIC_DOMAIN, NUMERIC_MARGIN,
 )
 
@@ -141,15 +141,12 @@ def _sample_observations(frame, config, policy, seed):
             law = AssignmentLaw(frame, i, state, config, support[frame.support_keys[i]])
             # A genuine point mass at the first lower boundary, never jittered.
             atom = config.assignment == "atoms" and rng.random() < .5
-            if count_scenario:
-                if atom:
-                    true_dose = exact(law.components[0][0])
-                    dose = float(true_dose+law.error)
-                else:
-                    dose, true_dose = law.sample_count_dose(rng)
+            if atom:
+                true_dose = exact(law.components[0][0])
+                dose = float(true_dose+law.error)
             else:
-                dose = law.components[0][0]+error if atom else law.sample(rng)
-                true_dose = None
+                # Retain true dose for continuous endpoints as well as counts.
+                dose, true_dose = law.sample_count_dose(rng)
             pflag, psurvey, _ = observation_probabilities(dose, state, config)
             geographies[geo] = (state, dose, true_dose, bool(rng.random() < pflag), bool(rng.random() < psurvey), rng.normal())
         state, dose, true_dose, flag, survey, geo_noise = geographies[geo]
@@ -171,7 +168,7 @@ def _sample_observations(frame, config, policy, seed):
             denominator = float(100 * factor)
             outcome = count / denominator
         else:
-            mean = float(structural_mean(dose-state.error, frame, i, state, config))
+            mean = float(structural_mean(wide(true_dose), frame, i, state, config))
             outcome = mean + config.noise_sd * (geo_noise + clusters[cluster] + rng.normal()) / np.sqrt(3)
         cov = []
         if config.local_confounding == "measured":
@@ -266,12 +263,7 @@ def _integration_breakpoints(terms, components, delta, config, shift_intervals):
     return boundaries
 
 
-def _posterior_mean(at, terms, frame, config):
-    if not isinstance(at,LocalCoordinates):
-        # Ordinary float queries have no hidden offset. Give each its own anchor.
-        values = np.asarray(at)
-        return np.array([_posterior_mean(LocalCoordinates(exact(a),exact(1),np.array([0.])),
-                                         terms,frame,config)[0] for a in values])
+def _posterior_weights(at, terms, config):
     rounded = at.rounded()
     candidates = []
     for index,term in enumerate(terms):
@@ -301,8 +293,47 @@ def _posterior_mean(at, terms, frame, config):
     log_weights -= np.max(log_weights,axis=0)
     weights = np.exp(log_weights)
     weights /= weights.sum(axis=0)
-    means = np.array([structural_mean(rounded-float(t.law.error),frame,t.row,t.state,config) for t in terms])
-    return np.sum(weights*means,axis=0)
+    return weights
+
+
+def _posterior_mean(at, terms, frame, config):
+    if not isinstance(at, LocalCoordinates):
+        return np.array([_posterior_mean(LocalCoordinates(exact(a), exact(1), np.array([0.])),
+                                         terms, frame, config)[0] for a in np.asarray(at)])
+    weights = _posterior_weights(at, terms, config)
+    means = np.array([structural_mean(at.rounded()-float(t.law.error), frame, t.row, t.state, config)
+                      for t in terms])
+    return np.sum(weights*means, axis=0)
+
+
+def _effect_values(at, term, config):
+    return effect(at.rounded()-wide(term.law.error)-config.migration*term.state.illness, config)
+
+
+def _causal_contrast(factual, shifted, term, config):
+    # The dose-independent baseline cancels algebraically, before any rounding
+    # or denominator amplification can erase a small, meaningful intervention.
+    change = _effect_values(shifted, term, config)-_effect_values(factual, term, config)
+    return config.registration_probability*change/wide(term.state.denominator_factor)
+
+
+def _posterior_contrast(factual, shifted, terms, frame, config):
+    factual_weights = _posterior_weights(factual, terms, config)
+    shifted_weights = _posterior_weights(shifted, terms, config)
+    difference = shifted_weights-factual_weights
+    baselines = [exact(config.registration_probability)*_count_baseline(frame, t.row, t.state, config)
+                 /t.state.denominator_factor for t in terms]
+    # A common baseline cancels because both posterior distributions have unit
+    # mass. Subtract it exactly rather than amplifying their rounding residual.
+    centered = np.array([wide(b-baselines[0]) for b in baselines])
+    baseline_change = np.sum(difference*centered[:, None], axis=0)
+    effect_change = np.zeros(len(factual.values), dtype=np.longdouble)
+    for i, term in enumerate(terms):
+        factual_effect = (config.registration_probability*_effect_values(factual, term, config)
+                          /wide(term.state.denominator_factor))
+        effect_change += (shifted_weights[i]*_causal_contrast(factual, shifted, term, config)
+                          +difference[i]*factual_effect)
+    return baseline_change+effect_change
 
 
 def _integrate(frame, config, policy, groups, order, boundaries_by_key, eligible_by_key):
@@ -326,10 +357,8 @@ def _integrate(frame, config, policy, groups, order, boundaries_by_key, eligible
                 if moved.any():
                     factual = coordinates.subset(moved)
                     shifted = factual.shifted(policy.delta_mmhg)
-                    observed[moved] = (_posterior_mean(shifted,terms,frame,config)
-                                       -_posterior_mean(factual,terms,frame,config))
-                    causal[moved] = (structural_mean(shifted.rounded()-float(term.law.error),frame,term.row,term.state,config)
-                                     -structural_mean(factual.rounded()-float(term.law.error),frame,term.row,term.state,config))
+                    observed[moved] = _posterior_contrast(factual,shifted,terms,frame,config)
+                    causal[moved] = _causal_contrast(factual,shifted,term,config)
                 log_weights = term.log_weight+rule.log_weights+observation_log_probability(points,term.state,config)
                 local_log_mass = logsumexp(log_weights)
                 weights = np.exp(log_weights-log_weights.max())
