@@ -1,8 +1,5 @@
-"""Read-only fingerprints of attempt states, without following links.
-
-Identity binds entries, types, modes, sizes, content hashes and symlink targets.
-Timestamps and inode numbers are deliberately excluded: an identical state is
-an identical consumer input, even after a rewrite. This is not a write log.
+"""Fingerprint entries, types, modes, sizes, bytes and symlink targets.
+Ignore timestamps and inodes; compare states, not transient write history.
 """
 from contextlib import contextmanager
 from dataclasses import replace

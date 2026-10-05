@@ -1,8 +1,5 @@
-"""Pure campaign expansion. Returns coordinator units; never submits jobs.
-
-A campaign spec is retained in the expansion so validation can independently
-rederive every required work slice and collector edge. Code prerequisite IDs go
-straight into `needs`: coordinator code completion already means merged into dev.
+"""Expand coordinator units without submission. Retain the spec to rederive
+all slices and collector edges. Code prerequisites in needs are merge barriers.
 """
 from copy import deepcopy
 from decimal import Decimal

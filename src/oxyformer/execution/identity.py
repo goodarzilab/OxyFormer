@@ -1,8 +1,5 @@
-"""Recipe fingerprint v2: all tracked files except non-plan documentation.
-
-The scope is fixed here, never selected by a task or recipe. Every file under
-src/, scripts/ and docs/plan/ is included. Only *.md files elsewhere are
-excluded; Python files remain importable even if placed under docs/.
+"""Recipe fingerprint v2 covers tracked files except *.md outside src/,
+scripts/ and docs/plan/. Tasks cannot override this scope.
 """
 import importlib.metadata
 from hashlib import new as new_hash, sha256
