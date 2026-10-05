@@ -1,4 +1,9 @@
 """Expand a reviewed finite campaign spec; output only, never dispatch."""
+import sys
+if not sys.dont_write_bytecode:
+    print('blocked: bytecode-disabled startup required; use python -B with PYTHONDONTWRITEBYTECODE=1', file=sys.stderr)
+    raise SystemExit(2)
+
 import argparse
 import os
 from pathlib import Path
