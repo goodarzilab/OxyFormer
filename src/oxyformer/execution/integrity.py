@@ -11,7 +11,7 @@ import stat
 import tempfile
 
 from oxyformer.contracts import StageResult
-from oxyformer.provenance import ArtifactRecord, canonical_json, require
+from oxyformer.provenance import ArtifactRecord, ContractError, canonical_json, require
 from .paths import atomic_json, atomic_write, output_path, temporary_path
 
 FINGERPRINT = "_execution/fingerprint.json"
@@ -57,6 +57,14 @@ def record_taints(check):
                 pass  # Taint is permanent; a later observer cannot clear it.
 
 
+class InputChanged(ContractError):
+    """A reader observed a change, as distinct from invalid input or I/O failure."""
+
+    def __init__(self, path, message):
+        self.path = Path(path)
+        super().__init__(f'{message}: {path}')
+
+
 def _stable(metadata):
     return (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_size,
         metadata.st_mtime_ns, metadata.st_ctime_ns)
@@ -87,12 +95,18 @@ def open_regular(path):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     with os.fdopen(fd, 'rb') as stream:
         opened = os.fstat(stream.fileno())
-        require(stat.S_ISREG(opened.st_mode) and _stable(opened) == _stable(before),
-            f'input changed before reading: {path}')
+        if not stat.S_ISREG(opened.st_mode) or _stable(opened) != _stable(before):
+            raise InputChanged(path, 'input changed before reading')
         yield stream
-        require(_stable(os.fstat(stream.fileno())) == _stable(before)
-            and _stable(regular_file_stat(path)) == _stable(before),
-            f'input changed while reading: {path}')
+        try:
+            after = regular_file_stat(path)
+        except ContractError as exc:
+            raise InputChanged(path, 'input type or directory changed while reading') from exc
+        except FileNotFoundError as exc:
+            raise InputChanged(path, 'input removed while reading') from exc
+        if (_stable(os.fstat(stream.fileno())) != _stable(before)
+                or _stable(after) != _stable(before)):
+            raise InputChanged(path, 'input changed while reading')
 
 
 def read_regular(path):
@@ -150,11 +164,11 @@ def fingerprint_tree(root, *, exclude=()):
                 fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
                 with os.fdopen(fd, 'rb') as stream:
                     if _stable(os.fstat(stream.fileno())) != _stable(before):
-                        raise OSError('entry changed before hashing')
+                        raise InputChanged(path, 'entry changed before hashing')
                     for chunk in iter(lambda: stream.read(1024 * 1024), b''):
                         digest.update(chunk)
                     if _stable(os.fstat(stream.fileno())) != _stable(before):
-                        raise OSError('entry changed while hashing')
+                        raise InputChanged(path, 'entry changed while hashing')
                 entry['sha256'] = digest.hexdigest()
             elif stat.S_ISDIR(kind):
                 with os.scandir(path) as children:
@@ -164,8 +178,12 @@ def fingerprint_tree(root, *, exclude=()):
                     for name in reversed(names))
                 return
             if _stable(path.lstat()) != _stable(before):
-                raise OSError('entry changed while fingerprinting')
-        except OSError as exc:
+                raise InputChanged(path, 'entry changed while fingerprinting')
+        except (OSError, InputChanged) as exc:
+            if isinstance(exc, InputChanged):
+                entry['changed'] = True
+            if isinstance(exc, FileNotFoundError):
+                entry['missing'] = True
             entry['error'] = f'{type(exc).__name__}: {exc}'
 
     while pending:
@@ -174,9 +192,16 @@ def fingerprint_tree(root, *, exclude=()):
             visit(path, relative)
         else:
             try:
-                if _stable(path.lstat()) != _stable(before):
-                    raise OSError('entry changed while fingerprinting')
-            except OSError as exc:
+                after = path.lstat()
+                if _stable(after) != _stable(before):
+                    if _stable(after)[:4] == _stable(before)[:4]:
+                        entries[relative]['timestamps_only'] = True
+                    raise InputChanged(path, 'entry changed while fingerprinting')
+            except (OSError, InputChanged) as exc:
+                if isinstance(exc, InputChanged):
+                    entries[relative]['changed'] = True
+                if isinstance(exc, FileNotFoundError):
+                    entries[relative]['missing'] = True
                 entries[relative]['error'] = f'{type(exc).__name__}: {exc}'
     return entries
 
@@ -206,6 +231,36 @@ def publication_view(entries):
 
 def publication_tree(root):
     return publication_view(fingerprint_tree(root))
+
+
+def _settled_publication_tree(root):
+    """Allow our own control-directory timestamps to settle, never rebaseline.
+
+    Weka can expose pre-rename mtime/ctime once after _replace_control, even
+    after directory fsync. Only retry a directory-read instability in the
+    runner-owned _execution directory. Every entry, byte, mode and size must
+    remain identical to the first observation; other errors are not retried.
+    Upstream fingerprinting remains strict and never calls this helper.
+    """
+    first = publication_tree(root)
+    control = first.get('_execution', {})
+    if not (control.get('type') == stat.S_IFDIR and control.get('timestamps_only')
+            and 'error' in control):
+        return first
+    expected = dict(first, _execution={key: value for key, value in control.items()
+        if key not in ('error', 'changed', 'timestamps_only')})
+    for _ in range(3):
+        current = publication_tree(root)
+        if current == expected:
+            return current
+        detail = current.get('_execution', {})
+        if not (detail.get('type') == stat.S_IFDIR and detail.get('timestamps_only') and 'error' in detail):
+            break
+        normalized = dict(current, _execution={key: value for key, value in detail.items()
+            if key not in ('error', 'changed', 'timestamps_only')})
+        if normalized != expected:
+            break
+    return first  # Preserve the refusal and the original evidence.
 
 
 def _restore_control_permissions(path):
@@ -281,7 +336,7 @@ def publish_result(root, result, *, owned_controls=False):
     try:
         atomic_json(root, FINGERPRINT, {})
         for _ in range(3):
-            entries = publication_tree(root)
+            entries = _settled_publication_tree(root)
             errors = [str(root / name) for name, entry in entries.items() if 'error' in entry]
             require(not errors, 'publication fingerprint unreadable: ' + ', '.join(errors))
             value = {'schema_version': 1, 'attempt': str(root),
@@ -290,7 +345,7 @@ def publish_result(root, result, *, owned_controls=False):
                 'control_modes': {name: stat.S_IMODE((root / name).lstat().st_mode)
                     for name in PUBLICATION_EXCLUSIONS}}
             _replace_control(root, FINGERPRINT, canonical_json(value))
-            if publication_tree(root) == entries:
+            if _settled_publication_tree(root) == entries:
                 break
         else:
             raise ValueError('attempt changed during fingerprint publication')
@@ -298,7 +353,7 @@ def publish_result(root, result, *, owned_controls=False):
             lineage=result.artifacts[0].lineage, kind='attempt_fingerprint')
         published = replace(result, artifacts=(*result.artifacts, fingerprint))
         _replace_control(root, RESULT, published.to_json())
-        require(publication_tree(root) == entries, 'attempt changed during result publication')
+        require(_settled_publication_tree(root) == entries, 'attempt changed during result publication')
         record_publication(root, published)
         return published
     except BaseException as exc:
