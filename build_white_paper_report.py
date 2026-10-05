@@ -893,7 +893,7 @@ a {{ color: inherit; text-decoration: none; }}
 }}
 </style>
 </head>
-<body>
+<body><aside role="note"><strong>EXPLORATORY LEGACY BENCHMARK — v2 release gates have not been evaluated.</strong></aside>
 <div class="layout">
   <aside class="sidebar">
     <div class="eyebrow" style="color:#5eead4;">White Paper</div>
@@ -932,5 +932,9 @@ sections.forEach((section) => observer.observe(section));
 
 
 if __name__ == '__main__':
+    import sys
+    if "--v2-request" in sys.argv:
+        from oxyformer.reporting.stage import request_main
+        raise SystemExit(request_main())
     output_path = build_report(Path('.'))
     print(output_path)
