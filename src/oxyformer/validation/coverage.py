@@ -324,54 +324,74 @@ def execute_draw(draw, frame, scenario, template, recipe, root, deadline):
     return record
 
 
-def _run_batch(request: StageRequest, started: float) -> StageResult:
+def prepare_batch(request: StageRequest):
+    """Validate the exact leaf inputs without generating outcomes or fitting.
+
+    Campaign admission measures this same path using the fully expanded lock
+    and the requested leaf size; unlocked profiles cannot supply its cost.
+    """
     from oxyformer.validation.campaign import load_lock, validate_recipe, validate_leaf_task, fingerprint
+    request.verify_inputs()
+    require(request.stage in ("coverage", "simulation-smoke"), "unsupported coverage stage")
+    config, task = yaml.safe_load(Path(request.config_path).read_text()), read_json(request.task_path)
+    require(task["stage"] == request.stage, "stage mismatch")
+    parameters = task["parameters"]
+    mode = parameters["mode"]
+    require(mode in ("smoke", "profile", "screening", "final"), "unknown repetition mode")
+    require((request.stage == "simulation-smoke") == (mode in ("smoke", "profile")), "stage/mode mismatch")
+    if mode in ("screening", "final"):
+        lock = load_lock(request, config, task)
+        validate_leaf_task(request, config, task, lock)
+        recipe = lock["recipe"]
+        expected_task = next((t for t in lock["batches"] if t["batch_id"] == parameters["batch_id"]), None)
+        require(expected_task is not None and expected_task["mode"] == mode, "undeclared batch")
+        require(parameters["draws"] == expected_task["draws"], "batch draw drift")
+        require(parameters["scenario"] == expected_task["scenario"], "batch scenario drift")
+        require(parameters["wall_seconds"] == expected_task["wall_seconds"], "batch budget drift")
+    else:
+        recipe = parameters["recipe"]
+        lock = None
+    production = mode != "smoke"
+    validate_recipe(recipe, production=production)
+    template_path = dependency(request, config, parameters["endpoint_input"])
+    frame_path = dependency(request, config, parameters["frame_input"])
+    template = nested_cv.PreparedEndpoint.from_json(template_path.read_text())
+    frame = CovariateFrame.from_json(frame_path.read_text())
+    require(recipe["endpoint_hash"] == template.content_hash and recipe["frame_hash"] == frame.content_hash,
+            "recipe input drift")
+    scenario = SCMConfig(**parameters["scenario"])
+    if lock:
+        require(parameters["scenario"] in lock["scenario_family"], "scenario family drift")
+    draws = parameters["draws"]
+    validate_draws(draws)
+    require(all(d["scenario"] == scenario.name for d in draws), "draw/scenario mismatch")
+    seconds = finite(parameters["wall_seconds"], "batch wall seconds")
+    require(seconds > 0, "positive batch budget required")
+    root = Path(request.output_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    stamps = ({k: lock[k] for k in ("scientific_fingerprint", "environment_hash")}
+              if lock else fingerprint())
+    return task, recipe, lock, template, frame, scenario, seconds, stamps
+
+
+def _run_batch(request: StageRequest, started: float) -> StageResult:
     try:
-        request.verify_inputs()
-        require(request.stage in ("coverage", "simulation-smoke"), "unsupported coverage stage")
-        config, task = yaml.safe_load(Path(request.config_path).read_text()), read_json(request.task_path)
-        require(task["stage"] == request.stage, "stage mismatch")
+        task, recipe, lock, template, frame, scenario, seconds, stamps = prepare_batch(request)
         parameters = task["parameters"]
-        mode = parameters["mode"]
-        require(mode in ("smoke", "profile", "screening", "final"), "unknown repetition mode")
-        require((request.stage == "simulation-smoke") == (mode in ("smoke", "profile")), "stage/mode mismatch")
-        if mode in ("screening", "final"):
-            lock = load_lock(request, config, task)
-            validate_leaf_task(request, config, task, lock)
-            recipe = lock["recipe"]
-            expected_task = next((t for t in lock["batches"] if t["batch_id"] == parameters["batch_id"]), None)
-            require(expected_task is not None and expected_task["mode"] == mode, "undeclared batch")
-            require(parameters["draws"] == expected_task["draws"], "batch draw drift")
-            require(parameters["scenario"] == expected_task["scenario"], "batch scenario drift")
-            require(parameters["wall_seconds"] == expected_task["wall_seconds"], "batch budget drift")
-        else:
-            recipe = parameters["recipe"]
-            lock = None
+        mode, draws = parameters["mode"], parameters["draws"]
         production = mode != "smoke"
-        validate_recipe(recipe, production=production)
-        template_path = dependency(request, config, parameters["endpoint_input"])
-        frame_path = dependency(request, config, parameters["frame_input"])
-        template = nested_cv.PreparedEndpoint.from_json(template_path.read_text())
-        frame = CovariateFrame.from_json(frame_path.read_text())
-        require(recipe["endpoint_hash"] == template.content_hash and recipe["frame_hash"] == frame.content_hash,
-                "recipe input drift")
-        scenario = SCMConfig(**parameters["scenario"])
-        if lock:
-            require(parameters["scenario"] in lock["scenario_family"], "scenario family drift")
-        draws = parameters["draws"]
-        validate_draws(draws)
-        require(all(d["scenario"] == scenario.name for d in draws), "draw/scenario mismatch")
-        seconds = finite(parameters["wall_seconds"], "batch wall seconds")
-        require(seconds > 0, "positive batch budget required")
         root = Path(request.output_dir)
-        root.mkdir(parents=True, exist_ok=True)
+        setup_seconds = time.monotonic() - started
         records, repetition_seconds = [], []
         for draw in draws:
             draw_started = time.monotonic()
             destination = output_path(root, "repetitions/" + draw["repetition_id"])
             require(not destination.exists(), "repetition was already attempted; use declared continuation, never redraw")
             destination.mkdir(parents=True)
-            record = execute_draw(draw, frame, scenario, template, recipe, destination, started + seconds)
+            # A locked leaf's wall budget is a planning estimate. Slurm owns
+            # the hard limit; a late draw is retained instead of truncated here.
+            deadline = math.inf if lock else started + seconds
+            record = execute_draw(draw, frame, scenario, template, recipe, destination, deadline)
             atomic_json(destination, "result.json", record)
             repetition_seconds.append(time.monotonic() - draw_started)
             records.append(record)
@@ -383,13 +403,9 @@ def _run_batch(request: StageRequest, started: float) -> StageResult:
             "lock_hash": digest(lock) if lock else None, "batch_id": parameters.get("batch_id"),
             "scenario": scenario.to_dict()["payload"], "draws": draws, "records": records, "summary": summary,
             "certifies_production_coverage": False}
-        # Locked execution already verified this fingerprint in load_lock.
-        # Repeating the full checkout/environment scan would add an unprofiled
-        # second scan to every locked leaf.
-        stamps = ({k: lock[k] for k in ("scientific_fingerprint", "environment_hash")}
-                  if lock else fingerprint())
         timing = {"wall_seconds": time.monotonic() - started, "gpu_seconds": 0., "device": "cpu",
-            "measurement_scope": "before_final_publication",
+            "measurement_scope": "before_final_publication", "setup_seconds": setup_seconds,
+            "admitted_budget_seconds": seconds,
             "production_equivalent": production, "recipe_hash": digest(recipe),
             "complete_repetition_seconds": [seconds for r, seconds in zip(records, repetition_seconds) if r["status"] == "success"],
             "complete": summary["complete"], "all_successful": summary["counts"]["success"] == len(draws), **stamps}
@@ -400,6 +416,33 @@ def _run_batch(request: StageRequest, started: float) -> StageResult:
     except (ContractError, KeyError, TypeError, ValueError, OSError) as exc:
         return StageResult(request_hash=request.content_hash, status="blocked", artifacts=(), message=str(exc) or type(exc).__name__)
 
+
+
+def record_runtime(request, completed, started, task):
+    """Record the measured complete batch, including publication/verification.
+
+    This small telemetry receipt is emitted after measurement; its own write
+    and the outer executor are explicitly outside the measured interval.
+    Profiles additionally time this receipt, so admission includes its cost.
+    """
+    if not completed.artifacts:
+        return completed
+    parameters = task["parameters"]
+    budget = finite(parameters["wall_seconds"], "admitted budget")
+    aggregate = read_json(Path(request.output_dir) / "result.json")
+    elapsed = time.monotonic() - started
+    runtime = {"measurement_scope": "complete_batch_return", "wall_seconds": elapsed,
+        "admitted_budget_seconds": budget, "budget_exceeded": elapsed > budget,
+        "overrun_seconds": max(0., elapsed - budget), "batch_id": parameters.get("batch_id"),
+        "lock_hash": aggregate["lock_hash"], "request_hash": completed.request_hash,
+        "excluded": ["runtime receipt publication", "outer executor and scheduler"]}
+    path = atomic_json(request.output_dir, "runtime.json", runtime)
+    artifact = ArtifactRecord(path="runtime.json", sha256=file_hash(path),
+                              lineage=completed.artifacts[0].lineage, kind="runtime")
+    message = completed.message
+    if runtime["budget_exceeded"]:
+        message += f"; planning budget overrun {runtime['overrun_seconds']:.6f}s (draws retained)"
+    return replace(completed, artifacts=(*completed.artifacts, artifact), message=message)
 
 
 def run_stage(request: StageRequest) -> StageResult:
@@ -416,7 +459,8 @@ def run_stage(request: StageRequest) -> StageResult:
         request.verify_inputs()
         task = read_json(request.task_path)
         if task.get("parameters", {}).get("mode") != "profile":
-            return _run_batch(request, started)
+            completed = _run_batch(request, started)
+            return record_runtime(request, completed, started, task)
         root = Path(request.output_dir)
         root.mkdir(parents=True, exist_ok=True)
         destination = output_path(root, "_profiled")
@@ -424,6 +468,7 @@ def run_stage(request: StageRequest) -> StageResult:
         destination.mkdir()
         profiled_request = replace(request, output_dir=str(destination))
         completed = _run_batch(profiled_request, started)
+        completed = record_runtime(profiled_request, completed, started, task)
         if not completed.artifacts:
             return StageResult(request_hash=request.content_hash, status=completed.status,
                                artifacts=(), message=completed.message)
@@ -431,7 +476,9 @@ def run_stage(request: StageRequest) -> StageResult:
         elapsed = time.monotonic() - started
         result = read_json(destination / "result.json")
         timing = read_json(destination / "timing.json")
-        timing.update(wall_seconds=elapsed, measurement_scope="complete_stage_return",
+        timing.update(wall_seconds=elapsed,
+                      publication_verification_seconds=elapsed - timing["setup_seconds"] - math.fsum(timing["complete_repetition_seconds"]),
+                      measurement_scope="complete_stage_return",
                       profiled_request_hash=profiled_request.content_hash)
         result["profiled_request_hash"] = profiled_request.content_hash
         extra = tuple(replace(a, path="_profiled/" + a.path) for a in completed.artifacts)

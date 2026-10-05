@@ -2,9 +2,12 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 import json
 import math
 from pathlib import Path
+from tempfile import TemporaryDirectory
+import time
 
 import yaml
 import torch
@@ -17,12 +20,12 @@ from oxyformer.execution import identity
 from oxyformer.execution.campaign import expand_campaign, validate_plan, concrete_id
 from oxyformer.provenance import ContractError, file_hash, require
 from oxyformer.validation.coverage import (MIN_REPETITIONS, RETRY_RULES, dependency, digest,
-    finite, integer, publish, read_json, repetition_plan, summarize, validate_draws)
+    finite, integer, publish, read_json, repetition_plan, summarize, validate_draws, prepare_batch, atomic_json)
 from oxyformer.validation.scm import SCMConfig, CovariateFrame
 
 REGISTRY = Path(__file__).parents[3] / "configs/validation/final_scenarios.yaml"
 REPOSITORY = Path(__file__).parents[3]
-LEAF_OUTPUTS = ["result.json", "timing.json", "artifact_manifest.json"]
+LEAF_OUTPUTS = ["result.json", "timing.json", "artifact_manifest.json", "runtime.json"]
 COLLECT_OUTPUTS = ["result.json", "gate.json", "artifact_manifest.json"]
 
 
@@ -101,10 +104,74 @@ def _profile(request, config, reference, scenario, recipe, stamps):
     require(len(measured) == len(declared) and all(finite(t, "profile time") > 0 for t in measured), "invalid profile times")
     wall = finite(timing["wall_seconds"], "profile wall seconds")
     require(wall >= math.fsum(measured), "profile wall time does not include its repetitions")
+    setup = finite(timing["setup_seconds"], "profile setup seconds")
     overhead = wall - math.fsum(measured)
-    return {"seconds_per_repetition": max(measured), "leaf_overhead_seconds": overhead,
-            "result_hash": file_hash(result_path),
+    require(0 <= setup <= overhead, "invalid profile setup/finalization accounting")
+    return {"seconds_per_repetition": max(measured), "setup_seconds": setup,
+            "publication_verification_seconds": overhead - setup,
+            "profile_repetitions": len(declared), "result_hash": file_hash(result_path),
             "timing_hash": file_hash(timing_path), "draws": declared}
+
+
+def _admit_locked_leaves(request, config, lock, plans):
+    """Measure setup on the actual expanded shapes before releasing the lock.
+
+    No draws run here. Private candidate inputs exercise the same validation
+    and parsing used by coverage.run_stage, including the complete lock and
+    expansion. The temporary passing screening gate is solely a preflight cost
+    fixture, is never emitted, and cannot authorize a scientific leaf.
+    """
+    Path(request.output_dir).mkdir(parents=True, exist_ok=True)
+    measurements = []
+    with TemporaryDirectory(prefix=".admission-", dir=request.output_dir) as temporary:
+        root = Path(temporary)
+        lock_root = root / "lock"
+        lock_root.mkdir()
+        atomic_json(lock_root, "recipe_lock.json", lock)
+        atomic_json(lock_root, "expanded_units.json", {"lock_hash": digest(lock), "plans": plans})
+        screening_root = root / "screening-cost-fixture"
+        screening_root.mkdir()
+        atomic_json(screening_root, "gate.json", {"pass": True, "mode": "screening", "lock_hash": digest(lock)})
+        for plan in plans:
+            measured_shapes = set()
+            for leaf in plan["tasks"][:-1]:
+                parameters = leaf["parameters"]
+                size = len(parameters["draws"])
+                name = parameters["scenario"]["name"]
+                shape = (name, size)
+                if shape in measured_shapes:
+                    continue
+                measured_shapes.add(shape)
+                sample = root / leaf["id"]
+                sample.mkdir()
+                dependencies = dict(config["dependencies"])
+                dependencies[leaf["recipe_lock"]["dependency"]] = str(lock_root)
+                if "screening_gate" in parameters:
+                    dependencies[parameters["screening_gate"]["dependency"]] = str(screening_root)
+                sample_config = {**config, "dependencies": dependencies}
+                config_path = atomic_json(sample, "config.json", sample_config)
+                task_path = atomic_json(sample, "task.json", leaf)
+                paths = tuple(dict.fromkeys(str(Path(dependencies[dep]) / relative)
+                    for dep, relatives in plan["spec"]["inputs"].items() for relative in relatives))
+                sample_request = replace(request, stage="coverage", config_path=str(config_path),
+                    config_hash=file_hash(config_path), task_path=str(task_path), task_hash=file_hash(task_path),
+                    dependency_paths=paths, dependency_hashes=tuple(map(file_hash, paths)),
+                    output_dir=str(sample / "out"))
+                started = time.monotonic()
+                # Match the public entry plus complete batch preflight.
+                sample_request.verify_inputs()
+                read_json(sample_request.task_path)
+                prepare_batch(sample_request)
+                setup = time.monotonic() - started
+                profile = lock["budget"]["profiles"][name]
+                publication = profile["publication_verification_seconds"] * max(1., size / profile["profile_repetitions"])
+                estimated = (setup + size * profile["seconds_per_repetition"] + publication) * lock["budget"]["profile_safety_factor"]
+                measurements.append({"mode": parameters["mode"], "scenario": name, "repetitions": size,
+                    "locked_setup_seconds": setup, "publication_verification_seconds": publication,
+                    "estimated_seconds": estimated, "admitted_budget_seconds": parameters["wall_seconds"]})
+                require(estimated <= parameters["wall_seconds"],
+                        "infeasible batch budget: measured locked setup, repetitions and scaled publication/verification do not fit")
+    return measurements
 
 
 def build_lock(request, config, task):
@@ -164,7 +231,8 @@ def build_lock(request, config, task):
         mode_leaves = 0
         for scenario in scenarios:
             profile = profiles[scenario["name"]]
-            require((profile["leaf_overhead_seconds"] + profile["seconds_per_repetition"] * min(batch_size, repetitions)) * factor <= wall_seconds,
+            require((profile["publication_verification_seconds"] * max(1., min(batch_size, repetitions) / profile["profile_repetitions"])
+                     + profile["seconds_per_repetition"] * min(batch_size, repetitions)) * factor <= wall_seconds,
                     "infeasible batch budget: measured complete repetitions do not fit")
             draws = repetition_plan(seed_namespace + ":" + mode, scenario["name"], repetitions)
             for start in range(0, repetitions, batch_size):
@@ -179,6 +247,8 @@ def build_lock(request, config, task):
     budget = {"gpu_hours": 0., "gpu_hours_per_leaf_max": 4., "leaves_per_instance_max": 40,
               "cpu_wall_hours_ceiling": (len(batches) * math.ceil(wall_seconds / 60) + 20) / 60,
               "profile_safety_factor": factor, "profiles": profiles,
+              "admission_model": "measure locked setup at each leaf size; scale complete profile finalization by repetition count",
+              "budget_semantics": "planning estimate; report overruns and retain draws; scheduler enforces binding limits",
               "concurrency_limits": {"gpu": 8, "cpu": 6}, "run_gpu_hours_ceiling": 2500}
     require(finite(parameters["cpu_wall_hours_budget"], "CPU hours budget") >= budget["cpu_wall_hours_ceiling"],
             "infeasible CPU budget")
@@ -218,7 +288,8 @@ def build_lock(request, config, task):
             "prerequisites": [], "inputs": stage_inputs, "recipe_lock": lock_ref, "work": work,
             "collector": {"stage": "campaign-collect", "outputs": COLLECT_OUTPUTS, "wall_seconds": 600}}
         plans.append(expand_campaign(spec, config["approvals"]))
-    return lock, plans
+    measurements = _admit_locked_leaves(request, config, lock, plans)
+    return lock, plans, {**budget, "lock_hash": digest(lock), "admission_measurements": measurements}
 
 
 def _plan_for_task(request, config, task, lock):
@@ -269,7 +340,7 @@ def collect(request, config, task):
         gate = read_json(dependency(request, config, references[0]))
         require(gate["pass"] is True and gate["mode"] == "screening" and gate["lock_hash"] == digest(lock),
                 "screening did not admit final collection")
-    results = []
+    results, runtimes = [], []
     for leaf in plan["tasks"][:-1]:
         path = dependency(request, config, {"dependency": leaf["id"], "path": "result.json"})
         result = read_json(path)
@@ -277,6 +348,17 @@ def collect(request, config, task):
         require(result["lock_hash"] == digest(lock) and result["recipe_hash"] == digest(lock["recipe"]), "leaf recipe drift")
         require(result["batch_id"] == parameters["batch_id"] and result["mode"] == mode
                 and result["scenario"] == parameters["scenario"] and result["draws"] == parameters["draws"], "leaf identity drift")
+        runtime = read_json(dependency(request, config, {"dependency": leaf["id"], "path": "runtime.json"}))
+        require(runtime["batch_id"] == parameters["batch_id"] and runtime["lock_hash"] == digest(lock),
+                "leaf runtime identity drift")
+        require(runtime["measurement_scope"] == "complete_batch_return", "incomplete runtime measurement")
+        budget_seconds = finite(runtime["admitted_budget_seconds"], "leaf admitted budget")
+        require(budget_seconds == parameters["wall_seconds"], "leaf runtime budget drift")
+        measured = finite(runtime["wall_seconds"], "leaf measured runtime")
+        require(measured >= 0, "negative leaf runtime")
+        runtimes.append({"leaf_id": leaf["id"], "batch_id": parameters["batch_id"],
+            "scenario": parameters["scenario"]["name"], "wall_seconds": measured,
+            "admitted_budget_seconds": budget_seconds, "overrun_seconds": max(0., measured - budget_seconds)})
         results.append(result)
     records = [r for result in results for r in result["records"]]
     declarations = [d for result in results for d in result["draws"]]
@@ -295,7 +377,8 @@ def collect(request, config, task):
     gate = {"pass": passing, "mode": mode, "lock_hash": digest(lock),
             "certifies_production_coverage": bool(passing and mode == "final"),
             "expected_leaves": plan["expected_leaves"], "received_leaves": [t["id"] for t in plan["tasks"][:-1]],
-            "scenario_summaries": summaries, "retry_rules": lock["retry_rules"]}
+            "scenario_summaries": summaries, "retry_rules": lock["retry_rules"],
+            "leaf_runtimes": runtimes, "budget_overruns": [r for r in runtimes if r["overrun_seconds"] > 0]}
     return {"result.json": {"records": records, "gate": gate}, "gate.json": gate}, passing
 
 
@@ -306,11 +389,11 @@ def run_stage(request: StageRequest) -> StageResult:
         task = read_json(request.task_path)
         require(task["stage"] == request.stage, "stage mismatch")
         if request.stage == "campaign-lock":
-            lock, plans = build_lock(request, config, task)
+            lock, plans, budget = build_lock(request, config, task)
             values = {"recipe_lock.json": lock, "task_manifest.json": {"lock_hash": digest(lock),
                 "tasks": [t for plan in plans for t in plan["tasks"]]},
                 "expanded_units.json": {"lock_hash": digest(lock), "plans": plans},
-                "budget.json": lock["budget"], "gate.json": {"pass": True, "admitted": True,
+                "budget.json": budget, "gate.json": {"pass": True, "admitted": True,
                     "lock_hash": digest(lock), "submission_performed": False, "screening_complete": False,
                     "certifies_production_coverage": False}}
             return publish(request, values, status="pass", message="Recipe locked prospectively; no jobs submitted")

@@ -58,7 +58,7 @@ def setup_lock(tmp_path, **changes):
     write(profile / "timing.json", {"production_equivalent": True, "complete": True, "all_successful": True,
         "recipe_hash": coverage.digest(recipe), "device": "cpu", "gpu_seconds": 0,
         "complete_repetition_seconds": [10., 11.], "wall_seconds": 25.,
-        "measurement_scope": "complete_stage_return", **STAMPS})
+        "measurement_scope": "complete_stage_return", "setup_seconds": 3., **STAMPS})
     parameters = {"campaign_id": "test", "recipe": recipe, "scenario_family": [scenario],
         "final_repetitions": 1000, "screening_repetitions": 5, "repetitions_per_leaf": 25,
         "gpus": 0, "wall_seconds": 600, "profile_safety_factor": 2., "evaluation_namespace": "prospective-one",
@@ -157,6 +157,9 @@ def collection_request(tmp_path, *, missing_leaf=False, missing_repetition=False
             selected.pop()
         write(destination / "result.json", {"lock_hash": coverage.digest(lock), "recipe_hash": coverage.digest(lock["recipe"]),
             "batch_id": params["batch_id"], "mode": mode, "scenario": params["scenario"], "draws": params["draws"], "records": selected})
+        write(destination / "runtime.json", {"batch_id": params["batch_id"],
+            "lock_hash": coverage.digest(lock), "admitted_budget_seconds": params["wall_seconds"],
+            "wall_seconds": 100., "measurement_scope": "complete_batch_return"})
         dependencies[leaf["id"]] = destination
     return request(tmp_path / "collection-request", task, dependencies), lock, plans
 
@@ -257,17 +260,23 @@ def test_lock_accepts_authenticated_noncanonical_input_serialization(tmp_path):
     result.verify(req)
 
 
-@pytest.mark.parametrize("seconds,status", [(250, "blocked"), (270, "pass")])
-def test_lock_accounts_for_measured_setup_overhead(tmp_path, seconds, status):
+@pytest.mark.parametrize("seconds,status", [(270, "blocked"), (294, "pass")])
+def test_lock_scales_publication_cost_with_leaf_size(tmp_path, monkeypatch, seconds, status):
     req, _ = setup_lock(tmp_path, profile_safety_factor=1., wall_seconds=seconds)
     path = tmp_path / "profile/timing.json"
     timing = coverage.read_json(path)
-    timing.update(wall_seconds=40., complete_repetition_seconds=[10., 10.])
+    timing.update(wall_seconds=40., setup_seconds=18., complete_repetition_seconds=[10., 10.])
     write(path, timing)
     req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    clock = [0.]
+    monkeypatch.setattr(coverage.time, "monotonic", lambda: clock[0])
+    def fingerprint():
+        clock[0] += 18.
+        return deepcopy(STAMPS)
+    monkeypatch.setattr(campaign, "fingerprint", fingerprint)
     result = campaign.run_stage(req)
-    # 20 seconds of measured setup + 25 * 10-second repetitions need 270 s.
-    assert result.status == status
+    # Actual locked setup + 25 draws + publication at one second per draw.
+    assert result.status == status, result.message
     if status == "blocked":
         assert "infeasible batch budget" in result.message
 
@@ -308,8 +317,9 @@ def test_oversized_campaign_is_refused_before_draw_allocation(tmp_path, monkeypa
 
 @pytest.mark.parametrize("case", ["locked_preflight", "scaled_publication"])
 def test_review_round_three_admission_matches_complete_locked_leaf(tmp_path, monkeypatch, case):
-    """Unresolved review reproductions: preserve as red recovery regressions."""
-    req, _ = setup_lock(tmp_path, profile_safety_factor=1., wall_seconds=270)
+    """Plan for the actual leaf; report residual latency without dropping draws."""
+    budget = 271 if case == "locked_preflight" else 293
+    req, task = setup_lock(tmp_path, profile_safety_factor=1., wall_seconds=budget)
     profile_count = 25 if case == "locked_preflight" else 2
     profile_path = tmp_path / "profile/result.json"
     profile = coverage.read_json(profile_path)
@@ -318,20 +328,10 @@ def test_review_round_three_admission_matches_complete_locked_leaf(tmp_path, mon
     timing_path = tmp_path / "profile/timing.json"
     timing = coverage.read_json(timing_path)
     timing.update(wall_seconds=20. + profile_count * 10.,
+                  setup_seconds=20. if case == "locked_preflight" else 18.,
                   complete_repetition_seconds=[10.] * profile_count)
     write(timing_path, timing)
     req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
-    admitted = campaign.run_stage(req)
-    assert admitted.status == "pass", admitted.message
-    root = Path(req.output_dir)
-    lock = coverage.read_json(root / "recipe_lock.json")
-    plans = coverage.read_json(root / "expanded_units.json")["plans"]
-    leaf = plans[1]["tasks"][0]
-    screen_id = plans[0]["tasks"][-1]["id"]
-    screening = tmp_path / "screening"
-    write(screening / "gate.json", {"pass": True, "mode": "screening", "lock_hash": coverage.digest(lock)})
-    leaf_request = request(tmp_path / "leaf-request", leaf,
-        {"campaign-lock": root, "inputs": tmp_path / "inputs", screen_id: screening})
     clock = [0.]
     monkeypatch.setattr(coverage.time, "monotonic", lambda: clock[0])
     def fingerprint():
@@ -343,6 +343,24 @@ def test_review_round_three_admission_matches_complete_locked_leaf(tmp_path, mon
         if case == "locked_preflight":
             clock[0] += 1.
         return value
+    monkeypatch.setattr(campaign, "fingerprint", fingerprint)
+    monkeypatch.setattr(campaign, "validate_leaf_task", validate)
+    admitted = campaign.run_stage(req)
+    assert admitted.status == "pass", admitted.message
+    root = Path(req.output_dir)
+    admission = coverage.read_json(root / "budget.json")["admission_measurements"]
+    final_cost = next(row for row in admission if row["mode"] == "final")
+    assert final_cost["estimated_seconds"] == budget
+    assert final_cost["locked_setup_seconds"] == (21 if case == "locked_preflight" else 18)
+    assert final_cost["publication_verification_seconds"] == (0 if case == "locked_preflight" else 25)
+    lock = coverage.read_json(root / "recipe_lock.json")
+    plans = coverage.read_json(root / "expanded_units.json")["plans"]
+    leaf = plans[1]["tasks"][0]
+    screen_id = plans[0]["tasks"][-1]["id"]
+    screening = tmp_path / "screening"
+    write(screening / "gate.json", {"pass": True, "mode": "screening", "lock_hash": coverage.digest(lock)})
+    leaf_request = request(tmp_path / "leaf-request", leaf,
+        {"campaign-lock": root, "inputs": tmp_path / "inputs", screen_id: screening})
     def draw_result(draw, frame, scenario, template, recipe, destination, deadline):
         complete = clock[0] + 10. <= deadline
         clock[0] += 10. if complete else max(0., deadline - clock[0])
@@ -353,18 +371,103 @@ def test_review_round_three_admission_matches_complete_locked_leaf(tmp_path, mon
     original_publish = coverage.publish
     def publish(request, values, **kwargs):
         if case == "scaled_publication":
-            clock[0] += len(values["result.json"]["records"])
+            clock[0] += len(values["result.json"]["records"]) + 3.  # Residual observed latency.
         return original_publish(request, values, **kwargs)
-    monkeypatch.setattr(campaign, "fingerprint", fingerprint)
-    monkeypatch.setattr(campaign, "validate_leaf_task", validate)
     monkeypatch.setattr(coverage, "execute_draw", draw_result)
     monkeypatch.setattr(coverage, "publish", publish)
+    clock[0] = 0.
     result = coverage.run_stage(leaf_request)
     result.verify(leaf_request)
     data = coverage.read_json(Path(leaf_request.output_dir) / "result.json")
-    print({"case": case, "admission": admitted.status, "leaf": result.status,
-           "wall_seconds": clock[0], "budget": 270, "counts": data["summary"]["counts"]})
-    if case == "locked_preflight":
-        assert result.status == "pass", "Admission omitted locked validation and stranded an otherwise complete draw"
+    runtime = coverage.read_json(Path(leaf_request.output_dir) / "runtime.json")
+    assert result.status == "pass", result.message
+    assert data["summary"]["counts"]["success"] == 25
+    assert data["summary"]["counts"]["incomplete"] == 0
+    assert runtime["wall_seconds"] == clock[0] == (271 if case == "locked_preflight" else 296)
+    assert runtime["admitted_budget_seconds"] == budget
+    assert runtime["overrun_seconds"] == (0 if case == "locked_preflight" else 3)
+    assert runtime["budget_exceeded"] == (case == "scaled_publication")
+
+
+def test_collection_reports_all_overruns_without_discarding_draws(tmp_path):
+    req, _, plans = collection_request(tmp_path)
+    leaves = plans[1]["tasks"][:-1]
+    for leaf, extra in zip(leaves[:2], [3., 7.]):
+        path = tmp_path / "leaves" / leaf["id"] / "runtime.json"
+        runtime = coverage.read_json(path)
+        runtime["wall_seconds"] = runtime["admitted_budget_seconds"] + extra
+        write(path, runtime)
+    req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    result = campaign.run_stage(req)
+    assert result.status == "pass", result.message
+    gate = coverage.read_json(Path(req.output_dir) / "gate.json")
+    assert [row["leaf_id"] for row in gate["budget_overruns"]] == [leaf["id"] for leaf in leaves[:2]]
+    assert [row["overrun_seconds"] for row in gate["budget_overruns"]] == [3., 7.]
+    assert len(gate["leaf_runtimes"]) == 40
+    assert gate["scenario_summaries"]["null_effect"]["declared_repetitions"] == 1000
+    assert len(coverage.read_json(Path(req.output_dir) / "result.json")["records"]) == 1000
+
+
+@pytest.mark.parametrize("change", ["missing", "budget", "identity"])
+def test_collection_requires_bound_runtime_evidence(tmp_path, change):
+    req, _, plans = collection_request(tmp_path)
+    leaf = plans[1]["tasks"][0]
+    path = tmp_path / "leaves" / leaf["id"] / "runtime.json"
+    if change == "missing":
+        path.unlink()
+        paths = tuple(p for p in req.dependency_paths if p != str(path))
+        req = replace(req, dependency_paths=paths, dependency_hashes=tuple(map(file_hash, paths)))
     else:
-        assert result.status != "pass", "Leaf published pass after 293 seconds against its locked 270-second budget"
+        runtime = coverage.read_json(path)
+        runtime["admitted_budget_seconds" if change == "budget" else "batch_id"] = 1
+        write(path, runtime)
+        req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    assert campaign.run_stage(req).status == "blocked"
+
+
+def test_admission_measures_setup_at_each_leaf_size_without_running_draws(tmp_path, monkeypatch):
+    req, _ = setup_lock(tmp_path, profile_safety_factor=1.)
+    clock = [0.]
+    monkeypatch.setattr(coverage.time, "monotonic", lambda: clock[0])
+    original = campaign.prepare_batch
+    shapes = []
+    def prepare(request):
+        result = original(request)
+        parameters = result[0]["parameters"]
+        size = len(parameters["draws"])
+        shapes.append((parameters["mode"], size))
+        clock[0] += size / 5
+        return result
+    def no_draws(*args):
+        raise AssertionError("admission must not inspect simulated outcomes")
+    monkeypatch.setattr(campaign, "prepare_batch", prepare)
+    monkeypatch.setattr(coverage, "execute_draw", no_draws)
+    result = campaign.run_stage(req)
+    assert result.status == "pass", result.message
+    assert shapes == [("screening", 5), ("final", 25)]
+    measurements = coverage.read_json(Path(req.output_dir) / "budget.json")["admission_measurements"]
+    assert [m["locked_setup_seconds"] for m in measurements] == [1., 5.]
+    assert not list(Path(req.output_dir).glob(".admission-*"))
+
+
+def test_late_locked_draws_remain_complete_and_reported(tmp_path, monkeypatch):
+    root, lock, plans = locked(tmp_path)
+    leaf = plans[0]["tasks"][0]
+    req = request(tmp_path / "late-leaf", leaf, {"campaign-lock": root, "inputs": tmp_path / "inputs"})
+    clock = [0.]
+    monkeypatch.setattr(coverage.time, "monotonic", lambda: clock[0])
+    def draw_result(draw, frame, scenario, template, recipe, destination, deadline):
+        assert deadline == float("inf")  # The scheduler owns the binding limit.
+        clock[0] += 150.
+        return {"draw": draw, "status": "success", "reason": "complete late draw",
+            "truth": 0., "causal_truth": 0., "truth_integration_error": 0.,
+            "estimates": {m: {"value": 0., "se": 1.} for m in coverage.METHODS}}
+    monkeypatch.setattr(coverage, "execute_draw", draw_result)
+    result = coverage.run_stage(req)
+    assert result.status == "pass", result.message
+    runtime = coverage.read_json(Path(req.output_dir) / "runtime.json")
+    assert runtime["wall_seconds"] == 750.
+    assert runtime["admitted_budget_seconds"] == 600.
+    assert runtime["overrun_seconds"] == 150.
+    records = coverage.read_json(Path(req.output_dir) / "result.json")["records"]
+    assert len(records) == 5 and all(r["status"] == "success" for r in records)

@@ -401,3 +401,5 @@ def test_profile_measures_final_publication_and_verification(tmp_path, monkeypat
     assert deadlines == [1000., 1000.]  # Public-entry preflight consumes the same budget.
     assert timing["wall_seconds"] == 77.  # Includes preflight and normal leaf publication/verification.
     assert timing["complete_repetition_seconds"] == [10., 10.]
+    assert timing["setup_seconds"] == 55.
+    assert timing["publication_verification_seconds"] == 2.
