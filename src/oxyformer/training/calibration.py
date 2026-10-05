@@ -91,7 +91,7 @@ def paired_tensors(logits, weights, *, allow_zero_mass=False):
     Callers retain the complete original IDs and provenance separately.
     """
     z = torch.as_tensor(logits, dtype=torch.float32).detach()
-    w = torch.as_tensor(weights, dtype=torch.float32, device=z.device).detach()
+    w = torch.as_tensor(weights, dtype=torch.float64, device=z.device).detach()
     require(z.ndim == 2 and z.shape[1] == 2 and w.shape == (len(z),),
             "calibration requires [original, observed/shifted] logits and origin weights")
     require(bool(torch.isfinite(z).all()) and bool(torch.isfinite(w).all()),
@@ -100,14 +100,34 @@ def paired_tensors(logits, weights, *, allow_zero_mass=False):
     positive = w > 0
     require(allow_zero_mass or bool(positive.any()), "invalid calibration target weights")
     z, w = z[positive], w[positive]
-    # Common rescaling preserves the target law without overflowing its sum.
-    if len(w):
-        w = w / w.max()
-    total = w.sum()
     labels = torch.tensor([0., 1.], device=z.device).expand_as(z)
-    # Normalize before duplication; both copies always retain the same mass.
-    denominator = torch.where(total > 0, total, torch.ones_like(total))
-    return z, labels, (w / denominator)[:, None].expand_as(z) / 2
+    # Retain raw mass until reduction. Even FP64 normalization can erase a
+    # positive row whose weighted loss or root-mean-square is representable.
+    return z, labels, w[:, None].expand_as(z)
+
+
+def _log_weights(weights):
+    return weights.log() - weights.max().log()
+
+
+def _weighted_mean(values, weights, *, root=False):
+    """Reduce nonnegative observations without prematurely rounding mass."""
+    if not values.numel():
+        return values.new_zeros((), dtype=torch.float64)
+    log_weights = _log_weights(weights).flatten()
+    log_mean = (torch.logsumexp(values.double().flatten().log() + log_weights, 0)
+                - torch.logsumexp(log_weights, 0))
+    # A representable RMSE may have an unrepresentable mean square.
+    return (log_mean / 2 if root else log_mean).exp()
+
+
+def _weighted_score(values, weights):
+    """Accumulate signed score terms before conversion to FP32 parameters."""
+    log_weights = _log_weights(weights).flatten()
+    values = values.double().flatten()
+    terms = (values.abs().log() + log_weights - torch.logsumexp(log_weights, 0)).exp()
+    # fsum preserves cancellation between paired/original signed contributions.
+    return math.fsum((terms * values.sign()).tolist())
 
 
 def pair_metrics(logits, weights):
@@ -117,8 +137,8 @@ def pair_metrics(logits, weights):
 
 def _pair_metrics(z, y, w):
     """Score already validated positive-weight pairs, including empty support."""
-    loss = float((F.binary_cross_entropy_with_logits(z, y, reduction="none") * w).sum())
-    brier = float(((z.sigmoid() - y).square() * w).sum())
+    loss = float(_weighted_mean(F.binary_cross_entropy_with_logits(z, y, reduction="none"), w))
+    brier = float(_weighted_mean((z.sigmoid() - y).square(), w))
     require(math.isfinite(loss) and math.isfinite(brier), "nonfinite calibration score")
     return loss, brier
 
@@ -126,8 +146,8 @@ def _pair_metrics(z, y, w):
 def _weighted_median(values, mass):
     """Choose an observed coordinate without averaging away small contrasts."""
     order = values.argsort()
-    cumulative = mass[order].cumsum(0)
-    index = torch.searchsorted(cumulative, cumulative[-1] / 2)
+    cumulative = torch.logcumsumexp(_log_weights(mass)[order], 0)
+    index = torch.searchsorted(cumulative, cumulative[-1] - math.log(2))
     return values[order[index]]
 
 
@@ -160,23 +180,25 @@ def fit_affine(logits, weights, *, original_ids, fold_ids, partitions,
         # original has an extreme logit. These statistics only condition the
         # same affine objective; every positive-weight pair remains in it.
         offset = _weighted_median(z.flatten(), mass.flatten())
-        centered = z - offset
-        if not bool(torch.isfinite(centered).all()):
-            # Opposite FP32 endpoints need an interior origin for subtraction.
-            offset = z.min() / 2 + z.max() / 2
-            centered = z - offset
-        deviations = centered.abs()
+        # Coordinate statistics may use FP64; the realized map and both
+        # optimized parameters remain FP32. Keep the observed offset even if
+        # an opposite extreme would overflow FP32 subtraction.
+        deviations = (z.double() - offset.double()).abs()
         varying = deviations > 0
         magnitude = (_weighted_median(deviations[varying], mass[varying])
-                     if bool(varying.any()) else z.new_zeros(()))
-        # Keep all positive-weight normalized inputs representable, even when
-        # their spread greatly exceeds the typical conditioning scale. This
-        # machine-range bound changes coordinates only, never clips logits.
-        magnitude = torch.maximum(magnitude, deviations.max() / (torch.finfo(z.dtype).max / 2))
+                     if bool(varying.any()) else deviations.new_zeros(()))
+        maximum = torch.finfo(z.dtype).max
+        magnitude = torch.maximum(magnitude, deviations.max() / (maximum / 2))
+        magnitude = magnitude.clamp(max=maximum).float()
         if float(magnitude) == 0:
             slope, intercept, magnitude = 0., 0., torch.ones_like(magnitude)
         else:
-            x = (z - offset) / magnitude
+            coordinates = AffineCalibration(slope=1., intercept=0., class_prior=.5,
+                original_ids=ids, partitions=tuple(partitions), lineage=lineage,
+                input_offset=float(offset), input_scale=float(magnitude))
+            # Fit exactly the normalization used by the public FP32 map,
+            # including its overflow-safe subtraction on opposite extremes.
+            x = coordinates.logits(z)
             parameter = torch.zeros(2, dtype=torch.float32, device=z.device, requires_grad=True)
             optimizer = torch.optim.LBFGS([parameter], lr=1., max_iter=100,
                                          tolerance_grad=1e-7, tolerance_change=1e-9,
@@ -184,10 +206,17 @@ def fit_affine(logits, weights, *, original_ids, fold_ids, partitions,
 
             def closure():
                 optimizer.zero_grad()
-                loss = (F.binary_cross_entropy_with_logits(
-                    parameter[0] * x + parameter[1], labels, reduction="none") * mass).sum()
-                require(bool(torch.isfinite(loss)), "nonfinite affine objective")
-                loss.backward()
+                with torch.no_grad():
+                    calibrated = parameter[0] * x + parameter[1]
+                    loss = _weighted_mean(F.binary_cross_entropy_with_logits(
+                        calibrated, labels, reduction="none"), mass)
+                    require(bool(torch.isfinite(loss)), "nonfinite affine objective")
+                    residual = (calibrated.sigmoid() - labels).double()
+                    # Form scores before reducing raw weights: casting tiny
+                    # normalized mass to FP32 first loses large x * mass terms.
+                    scores = ((residual * x.double()).mean(1), residual.mean(1))
+                    parameter.grad = parameter.new_tensor([
+                        _weighted_score(score, mass[:, 0]) for score in scores])
                 require(bool(torch.isfinite(parameter.grad).all()), "nonfinite affine gradient")
                 return loss
 
@@ -220,7 +249,7 @@ def transfer_diagnostics(calibration, oof_logits, refit_logits, weights, *, line
     after = _pair_metrics(calibration.logits(final), labels, mass)
     # Diagnostics can accumulate squared FP32 differences in FP64 without
     # changing the FP32 calibration or ratio computation.
-    delta = float(((final.double() - z.double()).square() * mass.double()).sum().sqrt())
+    delta = float(_weighted_mean((final.double() - z.double()).square(), mass, root=True))
     require(math.isfinite(delta), "nonfinite calibration transfer")
     return TransferDiagnostics(original_ids=calibration.original_ids,
         metrics=(("inner_oof_log_loss", before[0]), ("inner_oof_brier", before[1]),
