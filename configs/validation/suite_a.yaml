@@ -9,7 +9,8 @@
 # without loss, otherwise a specific representability error is raised. Policy
 # objects come from the authoritative ShiftOrStayPolicy API and supply its
 # already-serialized values. In contrast, exact_shift_intervals is a raw
-# rational geometry helper: it retains supported real endpoints/delta exactly
+# rational geometry helper: it additionally admits explicit Fraction inputs,
+# retaining supported real endpoints/delta exactly
 # and never serializes them into binary64 records.
 # Intervention doses and integration tolerances >= 1e-5000 retain their exact
 # supplied values and need not fit binary64. Seeds, row indices, pair sizes and
@@ -49,6 +50,8 @@
 # rational geometry and array nodes/weights, not serialized simulator inputs.
 # The tolerance floor is an exact decimal string, below IEEE extended/quad
 # subnormals and more than 100x below the registered default for every recipe.
+# Precise selected log masses and their expm1 differences remain rational
+# through convergence; relative-mass display values are rounded upward.
 # Internal tail allowances use rational arithmetic with a directed Decimal
 # exponential bound; only the display bound is rounded upward to binary64.
 numeric_domain:
