@@ -27,6 +27,7 @@ from oxyformer.validation.scm import (
     sampled_mean, effect_fraction, LocalCoordinates, exact, exact_shift_intervals, wide, observation_transition_points, _count_baseline, _sine_bounds,
     numeric_scalar, binary64_scalar, integer_scalar, normalize_record_numbers,
     validate_numeric, validate_policy_domain, validate_seed, REGISTERED_NUMERIC_BOX, NUMERIC_DOMAIN, NUMERIC_MARGIN, NUMERIC_ZERO_EXCEPTIONS,
+    MIN_INTEGRATION_TOLERANCE, INTEGRATION_TOLERANCE_DOMAIN,
 )
 
 
@@ -50,6 +51,8 @@ class ObservedRecords(Immutable):
     observed_denominator: tuple[float | None, ...]
 
     def __post_init__(self):
+        validate_numeric(self.a, "recorded_exposure", "recorded exposure")
+        validate_numeric(self.measured_x, "covariate", "measured X")
         normalize_record_numbers(self)
         Immutable.__post_init__(self)
         n = len(self.frame.original_ids)
@@ -57,6 +60,12 @@ class ObservedRecords(Immutable):
                 self.flag_available, self.survey_included, self.biomarker_available,
                 self.registered_events, self.observed_denominator)), "observation alignment")
         require(all(len(x) == len(self.measured_columns) for x in self.measured_x), "measured X width")
+        require(all(v is None or v >= 0 for v in self.registered_events),
+                "registered events must be nonnegative integers")
+        # 100*(1+error) is strictly below 200 exactly, but its valid serialized
+        # endpoint can round to 200. Do not reapply the latent open bound.
+        require(all(v is None or 0 < v <= 200 for v in self.observed_denominator),
+                "observed denominator outside supported numeric domain: (0, 200]")
         for y, flag, survey, bio in zip(self.y, self.flag_available, self.survey_included, self.biomarker_available):
             require((y is not None) == (flag and survey and bio), "outcome selection mismatch")
 
@@ -519,6 +528,8 @@ def _quadrature_tail_budget(frame, config, policy, groups, tolerance):
     This tail bound supplements, rather than replaces, doubled-order diagnostics.
     """
     tolerance = exact(tolerance)
+    require(tolerance >= MIN_INTEGRATION_TOLERANCE,
+            "integration tolerance outside supported numeric domain: at least 1e-5000")
     terms = [t for group in groups.values() for t in group]
     penalty = exact(0)
     response = exact(0)
@@ -563,8 +574,14 @@ def _quadrature_tail_budget(frame, config, policy, groups, tolerance):
     for term in terms:
         term.law.tail_decay = cutoff
         term.precision = precision
-    relative = 2*np.exp(-wide(extra))
-    return float(2*wide(contrast)*relative/(1-relative))
+    # Decimal exp is correctly rounded. Its next representable value is an
+    # upper bound; all remaining arithmetic is rational. Neither longdouble
+    # exp nor binary64 serialization can erase a positive internal allowance.
+    with localcontext() as context:
+        context.prec = 80
+        relative = 2*Fraction((-Decimal(extra)).exp().next_plus())
+    require(0 < relative < 1, "invalid positive quadrature tail allowance")
+    return 2*contrast*relative/(1-relative)
 
 
 @lru_cache(maxsize=32)
@@ -770,6 +787,8 @@ def generate_suite_a(frame: CovariateFrame, config: SCMConfig, policy: ShiftOrSt
     tolerance = numeric_scalar(tolerance, "integration tolerance")
     max_order = integer_scalar(max_order, "max_order")
     require(tolerance > 0 and max_order >= 32, "invalid integration controls")
+    require(tolerance >= MIN_INTEGRATION_TOLERANCE,
+            "integration tolerance outside supported numeric domain: at least 1e-5000")
     eligible_by_key = {key:exact_shift_intervals(c,policy.delta_mmhg) for key,c in policy.components_by_key}
     config.validate_policy(policy, frame, eligible_by_key=eligible_by_key)
     validate_count_rates(frame, config, policy, eligible_by_key=eligible_by_key)
@@ -807,6 +826,11 @@ def generate_suite_a(frame: CovariateFrame, config: SCMConfig, policy: ShiftOrSt
             break
         previous,previous_log_mass = values,log_mass
     require(converged, "truth integration did not converge within tolerance including binary64 truth rounding")
+    # The public JSON schema is binary64. Round display bounds upward, while
+    # convergence above uses the full rational allowance (even below 5e-324).
+    tail_display = float(tail_bound)
+    if exact(tail_display) < tail_bound:
+        tail_display = float(np.nextafter(tail_display, np.inf))
     rounding_bound = float(rounding)
     if exact(rounding_bound) < rounding:
         rounding_bound = float(np.nextafter(rounding_bound, np.inf))
@@ -817,7 +841,7 @@ def generate_suite_a(frame: CovariateFrame, config: SCMConfig, policy: ShiftOrSt
         order=order, converged=True, assignment_mass_error=float(mass_error),
         selected_mass_fraction=float(np.exp(log_mass)), selected_mass_relative_difference=mass_difference,
         selected_log_mass_fraction=float(log_mass), grouped_mass_relative_error=grouped_error,
-        quadrature_tail_absolute_bound=tail_bound, truth_serialization_absolute_bound=rounding_bound)
+        quadrature_tail_absolute_bound=tail_display, truth_serialization_absolute_bound=rounding_bound)
     return GeneratedSample(observations, observed, causal, uncertainty)
 
 
@@ -944,7 +968,8 @@ def load_suite_a(path: str | Path):
     require(declaration is not None, "Suite A recipe must declare numeric_domain")
     expected = {"id": "suite-a-100x-v1", "margin": NUMERIC_MARGIN,
                 "registered_box": {k:list(v) for k,v in REGISTERED_NUMERIC_BOX.items()},
-                "supported_box": {k:list(v) for k,v in NUMERIC_DOMAIN.items()}}
+                "supported_box": {k:list(v) for k,v in NUMERIC_DOMAIN.items()},
+                "integration_tolerance": dict(INTEGRATION_TOLERANCE_DOMAIN)}
     require(isinstance(declaration, dict), "recipe numeric_domain must be a mapping")
     declaration = dict(declaration)
     # Existing v1 declarations expressed these same disabled-zero exceptions
