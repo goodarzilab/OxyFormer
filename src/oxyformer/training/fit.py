@@ -286,11 +286,27 @@ def _predict(model, view, inputs, policy, *, outcome_mean=False, base_only=False
     return prediction
 
 
-def _outcome_loss(config, prediction, ids, *, reduction="sum"):
+def _weight_unit(weights):
+    """Choose arithmetic units with room for FP64 products and reciprocals.
+
+    Original weights remain in inputs/pair records. A common positive factor
+    cancels from a weighted objective; it must cancel before autograd would
+    have to represent an overflowing reciprocal of the original total mass.
+    """
+    largest = max(weights, default=0.)
+    limits = torch.finfo(torch.float64)
+    return largest if (0 < largest < math.sqrt(limits.tiny) or
+                       largest > math.sqrt(limits.max)) else 1.
+
+
+def _outcome_loss(config, prediction, ids, *, reduction="sum", weight_unit=1.):
     # Accumulate target-weighted losses before normalization in FP64. Model
     # predictions and target validity remain governed by their FP32 contract.
     prediction = prediction.double()
     weights = torch.tensor(_inputs(config, ids).origin_weights, dtype=torch.float64)
+    if reduction == "mean":
+        weight_unit = _weight_unit(weights.tolist())
+    weights = weights / weight_unit
     target = torch.tensor(_values(config, config.data.manifest.outcome_field, ids), dtype=torch.float32)
     population = (torch.tensor(_values(config, config.population_field, ids), dtype=torch.float32)
                   if config.population_field else None)
@@ -305,8 +321,15 @@ def _profile(model, config, view, inputs):
             base = _predict(model, view, inputs, config.policy, base_only=True)[:, 0]
             target = torch.tensor(_values(config, config.data.manifest.outcome_field, view.original_ids),
                                   dtype=torch.float32)
-            model.group_offsets.update_identity(view.original_ids, target.double(), base.double(),
-                                                 torch.tensor(inputs.origin_weights, dtype=torch.float64))
+            # Each offset profiles its own weighted mean. Use units local to
+            # that county so a different county's mass cannot erase its support.
+            by_county = {}
+            for county, weight in zip(inputs.counties, inputs.origin_weights):
+                by_county.setdefault(county, []).append(weight)
+            units = {county: _weight_unit(weights) for county, weights in by_county.items()}
+            weights = torch.tensor([w / units[c] for c, w in
+                                    zip(inputs.counties, inputs.origin_weights)], dtype=torch.float64)
+            model.group_offsets.update_identity(view.original_ids, target.double(), base.double(), weights)
 
 
 class _Budget:
@@ -332,6 +355,8 @@ def _train_one(config, bundle, encoder_state, view, stopping, epochs, seed, budg
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=1.)
     inputs = _inputs(config, view.original_ids)
     require(sum(inputs.origin_weights) > 0, "fitting partition has no target mass")
+    weight_unit = _weight_unit(inputs.origin_weights)
+    original_mass = sum(w / weight_unit for w in inputs.origin_weights)
     sampler = StatefulSampler(len(view.original_ids), seed)
     progress = dict(epoch=0, step=0, phase="start", best_loss=None, best_epoch=0, bad_epochs=0, history=[])
     best = None
@@ -367,16 +392,18 @@ def _train_one(config, bundle, encoder_state, view, stopping, epochs, seed, budg
             optimizer.zero_grad(set_to_none=True)
             predicted = _predict(model, part, metadata, config.policy)
             if bundle["kind"] == "outcome":
-                loss = _outcome_loss(config, predicted[:, 0], ids)
-                mass = sum(inputs.origin_weights)
+                loss = _outcome_loss(config, predicted[:, 0], ids, weight_unit=weight_unit)
+                mass = original_mass
             else:
                 pairs = paired_records(config.policy.apply(metadata.a_mmhg, metadata.policy_covariates),
                                        metadata.origin_weights, weight_id=config.data.manifest.spec.weight_id)
-                # Keep original pair weights, but widen the weighted reduction
-                # before it can overflow or lose tiny target masses. Gradients
-                # return to the FP32 model only after global normalization.
-                loss = paired_origin_loss(predicted.double(), pairs, reduction="sum")
-                mass = 2 * sum(inputs.origin_weights)
+                # The authoritative records retain raw origin weights. Only
+                # the numerical loss receives weights in common arithmetic
+                # units, using the SAME unit as the full fitting denominator.
+                numerical_pairs = (pairs if weight_unit == 1. else replace(pairs,
+                    origin_weights=tuple(w / weight_unit for w in pairs.origin_weights)))
+                loss = paired_origin_loss(predicted.double(), numerical_pairs, reduction="sum")
+                mass = 2 * original_mass
             # Uniform sampling of ORIGINALS estimates the global weighted loss.
             # Dividing each batch by its own mass would optimize a different law.
             loss = loss * (len(view.original_ids) / (len(ids) * mass))
@@ -605,6 +632,9 @@ def _fit_controller(config, outer, manifest, identity, controller, root, budget)
     columns = tuple(name for name, _ in config.feature_kinds)
     all_view = config.data.covariates(columns)
     outer_ids = outer.training_ids(config.fold)
+    # All held-out masses use one unit, so pooled selection keeps the same
+    # endpoint law without overflowing totals or checkpoint scalar fields.
+    evaluation_mass_unit = _weight_unit(_inputs(config, outer_ids).origin_weights)
     tasks = []
     partitions = {}
     audits = {}
@@ -696,7 +726,9 @@ def _fit_controller(config, outer, manifest, identity, controller, root, budget)
                                if kind == "outcome" else pair_metrics(predicted, metadata.origin_weights))
                 require(all(math.isfinite(m) for m in metrics), "nonfinite held-out factual loss")
                 result = dict(kind=kind, fold=fold, grid=grid, ids=held,
-                    predictions=predicted.tolist(), metrics=metrics, mass=sum(metadata.origin_weights),
+                    predictions=predicted.tolist(), metrics=metrics,
+                    mass=sum(w / evaluation_mass_unit for w in metadata.origin_weights),
+                    mass_unit=evaluation_mass_unit,
                     epochs=state["progress"]["best_epoch"], ownership=audits[fold].to_json())
                 if kind == "origin":
                     # With frozen epochs, an in-sample fitting score may choose

@@ -451,3 +451,58 @@ def test_training_objective_is_invariant_to_extreme_common_weight_scale(complete
         if isinstance(expected, torch.Tensor):
             # Model parameters remain FP32; use the unchanged default tolerance.
             torch.testing.assert_close(actual[name], expected)
+
+
+@pytest.mark.parametrize("kind", ["outcome", "origin"])
+@pytest.mark.parametrize("weight", [1e-310, 1e-311])
+def test_subnormal_raw_weights_do_not_overflow_training_normalization(completed, kind, weight):
+    test_training_objective_is_invariant_to_extreme_common_weight_scale(completed, kind, weight)
+
+
+@pytest.mark.parametrize("weight_scale", [1e-311, 1e307])
+def test_extreme_weights_complete_fold_with_same_predictions(completed, tmp_path, weight_scale):
+    case, baseline = completed
+    spec, split, manifest, config = case
+    training = set(split.training_ids(0))
+    rows = tuple((*row[:-1], row[-1] * weight_scale) if row[0] in training else row
+                 for row in config.data.rows)
+    changed = replace(config, data=replace(config.data, rows=rows),
+                      output_dir=str(tmp_path / "scaled-weight-fold"))
+    actual = fit_fold(spec, split, manifest, changed, 1103)
+    assert actual.complete
+    for result in state(actual)["results"]:
+        raw_weights = _inputs(changed, result["ids"]).origin_weights
+        assert result["mass"] == sum(w / result["mass_unit"] for w in raw_weights)
+        assert all(w > 0 for w in raw_weights)
+    view = subset(config.data.covariates(("x",)), baseline.prediction_inputs.original_ids)
+    expected = predict_fold(baseline, view, config.policy)
+    predicted = predict_fold(actual, view, config.policy)
+    for field in ("mu_a", "mu_d", "r_a", "r_d"):
+        torch.testing.assert_close(torch.tensor(getattr(predicted, field), dtype=torch.float32),
+                                   torch.tensor(getattr(expected, field), dtype=torch.float32))
+
+
+def test_identity_offsets_keep_positive_counties_at_different_weight_scales(completed):
+    case, artifact = completed
+    config = case[-1]
+    bundle = dict(state(artifact)["final"]["outcome"])
+    bundle.pop("state")
+    ids = case[1].training_ids(0)
+    tiny = set(ids[:len(ids)//2])
+    rows = tuple((*row[:4], "tiny" if row[0] in tiny else "large",
+                  1e-300 if row[0] in tiny else 1e300) for row in config.data.rows)
+    changed = replace(config, data=replace(config.data, rows=rows))
+    inputs = _inputs(changed, ids)
+    bundle["counties"] = inputs.counties
+    model = _build(bundle).eval()
+    view = subset(changed.data.covariates(("x",)), ids)
+    with torch.no_grad():
+        base = _predict(model, view, inputs, changed.policy, base_only=True)[:, 0]
+        target = torch.tensor(fitting._values(changed, "y", ids))
+        residual = target.double() - base.double()
+        expected = torch.tensor([float(residual[[oid in tiny for oid in ids]].mean())
+                                 if county == "tiny" else
+                                 float(residual[[oid not in tiny for oid in ids]].mean())
+                                 for county in inputs.counties], dtype=torch.float32)
+        fitting._profile(model, changed, view, inputs)
+    torch.testing.assert_close(model.group_offsets(inputs.counties), expected)
