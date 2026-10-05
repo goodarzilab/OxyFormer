@@ -134,7 +134,12 @@ not be silently encoded by this adapter. County/geography is not a predictor.
   requires those inputs. They use raw mmHg and reject a treatment-design override.
   Probabilities are uncalibrated; fit calibration on inner training OOF records
   before using the existing prior-corrected ratio conversion. No implicit clipping,
-  targeting or ratio fitting happens here.
+  targeting or ratio fitting happens here. Origin logits are computed from backend
+  probabilities in NumPy precision at least as wide as float64 and the backend
+  output. Only the resulting logits or reported probabilities are converted to
+  the query tensor dtype. A reported low-precision probability may round to 0 or
+  1 while its logit remains finite; an actual backend 0 or 1 still blocks logits
+  with the boundary-probability error, without clipping.
 
 Feature approvals, target-weight semantics, label alignment and authenticity of
 runtime manifests remain responsibilities of the trusted data/training producer.
