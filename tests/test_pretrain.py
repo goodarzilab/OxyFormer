@@ -387,3 +387,17 @@ def test_loss_means_and_persistent_totals_match_exact_reference(values):
     assert units == _loss_units(losses)
     assert _validation_score([units, units], [len(values), len(values)], ((0, 1),)) == expected
     assert _validation_score([units, units], [len(values), len(values)], ((0,), (1,))) == expected
+
+
+@pytest.mark.parametrize("route", ["constructor", "json"])
+def test_invalid_feature_kind_is_rejected_by_merged_immutable(tmp_path, route):
+    import json
+    _, _, config = make_case(tmp_path)
+    kinds = (("part", "numericl"),) + config.settings.feature_kinds[1:]
+    with pytest.raises(ContractError, match="invalid enum"):
+        if route == "constructor":
+            replace(config.settings, feature_kinds=kinds)
+        else:
+            payload = json.loads(config.settings.to_json())
+            payload["payload"]["feature_kinds"] = kinds
+            SSLSettings.from_json(json.dumps(payload))
