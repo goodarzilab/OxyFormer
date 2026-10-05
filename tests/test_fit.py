@@ -162,7 +162,8 @@ def test_both_treatments_predicted_from_label_free_views(completed):
     # predict_fold computes calibration and ratios in FP32 before widening for
     # output; use FP32 references and its default assert_close tolerances.
     assert logits.dtype == torch.float32
-    expected = (logits * calibration.slope + calibration.intercept).exp()
+    normalized = (logits - calibration.input_offset) / calibration.input_scale
+    expected = (normalized * calibration.slope + calibration.intercept).exp()
     torch.testing.assert_close(torch.tensor(result.r_a, dtype=torch.float32), expected[:, 0])
     torch.testing.assert_close(torch.tensor(result.r_d, dtype=torch.float32), expected[:, 1])
     for invalid in (config.data, replace(view, use="ssl")):
