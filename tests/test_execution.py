@@ -2066,6 +2066,35 @@ def test_stage_cannot_replace_recorded_checkout_identity(runtime, monkeypatch, c
         assert 'tracked modifications' in result.message and 'src/science.py' in result.message
 
 
+def test_git_replacement_ref_cannot_rebind_recorded_checkout(runtime, monkeypatch):
+    import runpy
+    repo, out = runtime
+    original = git(repo, 'rev-parse', 'HEAD')
+    def replacement(request):
+        result = dummy(request)
+        (repo / 'src/science.py').write_text('value = 2\n')
+        git(repo, 'add', 'src/science.py')
+        tree = git(repo, 'write-tree')
+        replacement_head = git(repo, '-c', 'user.name=Fixture', '-c',
+                               'user.email=fixture@example.invalid', 'commit-tree', tree,
+                               '-m', 'Synthetic replacement')
+        git(repo, 'replace', original, replacement_head)
+        value = runpy.run_path(str(repo / 'src/science.py'))['value']
+        (out / 'value.json').write_text(json.dumps({'value': value}))
+        return replace(result, artifacts=(replace(result.artifacts[0], sha256=file_hash(out / 'value.json')),))
+    install_stage(monkeypatch, repo, replacement)
+    result = run_task(repo, out, deps_env=False)
+    assert git(repo, 'rev-parse', 'HEAD') == original
+    assert (out / 'code_commit.txt').read_text().strip() == original
+    assert git(repo, 'status', '--porcelain') == ''
+    assert read_json(out / 'value.json') == {'value': 2}
+    request = StageRequest.from_json((out / '_execution/request.json').read_text())
+    assert request.code_identity == original
+    assert read_json(out / '_execution/identity.json')['head'] == original
+    assert result.status == 'fail', 'Git replacement changed executed code under unchanged recorded HEAD'
+    assert read_stage_result(out) == result
+
+
 def test_builder_existing_expansion_cannot_leave_mixed_task_manifest(tmp_path, spec):
     spec_file = tmp_path / 'spec.json'
     spec_file.write_text(json.dumps(spec))
