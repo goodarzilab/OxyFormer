@@ -17,6 +17,7 @@ import sys
 from oxyformer.contracts import StageRequest, StageResult
 from oxyformer.provenance import require
 from .identity import verify_module_origins
+from .integrity import read_regular, verify_inputs
 from .paths import atomic_write, isolated_caches
 
 WORKER_RESULT = '_execution/worker-result.json'
@@ -42,7 +43,7 @@ def execute(request, module_name, repo):
                 continue
         raise
     require(process.returncode == 0, f'stage worker exited with status {process.returncode}')
-    return StageResult.from_json((Path(request.output_dir) / WORKER_RESULT).read_text())
+    return StageResult.from_json(read_regular(Path(request.output_dir) / WORKER_RESULT))
 
 
 def _reap_descendants():
@@ -85,9 +86,9 @@ def supervise(request_path, repository, module_name):
 
 
 def stage_main(request_path, repository, module_name):
-    request = StageRequest.from_json(Path(request_path).read_text())
+    request = StageRequest.from_json(read_regular(request_path))
     try:
-        request.verify_inputs()
+        verify_inputs(request)
         caches = isolated_caches(request.output_dir)
         caches.__enter__()
         atexit.register(caches.__exit__, None, None, None)
