@@ -195,7 +195,7 @@ class TabICLComparator:
         require(a.shape == (2 * n,) and np.isfinite(a).all(), "invalid paired treatment")
         return self._fit(view, split, fold, np.column_stack((a, np.tile(raw, (2, 1)))), pairs.transformed)
 
-    def _predict(self, a_query, x_tokens, raw_x, context, group_offset):
+    def _predict(self, a_query, x_tokens, raw_x, context, group_offset, *, as_logits=False):
         require(self._estimator is not None, "comparator is not fitted")
         require(runtime_environment(self.package) == self.checkpoint.environment, "runtime fingerprint mismatch")
         view = x_tokens
@@ -238,11 +238,20 @@ class TabICLComparator:
                     require(classes.shape == (2,) and set(classes) == {0, 1}, "binary classes mismatch")
                     prob = np.asarray(self._estimator.predict_proba(row))
                     require(prob.shape == (1, 2), "unexpected binary probability shape")
+                    # Preserve backend precision, including NumPy longdouble.
+                    # Rounding an interior probability can manufacture a boundary.
+                    output = output.astype(np.result_type(output.dtype, prob.dtype), copy=False)
                     output[i, j] = prob[0, int(np.flatnonzero(classes == 1)[0])]
         require(np.isfinite(output).all(), "nonfinite foundation prediction")
         if self.family == "bernoulli":
             require(((output >= 0) & (output <= 1)).all(), "invalid foundation probability")
-        result = torch.as_tensor(output, dtype=a_query.dtype, device=a_query.device)
+        if as_logits:
+            require(((output > 0) & (output < 1)).all(), "boundary probability; no implicit clipping")
+            output = np.log(output) - np.log1p(-output)
+        # Torch supports at most float64: only narrow after the logit transform
+        # (or at the reporting boundary for probabilities), never before it.
+        result = torch.as_tensor(output.astype(np.float64, copy=False),
+                                 dtype=a_query.dtype, device=a_query.device)
         require(bool(torch.isfinite(result).all()), "prediction overflows requested dtype")
         return result
 
@@ -256,6 +265,5 @@ class TabICLComparator:
         return self._predict(a_query, x_tokens, raw_x, context, group_offset)
 
     def logits(self, a_query, x_tokens, raw_x, context, group_offset):
-        p = self.probability(a_query, x_tokens, raw_x, context, group_offset)
-        require(bool(((p > 0) & (p < 1)).all()), "boundary probability; no implicit clipping")
-        return torch.logit(p)
+        require(self.task == "origin", "origin logits requires origin comparator")
+        return self._predict(a_query, x_tokens, raw_x, context, group_offset, as_logits=True)
