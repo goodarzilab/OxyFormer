@@ -845,3 +845,33 @@ def test_tree_fingerprint_errors_are_explicit_and_path_specific(tmp_path, monkey
     after = fingerprint_tree(tmp_path)
     assert 'synthetic unreadable entry' in after['file']['error']
     assert changed_paths(before, after) == ['file']
+
+
+@pytest.mark.parametrize('raises', [False, True])
+def test_post_execution_check_names_proc_fd_chmod(runtime, tmp_path, monkeypatch, raises):
+    repo, out = runtime
+    upstream = tmp_path / 'source'
+    upstream.mkdir()
+    (upstream / 'data.json').write_text('{}')
+    (upstream / 'receipts.json').write_text('{}')
+    victim = upstream / 'undeclared'
+    victim.write_text('unchanged bytes')
+    before = file_hash(victim)
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(upstream))
+    def faulty(request):
+        result = dummy(request)
+        with victim.open('rb') as stream:
+            os.chmod(f'/proc/self/fd/{stream.fileno()}', victim.stat().st_mode ^ 0o100)
+        if raises:
+            raise RuntimeError('synthetic failure after chmod')
+        return result
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty))
+    result = run('dummy', out, repo, deps_env=True,
+                 task_file=task_file(out, needs={'data-unit': ['data.json', 'receipts.json']}))
+    assert result.status == 'fail'
+    assert str(victim) in result.message
+    receipt = json.loads((out / '_execution/dependency_check.json').read_text())
+    assert receipt['attempts'][str(upstream)]['status'] == 'tainted'
+    assert receipt['attempts'][str(upstream)]['changed_paths'] == ['undeclared']
+    assert file_hash(victim) == before and victim.stat().st_mode & 0o100
+    assert not (tmp_path / '.oxyformer-integrity').exists()
