@@ -729,18 +729,58 @@ def test_sparse_epoch_has_optimizer_update_and_exact_continuation(tmp_path, miss
 
 
 def test_changed_blas_preference_rejects_resume_before_attempt(tmp_path):
-    # Exercise the real selector without requiring a GPU; environment identity
-    # binds backend preferences on CPU too, as it does other CUDA precision flags.
+    # A CUDA build can select cuBLASLt without a GPU, but a CPU-only wheel
+    # cannot. Probe the actual build capability, not GPU visibility.
     preference = torch.backends.cuda.preferred_blas_library
     original = preference()
     try:
+        try:
+            preference("cublaslt")
+        except RuntimeError as error:
+            if "not been compiled with cuBLASLt" not in str(error):
+                raise
+            pytest.skip(f"PyTorch {torch.__version__} lacks cuBLASLt: {error}")
         preference("cublas")
         view, split, config = make_case(tmp_path)
         first = pretrain(view, split, replace(config, max_batches=1), 1103)
         preference("cublaslt")
+        assert dict(first.identity.environment)["blas_preference"] != str(preference())
         config = replace(config, predecessor=first, output_dir=str(tmp_path / "resumed"))
         with pytest.raises(ContractError, match="identity"):
             pretrain(view, split, config, 1103)
         assert not Path(config.output_dir).exists()
     finally:
-        preference(original)
+        if preference() != original:
+            preference(original)
+        assert preference() == original
+
+
+def test_blas_preference_is_read_only_through_checkpoint_and_resume(tmp_path, monkeypatch):
+    # Runs on both wheels, including when the cuBLASLt transition above skips.
+    # Use the real getter, and fail if production ever tries to set a backend.
+    preference = torch.backends.cuda.preferred_blas_library
+    original = preference()
+    reads = []
+
+    def read_only(backend=None):
+        assert backend is None, "CPU training must not set a CUDA BLAS backend"
+        value = preference()
+        reads.append(value)
+        return value
+
+    monkeypatch.setattr(torch.backends.cuda, "preferred_blas_library", read_only)
+    view, split, config = make_case(tmp_path)
+    full = pretrain(view, split, config, 1103)
+    first = pretrain(view, split, replace(config, max_batches=1,
+                                         output_dir=str(tmp_path / "first")), 1103)
+    descriptor = read_artifact(Path(first.path).with_suffix(".json"),
+                               CheckpointArtifact, first.content_hash)
+    assert descriptor == first
+    assert dict(descriptor.identity.environment)["blas_preference"] == str(original)
+    resumed = pretrain(view, split, replace(config, predecessor=descriptor,
+                                           output_dir=str(tmp_path / "resumed")), 1103)
+    assert resumed.complete and resumed.identity == full.identity
+    assert_state_equal(load_checkpoint(full, full.identity),
+                       load_checkpoint(resumed, resumed.identity))
+    assert reads and all(value == original for value in reads)
+    assert preference() == original
