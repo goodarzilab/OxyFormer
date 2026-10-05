@@ -19,7 +19,7 @@ from oxyformer.provenance import Immutable, ContractError, require, write_artifa
 from oxyformer.validation.analytic_truth import UniformShiftTruth
 from oxyformer.validation.scm import (
     AssignmentLaw, CovariateFrame, LatentState, SCMConfig, adjustment_key,
-    latent_states, observation_probabilities, observation_log_probability, structural_mean, validate_count_rates,
+    latent_states, observation_probabilities, observation_log_probability, structural_mean, validate_count_rates, count_event_rate,
     LocalCoordinates, exact, exact_shift_intervals, wide, observation_transition_points,
     validate_numeric, validate_policy_domain, validate_seed, REGISTERED_NUMERIC_BOX, NUMERIC_DOMAIN, NUMERIC_MARGIN,
 )
@@ -127,6 +127,7 @@ def _sample_observations(frame, config, policy, seed):
     validate_policy_domain(policy)
     rng = np.random.default_rng(seed)
     regions, geographies, clusters = {}, {}, {}
+    count_scenario = config.registration_probability < 1 or config.denominator_error != 0
     a, y, measured, flags, surveys, biomarkers, events, denominators = ([] for _ in range(8))
     support = dict(policy.components_by_key)
     for i, (geo, region, cluster) in enumerate(zip(frame.geography_ids, frame.region_ids, frame.cluster_ids)):
@@ -139,10 +140,19 @@ def _sample_observations(frame, config, policy, seed):
             state = LatentState(local, regions[region], illness, error)
             law = AssignmentLaw(frame, i, state, config, support[frame.support_keys[i]])
             # A genuine point mass at the first lower boundary, never jittered.
-            dose = law.components[0][0] + error if config.assignment == "atoms" and rng.random() < .5 else law.sample(rng)
+            atom = config.assignment == "atoms" and rng.random() < .5
+            if count_scenario:
+                if atom:
+                    true_dose = exact(law.components[0][0])
+                    dose = float(true_dose+law.error)
+                else:
+                    dose, true_dose = law.sample_count_dose(rng)
+            else:
+                dose = law.components[0][0]+error if atom else law.sample(rng)
+                true_dose = None
             pflag, psurvey, _ = observation_probabilities(dose, state, config)
-            geographies[geo] = (state, dose, bool(rng.random() < pflag), bool(rng.random() < psurvey), rng.normal())
-        state, dose, flag, survey, geo_noise = geographies[geo]
+            geographies[geo] = (state, dose, true_dose, bool(rng.random() < pflag), bool(rng.random() < psurvey), rng.normal())
+        state, dose, true_dose, flag, survey, geo_noise = geographies[geo]
         if cluster not in clusters:
             clusters[cluster] = rng.normal()
         factor = 1 + config.denominator_error * float(rng.choice([-1, 1]))
@@ -151,18 +161,17 @@ def _sample_observations(frame, config, policy, seed):
         flag = flag and frame.outcome_available[i]
         bio = bool(rng.random() < pbio) and frame.biomarker_available[i]
         available = flag and survey and bio
-        mean = float(structural_mean(dose-state.error, frame, i, state, config))
         count = denominator = None
-        if config.registration_probability < 1 or config.denominator_error:
+        if count_scenario:
             # Poisson events followed by binomial registration. The endpoint is
             # registered events / observed denominator in BOTH truth artifacts.
-            true_rate = mean * factor / config.registration_probability
-            require(true_rate >= 0, "count scenario has a negative event rate")
-            true_events = rng.poisson(100 * true_rate)
+            intensity = count_event_rate(true_dose, frame, i, state, config, poisson_intensity=True)
+            true_events = rng.poisson(intensity)
             count = int(rng.binomial(true_events, config.registration_probability))
             denominator = 100 * factor
             outcome = count / denominator
         else:
+            mean = float(structural_mean(dose-state.error, frame, i, state, config))
             outcome = mean + config.noise_sd * (geo_noise + clusters[cluster] + rng.normal()) / np.sqrt(3)
         cov = []
         if config.local_confounding == "measured":
