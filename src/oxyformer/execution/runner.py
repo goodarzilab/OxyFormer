@@ -79,47 +79,61 @@ def dependency_file(root, relative):
 
 def verify_dependency_result(root, *, expected_hash=None, trees=None, active=None, verified=None,
                              output_dir=None):
+    """Verify the complete lineage with an explicit postorder traversal."""
     root = directory_path(root)
-    if output_dir is not None:
-        require(not output_dir.is_relative_to(root) and not root.is_relative_to(output_dir),
-                f'output overlaps an upstream attempt: {root}')
     active = set() if active is None else active
     verified = {} if verified is None else verified
-    require(root not in active, 'dependency publication cycle')
-    if root in verified:
-        result = verified[root]
-        require(expected_hash is None or any(a.path == FINGERPRINT and a.sha256 == expected_hash
-                                            for a in result.artifacts),
-                'dependency published fingerprint identity changed')
-        return result
-    active.add(root)
+    entered = set()
+    pending = {}
+    stack = [(root, expected_hash, None, False)]
     try:
-        result_file = dependency_file(root, '_execution/result.json')
-        request = StageRequest.from_json(read_regular(dependency_file(root, '_execution/request.json')))
-        result = StageResult.from_json(read_regular(result_file))
-        require(Path(request.output_dir).resolve() == root, 'dependency attempt owner mismatch')
-        require(result.status == 'pass', 'dependency stage did not pass')
-        tree = verify_published_tree(root, result, expected_hash)
-        verify_result(result, request)
-        # The request binds this dependency map and each parent's fingerprint
-        # digest. Verify the entire recorded lineage, not just direct inputs.
-        config = read_mapping(request.config_path)
-        hashes = dict(zip(request.dependency_paths, request.dependency_hashes))
-        for unit, parent in config.get('dependencies', {}).items():
-            parent = Path(parent)
-            require(parent.is_absolute(), 'dependency publication path must be absolute')
-            parent = directory_path(parent)
-            expected = hashes.get(str(parent / FINGERPRINT))
-            require(expected is not None, 'dependency fingerprint absent from published request')
-            verify_dependency_result(parent, expected_hash=expected, trees=trees,
-                                     active=active, verified=verified, output_dir=output_dir)
-            verify_dependency_id(parent, unit)
-        if trees is not None:
-            trees[str(root)] = tree
-        verified[root] = result
-        return result
+        while stack:
+            current, expected, unit, ready = stack.pop()
+            if ready:
+                result, tree = pending.pop(current)
+                if trees is not None:
+                    trees[str(current)] = tree
+                verified[current] = result
+                active.remove(current)
+            else:
+                current = directory_path(current)
+                if output_dir is not None:
+                    require(not output_dir.is_relative_to(current) and not current.is_relative_to(output_dir),
+                            f'output overlaps an upstream attempt: {current}')
+                require(current not in active, 'dependency publication cycle')
+                if current in verified:
+                    result = verified[current]
+                    require(expected is None or any(a.path == FINGERPRINT and a.sha256 == expected
+                                                    for a in result.artifacts),
+                            'dependency published fingerprint identity changed')
+                else:
+                    active.add(current)
+                    entered.add(current)
+                    request = StageRequest.from_json(read_regular(dependency_file(current, '_execution/request.json')))
+                    result = StageResult.from_json(read_regular(dependency_file(current, RESULT)))
+                    require(Path(request.output_dir).resolve() == current, 'dependency attempt owner mismatch')
+                    require(result.status == 'pass', 'dependency stage did not pass')
+                    tree = verify_published_tree(current, result, expected)
+                    verify_result(result, request)
+                    config = read_mapping(request.config_path)
+                    hashes = dict(zip(request.dependency_paths, request.dependency_hashes))
+                    parents = []
+                    for parent_unit, parent in config.get('dependencies', {}).items():
+                        parent = Path(parent)
+                        require(parent.is_absolute(), 'dependency publication path must be absolute')
+                        parent = directory_path(parent)
+                        digest = hashes.get(str(parent / FINGERPRINT))
+                        require(digest is not None, 'dependency fingerprint absent from published request')
+                        parents.append((parent, digest, parent_unit, False))
+                    pending[current] = (result, tree)
+                    stack.append((current, expected, unit, True))
+                    stack.extend(reversed(parents))
+                    continue
+            if unit is not None:
+                verify_dependency_id(current, unit)
+        return verified[root]
     finally:
-        active.remove(root)
+        active.difference_update(entered)
 
 
 def verify_dependency_id(root, unit):
