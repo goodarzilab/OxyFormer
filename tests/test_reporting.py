@@ -1344,3 +1344,79 @@ def test_isolated_output_alias_remains_releasable(case, tmp_path, monkeypatch, r
     result.verify(request)
     assert json.loads((output / 'report.json').read_text())['state'] == 'released'
     assert run_stage(request) == result
+
+
+@pytest.mark.parametrize('document', ['approvals', 'config'])
+def test_utf8_reporting_inputs_release_under_ascii_locale(case, tmp_path, monkeypatch, document):
+    repository = tmp_path / 'synthetic-repository'
+    request = repository_request(case, tmp_path, monkeypatch, repository)
+    task = json.loads(Path(request.task_path).read_text())
+    approvals_path = Path(task['approvals'])
+    approvals = yaml.safe_load(approvals_path.read_text(encoding='utf-8'))
+    if document == 'config':
+        config = Path(request.config_path)
+        config.write_text(CONFIG.read_text(encoding='utf-8') + '\n# Reviewed by Ren\u00e9\n', encoding='utf-8')
+        request = replace(request, config_hash=file_hash(config))
+        for approval in approvals['owner_decisions']['reporting_approvals']:
+            approval['config_hash'] = request.config_hash
+    else:
+        for approval in approvals['owner_decisions']['reporting_approvals']:
+            approval['reviewer'] = 'Ren\u00e9'
+    approvals_path.write_text(yaml.safe_dump(approvals, allow_unicode=True), encoding='utf-8')
+    request = replace(request, dependency_hashes=tuple(file_hash(p) for p in request.dependency_paths))
+    request_path = tmp_path / 'ascii-locale-request.json'
+    request_path.write_text(request.to_json(), encoding='utf-8')
+    script = """
+import locale, sys
+from pathlib import Path
+from oxyformer.reporting import stage
+assert locale.getpreferredencoding(False).lower() in ('ansi_x3.4-1968', 'ascii')
+stage.OWNER_APPROVALS = Path(sys.argv[2])
+sys.exit(stage.request_main(['--v2-request', sys.argv[1]]))
+"""
+    completed = subprocess.run([sys.executable, '-c', script, str(request_path), str(approvals_path)],
+        cwd=tmp_path, env={**os.environ, 'PYTHONPATH': str(ROOT / 'src'), 'CUDA_VISIBLE_DEVICES': '',
+                          'LC_ALL': 'C', 'PYTHONUTF8': '0', 'PYTHONCOERCECLOCALE': '0'},
+        capture_output=True, text=True, timeout=60)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    result = StageResult.from_json(completed.stdout)
+    result.verify(request)
+    report = json.loads((Path(request.output_dir) / 'report.json').read_text(encoding='utf-8'))
+    assert report['state'] == 'released'
+
+
+@pytest.mark.parametrize('ratio_scale', [1e-200, 1., 1e200])
+def test_subset_ess_survives_full_target_mass_underflow(ratio_scale):
+    weights = (1e200,) * 40 + (1e-200,) + (1e-202,) * 39
+    report = overlap_report(weights, (ratio_scale,) * 80,
+        (9.,) * 40 + (1.,) * 40, (9.,) * 40 + (3.,) * 40,
+        ('constant',), ((1.,),) * 80, ((1.,),) * 80)
+    expected = (1 + 39 * .01) ** 2 / (1 + 39 * .01 ** 2)
+    # Affected additionally includes stayers when r != 1.
+    subset = report['subsets']['moved']
+    assert subset['count'] == 40
+    assert subset['target_mass'] == 0.  # true full-target share rounds below binary64
+    for label in ('target', 'ratio'):
+        diagnostic = subset[label + '_weights']
+        assert diagnostic['ess'] == pytest.approx(expected, rel=1e-14, abs=0.)
+        assert diagnostic['ess_fraction'] == pytest.approx(expected / 40, rel=1e-14, abs=0.)
+        assert label + ' ESS < 25% of subset records' in subset['warnings']
+    if ratio_scale == 1.:
+        assert report['subsets']['affected'] == report['subsets']['moved']
+
+
+@pytest.mark.parametrize('ratio_scale', [1e-200, 1e200])
+def test_signed_subset_concentration_survives_normalization_underflow(ratio_scale):
+    weights = (1e200,) * 40 + (1e-200,) + (1e-202,) * 39
+    report = overlap_report(weights, (ratio_scale,) * 80,
+        (9.,) * 40 + (1.,) * 40, (9.,) * 40 + (3.,) * 40,
+        ('constant',), ((1.,),) * 80, ((1.,),) * 80)
+    signed = report['subsets']['moved']['signed_correction']
+    assert signed['ess'] is None
+    assert signed['max_absolute_share'] == pytest.approx(1 / 1.39, rel=1e-14, abs=0.)
+    if ratio_scale == 1e200:
+        # (1e-200 + 39*1e-202) * (1e200 - 1) / (40*1e200)
+        assert signed['absolute_mass'] == pytest.approx(3.475e-202, rel=1e-14, abs=0.)
+        assert signed['signed_sum'] == signed['absolute_mass']
+    else:
+        assert signed['absolute_mass'] == 0.  # global mass is below binary64

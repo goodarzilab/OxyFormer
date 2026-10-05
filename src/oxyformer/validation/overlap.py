@@ -23,6 +23,19 @@ def weight_diagnostics(values):
     return {"ess": ess, "ess_fraction": ess / len(v), "max_share": float(z.max() / z.sum())}
 
 
+def _ratio_weight_diagnostics(weights, ratios):
+    # ESS is invariant to common scale. Form raw products exactly so neither
+    # full-target normalization nor multiplication can erase a positive subset.
+    values = [Fraction.from_float(float(w)) * Fraction.from_float(float(r))
+              for w, r in zip(weights, ratios)]
+    total = sum(values, Fraction(0))
+    if not total:
+        return {"ess": None, "ess_fraction": None, "max_share": None}
+    ess = float(total ** 2 / sum((v * v for v in values), Fraction(0)))
+    return {"ess": ess, "ess_fraction": ess / len(values),
+            "max_share": float(max(values) / total)}
+
+
 def signed_diagnostics(values):
     v = fp64_vector(values, "signed correction weights")
     mass = float(np.abs(v).sum())
@@ -31,6 +44,18 @@ def signed_diagnostics(values):
             "max_absolute_share": float(np.abs(v).max() / mass) if mass else None,
             "ess": None, "ess_reason": "Signed correction is not a sampling weight."}
 
+
+
+def _signed_weight_diagnostics(weights, ratios, total_weight):
+    # Keep conditional concentration independent of an unrepresentably small
+    # full-target share; normalize masses only after exact correction products.
+    values = [Fraction.from_float(float(w)) * (Fraction.from_float(float(r)) - 1)
+              for w, r in zip(weights, ratios)]
+    mass = sum((abs(v) for v in values), Fraction(0))
+    return {"signed_sum": float(sum(values, Fraction(0)) / total_weight),
+            "absolute_mass": float(mass / total_weight),
+            "max_absolute_share": float(max(abs(v) for v in values) / mass) if mass else None,
+            "ess": None, "ess_reason": "Signed correction is not a sampling weight."}
 
 
 def _functional_expectations(weights, ratios, observed, shifted):
@@ -60,7 +85,8 @@ def overlap_report(weights, ratios, observed, shifted, names, f_a, f_d):
     d = fp64_vector(shifted, "shifted exposure", len(a))
     r = fp64_vector(ratios, "density ratios", len(a))
     require(bool((r >= 0).all()), "negative density ratios")
-    q = normalized_weights(weights, len(a))
+    w = fp64_vector(weights, "target weights", len(a))
+    q = normalized_weights(w, len(a))
     fa, fd = np.asarray(f_a, dtype=np.float64), np.asarray(f_d, dtype=np.float64)
     require(bool(names) and len(set(names)) == len(names), "frozen balance functions required")
     for name in names:
@@ -70,13 +96,14 @@ def overlap_report(weights, ratios, observed, shifted, names, f_a, f_d):
     require(bool(np.isfinite(fa).all() and np.isfinite(fd).all()), "nonfinite balance functions")
     moved = d != a
     affected = moved | (r != 1)  # unchanged records can receive incoming mass
+    total_weight = sum((Fraction.from_float(float(v)) for v in w), Fraction(0))
     subsets = {}
     for name, mask in (("all", np.ones(len(a), dtype=bool)), ("moved", moved), ("affected", affected)):
         if not mask.any():
             subsets[name] = {"count": 0, "target_mass": 0.0, "diagnostics": None}
             continue
-        target = weight_diagnostics(q[mask])
-        ratio = weight_diagnostics((q * r)[mask])
+        target = weight_diagnostics(w[mask])
+        ratio = _ratio_weight_diagnostics(w[mask], r[mask])
         p99 = float(np.quantile(r[mask], .99))
         warnings = ["ratio p99 > 10"] if p99 > 10 else []
         for label, diagnostic in (("target", target), ("ratio", ratio)):
@@ -84,7 +111,7 @@ def overlap_report(weights, ratios, observed, shifted, names, f_a, f_d):
                 warnings.append(f"{label} ESS < 25% of subset records")
         subsets[name] = {"count": int(mask.sum()), "target_mass": float(q[mask].sum()),
                          "target_weights": target, "ratio_weights": ratio,
-                         "signed_correction": signed_diagnostics((q * (r - 1))[mask]),
+                         "signed_correction": _signed_weight_diagnostics(w[mask], r[mask], total_weight),
                          "ratio_p99": p99, "warnings": warnings}
     left, right = _functional_expectations(weights, r, fa, fd)
     require(bool(np.isfinite(left).all() and np.isfinite(right).all()), "nonfinite functional balance")

@@ -82,13 +82,13 @@ def run_stage(request: StageRequest) -> StageResult:
         report["manifest_hash"] = manifest.content_hash
         report["diagnostics"] = summarize(bundle, manifest)
         request.verify_inputs()
-        config = require_container(yaml.safe_load(Path(request.config_path).read_text()), dict, "reporting config")
+        config = require_container(yaml.safe_load(Path(request.config_path).read_text(encoding="utf-8")), dict, "reporting config")
         require(config.get("schema_version") == 1, "unsupported reporting config")
         require(request.stage in STAGE_GATES, "unknown reporting stage")
         require(Path(task["approvals"]).resolve() == _owner_registry(request).resolve(), "approval path is not owner registry")
         receipts = read_artifact(task["receipts"], TaskReceipts, dependencies[task["receipts"]])
         require(manifest.stage == request.stage, "reporting stage mismatch")
-        approvals = require_container(yaml.safe_load(Path(task["approvals"]).read_text()), dict, "owner approvals")
+        approvals = require_container(yaml.safe_load(Path(task["approvals"]).read_text(encoding="utf-8")), dict, "owner approvals")
         report = evaluate(bundle, manifest, receipts, approvals, request.config_hash)
         # Recheck immutable dependencies after collection, before publication.
         request.verify_inputs()
@@ -150,6 +150,6 @@ def request_main(argv=None):
     parser = argparse.ArgumentParser(description="Build isolated, gated OxyFormer v2 reporting artifacts")
     parser.add_argument("--v2-request", type=Path, required=True)
     args = parser.parse_args(argv)
-    result = run_stage(StageRequest.from_json(args.v2_request.read_text()))
+    result = run_stage(StageRequest.from_json(args.v2_request.read_text(encoding="utf-8")))
     print(result.to_json())
     return 0 if result.status == "pass" else 1

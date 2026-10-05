@@ -175,3 +175,13 @@ no tolerance or overlap threshold is relaxed. A truly unrepresentable final
 diagnostic still fails finite-record validation. Forest coordinates divide by
 the plotting bound before scaling, so every finite point remains drawable.
 Valid derived diagnostics also remain visible when approval metadata is refused.
+
+Reporting config, owner approvals and request text are decoded as UTF-8
+independently of the runtime locale, matching canonical artifact text.
+Subset ESS uses raw target masses and exact ratio products before the final
+diagnostic rounding. Signed subset mass and concentration likewise use exact
+correction products before normalization. Thus a tiny full-target mass can round
+to zero without erasing a subset's scale-independent ESS or concentration.
+These remain diagnostics; no scientific acceptance threshold is changed.
+Immutable publication requires same-directory hard-link support in output_dir;
+an unavailable publication primitive returns failure without artifact references.
