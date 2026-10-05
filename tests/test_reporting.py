@@ -1048,3 +1048,31 @@ print(stage.run_stage(request).to_json())
     assert [e['method'] for e in report['estimators']] == ['mtp_one_step', 'cv_tmle_identity']
     assert 'aligned_influence' in report['diagnostics']
     assert 'overlap_by_seed' in report['diagnostics']
+
+
+def test_report_publication_is_stable_with_windows_text_newlines(produced_primary_case, tmp_path, monkeypatch):
+    same_case, _ = produced_primary_case
+    request = make_request(tmp_path, same_case, monkeypatch)
+    real_temporary_file = stage.tempfile.NamedTemporaryFile
+
+    def windows_temporary_file(*args, **kwargs):
+        # Exercise real TextIOWrapper CRLF translation on the CPU/Linux host.
+        # Binary streams are platform-independent and receive no newline option.
+        if 'b' not in kwargs.get('mode', 'w+b') and kwargs.get('newline') is None:
+            kwargs['newline'] = '\r\n'
+        return real_temporary_file(*args, **kwargs)
+
+    monkeypatch.setattr(stage.tempfile, 'NamedTemporaryFile', windows_temporary_file)
+    first = run_stage(request)
+    assert first.status == 'pass'
+    first.verify(request)
+    second = run_stage(request)
+    assert second == first
+    second.verify(request)
+    root = Path(request.output_dir)
+    report = json.loads((root / 'report.json').read_text())
+    assert report['state'] == 'released'
+    for name in ('report.html', 'estimators.svg'):
+        content = (root / name).read_bytes()
+        assert b'\n' in content
+        assert b'\r\n' not in content
