@@ -67,15 +67,47 @@ def dependency_file(root, relative):
     return path
 
 
-def verify_dependency_result(root):
-    result_file = dependency_file(root, '_execution/result.json')
-    request = StageRequest.from_json(dependency_file(root, '_execution/request.json').read_text())
-    result = StageResult.from_json(result_file.read_text())
-    require(Path(request.output_dir).resolve() == root, 'dependency attempt owner mismatch')
-    require(result.status == 'pass', 'dependency stage did not pass')
-    verify_published_tree(root, result)
-    result.verify(request)
-    return result
+def verify_dependency_result(root, *, expected_hash=None, trees=None, active=None, verified=None):
+    root = Path(root).resolve(strict=True)
+    active = set() if active is None else active
+    verified = {} if verified is None else verified
+    require(root not in active, 'dependency publication cycle')
+    if root in verified:
+        result = verified[root]
+        require(expected_hash is None or any(a.path == FINGERPRINT and a.sha256 == expected_hash
+                                            for a in result.artifacts),
+                'dependency published fingerprint identity changed')
+        return result
+    active.add(root)
+    try:
+        result_file = dependency_file(root, '_execution/result.json')
+        request = StageRequest.from_json(dependency_file(root, '_execution/request.json').read_text())
+        result = StageResult.from_json(result_file.read_text())
+        require(Path(request.output_dir).resolve() == root, 'dependency attempt owner mismatch')
+        require(result.status == 'pass', 'dependency stage did not pass')
+        verify_published_tree(root, result, expected_hash)
+        result.verify(request)
+        # The request binds this dependency map and each parent's fingerprint
+        # digest. Verify the entire recorded lineage, not just direct inputs.
+        config = read_mapping(request.config_path)
+        hashes = dict(zip(request.dependency_paths, request.dependency_hashes))
+        for parent in config.get('dependencies', {}).values():
+            parent = Path(parent)
+            require(parent.is_absolute(), 'dependency publication path must be absolute')
+            parent = parent.resolve(strict=True)
+            expected = hashes.get(str(parent / FINGERPRINT))
+            require(expected is not None, 'dependency fingerprint absent from published request')
+            verify_dependency_result(parent, expected_hash=expected, trees=trees,
+                                     active=active, verified=verified)
+        if trees is not None:
+            tree = fingerprint_tree(root)
+            unreadable = [str(root / name) for name, entry in tree.items() if 'error' in entry]
+            require(not unreadable, 'dependency fingerprint unreadable: ' + ', '.join(unreadable))
+            trees[str(root)] = tree
+        verified[root] = result
+        return result
+    finally:
+        active.remove(root)
 
 
 def verify_dependency_recipe(root, lock):
@@ -174,14 +206,11 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     published_hashes = {}
     stage_dependencies = []
     dependency_trees = {}
+    verified_dependencies = {}
     for unit, root in deps.items():
         require(not out.is_relative_to(root) and not root.is_relative_to(out),
                 'output overlaps an upstream attempt')
         require(isinstance(needs[unit], list) and needs[unit], 'dependency requires explicit files')
-        tree = fingerprint_tree(root)
-        unreadable = [str(root / name) for name, entry in tree.items() if 'error' in entry]
-        require(not unreadable, 'dependency fingerprint unreadable: ' + ', '.join(unreadable))
-        dependency_trees[str(root)] = tree
         for relative in needs[unit]:
             files.append(dependency_file(root, relative))
         # Acquisition commands predate the common stage API and publish source
@@ -193,7 +222,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         # Every producer now seals its own attempt. An acquisition receipt
         # describes source data but cannot replace the publication fingerprint.
         require((root / '_execution/result.json').is_file(), f'stage receipt missing: {unit}')
-        result = verify_dependency_result(root)
+        result = verify_dependency_result(root, trees=dependency_trees, verified=verified_dependencies)
         published_hashes[root / FINGERPRINT] = next(
             a.sha256 for a in result.artifacts if a.path == FINGERPRINT)
         stage_dependencies.append(root)
