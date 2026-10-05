@@ -191,25 +191,14 @@ def _population_moments(values):
     if all(value == values[0] for value in values):
         # True constancy must not become tiny variance through rounded summation.
         return float(values[0]), 1.0
-    # Move the largest magnitude into [1, 2) with an exact binary scale.
-    # Squaring unscaled deviations can produce a nonzero but badly rounded
-    # subnormal variance, so scaling must precede *every* variance computation.
+    # Rescale by a data-derived power of two before taking moments. Rational
+    # values preserve both large integers' low bits and tiny residual means;
+    # exact centering avoids inflated variance around a rounded floating mean.
     exponent = math.frexp(max(abs(value) for value in values))[1] - 1
-    with np.errstate(all="ignore"):
-        original = np.asarray(values, dtype=np.float64)
-        scaled = np.ldexp(original, -exponent)
-        exact_scaling = np.array_equal(np.ldexp(scaled, exponent), original)
-        if exact_scaling:
-            mean = math.ldexp(float(np.mean(scaled)), exponent)
-            scale = math.ldexp(float(np.std(scaled)), exponent)
-        else:
-            # A range wider than binary64 can retain tiny residual means after
-            # cancellation. Keep the binary rescaling exact with rationals and
-            # undo it on the mean before converting back to float.
-            factor = Fraction(2) ** exponent
-            scaled = [Fraction(value) / factor for value in values]
-            mean = float(statistics.mean(scaled) * factor)
-            scale = math.ldexp(float(statistics.pstdev(scaled)), exponent)
+    factor = Fraction(2) ** exponent
+    scaled = [Fraction(value) / factor for value in values]
+    mean = float(statistics.mean(scaled) * factor)
+    scale = math.ldexp(float(statistics.pstdev(scaled)), exponent)
     require(math.isfinite(mean) and math.isfinite(scale) and scale > 0,
             "population moments are not representable")
     return mean, scale

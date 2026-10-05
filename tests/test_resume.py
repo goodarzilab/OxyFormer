@@ -659,3 +659,44 @@ def test_npy_shape_is_bounded_before_array_allocation(tmp_path, monkeypatch, sha
     monkeypatch.setattr(np, "ndarray", bounded_array)
     with pytest.raises(ContractError, match="tensor.*size"):
         load_checkpoint(descriptor, descriptor.identity)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("unit_ids", ("other",)), ("split_hash", "b" * 64),
+    ("config_hash", "c" * 64), ("environment", (("other", "environment"),)),
+    ("seed", 999),
+])
+@pytest.mark.parametrize("operation", ["save", "load"])
+def test_lineage_must_agree_with_identity(tmp_path, field, value, operation):
+    from io import BytesIO
+    import json
+    import zipfile
+
+    view, split, config = make_case(tmp_path)
+    first = pretrain(view, split, replace(config, max_batches=1), 1103)
+    state = load_checkpoint(first, first.identity)
+    lineage = replace(first.lineage, **{field: value})
+    root = tmp_path / "contradictory"
+    root.mkdir()
+    if operation == "save":
+        with pytest.raises(ContractError, match="lineage.*identity"):
+            save_checkpoint(root, identity=first.identity, lineage=lineage, state=state,
+                            complete=False, reason="batch_limit")
+        assert list(root.iterdir()) == []
+    else:
+        stream = BytesIO()
+        with zipfile.ZipFile(first.path) as source, zipfile.ZipFile(stream, "w") as output:
+            for name in source.namelist():
+                payload = source.read(name)
+                if name == "metadata.json":
+                    metadata = json.loads(payload)
+                    metadata["lineage"] = lineage.to_dict()
+                    payload = canonical_json(metadata).encode()
+                output.writestr(name, payload)
+        payload = stream.getvalue()
+        path = root / "inconsistent.ofc"
+        path.write_bytes(payload)
+        descriptor = replace(first, path=str(path), lineage=lineage,
+                             sha256=sha256(payload).hexdigest(), byte_size=len(payload))
+        with pytest.raises(ContractError, match="lineage.*identity"):
+            load_checkpoint(descriptor, first.identity)
