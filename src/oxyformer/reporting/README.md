@@ -14,7 +14,10 @@ adjacent `approvals.yaml` is the only accepted registry. The frozen config path'
 repository prefix is retained before resolving its leaf: a symlinked `configs/`
 directory cannot move the repository anchor. Each protected leaf and approval
 identity is then resolved separately. Installed code never
-looks for owner approvals beside `site-packages`. Output protection uses that
+looks for owner approvals beside `site-packages`. Its optional source-layout probe
+can encounter an unrelated file or broken link under the Python installation;
+such a candidate means installed mode, without weakening resolution of actual
+request inputs or protected repository paths. Output protection uses that
 same repository. Results are created once in `output_dir`:
 `report.json`, self-contained `report.html`, and `estimators.svg`. Existing
 outputs are never overwritten. Identical reruns reverify inputs and existing

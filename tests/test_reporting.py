@@ -980,7 +980,8 @@ def test_fresh_round2_exact_county_share_boundary_and_neighbors(case, direction)
         assert metric['G_eff'] == pytest.approx(2450/29)
 
 
-@pytest.mark.parametrize('mode', ['shared', 'mismatched', 'alternate_approval', 'protected_output'])
+@pytest.mark.parametrize('mode', ['shared', 'mismatched', 'alternate_approval', 'protected_output',
+                                  'src_file', 'src_dangling', 'src_loop'])
 def test_installed_reporting_uses_repository_config_binding(produced_primary_case, tmp_path, monkeypatch, mode):
     same_case, different_fit = produced_primary_case
     b, m, receipts = same_case
@@ -992,6 +993,14 @@ def test_installed_reporting_uses_repository_config_binding(produced_primary_cas
     installed = tmp_path / 'venv/lib/python3.11/site-packages'
     shutil.copytree(ROOT / 'src/oxyformer', installed / 'oxyformer',
                     ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    # This optional source-checkout candidate is unrelated to the request's repository.
+    unrelated = installed.parent / 'src'
+    if mode == 'src_file':
+        unrelated.write_text('unrelated installation file')
+    elif mode == 'src_dangling':
+        unrelated.symlink_to(tmp_path / 'absent-source', target_is_directory=True)
+    elif mode == 'src_loop':
+        unrelated.symlink_to(unrelated, target_is_directory=True)
     repository = tmp_path / 'project'
     config = repository / 'configs/reporting.yaml'
     config.parent.mkdir(parents=True)
@@ -1040,7 +1049,7 @@ print(stage.run_stage(request).to_json())
         assert not report['releasable']
         assert any('approval path is not owner registry' in g['reason'] for g in report['gates'])
         return
-    if mode == 'shared':
+    if mode == 'shared' or mode.startswith('src_'):
         assert result.status == 'pass', report['gates']
         assert report['state'] == 'released'
     else:

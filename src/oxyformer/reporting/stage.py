@@ -42,8 +42,13 @@ _MODULE = _realpath(__file__)
 _SOURCE_ROOT = _MODULE.parents[3]
 # A source checkout has a fixed registry. Installed code has no repository
 # beside it: use the repository config already bound by the frozen request.
-OWNER_APPROVALS = (_SOURCE_ROOT / "configs" / "approvals.yaml"
-                   if _realpath(_SOURCE_ROOT / "src/oxyformer/reporting/stage.py") == _MODULE else None)
+try:
+    _SOURCE_CHECKOUT = _realpath(_SOURCE_ROOT / "src/oxyformer/reporting/stage.py") == _MODULE
+except (ContractError, OSError):
+    # An installed package may have an unrelated, unusable src entry beside it.
+    # This optional classification probe is not a request or protected path.
+    _SOURCE_CHECKOUT = False
+OWNER_APPROVALS = _SOURCE_ROOT / "configs/approvals.yaml" if _SOURCE_CHECKOUT else None
 _SOURCE_CONFIG = _SOURCE_ROOT / "configs/reporting.yaml" if OWNER_APPROVALS is not None else None
 
 
