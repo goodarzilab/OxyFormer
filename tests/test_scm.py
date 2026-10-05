@@ -2412,3 +2412,78 @@ def test_seventh_round1_structural_doses_enforce_declared_domain(dose):
     from oxyformer.validation.scm import structural_mean
     with pytest.raises(ContractError, match='structural doses.*supported numeric domain'):
         structural_mean(dose, frame(1, 1), 0, LatentState(), config())
+
+
+class _SeventhIndexProtocol:
+    def __init__(self, value):
+        self.value = value
+    def __index__(self):
+        return self.value
+
+
+@pytest.mark.parametrize('entry', ['structural', 'sampled', 'count', 'adjustment', 'piece', 'order'])
+def test_seventh_round2_indices_share_concrete_integer_contract(entry):
+    from oxyformer.validation.scm import structural_mean, sampled_mean, count_event_rate, adjustment_key
+    from scipy.special import logsumexp
+    f, c, state = frame(1, 1), config(), LatentState()
+    law = AssignmentLaw(f, 0, state, c, ((0., 10.),))
+    calls = {
+        'structural': lambda row: structural_mean([0.], f, row, state, c)[0],
+        'sampled': lambda row: sampled_mean(0., f, row, state, c),
+        'count': lambda row: count_event_rate(0., f, row, state, c),
+        'adjustment': lambda row: adjustment_key(f, row, state, c)[0],
+        'piece': lambda index: law.quantile_coordinates(index, .25).rounded(),
+        'order': lambda order: float(logsumexp(np.concatenate([r.log_weights for r in law.quadrature(order, [])]))),
+    }
+    number = 32 if entry == 'order' else 0
+    expected = (0., None) if entry == 'adjustment' else 2.5 if entry == 'piece' else 0. if entry == 'order' else 50.
+    # Floating representations are first so their prior false refusal is visible.
+    for value in [np.float64(number), *_fifth_numeric_variants(number)]:
+        actual = calls[entry](value)
+        if entry == 'adjustment':
+            assert actual == expected
+        else:
+            assert actual == pytest.approx(expected, abs=1e-14)
+    for value in (False, np.bool_(False), _SeventhInt(number), _SeventhIndexProtocol(number), -1, .5):
+        with pytest.raises(ContractError):
+            calls[entry](value)
+
+
+def test_seventh_round2_assignment_rejects_length_protocol_before_using_it():
+    class LengthProtocol(list):
+        def __len__(self):
+            pytest.fail('unapproved length protocol ran')
+    with pytest.raises(ContractError, match='numeric|exact.*type'):
+        AssignmentLaw(frame(1, 1), 0, LatentState(), config(), LengthProtocol([(0., 10.)]))
+
+
+@pytest.mark.parametrize('case', ['near_wide', 'near_narrow', 'tilted_narrow'])
+def test_seventh_round2_binary64_longdouble_assignment_and_truth(case, monkeypatch):
+    # Exercise the algorithm with binary64 longdouble range/precision without
+    # claiming this machine is a different architecture. Both real builds also
+    # run the complete suite with their native longdouble.
+    smallest = float(np.nextafter(0., 1.))
+    near = case != 'tilted_narrow'
+    c = config(assignment='near_deterministic', near_scale=smallest, noise_sd=0.) if near else config(local_confounding='omitted', noise_sd=0.)
+    f = frame(1, 1)
+    components = ((0., 10.),) if case == 'near_wide' else ((0., smallest),)
+    p = policy(components)
+    monkeypatch.setattr(np, 'longdouble', np.float64)
+    with np.errstate(over='ignore', under='ignore', invalid='ignore', divide='ignore'):
+        law = AssignmentLaw(f, 0, LatentState(local=1. if not near else 0.), c, components)
+        assert np.isfinite(law.probabilities).all()
+        assert sum(law.probabilities) == pytest.approx(1., abs=1e-12)
+        result = generate_suite_a(f, c, p)
+    expected = 2. if case == 'near_wide' else 0.
+    assert result.observed_law_truth.value == pytest.approx(expected, abs=1e-10)
+    assert result.structural_causal_truth.value == pytest.approx(expected, abs=1e-10)
+
+
+def test_seventh_round2_tiny_slope_quantile_retains_local_draw(monkeypatch):
+    from fractions import Fraction
+    from oxyformer.validation.scm import exact
+    smallest = float(np.nextafter(0., 1.))
+    monkeypatch.setattr(np, 'longdouble', np.float64)
+    law = AssignmentLaw(frame(1, 1), 0, LatentState(local=-1.), config(), ((0., smallest),))
+    at = law.quantile_coordinates(0, .25)
+    assert at.anchor+at.unit*exact(at.values.item()) == Fraction(smallest)/4
