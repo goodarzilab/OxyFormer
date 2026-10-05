@@ -2035,3 +2035,68 @@ def test_deep_tree_preserves_detection_and_publication(runtime, tmp_path, monkey
     finally:
         for path in reversed(created):
             path.rmdir()
+
+
+def test_rewritten_upstream_publication_cannot_reset_later_consumer_baseline(runtime, tmp_path, monkeypatch):
+    from oxyformer.execution.integrity import FINGERPRINT, RESULT, publication_tree
+    from oxyformer.provenance import canonical_json
+    repo, out = runtime
+    source = tmp_path / 'source'
+    source.mkdir()
+    victim = source / 'undeclared'
+    victim.write_text('before')
+    seal_source_fixture(repo, source)
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
+    def rewritten(request):
+        result = dummy(request)
+        victim.write_text('changed')
+        fingerprint = read_json(source / FINGERPRINT)
+        fingerprint['entries'] = publication_tree(source)
+        (source / FINGERPRINT).write_text(canonical_json(fingerprint))
+        producer = read_stage_result(source)
+        producer = replace(producer, artifacts=tuple(
+            replace(a, sha256=file_hash(source / FINGERPRINT)) if a.path == FINGERPRINT else a
+            for a in producer.artifacts))
+        (source / RESULT).write_text(producer.to_json())
+        return result
+    install_stage(monkeypatch, repo, rewritten)
+    failed = run('dummy', out, repo, deps_env=True, task_file=task_file(out, needs=SOURCE_NEEDS))
+    assert failed.status == 'fail' and str(victim) in failed.message
+    assert read_stage_result(out) == failed
+    assert read_json(out / '_execution/dependency_check.json')['status'] == 'fail'
+    later = tmp_path / 'later'
+    initialize_attempt(repo, later)
+    install_stage(monkeypatch, repo, dummy)
+    try:
+        accepted = run('dummy', later, repo, deps_env=True, task_file=task_file(later, needs=SOURCE_NEEDS))
+    except ContractError:
+        return
+    assert accepted.status != 'pass', 'later consumer accepted a coherently rewritten upstream publication'
+
+
+def test_deep_valid_dependency_lineage_does_not_exhaust_python_stack(runtime, tmp_path):
+    from oxyformer.execution.integrity import FINGERPRINT, publish_result
+    from oxyformer.execution.paths import atomic_write
+    repo, _ = runtime
+    head = git(repo, 'rev-parse', 'HEAD')
+    parent = None
+    for index in range(1100):
+        root = tmp_path / str(index)
+        root.mkdir()
+        dependencies = {} if parent is None else {'data-unit': str(parent)}
+        config = atomic_json(root, '_execution/config.json', {'dependencies': dependencies})
+        task = atomic_json(root, '_execution/task.json', {'id': 'data-unit', 'stage': 'source'})
+        inputs = () if parent is None else (str(parent / FINGERPRINT),)
+        request = StageRequest(stage='source', config_path=str(config), config_hash=file_hash(config),
+            task_path=str(task), task_hash=file_hash(task), dependency_paths=inputs,
+            dependency_hashes=tuple(file_hash(p) for p in inputs), output_dir=str(root), code_identity=head)
+        atomic_write(root, '_execution/request.json', request.to_json())
+        data = atomic_json(root, 'data.json', {})
+        lineage = ArtifactLineage(source_hashes=(file_hash(data),), unit_ids=('data-unit',),
+            parent_hashes=(), split_hash=None, config_hash=request.config_hash, model_hash=None,
+            environment=(('python', 'fixture'),), seed=None, parameter_count=None)
+        result = StageResult(request_hash=request.content_hash, status='pass', message='fixture',
+            artifacts=(ArtifactRecord(path='data.json', sha256=file_hash(data), lineage=lineage, kind='source'),))
+        assert publish_result(root, result).status == 'pass'
+        parent = root
+    assert verify_dependency_result(parent).status == 'pass'
