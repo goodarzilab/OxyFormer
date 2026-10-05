@@ -21,18 +21,35 @@ from oxyformer.reporting.evidence_matrix import LIMITATIONS, evaluate, require_c
 from oxyformer.reporting.records import ExpectedTasks, ReportBundle, STAGE_GATES, TaskReceipts
 from oxyformer.reporting.render import render_forest, render_html
 
-_MODULE = Path(__file__).resolve()
+
+def _realpath(path):
+    """Resolve existing components strictly, permitting only a missing suffix.
+
+    New report directories and absent protected leaves are valid. Broken links,
+    loops, non-directory ancestors and other resolution errors are not. Reject
+    a missing component before '..': such a request cannot later verify strictly.
+    """
+    path = Path(path)
+    try:
+        return Path(os.path.realpath(path, strict=True))
+    except FileNotFoundError:
+        require(not path.is_symlink(), f"unresolvable report path symlink: {path}")
+        require(path.name != "..", f"missing report path ancestor: {path}")
+        return _realpath(path.parent) / path.name
+
+
+_MODULE = _realpath(__file__)
 _SOURCE_ROOT = _MODULE.parents[3]
 # A source checkout has a fixed registry. Installed code has no repository
 # beside it: use the repository config already bound by the frozen request.
 OWNER_APPROVALS = (_SOURCE_ROOT / "configs" / "approvals.yaml"
-                   if _SOURCE_ROOT / "src/oxyformer/reporting/stage.py" == _MODULE else None)
+                   if _realpath(_SOURCE_ROOT / "src/oxyformer/reporting/stage.py") == _MODULE else None)
 
 
 def _owner_registry(request):
     if OWNER_APPROVALS is not None:
         return OWNER_APPROVALS
-    config = Path(request.config_path).resolve()
+    config = _realpath(request.config_path)
     require(config.name == "reporting.yaml" and config.parent.name == "configs",
             "installed reporting requires repository configs/reporting.yaml")
     return config.with_name("approvals.yaml")
@@ -82,7 +99,7 @@ def run_stage(request: StageRequest) -> StageResult:
         config = require_container(yaml.safe_load(Path(request.config_path).read_text()), dict, "reporting config")
         require(config.get("schema_version") == 1, "unsupported reporting config")
         require(request.stage in STAGE_GATES, "unknown reporting stage")
-        require(Path(task["approvals"]).resolve() == _owner_registry(request).resolve(), "approval path is not owner registry")
+        require(_realpath(task["approvals"]) == _realpath(_owner_registry(request)), "approval path is not owner registry")
         receipts = read_artifact(task["receipts"], TaskReceipts, dependencies[task["receipts"]])
         require(manifest.stage == request.stage, "reporting stage mismatch")
         approvals = require_container(yaml.safe_load(Path(task["approvals"]).read_text()), dict, "owner approvals")
@@ -106,11 +123,13 @@ def run_stage(request: StageRequest) -> StageResult:
 
 
 def _write_report(request, report, bundle):
-    root = Path(request.output_dir).resolve()
-    repository = _owner_registry(request).parents[1].resolve()
-    for protected in (repository / "outputs", repository / "report", repository / "src", repository / "configs"):
-        require(not root.is_relative_to(protected), "report output overlaps protected repository path")
-    require(not any(Path(p).resolve().is_relative_to(root) for p in
+    root = _realpath(request.output_dir)
+    repository = _realpath(_owner_registry(request).parents[1])
+    protected_paths = tuple(_realpath(repository / name) for name in ("outputs", "report", "src", "configs"))
+    for protected in protected_paths:
+        require(not root.is_relative_to(protected) and not protected.is_relative_to(root),
+                "report output overlaps protected repository path")
+    require(not any(_realpath(p).is_relative_to(root) for p in
                     (request.config_path, request.task_path) + request.dependency_paths),
             "report output must be isolated from inputs")
     root.mkdir(parents=True, exist_ok=True)

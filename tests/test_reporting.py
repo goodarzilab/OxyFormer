@@ -1255,3 +1255,109 @@ def test_invalid_approval_metadata_keeps_derived_diagnostics(case, tmp_path, mon
     assert not report['releasable']
     assert report['diagnostics'] == json.loads(canonical_json(summarize(case[0], case[1])))
     assert len(report['estimators']) == 2
+
+
+def isolated_repository_request(case, tmp_path, monkeypatch):
+    """Keep every filesystem-isolation regression inside synthetic storage."""
+    request = make_request(tmp_path, case, monkeypatch)
+    repository = tmp_path / 'synthetic-repository'
+    config = repository / 'configs' / 'reporting.yaml'
+    config.parent.mkdir(parents=True)
+    config.write_bytes(CONFIG.read_bytes())
+    registry = config.with_name('approvals.yaml')
+    task = json.loads(Path(request.task_path).read_text())
+    registry.write_bytes(Path(task['approvals']).read_bytes())
+    monkeypatch.setattr(stage, 'OWNER_APPROVALS', registry)
+    task['approvals'] = str(registry)
+    Path(request.task_path).write_text(json.dumps(task))
+    return repository, replace(
+        request, config_path=str(config), config_hash=file_hash(config),
+        task_hash=file_hash(request.task_path), dependency_paths=tuple(task.values()),
+        dependency_hashes=tuple(file_hash(p) for p in task.values()))
+
+
+@pytest.mark.parametrize('protected_name', ['outputs', 'report', 'src', 'configs'])
+@pytest.mark.parametrize('relation', ['equal', 'inside', 'contains'])
+@pytest.mark.parametrize('output_alias', [False, True])
+def test_report_isolation_resolves_both_sides_before_creation(
+        case, tmp_path, monkeypatch, protected_name, relation, output_alias):
+    repository, request = isolated_repository_request(case, tmp_path, monkeypatch)
+    storage = tmp_path / 'storage'
+    storage.mkdir()
+    protected = repository / protected_name
+    target = storage / 'protected'
+    if protected.exists():
+        protected.rename(target)
+    else:
+        target.mkdir()
+    protected.symlink_to(target, target_is_directory=True)
+    output = {'equal': target, 'inside': target / 'new' / 'report', 'contains': storage}[relation]
+    if output_alias:
+        alias = tmp_path / 'output-alias'
+        alias.symlink_to(storage, target_is_directory=True)
+        output = alias / output.relative_to(storage)
+    request = replace(request, output_dir=str(output))
+    request.verify_inputs()
+    before = sorted(str(p.relative_to(storage)) for p in storage.rglob('*'))
+    result = run_stage(request)
+    assert result.status == 'fail' and result.artifacts == ()
+    assert 'overlaps protected repository path' in result.message
+    assert sorted(str(p.relative_to(storage)) for p in storage.rglob('*')) == before
+
+
+@pytest.mark.parametrize('protected_name', ['outputs', 'report', 'src', 'configs'])
+def test_report_isolation_allows_separate_output_symlink(case, tmp_path, monkeypatch, protected_name):
+    repository, request = isolated_repository_request(case, tmp_path, monkeypatch)
+    protected = repository / protected_name
+    target = tmp_path / 'protected-storage'
+    if protected.exists():
+        protected.rename(target)
+    else:
+        target.mkdir()
+    protected.symlink_to(target, target_is_directory=True)
+    storage = tmp_path / 'allowed-storage'
+    storage.mkdir()
+    alias = tmp_path / 'allowed-alias'
+    alias.symlink_to(storage, target_is_directory=True)
+    request = replace(request, output_dir=str(alias / 'new' / 'report'))
+    result = run_stage(request)
+    assert result.status == 'pass', result.message
+    result.verify(request)
+    assert {p.name for p in (storage / 'new' / 'report').iterdir()} == {
+        'report.json', 'report.html', 'estimators.svg'}
+    assert run_stage(request) == result
+
+
+@pytest.mark.parametrize('side', ['output', 'protected'])
+@pytest.mark.parametrize('error', ['dangling', 'loop', 'not_directory'])
+def test_report_isolation_resolution_error_refuses_before_creation(
+        case, tmp_path, monkeypatch, side, error):
+    repository, request = isolated_repository_request(case, tmp_path, monkeypatch)
+    path = repository / 'outputs' if side == 'protected' else tmp_path / 'output-alias'
+    missing = tmp_path / 'missing'
+    if error == 'dangling':
+        path.symlink_to(missing, target_is_directory=True)
+    elif error == 'loop':
+        path.symlink_to(path, target_is_directory=True)
+    else:
+        file = tmp_path / 'regular-file'
+        file.write_text('keep')
+        path.symlink_to(file / 'child', target_is_directory=True)
+    request = replace(request, output_dir=str(path / 'new-report' if side == 'output'
+                                             else tmp_path / 'new-report'))
+    result = run_stage(request)
+    assert result.status == 'fail' and result.artifacts == ()
+    assert not (tmp_path / 'new-report').exists()
+    assert not missing.exists()
+
+
+def test_report_isolation_allows_missing_protected_leaves_and_dotdot(case, tmp_path, monkeypatch):
+    repository, request = isolated_repository_request(case, tmp_path, monkeypatch)
+    # Strict resolution of existing ancestors must still permit new attempt paths.
+    assert not (repository / 'outputs').exists()
+    (tmp_path / 'detour').mkdir()
+    request = replace(request, output_dir=str(tmp_path / 'detour' / '..' / 'isolated' / 'report'))
+    result = run_stage(request)
+    assert result.status == 'pass', result.message
+    result.verify(request)
+    assert list((tmp_path / 'detour').iterdir()) == []

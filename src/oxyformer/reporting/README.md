@@ -16,7 +16,14 @@ outputs are never overwritten. Identical reruns reverify inputs and existing
 bytes and return the same result; matching partial publications are completed.
 Conflicting files or an output directory that contains inputs, or overlaps
 repository src/, configs/, outputs/ or report/, return a failed StageResult with
-no stale artifact references. No reporting path loads outcomes into a model.
+no stale artifact references. Before creating anything, output and all four
+protected paths use the same strict realpath resolution of existing components.
+Missing suffixes allow new attempt directories and absent protected leaves;
+broken symlinks, loops and other resolution errors refuse publication. Protection
+is bidirectional: output cannot be inside, equal to, or an ancestor of a protected
+path, including when either path uses a stable symlink. An isolated output symlink
+remains valid. This is a path check, not protection against concurrent filesystem
+replacement or bind-mount aliases. No reporting path loads outcomes into a model.
 
 Use canonical `ReportBundle`, `ExpectedTasks`, and `TaskReceipts` artifacts from
 `records.py`. The merged `Estimate` contract contains final scores and normalized
