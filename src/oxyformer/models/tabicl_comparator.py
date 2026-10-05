@@ -24,6 +24,7 @@ import numpy as np
 import torch
 
 from oxyformer.contracts import CovariateView, SplitManifest
+from oxyformer.data.loaders import LoadedData
 from oxyformer.design.policies import PolicyPairs
 from oxyformer.provenance import ContractError, canonical_json, check_hash, require
 
@@ -217,6 +218,7 @@ class TabICLComparator:
 
     def _training_context(self, view, split, fold, weights, weight_semantics):
         require(self._estimator is None, "comparator already fitted; use a new instance for each fold")
+        require(type(view) is CovariateView, "training CovariateView required")
         require(type(split) is SplitManifest, "SplitManifest required")
         split.spec.assert_compatible(view.spec)
         require(view.original_ids == split.training_ids(fold), "context must equal fold training IDs in order")
@@ -226,6 +228,44 @@ class TabICLComparator:
         raw = _matrix(view)
         require(raw.shape[1] + 1 <= self.max_features, "foundation feature limit exceeded")
         return raw
+
+    def _training_source(self, data, view, split, weight_semantics):
+        """Validate whole source records before reading any supervised column.
+
+        LoadedData is the privileged producer boundary. Never reconstruct it
+        here from detached labels and caller-supplied IDs. A source permutation
+        is harmless: every column is gathered using the same original-ID map.
+        """
+        require(type(data) is LoadedData, "training-only LoadedData required")
+        manifest = data.manifest
+        view.spec.assert_compatible(manifest.spec)
+        ids = manifest.original_ids
+        require(len(ids) == len(set(ids)) and set(ids) == set(view.original_ids),
+                "LoadedData IDs must match fold training view IDs exactly")
+        require(manifest.entity_graph_hash == split.entity_graph_hash,
+                "training data entity graph mismatch")
+        require(set(manifest.lineage.source_hashes) == set(view.lineage.source_hashes)
+                == set(split.lineage.source_hashes), "training data source mismatch")
+        positions = {oid: i for i, oid in enumerate(ids)}
+        order = tuple(positions[oid] for oid in view.original_ids)
+        columns = [data.column(name) for name in view.columns]
+        values = tuple(tuple(column[i] for column in columns) for i in order)
+        require(values == view.values, "training covariates do not match LoadedData by ID")
+        weights = ((1.,) * len(ids) if manifest.weight_field is None
+                   else data.column(manifest.weight_field))
+        _unit_weights(weights, len(ids), weight_semantics)
+        a = self._source_values(data, manifest.exposure_field, order, "treatment")
+        return a, order
+
+    @staticmethod
+    def _source_values(data, name, order, label):
+        column = data.column(name)
+        values = tuple(column[i] for i in order)
+        require(all(type(value) in (bool, int, float) for value in values),
+                f"invalid training {label}")
+        result = np.asarray(values, dtype=float)
+        require(np.isfinite(result).all(), f"invalid training {label}")
+        return result
 
     def _fit(self, view, split, fold, matrix, labels):
         require(2 <= len(matrix) <= self.max_context_rows, "foundation context limit exceeded; no subsampling")
@@ -258,16 +298,18 @@ class TabICLComparator:
         }).encode()).hexdigest()
         return self
 
-    def fit_outcome(self, view, split, fold, a, y, *, sample_weight, weight_semantics):
+    def fit_outcome(self, view, split, fold, data: LoadedData, *, sample_weight, weight_semantics):
+        """Read A/Y from training-only source records, aligned to the view by ID."""
         require(self.task == "outcome", "outcome fit requires outcome comparator")
         require(view.spec.outcome_scale in SUPPORTED_OUTCOME_SCALES[self.family],
                 "unsupported outcome scale for comparator family; comparator blocked")
         raw = self._training_context(view, split, fold, sample_weight, weight_semantics)
-        a = np.asarray(a, dtype=float)
-        require(a.shape == (len(raw),) and np.isfinite(a).all(), "invalid training treatment")
+        a, order = self._training_source(data, view, split, weight_semantics)
+        y = self._source_values(data, data.manifest.outcome_field, order, "outcome")
         return self._fit(view, split, fold, np.column_stack((a, raw)), y)
 
-    def fit_origin(self, view, split, fold, pairs: PolicyPairs, *, weight_semantics):
+    def fit_origin(self, view, split, fold, data: LoadedData, pairs: PolicyPairs, *, weight_semantics):
+        """Bind policy originals to training source A; endpoint Y is not read."""
         require(self.task == "origin" and type(pairs) is PolicyPairs, "origin fit requires PolicyPairs")
         n = len(view.original_ids)
         require(pairs.original_ids == view.original_ids * 2 and
@@ -276,8 +318,10 @@ class TabICLComparator:
                 "origin pair estimand mismatch")
         _unit_weights(pairs.origin_weights, 2 * n, weight_semantics)
         raw = self._training_context(view, split, fold, pairs.origin_weights[:n], weight_semantics)
+        original_a, _ = self._training_source(data, view, split, weight_semantics)
         a = np.asarray(pairs.a_mmhg, dtype=float)
         require(a.shape == (2 * n,) and np.isfinite(a).all(), "invalid paired treatment")
+        require(np.array_equal(a[:n], original_a), "origin treatment does not match LoadedData by ID")
         return self._fit(view, split, fold, np.column_stack((a, np.tile(raw, (2, 1)))), pairs.transformed)
 
     def _predict(self, a_query, x_tokens, raw_x, context, group_offset, *, as_logits=False):

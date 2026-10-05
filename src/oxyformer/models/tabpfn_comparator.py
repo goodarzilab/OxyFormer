@@ -3,6 +3,8 @@
 No remote client, telemetry service, default checkpoint or download path is used.
 The installed 9.1.0 loader explicitly disables downloads, then ModelSpecs passes
 isolated in-memory weights to the estimator. Package imports remain lazy.
+Supervised fits inherit the training-only LoadedData handoff and original-ID
+alignment from TabICLComparator; prediction receives covariates only.
 """
 from copy import deepcopy
 from importlib import import_module
