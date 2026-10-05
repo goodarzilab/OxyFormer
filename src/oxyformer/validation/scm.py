@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 from itertools import product
 from fractions import Fraction
+from functools import lru_cache
 from typing import Literal
 
 import numpy as np
@@ -281,6 +282,148 @@ def structural_mean(a_true, frame, row, state, config):
     return config.registration_probability * mean / state.denominator_factor
 
 
+def _count_baseline(frame, row, state, config):
+    return (Fraction(50) + sum((exact(v) for v in frame.x[row] if v is not None), Fraction(0))/4
+            + exact(config.local_strength)*exact(state.local)
+            + exact(config.regional_strength)*exact(state.regional) + 2*exact(state.illness))
+
+
+def _integer_product_bounds(a, b, scale):
+    products = [x*y for x in a for y in b]
+    return min(products)//scale, -(-max(products)//scale)
+
+
+def _sine_bounds(value, bits):
+    """Certified rational enclosure, using outward-rounded integer arithmetic.
+
+    Halve to |x| <= 1/2, enclose the sine/cosine Taylor polynomials and their
+    alternating remainders, then double angles. Extra working bits limit width;
+    correctness does not depend on a platform's libm or extended precision.
+    """
+    halves = 0
+    reduced = value
+    while abs(reduced) > Fraction(1, 2):
+        reduced /= 2
+        halves += 1
+    scale = 1 << (bits+4*halves+16)
+    scaled = reduced*scale
+    x = (scaled.numerator//scaled.denominator, -(-scaled.numerator//scaled.denominator))
+    x2 = _integer_product_bounds(x, x, scale)
+    sine = sine_term = x
+    cosine = cosine_term = (scale, scale)
+    n, factorial = 0, 1
+    while True:
+        n += 1
+        def next_term(term, divisor):
+            lo, hi = _integer_product_bounds(term, x2, scale)
+            return (-hi)//divisor, -(lo//divisor)
+        sine_term = next_term(sine_term, (2*n)*(2*n+1))
+        cosine_term = next_term(cosine_term, (2*n-1)*(2*n))
+        sine = tuple(a+b for a,b in zip(sine, sine_term))
+        cosine = tuple(a+b for a,b in zip(cosine, cosine_term))
+        factorial *= (2*n-1)*(2*n)
+        # Both omitted remainders are at most (1/2)^(2n+2)/(2n+2)!.
+        if (1 << (2*n+2))*factorial*(2*n+1)*(2*n+2) >= scale:
+            break
+    sine = (sine[0]-1, sine[1]+1)
+    cosine = (cosine[0]-1, cosine[1]+1)
+    for _ in range(halves):
+        sc = _integer_product_bounds(sine, cosine, scale)
+        cc = _integer_product_bounds(cosine, cosine, scale)
+        ss = _integer_product_bounds(sine, sine, scale)
+        sine, cosine = (2*sc[0], 2*sc[1]), (cc[0]-ss[1], cc[1]-ss[0])
+    return Fraction(sine[0], scale), Fraction(sine[1], scale)
+
+
+@lru_cache(maxsize=16)
+def _pi_bounds(bits):
+    """Machin's identity with exact alternating-series remainder bounds."""
+    def atan_reciprocal(q):
+        total, power, n = Fraction(0), q, 0
+        while True:
+            total += Fraction((-1)**n, (2*n+1)*power)
+            n += 1
+            power *= q*q
+            remainder = Fraction((-1)**n, (2*n+1)*power)
+            if abs(remainder) <= Fraction(1, 1 << (bits+6)):
+                return min(total, total+remainder), max(total, total+remainder)
+    a, b = atan_reciprocal(5), atan_reciprocal(239)
+    return 16*a[0]-4*b[1], 16*a[1]-4*b[0]
+
+
+def _contains_sine_minimum(lower, upper, beta):
+    """Does the exact dose interval contain a minimum of beta*sin(dose/2)?"""
+    pl, ph = _pi_bounds(80)
+    ratios = (lower/pl, lower/ph, upper/pl, upper/ph)
+    start = min(ratios).__floor__()-1
+    stop = max(ratios).__ceil__()+1
+    offset = 1 if beta < 0 else -1
+    first = offset+4*((start-offset+3)//4)
+    for q in range(first, stop+1, 4):
+        bits = 80
+        while True:
+            pl, ph = _pi_bounds(bits)
+            lo, hi = sorted((q*pl, q*ph))
+            if hi < lower or lo > upper:
+                break
+            if lower <= lo and hi <= upper:
+                return True
+            # Nonzero rational endpoints cannot equal an odd multiple of pi.
+            bits *= 2
+    return False
+
+
+def count_event_rate(a_true, frame, row, state, config, *, poisson_intensity=False):
+    """Decide the raw event-rate sign before rounding its complete expression.
+
+    Polynomial rates are rational. For sine, refine rigorous enclosures until
+    both the sign and the final float rounding are decided. This predicate and
+    sampler boundary intentionally do not change smooth truth integration.
+    Registration/denominator factors are positive and applied by the sampler;
+    never reconstruct a raw rate by undoing separately rounded factors.
+    """
+    baseline = _count_baseline(frame, row, state, config)
+    dose = exact(a_true)-exact(config.migration)*exact(state.illness)
+    beta = exact(config.beta)
+    scale = 100 if poisson_intensity else 1
+    message = "count scenario has a negative event rate on its factual/intervention support"
+    if config.effect == "null" or beta == 0:
+        rate = baseline
+    elif config.effect == "linear":
+        rate = baseline+beta*dose
+    elif config.effect == "sign_changing":
+        rate = baseline+beta*(dose-5)**2/10
+    elif dose == 0:
+        rate = baseline
+    else:
+        bits = 80
+        while True:
+            bounds = _sine_bounds(dose/2, bits)
+            lower, upper = sorted(baseline+beta*v for v in bounds)
+            require(upper >= 0, message)
+            if lower >= 0 and float(scale*lower) == float(scale*upper):
+                return float(scale*lower)
+            bits *= 2
+    require(rate >= 0, message)
+    return float(scale*rate)
+
+
+def _validate_count_interval(lower, upper, frame, row, state, config):
+    displacement = exact(config.migration)*exact(state.illness)
+    if config.effect == "nonlinear":
+        baseline = _count_baseline(frame, row, state, config)
+        beta = exact(config.beta)
+        if baseline >= abs(beta):
+            return  # Exact global lower bound, including a zero extremum.
+        require(not _contains_sine_minimum(lower-displacement, upper-displacement, beta),
+                "count scenario has a negative event rate on its factual/intervention support")
+    for endpoint in (lower, upper):
+        count_event_rate(endpoint, frame, row, state, config)
+    vertex = 5+displacement
+    if config.effect == "sign_changing" and lower <= vertex <= upper:
+        count_event_rate(vertex, frame, row, state, config)
+
+
 def observation_probabilities(a_observed, state, config):
     """Factual observation mechanisms; independent of outcome noise given state."""
     a = np.asarray(a_observed)
@@ -488,6 +631,19 @@ class AssignmentLaw:
         index = rng.choice(len(self.pieces),p=self.probabilities)
         return float(self.quantile_coordinates(index,rng.random()).rounded())
 
+    def sample_count_dose(self, rng):
+        """Retain the true local dose for rates; serialize only the observation."""
+        index = rng.choice(len(self.pieces),p=self.probabilities)
+        coordinates = self.quantile_coordinates(index,rng.random())
+        # as_integer_ratio preserves the extended-precision local draw, including
+        # offsets much smaller than an ULP of the absolute recorded exposure.
+        local = Fraction(*np.longdouble(coordinates.values).as_integer_ratio())
+        true_dose = coordinates.anchor-self.error+coordinates.unit*local
+        piece = self.pieces[index]
+        if not piece.lower <= true_dose <= piece.upper:
+            raise ArithmeticError("count inverse-transform draw left its exact support")
+        return float(true_dose+self.error), true_dose
+
     def quadrature(self, order, breakpoints):
         """Full conditional piece measures, with log masses and local nodes.
 
@@ -549,14 +705,7 @@ def validate_count_rates(frame, config, policy, *, eligible_by_key=None):
                     if start <= end:
                         intervals.append((start+delta, end+delta))
             for lower, upper in intervals:
-                lo,hi = wide(lower),wide(upper)
-                critical = [lo, hi]
-                displacement = config.migration*state.illness
-                if config.effect == "nonlinear":
-                    first = int(np.ceil((lo-displacement-np.pi)/(2*np.pi)))
-                    last = int(np.floor((hi-displacement-np.pi)/(2*np.pi)))
-                    critical.extend(displacement+np.pi+2*np.pi*k for k in range(first, last+1))
-                if config.effect == "sign_changing" and lo <= 5+displacement <= hi:
-                    critical.append(5+displacement)
-                require(bool((structural_mean(critical, frame, row, state, config) >= 0).all()),
-                        "count scenario has a negative event rate on its factual/intervention support")
+                # Keep smooth endpoints observable to integration diagnostics;
+                # their rounded values are not evidence about the rate's sign.
+                structural_mean([wide(lower), wide(upper)], frame, row, state, config)
+                _validate_count_interval(lower, upper, frame, row, state, config)
