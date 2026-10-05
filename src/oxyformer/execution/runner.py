@@ -3,8 +3,9 @@
 This is an execution contract, not a sandbox for hostile Python modules. Stage
 implementations must use output_dir for all writes and treat dependency_paths as
 read-only. The runner never modifies upstream files or their permissions; input
-hashes are rechecked before publishing success. Archives are extracted only via
-execution.paths.safe_extract into the consuming attempt.
+trees are fingerprinted before execution and rechecked after the stage returns
+or raises. Archives are extracted only via execution.paths.safe_extract into
+the consuming attempt.
 """
 import importlib
 import json
@@ -16,6 +17,7 @@ import yaml
 
 from oxyformer.contracts import StageRequest, StageResult
 from oxyformer.provenance import ContractError, file_hash, relative_artifact_path, require
+from .integrity import fingerprint_tree, post_execution_check
 from .identity import code_identity, environment_record, scientific_fingerprint, verify_recipe
 from .paths import atomic_json, atomic_write, isolated_caches, output_path
 
@@ -167,10 +169,15 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     deps = resolve_dependencies(needs) if needs else {}
     files = []
     stage_dependencies = []
+    dependency_trees = {}
     for unit, root in deps.items():
         require(not out.is_relative_to(root) and not root.is_relative_to(out),
                 'output overlaps an upstream attempt')
         require(isinstance(needs[unit], list) and needs[unit], 'dependency requires explicit files')
+        tree = fingerprint_tree(root)
+        unreadable = [str(root / name) for name, entry in tree.items() if 'error' in entry]
+        require(not unreadable, 'dependency fingerprint unreadable: ' + ', '.join(unreadable))
+        dependency_trees[str(root)] = tree
         for relative in needs[unit]:
             files.append(dependency_file(root, relative))
         # Acquisition commands predate the common stage API and publish source
@@ -221,6 +228,8 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
               'input_sources': sources, 'dependencies': {k: str(v) for k, v in deps.items()}}
     config_path = atomic_json(out, '_execution/config.json', config)
     task_path = atomic_json(out, '_execution/task.json', task)
+    tree_path = atomic_json(out, '_execution/dependencies.json', dependency_trees)
+    files.append(tree_path)
     request = StageRequest(stage=stage, config_path=str(config_path), config_hash=file_hash(config_path),
                            task_path=str(task_path), task_hash=file_hash(task_path),
                            dependency_paths=tuple(map(str, files)),
@@ -255,8 +264,15 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         for path, digest in sources.items():
             require(file_hash(path) == digest, f'input source changed: {path}')
         code_identity(repo, out)
-    except Exception as exc:
+    except BaseException as exc:
         result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
                              message=str(exc).strip() or type(exc).__name__)
+    check = post_execution_check(dependency_trees)
+    atomic_json(out, '_execution/dependency_check.json', check)
+    if check['status'] == 'fail':
+        changed = [str(Path(root) / name) for root, detail in check['attempts'].items()
+                   for name in detail['changed_paths']]
+        result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
+                             message='upstream attempt tainted; changed paths: ' + ', '.join(changed))
     atomic_write(out, '_execution/result.json', result.to_json())
     return result

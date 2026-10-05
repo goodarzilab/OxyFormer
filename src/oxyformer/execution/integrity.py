@@ -63,3 +63,20 @@ def changed_paths(before, after):
     """All added, removed, changed or unreadable entries, in stable order."""
     return sorted(name for name in before.keys() | after.keys()
                   if before.get(name) != after.get(name) or 'error' in after.get(name, {}))
+
+
+def post_execution_check(before):
+    """Recompute every dependency, including after an unsuccessful stage.
+
+    Taint is recorded in the caller's receipt, never by writing to the
+    dependency. Cross-consumer rejection additionally needs the trusted
+    publication fingerprint carried into each consumer request.
+    """
+    attempts = {}
+    for root, expected in before.items():
+        actual = fingerprint_tree(root)
+        changed = changed_paths(expected, actual)
+        attempts[root] = {'status': 'tainted' if changed else 'unchanged',
+                          'changed_paths': changed, 'fingerprint': actual}
+    return {'status': 'fail' if any(a['changed_paths'] for a in attempts.values()) else 'pass',
+            'attempts': attempts}
