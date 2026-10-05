@@ -10,6 +10,7 @@ import yaml
 import torch
 
 from oxyformer.training.pretrain import environment_identity
+from oxyformer.training.nested_cv import PreparedEndpoint
 
 from oxyformer.contracts import StageRequest, StageResult
 from oxyformer.execution import identity
@@ -17,7 +18,7 @@ from oxyformer.execution.campaign import expand_campaign, validate_plan, concret
 from oxyformer.provenance import ContractError, file_hash, require
 from oxyformer.validation.coverage import (MIN_REPETITIONS, RETRY_RULES, dependency, digest,
     finite, integer, publish, read_json, repetition_plan, summarize, validate_draws)
-from oxyformer.validation.scm import SCMConfig
+from oxyformer.validation.scm import SCMConfig, CovariateFrame
 
 REGISTRY = Path(__file__).parents[3] / "configs/validation/final_scenarios.yaml"
 REPOSITORY = Path(__file__).parents[3]
@@ -96,7 +97,11 @@ def _profile(request, config, reference, scenario, recipe, stamps):
     require(summary["complete"] and summary["counts"]["success"] == len(declared), "profile omitted or failed repetitions")
     measured = timing["complete_repetition_seconds"]
     require(len(measured) == len(declared) and all(finite(t, "profile time") > 0 for t in measured), "invalid profile times")
-    return {"seconds_per_repetition": max(measured), "result_hash": file_hash(result_path),
+    wall = finite(timing["wall_seconds"], "profile wall seconds")
+    require(wall >= math.fsum(measured), "profile wall time does not include its repetitions")
+    overhead = wall - math.fsum(measured)
+    return {"seconds_per_repetition": max(measured), "leaf_overhead_seconds": overhead,
+            "result_hash": file_hash(result_path),
             "timing_hash": file_hash(timing_path), "draws": declared}
 
 
@@ -142,15 +147,17 @@ def build_lock(request, config, task):
         profiles[scenario["name"]] = _profile(request, config, parameters["profiles"][scenario["name"]], scenario, recipe, stamps)
         prior_seeds.update(d["seed"] for d in profiles[scenario["name"]]["draws"])
     # Bind actual input artifact identities before expanding anything.
-    for name, expected_hash in (("endpoint_input", recipe["endpoint_hash"]), ("frame_input", recipe["frame_hash"])):
+    for name, expected_hash, record_type in (("endpoint_input", recipe["endpoint_hash"], PreparedEndpoint),
+                                             ("frame_input", recipe["frame_hash"], CovariateFrame)):
         path = dependency(request, config, parameters[name])
-        require(file_hash(path) == expected_hash, "locked endpoint/frame hash mismatch")
+        require(record_type.from_json(path.read_text()).content_hash == expected_hash,
+                "locked endpoint/frame hash mismatch")
     batches = []
     for mode, repetitions in (("screening", screen_count), ("final", count)):
         mode_leaves = 0
         for scenario in scenarios:
             profile = profiles[scenario["name"]]
-            require(profile["seconds_per_repetition"] * min(batch_size, repetitions) * factor <= wall_seconds,
+            require((profile["leaf_overhead_seconds"] + profile["seconds_per_repetition"] * min(batch_size, repetitions)) * factor <= wall_seconds,
                     "infeasible batch budget: measured complete repetitions do not fit")
             draws = repetition_plan(seed_namespace + ":" + mode, scenario["name"], repetitions)
             for start in range(0, repetitions, batch_size):
