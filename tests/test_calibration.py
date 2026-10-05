@@ -121,8 +121,16 @@ def test_zero_mass_extreme_records_cannot_change_calibration():
     assert baseline.slope == other.slope and baseline.intercept == other.intercept
 
 
-@pytest.mark.parametrize("scale", [1e20, 1e-25])
+@pytest.mark.parametrize("scale", [1e20, 1e-25, 1e-39])
 def test_nonconstant_extreme_logits_preserve_finite_calibration(scale):
+    logits, values = nonseparable_case()
+    baseline = fit_affine(logits, [1.] * 6, **values)
+    scaled = fit_affine(logits * scale, [1.] * 6, **values)
+    assert scaled.slope != 0
+    torch.testing.assert_close(scaled.ratios(logits * scale), baseline.ratios(logits))
+
+
+def nonseparable_case():
     ids = tuple("abcdef")
     values = dict(original_ids=ids, fold_ids=(0, 0, 1, 1, 2, 2),
         partitions=tuple(CalibrationPartition(fold=fold, evaluation_ids=ids[2*fold:2*fold+2],
@@ -130,7 +138,24 @@ def test_nonconstant_extreme_logits_preserve_finite_calibration(scale):
             checkpoint_ids=(), frozen_epochs=1) for fold in range(3)),
         outer_training_ids=ids, lineage=lineage(ids))
     logits = torch.tensor([[-1., 1.], [-1., 1.], [-1., 1.], [1., -1.], [0., 0.], [0., 0.]])
+    return logits, values
+
+
+def test_large_common_offset_preserves_fitted_calibrated_contrasts():
+    logits, values = nonseparable_case()
     baseline = fit_affine(logits, [1.] * 6, **values)
-    scaled = fit_affine(logits * scale, [1.] * 6, **values)
-    assert scaled.slope != 0
-    torch.testing.assert_close(scaled.ratios(logits * scale), baseline.ratios(logits))
+    shifted = 1000. + 2. ** -13 * logits
+    fitted = fit_affine(shifted, [1.] * 6, **values)
+    torch.testing.assert_close(fitted.ratios(shifted), baseline.ratios(logits))
+    restored = type(fitted).from_json(fitted.to_json())
+    torch.testing.assert_close(restored.ratios(shifted), fitted.ratios(shifted))
+
+
+def test_transfer_rmse_preserves_representable_large_differences():
+    logits, values = nonseparable_case()
+    logits *= 1e20
+    fitted = fit_affine(logits, [1.] * 6, **values)
+    result = transfer_diagnostics(fitted, logits, torch.zeros_like(logits), [1.] * 6,
+                                  lineage=lineage(values["original_ids"]))
+    expected = float(logits.double().square().mean().sqrt())
+    assert dict(result.metrics)["weighted_logit_rmse"] == pytest.approx(expected, rel=1e-6)
