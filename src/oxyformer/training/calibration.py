@@ -3,6 +3,9 @@
 Every row represents one original observation and both origin classes. Ownership
 is checked on original IDs, before any numerical optimization. Final-refit
 transfer statistics are diagnostics only and never update the calibration.
+Alignment, ownership, finiteness and nonnegative weights cover every original
+row. Weighted arithmetic uses only raw positive-weight rows, without replacing
+excluded observations by placeholders. Public logits/ratios remain unweighted.
 """
 from dataclasses import dataclass
 import math
@@ -81,6 +84,12 @@ class AffineCalibration(Immutable):
 
 
 def paired_tensors(logits, weights, *, allow_zero_mass=False):
+    """Validate all originals, then return only their positive-weight pairs.
+
+    Select support before normalizing weights; rounded normalized mass must
+    never decide which original logits undergo calibration and ratio audits.
+    Callers retain the complete original IDs and provenance separately.
+    """
     z = torch.as_tensor(logits, dtype=torch.float32).detach()
     w = torch.as_tensor(weights, dtype=torch.float32, device=z.device).detach()
     require(z.ndim == 2 and z.shape[1] == 2 and w.shape == (len(z),),
@@ -90,7 +99,8 @@ def paired_tensors(logits, weights, *, allow_zero_mass=False):
     total = w.sum()
     require(bool((w >= 0).all()) and bool(torch.isfinite(total)) and
             (allow_zero_mass or bool(total > 0)), "invalid calibration target weights")
-    z = z.masked_fill(w[:, None] == 0, 0)
+    positive = w > 0
+    z, w = z[positive], w[positive]
     labels = torch.tensor([0., 1.], device=z.device).expand_as(z)
     # Normalize before duplication; both copies always retain the same mass.
     denominator = torch.where(total > 0, total, torch.ones_like(total))
@@ -99,7 +109,11 @@ def paired_tensors(logits, weights, *, allow_zero_mass=False):
 
 def pair_metrics(logits, weights):
     # A zero-mass evaluation partition contributes exactly zero to ranking.
-    z, y, w = paired_tensors(logits, weights, allow_zero_mass=True)
+    return _pair_metrics(*paired_tensors(logits, weights, allow_zero_mass=True))
+
+
+def _pair_metrics(z, y, w):
+    """Score already validated positive-weight pairs, including empty support."""
     loss = float((F.binary_cross_entropy_with_logits(z, y, reduction="none") * w).sum())
     brier = float(((z.sigmoid() - y).square() * w).sum())
     require(math.isfinite(loss) and math.isfinite(brier), "nonfinite calibration score")
@@ -131,16 +145,14 @@ def fit_affine(logits, weights, *, original_ids, fold_ids, partitions,
                 "calibration predictions do not match held-out partition")
     z, labels, mass = paired_tensors(logits, weights)
     with torch.inference_mode(False), torch.enable_grad(), torch.autocast(z.device.type, enabled=False):
-        active = mass > 0
-        fitting = z[active]
         # Midrange centering preserves representable small differences around
         # a large offset. Halve before adding to avoid endpoint overflow.
-        offset = fitting.min() / 2 + fitting.max() / 2
-        magnitude = (fitting - offset).abs().max()
+        offset = z.min() / 2 + z.max() / 2
+        magnitude = (z - offset).abs().max()
         if float(magnitude) == 0:
             slope, intercept, magnitude = 0., 0., torch.ones_like(magnitude)
         else:
-            x = ((z - offset) / magnitude).masked_fill(~active, 0)
+            x = (z - offset) / magnitude
             parameter = torch.zeros(2, dtype=torch.float32, device=z.device, requires_grad=True)
             optimizer = torch.optim.LBFGS([parameter], lr=1., max_iter=100,
                                          tolerance_grad=1e-7, tolerance_change=1e-9,
@@ -162,7 +174,7 @@ def fit_affine(logits, weights, *, original_ids, fold_ids, partitions,
     result = AffineCalibration(slope=slope, intercept=intercept, class_prior=.5,
         original_ids=ids, partitions=tuple(partitions), lineage=lineage,
         input_offset=float(offset), input_scale=float(magnitude))
-    pair_metrics(result.logits(z), weights)
+    _pair_metrics(result.logits(z), labels, mass)
     result.ratios(z)  # Numerical validity includes the actual ratio, not just BCE.
     return result
 
@@ -177,11 +189,11 @@ class TransferDiagnostics(Immutable):
 
 def transfer_diagnostics(calibration, oof_logits, refit_logits, weights, *, lineage):
     """Describe transfer on training originals; these are NOT held-out refit scores."""
-    before = pair_metrics(calibration.logits(oof_logits), weights)
-    after = pair_metrics(calibration.logits(refit_logits), weights)
-    z, _, mass = paired_tensors(oof_logits, weights)
+    z, labels, mass = paired_tensors(oof_logits, weights)
     final, _, _ = paired_tensors(refit_logits, weights)
     require(final.shape == z.shape, "transfer alignment mismatch")
+    before = _pair_metrics(calibration.logits(z), labels, mass)
+    after = _pair_metrics(calibration.logits(final), labels, mass)
     # Diagnostics can accumulate squared FP32 differences in FP64 without
     # changing the FP32 calibration or ratio computation.
     delta = float(((final.double() - z.double()).square() * mass.double()).sum().sqrt())

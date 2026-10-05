@@ -159,3 +159,82 @@ def test_transfer_rmse_preserves_representable_large_differences():
                                   lineage=lineage(values["original_ids"]))
     expected = float(logits.double().square().mean().sqrt())
     assert dict(result.metrics)["weighted_logit_rmse"] == pytest.approx(expected, rel=1e-6)
+
+
+def with_zero_weight_original():
+    logits, values = nonseparable_case()
+    ids = values["original_ids"] + ("g",)
+    values.update(original_ids=ids, fold_ids=values["fold_ids"] + (0,),
+        partitions=(replace(values["partitions"][0],
+            evaluation_ids=values["partitions"][0].evaluation_ids + ("g",)),
+            *values["partitions"][1:]), outer_training_ids=ids, lineage=lineage(ids))
+    return torch.cat((logits, torch.zeros(1, 2))), values
+
+
+def test_valid_zero_weight_original_never_evaluates_a_placeholder():
+    base_logits, base_values = nonseparable_case()
+    logits, values = with_zero_weight_original()
+    base_logits, logits = -12. + .125 * base_logits, -12. + .125 * logits
+    baseline = fit_affine(base_logits, [1.] * 6, **base_values)
+    # All actual ratios are finite; only the old fabricated raw zero overflows.
+    assert torch.isfinite(baseline.ratios(logits)).all()
+    fitted = fit_affine(logits, [1.] * 6 + [0.], **values)
+    for field in ("slope", "intercept", "input_offset", "input_scale"):
+        torch.testing.assert_close(torch.tensor(getattr(fitted, field)),
+                                   torch.tensor(getattr(baseline, field)))
+    torch.testing.assert_close(fitted.ratios(logits[:6]), baseline.ratios(base_logits))
+    assert fitted.original_ids == values["original_ids"]
+    assert fitted.partitions == values["partitions"]
+    assert fitted.lineage == values["lineage"]
+
+
+@pytest.mark.parametrize("zero_logits", [[0., 0.], [1e38, -1e38]])
+def test_weighted_paths_use_only_original_positive_weight_rows(zero_logits):
+    base, base_values = nonseparable_case()
+    base = -12. + .125 * base
+    logits, values = with_zero_weight_original()
+    logits[:6], logits[6] = base, torch.tensor(zero_logits)
+    weights = [1.] * 6 + [0.]
+    baseline = fit_affine(base, [1.] * 6, **base_values)
+    fitted = fit_affine(logits, weights, **values)
+    torch.testing.assert_close(fitted.ratios(base), baseline.ratios(base))
+    assert pair_metrics(logits, weights) == pair_metrics(base, [1.] * 6)
+    assert pair_metrics(logits, [0.] * 7) == (0., 0.)
+    refit = logits.clone()
+    refit[:6] += .125
+    expected = transfer_diagnostics(baseline, base, refit[:6], [1.] * 6,
+                                    lineage=base_values["lineage"])
+    actual = transfer_diagnostics(fitted, logits, refit, weights, lineage=values["lineage"])
+    assert actual.metrics == expected.metrics
+    assert actual.original_ids == values["original_ids"]
+    assert actual.lineage == values["lineage"]
+    # Public prediction still evaluates every requested row, independent of mass.
+    with pytest.raises(ContractError, match="nonfinite calibrated"):
+        fitted.ratios(logits[6:])
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+def test_zero_weight_raw_nonfinite_rows_remain_invalid(bad):
+    logits, values = with_zero_weight_original()
+    weights = [1.] * 6 + [0.]
+    calibration = fit_affine(logits, weights, **values)
+    invalid = logits.clone()
+    invalid[-1, 0] = bad
+    with pytest.raises(ContractError, match="nonfinite"):
+        fit_affine(invalid, weights, **values)
+    with pytest.raises(ContractError, match="nonfinite"):
+        pair_metrics(invalid, weights)
+    for oof, refit in ((invalid, logits), (logits, invalid)):
+        with pytest.raises(ContractError, match="nonfinite"):
+            transfer_diagnostics(calibration, oof, refit, weights, lineage=values["lineage"])
+
+
+def test_zero_weight_rows_retain_weight_and_ownership_checks():
+    logits, values = with_zero_weight_original()
+    with pytest.raises(ContractError, match="target weights"):
+        fit_affine(logits, [1.] * 6 + [-1.], **values)
+    with pytest.raises(ContractError, match="held-out partition"):
+        fit_affine(logits, [1.] * 6 + [0.], **(values | {"fold_ids": (0, 0, 1, 1, 2, 2, 1)}))
+    with pytest.raises(ContractError, match="lineage mismatch"):
+        fit_affine(logits, [1.] * 6 + [0.],
+                   **(values | {"lineage": lineage(values["original_ids"][:-1])}))

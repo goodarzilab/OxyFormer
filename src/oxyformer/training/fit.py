@@ -49,7 +49,7 @@ from oxyformer.models.tokens import FeatureSpec
 from oxyformer.models.treatment_query import TreatmentDesign
 from oxyformer.provenance import ArtifactLineage, Immutable, canonical_json, file_hash, require, write_artifact
 from oxyformer.training.calibration import (
-    AffineCalibration, CalibrationPartition, fit_affine, pair_metrics, transfer_diagnostics,
+    AffineCalibration, CalibrationPartition, fit_affine, paired_tensors, pair_metrics, transfer_diagnostics,
 )
 from oxyformer.training.checkpoint import (
     CheckpointArtifact, CheckpointIdentity, CheckpointRequest, capture_rng, load_checkpoint,
@@ -710,7 +710,8 @@ def _fit_controller(config, outer, manifest, identity, controller, root, budget)
     metadata = _inputs(config, calibration.original_ids)
     with torch.no_grad():
         refit = _predict(model, subset(all_view, calibration.original_ids), metadata, config.policy)
-    calibration.ratios(refit)
+    positive_refit, _, _ = paired_tensors(refit, metadata.origin_weights)
+    calibration.ratios(positive_refit)
     diagnostics = transfer_diagnostics(calibration, controller["oof_logits"], refit,
         metadata.origin_weights, lineage=_lineage(manifest, identity, calibration.original_ids,
             (calibration.content_hash, model_state_hash(_tensor_state(controller)))))
