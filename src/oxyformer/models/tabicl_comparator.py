@@ -9,7 +9,7 @@ time to make query composition irrelevant even for transductive backends.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from importlib import import_module, metadata
 from pathlib import Path
@@ -17,6 +17,8 @@ import platform
 import operator
 import re
 from types import MappingProxyType
+from shutil import copyfile
+from tempfile import TemporaryDirectory
 
 import numpy as np
 import torch
@@ -122,6 +124,26 @@ class Checkpoint:
                 digest.update(block)
         require(digest.hexdigest() == self.sha256, "checkpoint hash mismatch")
 
+    def verified_snapshot(self):
+        """Own the verified bytes across loading and any later lazy backend reads.
+
+        Deployment may replace the provisioned path. Only the private copy is
+        verified and passed to the backend, so that replacement cannot change
+        the weights consumed by this fit. In-place changes during copying fail
+        the copied-file hash check unless the copied bytes are still identical.
+        """
+        require(Path(self.path).is_file(), "local checkpoint missing; automatic downloads are forbidden")
+        storage = TemporaryDirectory(prefix="oxyformer-checkpoint-")
+        path = str(Path(storage.name) / self.filename)
+        try:
+            copyfile(self.path, path)
+            replace(self, path=path).verify()
+            Path(path).chmod(0o400)
+        except BaseException:
+            storage.cleanup()
+            raise
+        return storage, path
+
     @property
     def fingerprint(self):
         return sha256(canonical_json({k: v for k, v in vars(self).items() if k != "path"}).encode()).hexdigest()
@@ -130,6 +152,12 @@ class Checkpoint:
 def _unit_weights(weights, size: int, semantics: str):
     require(semantics == "unit", "unsupported target/survey weight semantics; comparator blocked")
     # Compare in the input dtype: narrowing can turn a non-unit weight into 1.
+    # Torch bfloat16 has no NumPy representation; it must stay in Torch here.
+    if isinstance(weights, torch.Tensor):
+        require(weights.shape == (size,) and not weights.is_complex() and
+                bool(torch.isfinite(weights).all()) and bool((weights == 1).all()),
+                "unsupported sample weights; comparator blocked, never silently unweighted")
+        return
     weights = np.asarray(weights)
     require(weights.shape == (size,) and weights.dtype.kind in "biuf" and
             np.isfinite(weights).all() and np.all(weights == 1),
@@ -175,13 +203,13 @@ class TabICLComparator:
         self.checkpoint, self.task, self.family, self.seed = checkpoint, task, family, seed
         self._estimator = None
 
-    def _make_estimator(self):
+    def _make_estimator(self, checkpoint_path):
         try:
             module = import_module("tabicl")
         except ImportError as exc:
             raise ContractError("missing optional dependency tabicl; request provisioning") from exc
         cls = module.TabICLRegressor if self.family == "identity" else module.TabICLClassifier
-        return cls(model_path=self.checkpoint.path, checkpoint_version=self.checkpoint.filename,
+        return cls(model_path=checkpoint_path, checkpoint_version=self.checkpoint.filename,
                    allow_auto_download=False, device="cpu", use_amp=False, use_fa3=False,
                    n_estimators=8, norm_methods=["none", "power"], feat_shuffle_method="latin",
                    outlier_threshold=4., batch_size=1, kv_cache=False, offload_mode=False,
@@ -205,9 +233,16 @@ class TabICLComparator:
         require(labels.shape == (len(matrix),) and np.isfinite(labels).all(), "invalid training labels")
         if self.family == "bernoulli":
             require(set(labels) == {0., 1.}, "binary context requires both classes; no continuous/binomial labels")
-        self.checkpoint.verify()
-        estimator = self._make_estimator()
-        estimator.fit(matrix.copy(), labels.copy())
+        storage, checkpoint_path = self.checkpoint.verified_snapshot()
+        try:
+            estimator = self._make_estimator(checkpoint_path)
+            estimator.fit(matrix.copy(), labels.copy())
+        except BaseException:
+            storage.cleanup()
+            raise
+        # TemporaryDirectory removes the private file when this adapter dies.
+        # Keep it alive for backends that retain a path for later reads.
+        self._checkpoint_storage = storage
         self._estimator = estimator
         self.training_ids = tuple(view.original_ids)
         self.columns = view.columns
