@@ -545,3 +545,27 @@ def test_environment_identity_retains_unnamed_distributions_deterministically(mo
     assert module.environment_identity(torch.device("cpu")) != first
     distributions.pop(0)
     assert module.environment_identity(torch.device("cpu")) != first
+
+
+@pytest.mark.parametrize("batch_size,budget", [(4, 1), (1, 7)])
+def test_float64_large_loss_continues_through_validation(tmp_path, batch_size, budget):
+    previous = torch.get_default_dtype()
+    try:
+        torch.set_default_dtype(torch.float64)
+        view, split, config = make_case(tmp_path)
+        values = [0., 2e-308] * 3 + [1.] * 4
+        view = replace(view, columns=("part", "complement"), values=tuple((v, v) for v in values))
+        settings = replace(config.settings,
+                           feature_kinds=(("part", "numeric"), ("complement", "numeric")),
+                           families=(("part", "complement"),), batch_size=batch_size,
+                           max_epochs=1, mask_rate=1.)
+        config = replace(config, settings=settings)
+        full = pretrain(view, split, config, 1103)
+        state = load_checkpoint(full, full.identity)
+        assert full.complete
+        assert state["progress"]["history"] == pytest.approx([1e308])
+        first = pretrain(view, split, replace(config, output_dir=str(tmp_path / "first"), max_batches=budget), 1103)
+        resumed = pretrain(view, split, replace(config, output_dir=str(tmp_path / "resume"), predecessor=first), 1103)
+        assert_state_equal(state, load_checkpoint(resumed, resumed.identity))
+    finally:
+        torch.set_default_dtype(previous)
