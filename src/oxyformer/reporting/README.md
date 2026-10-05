@@ -41,7 +41,9 @@ repository src/, configs/, outputs/ or report/, return a failed StageResult with
 no stale artifact references. Before creating anything, output and all four
 protected paths use the same strict realpath resolution of existing components.
 Missing suffixes allow new attempt directories and absent protected leaves;
-broken symlinks, loops and other resolution errors refuse publication. Protection
+broken symlinks, loops and other resolution errors refuse publication. Resolution
+and directory creation are iterative, so filesystem-valid missing suffixes do not
+depend on Python's recursion limit. Protection
 is bidirectional: output cannot be inside, equal to, or an ancestor of a protected
 path, including when either path uses a stable symlink. An isolated output symlink
 remains valid. This is a path check, not protection against concurrent filesystem

@@ -1844,3 +1844,47 @@ def test_repository_authority_is_established_once(case, tmp_path, monkeypatch, m
     assert calls == [request]
     assert result.status == ('blocked' if missing_task else 'pass')
     assert len(result.artifacts) == 3
+
+
+@pytest.mark.parametrize('missing_path', ['output', 'receipts'])
+def test_deep_missing_suffix_preserves_reporting(case, tmp_path, monkeypatch, missing_path):
+    request = make_request(tmp_path, case, monkeypatch)
+    anchor = tmp_path / 'deep-path'
+    anchor.mkdir()
+    nested = anchor.joinpath(*(['a'] * 1100))
+    assert len(str(nested / 'report.json').encode()) < os.pathconf(anchor, 'PC_PATH_MAX')
+    if missing_path == 'output':
+        request = replace(request, output_dir=str(nested))
+    else:
+        task = json.loads(Path(request.task_path).read_text())
+        dependencies = dict(zip(request.dependency_paths, request.dependency_hashes))
+        digest = dependencies.pop(task['receipts'])
+        task['receipts'] = str(nested / 'receipts.json')
+        dependencies[task['receipts']] = digest
+        Path(request.task_path).write_text(json.dumps(task))
+        request = replace(request, task_hash=file_hash(request.task_path),
+            dependency_paths=tuple(dependencies), dependency_hashes=tuple(dependencies.values()))
+        Path(request.output_dir).mkdir()
+    try:
+        result = run_stage(request)
+        assert result.status == ('pass' if missing_path == 'output' else 'blocked')
+        if missing_path == 'output':
+            result.verify(request)
+        else:
+            assert all(file_hash(Path(request.output_dir) / a.path) == a.sha256 for a in result.artifacts)
+        report = json.loads((Path(request.output_dir) / 'report.json').read_text())
+        assert report['releasable'] == (missing_path == 'output')
+        assert report['estimators'] == [e.to_dict()['payload'] for e in case[0].estimates]
+        assert report['diagnostics'] == json.loads(canonical_json(summarize(case[0], case[1])))
+        if missing_path == 'receipts':
+            assert report['state'] == 'missing' and report['evidence_label'] == 'diagnostic-only'
+    finally:
+        # shutil/pytest cleanup is recursive too: remove this unusually deep
+        # synthetic directory explicitly so cleanup does not obscure the result.
+        for name in ('report.json', 'report.html', 'estimators.svg'):
+            (nested / name).unlink(missing_ok=True)
+        directory = nested
+        while directory != anchor:
+            if directory.exists():
+                directory.rmdir()
+            directory = directory.parent

@@ -31,12 +31,29 @@ def _realpath(path):
     a missing component before '..': such a request cannot later verify strictly.
     """
     path = Path(path)
-    try:
-        return Path(os.path.realpath(path, strict=True))
-    except FileNotFoundError:
-        require(not path.is_symlink(), f"unresolvable report path symlink: {path}")
-        require(path.name != "..", f"missing report path ancestor: {path}")
-        return _realpath(path.parent) / path.name
+    missing = []
+    while True:
+        try:
+            resolved = Path(os.path.realpath(path, strict=True))
+            return resolved.joinpath(*reversed(missing))
+        except FileNotFoundError:
+            require(not path.is_symlink(), f"unresolvable report path symlink: {path}")
+            require(path.name != "..", f"missing report path ancestor: {path}")
+            missing.append(path.name)
+            path = path.parent
+
+
+def _make_output_directory(root):
+    """Create a resolved, preflighted destination without Python recursion."""
+    pending = [root]
+    while pending:
+        directory = pending[-1]
+        try:
+            directory.mkdir(exist_ok=True)
+        except FileNotFoundError:
+            pending.append(directory.parent)
+        else:
+            pending.pop()
 
 
 # Classify only the path actually imported, before resolving symlinks. Probing
@@ -152,7 +169,7 @@ def _write_report(request, report, bundle, authority):
     require(not any(_realpath(p).is_relative_to(root) for p in
                     (request.config_path, request.task_path) + request.dependency_paths),
             "report output must be isolated from inputs")
-    root.mkdir(parents=True, exist_ok=True)
+    _make_output_directory(root)
     lineage = ArtifactLineage(
         source_hashes=tuple(s.payload_hash for s in bundle.sources) if bundle and bundle.sources else (request.task_hash,),
         unit_ids=bundle.original_ids if bundle else ("unavailable-report",),
