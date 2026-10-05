@@ -1802,3 +1802,69 @@ def run_stage(request):
     return dummy(request)
 ''')
     assert process.returncode == 0, process.stdout + process.stderr
+
+
+@pytest.mark.parametrize('method', ['spawn', 'forkserver', 'preloaded-forkserver'])
+def test_multiprocessing_uses_attested_source(runtime, method):
+    repo, out = runtime
+    entrypoint = '''import os,sys,py_compile
+from pathlib import Path
+from oxyformer.cli import main
+repo = Path(sys.argv[sys.argv.index('--repo') + 1])
+source = repo / 'src/oxyformer/dummy.py'
+original, metadata = source.read_bytes(), source.stat()
+try:
+    source.write_bytes(original.replace(b'"value": 1', b'"value": 2'))
+    os.utime(source, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+    py_compile.compile(str(source), doraise=True)
+finally:
+    source.write_bytes(original)
+    os.utime(source, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+raise SystemExit(main())
+'''
+    body = '''import multiprocessing
+from dataclasses import replace
+def write_value(path):
+    Path(path).write_text(json.dumps({"value": 1}))
+def run_stage(request):
+    result = dummy(request)
+    method = %r
+    if method == 'preloaded-forkserver':
+        multiprocessing.set_forkserver_preload(['oxyformer.dummy'])
+        method = 'forkserver'
+    context = multiprocessing.get_context(method)
+    child = context.Process(target=write_value, args=(str(Path(request.output_dir) / 'value.json'),))
+    child.start()
+    child.join()
+    assert child.exitcode == 0
+    artifact = replace(result.artifacts[0], sha256=file_hash(Path(request.output_dir) / 'value.json'))
+    return replace(result, artifacts=(artifact,))
+''' % method
+    process = run_cli_fixture(repo, out, body, entrypoint=entrypoint)
+    assert process.returncode == 0, process.stdout + process.stderr
+    assert json.loads((out / 'value.json').read_text()) == {'value': 1}
+
+
+def test_generated_continuations_and_collector_use_attempt_directories(runtime, tmp_path, monkeypatch):
+    repo, out = runtime
+    lock_task = locked_task(repo, out, tmp_path / 'lock', monkeypatch)
+    spec = {'schema_version': 1, 'id': 'continuation-a', 'kind': 'screening',
+            'prerequisites': [], 'inputs': {'campaign-lock': ['recipe_lock.json']},
+            'recipe_lock': json.loads(lock_task.read_text())['recipe_lock'],
+            'work': [{'id': 'a', 'stage': 'dummy', 'outputs': ['value.json'],
+                      'slices': [{'gpus': 0, 'wall_seconds': 60}] * 2}],
+            'collector': {'stage': 'dummy', 'outputs': ['summary.json'], 'wall_seconds': 60}}
+    plan = expand_campaign(spec, {})
+    for task in plan['tasks']:
+        attempt = tmp_path / task['id']
+        attempt.mkdir()
+        (attempt / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+        task_path = attempt / 'input-task.json'
+        task_path.write_text(json.dumps(task))
+        result = run('dummy', attempt, repo, deps_env=True, task_file=task_path)
+        assert result.status == 'pass', result.message
+        # The coordinator passes attempt_dir itself; outputs are a completion
+        # predicate, not an export allowlist or a filtered copy operation.
+        monkeypatch.setenv(dependency_variable(task['id']), str(attempt))
+        for name in ('task.json', 'request.json', 'fingerprint.json'):
+            assert (attempt / '_execution' / name).is_file()

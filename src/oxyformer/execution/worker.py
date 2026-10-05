@@ -17,7 +17,6 @@ import sys
 from oxyformer.contracts import StageRequest, StageResult
 from oxyformer.provenance import require
 from .identity import verify_module_origins
-from .imports import install_tracked_imports
 from .integrity import read_regular, verify_inputs
 from .paths import atomic_write, isolated_caches
 
@@ -26,7 +25,13 @@ WORKER_RESULT = '_execution/worker-result.json'
 
 def execute(request, module_name, repo):
     """Wait for the stage interpreter, including its finalizers, before return."""
-    environment = dict(os.environ, PYTHONPATH=str(Path(repo) / 'src'))
+    # Standard spawn/forkserver and Python subprocesses inherit this startup
+    # hook, so scientific imports are verified before targets are unpickled.
+    source = Path(repo) / 'src'
+    bootstrap = source / 'oxyformer/execution/bootstrap'
+    environment = dict(os.environ, PYTHONPATH=os.pathsep.join((str(bootstrap), str(source))),
+                       OXYFORMER_IMPORT_REPO=str(repo),
+                       OXYFORMER_IMPORT_COMMIT=request.code_identity)
     process = subprocess.Popen([sys.executable, '-m', 'oxyformer.execution.worker',
                                 str(Path(request.output_dir) / '_execution/request.json'),
                                 str(repo), module_name], cwd=repo, env=environment)
@@ -90,7 +95,6 @@ def stage_main(request_path, repository, module_name):
     request = StageRequest.from_json(read_regular(request_path))
     try:
         verify_inputs(request)
-        install_tracked_imports(repository, request.code_identity)
         caches = isolated_caches(request.output_dir)
         caches.__enter__()
         atexit.register(caches.__exit__, None, None, None)
