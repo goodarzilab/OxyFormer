@@ -19,7 +19,7 @@ if not sys.dont_write_bytecode:
 from oxyformer.contracts import StageResult
 from oxyformer.exposure import tasks as atlas_stage
 from oxyformer.exposure.tasks import TASK_FILE, build_tasks, inspect_dem, write_tasks
-from oxyformer.execution.runner import dependency_variable, run
+from oxyformer.execution.runner import dependency_variable, read_mapping, run
 from oxyformer.provenance import ArtifactLineage, ArtifactRecord, canonical_json, file_hash, require
 
 
@@ -134,8 +134,15 @@ def admit(repo, out, census, dem, *, finalize=True):
             with patch('oxyformer.exposure.build.run_stage', admission_execute):
                 result = run(task['stage'], attempt, repo, deps_env=True, task_file=repo / TASK_FILE,
                     task_id=task['id'], execute=lambda request, module, clone: atlas_stage.run_stage(request))
+            config = json.loads((attempt / '_execution/config.json').read_text())
+            approvals = repo / 'configs/approvals.yaml'
+            require(config['approvals'] == read_mapping(approvals), 'approval values changed in admission config')
+            require(config['input_sources'][str(approvals)] == file_hash(approvals), 'approval hash binding changed')
             results.append(dict(task_id=task['id'], stage=task['stage'], status=result.status,
-                                message=result.message, attempt=str(attempt)))
+                message=result.message, attempt=str(attempt),
+                approvals={'approved_on': config['approvals']['approved_on'],
+                    'sha256': config['input_sources'][str(approvals)],
+                    'yaml_timestamp_policy': config['yaml_timestamp_policy']}))
             (out / 'admission.json').write_text(json.dumps({'head': head, 'admission_only': True, 'status': 'incomplete', 'results': results}, indent=2) + '\n')
             require(result.status == 'pass', f'{task["id"]}: {result.message}')
             os.environ[dependency_variable(task['id'])] = str(attempt)

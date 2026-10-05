@@ -2395,5 +2395,68 @@ def test_acquisition_cannot_be_rebaselined_after_receipt_and_payload_change(runt
         'payload_sha256': file_hash(acquisition / 'payload.tar'), 'payload_bytes': 9}))
     with raises(ContractError, match='fingerprint mismatch'):
         run_task(repo, new_attempt(repo, tmp_path / 'new'), needs=needs)
-    with raises(ContractError, match='input hash mismatch|consumer baseline'):
+    with raises(ContractError, match='input hash mismatch|consumer baseline|tainted'):
         verify_dependency_result(out)
+
+
+@mark.parametrize('consumer_baseline', [False, True])
+@mark.parametrize('damage', ['unlisted', 'payload', 'receipt', 'missing'])
+def test_observed_acquisition_change_stays_tainted_after_restore(
+        runtime, acquisition, tmp_path, monkeypatch, consumer_baseline, damage):
+    from oxyformer.execution.runner import verify_acquisition
+    repo, out = runtime
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']}
+    assert_pass(run_task(repo, out, needs=needs))
+    original_tree = fingerprint_tree(acquisition)
+    expected = original_tree if consumer_baseline else None
+    receipt_mode = (acquisition / 'receipts.json').stat().st_mode & 0o777
+    payload = (acquisition / 'payload.tar').read_bytes()
+    receipt = (acquisition / 'receipts.json').read_bytes()
+    def mutate_then_restore(request):
+        if damage == 'unlisted':
+            (acquisition / 'new-unlisted-file').write_text('faulty write')
+        elif damage == 'payload':
+            (acquisition / 'payload.tar').write_bytes(b'faulty payload')
+        elif damage == 'receipt':
+            (acquisition / 'receipts.json').write_text('{"status": "incomplete"}')
+        else:
+            (acquisition / 'receipts.json').unlink()
+        with raises((ContractError, FileNotFoundError)):
+            if consumer_baseline:
+                verify_dependency_result(out)
+            else:
+                observer = new_attempt(repo, tmp_path / 'observer')
+                run_task(repo, observer, needs=needs)
+        (acquisition / 'payload.tar').write_bytes(payload)
+        (acquisition / 'receipts.json').write_bytes(receipt)
+        (acquisition / 'receipts.json').chmod(receipt_mode)
+        (acquisition / 'new-unlisted-file').unlink(missing_ok=True)
+        assert fingerprint_tree(acquisition) == original_tree
+        return dummy(request)
+    install_stage(monkeypatch, repo, mutate_then_restore)
+    later = new_attempt(repo, tmp_path / 'later')
+    result = run_task(repo, later, needs=needs)
+    assert result.status == 'fail', 'an independently observed change must invalidate the running consumer'
+    with raises(ContractError, match='tainted'):
+        verify_acquisition(acquisition, 'receipts.json', expected_tree=expected)
+    with raises(ContractError, match='tainted'):
+        verify_dependency_result(out)
+
+
+def test_run_serializes_real_owner_approvals_with_original_binding(runtime):
+    import datetime
+    repo, out = runtime
+    original = (ROOT / 'configs/approvals.yaml').read_bytes()
+    approval = repo / 'configs/approvals.yaml'
+    approval.write_bytes(original)
+    (out / 'code_commit.txt').write_text(commit(repo))
+    assert_pass(run_task(repo, out))
+    config = read_json(out / '_execution/config.json')
+    expected = yaml.safe_load(original)
+    assert isinstance(expected['approved_on'], datetime.date)
+    expected['approved_on'] = expected['approved_on'].isoformat()
+    assert config['approvals'] == expected
+    assert config['yaml_timestamp_policy'] == 'preserve_scalar_text'
+    assert config['input_sources'][str(approval)] == sha256(original).hexdigest()
+    assert approval.read_bytes() == original
+    assert_pass(verify_dependency_result(out))
