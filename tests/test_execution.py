@@ -3229,3 +3229,77 @@ def test_authority_marker_io_cannot_hide_existing_taint(runtime, acquisition, mo
             runner.verify_acquisition(root, 'receipts.json')
         else:
             integrity.verify_publication(root, result)
+
+
+@mark.parametrize('reader', ['bytes', 'hash'])
+@mark.parametrize('observation', ['namespace', 'content'])
+def test_reader_evidence_survives_later_binding_io(runtime, acquisition, tmp_path, monkeypatch, reader, observation):
+    import errno
+    from contextlib import contextmanager
+    from oxyformer.execution import runner, integrity
+    repo, producer = runtime
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']}
+    assert_pass(run_task(repo, producer, needs=needs))
+    victim = acquisition / 'receipts.json'
+    saved = victim.read_bytes()
+    baseline = Path(str(integrity.publication_receipt(acquisition)) + '.acquisition')
+    marker = Path(str(integrity.publication_receipt(acquisition)) + '.tainted')
+    original_read, original_open, original_os_open = integrity.read_regular, integrity.open_regular, os.open
+    unavailable = False
+    observed = []
+    def authority_error(path):
+        if Path(path) == baseline and unavailable:
+            raise OSError(errno.EIO, 'later reader binding I/O failure', str(path))
+        return original_read(path)
+    def namespace_change(path, *args, **kwargs):
+        nonlocal unavailable
+        if Path(path) != victim:
+            return original_os_open(path, *args, **kwargs)
+        parked = tmp_path / 'parked-receipt'
+        victim.rename(parked)
+        unavailable = True
+        try:
+            return original_os_open(path, *args, **kwargs)
+        finally:
+            parked.rename(victim)
+    @contextmanager
+    def content_then_error(path):
+        nonlocal unavailable
+        with original_open(path) as stream:
+            if Path(path) != victim:
+                yield stream
+            else:
+                def read(*args):
+                    nonlocal unavailable
+                    raw = stream.read(*args)
+                    unavailable = True
+                    return raw
+                yield SimpleNamespace(read=read)
+    def worker(request):
+        nonlocal unavailable
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(integrity, 'read_regular', authority_error)
+                if observation == 'namespace':
+                    patch.setattr(os, 'open', namespace_change)
+                else:
+                    victim.write_bytes(b' ' + saved[1:])
+                    patch.setattr(integrity, 'open_regular', content_then_error)
+                try:
+                    (integrity.read_regular if reader == 'bytes' else integrity.regular_file_hash)(victim)
+                except (ContractError, OSError) as exc:
+                    observed.append(str(exc))
+                # The authority really remains unavailable; taint storage is writable.
+                with raises(OSError, match='later reader binding I/O failure'):
+                    integrity.read_regular(baseline)
+        finally:
+            unavailable = False
+            victim.write_bytes(saved)
+        return dummy(request)
+    install_stage(monkeypatch, repo, worker)
+    result = run_task(repo, new_attempt(repo, tmp_path / 'active'), needs=needs)
+    assert_failed(result, victim)
+    assert len(observed) == 1 and str(victim) in observed[0]
+    assert read_json(marker) == ['receipts.json']
+    with raises(ContractError, match='tainted'):
+        runner.verify_dependency_result(producer)
