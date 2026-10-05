@@ -13,7 +13,7 @@ from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 from unittest.mock import patch
 
-if not sys.dont_write_bytecode:
+if __name__ == '__main__' and not sys.dont_write_bytecode:
     raise SystemExit('Use python -B')
 
 from oxyformer.contracts import StageResult
