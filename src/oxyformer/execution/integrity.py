@@ -342,16 +342,26 @@ def acquisition_changed_paths(before, after):
     return sorted(changed)
 
 
-def post_execution_check(before):
-    """Recompute every dependency, including after an unsuccessful stage."""
+def post_execution_check(before, *, observed_changes=None):
+    """Persist each dependency's evidence before checking the next dependency.
+
+    The optional diagnostic list retains absolute witness paths even if later
+    authority reads or marker writes fail before the check can be returned.
+    """
     attempts = {}
     for root, expected in before.items():
-        actual = fingerprint_tree(root)
+        # Prepare the comparison authority before observing this tree.
         acquisition = _acquisition_binding(root) is not None
+        actual = fingerprint_tree(root)
         changed = (acquisition_changed_paths if acquisition else changed_paths)(expected, actual)
         unreadable = any('error' in entry for entry in actual.values())
         attempts[root] = {'status': 'tainted' if changed else 'unreadable' if unreadable else 'unchanged',
             'changed_paths': changed, 'fingerprint': actual}
+        if changed:
+            if observed_changes is not None:
+                observed_changes.extend(str(Path(root) / name) for name in changed)
+            # A later dependency's I/O error must not erase this observation.
+            record_taints({'attempts': {root: attempts[root]}})
     return {'status': 'fail' if any(a['status'] != 'unchanged' for a in attempts.values()) else 'pass',
         'attempts': attempts}
 
