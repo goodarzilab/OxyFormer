@@ -1,5 +1,6 @@
 # Input-type contract (all domain endpoints denote their exact binary values):
 # Python int/float and NumPy integer/floating scalars of every width are accepted.
+# Concrete built-in/NumPy scalar types are admitted; custom subclasses are refused.
 # Lists, tuples and arrays may mix these types; each supplied element is captured
 # before NumPy promotion and checked exactly. Existing numeric arrays supply
 # their stored values; callers must use object arrays to retain mixed precision.
@@ -227,3 +228,8 @@ scenarios:
 # observational_equivalence_pair(), with common S, X and epsilon and one Y.
 # It is separate from fixed-frame continuous assignment scenarios: S is random
 # under its known population law, while it is held fixed under interventions.
+
+# Nonlinear quadrature panels span at most 8 exposure units (4 sine radians),
+# in both integration paths, in addition to density and policy resolution.
+# Exact rational denominator factors remain in (0,2); structural responses
+# combine numerator and scale before output rounding, including sine enclosures.

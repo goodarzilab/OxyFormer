@@ -83,10 +83,15 @@ MIN_INTEGRATION_TOLERANCE = Fraction(1, 10**5000)
 INTEGRATION_TOLERANCE_DOMAIN = MappingProxyType({"minimum": "1e-5000", "registered": 1e-8})
 
 
+# Admit concrete built-in/NumPy scalars, not user-defined conversion behavior.
+REAL_SCALAR_TYPES = frozenset((int, float, np.byte, np.ubyte, np.short, np.ushort,
+    np.intc, np.uintc, np.int_, np.uint, np.longlong, np.ulonglong,
+    np.half, np.single, np.double, np.longdouble))
+
+
 def numeric_scalar(value, name):
     """Read a raw real scalar exactly, before any container/dtype promotion."""
-    require(isinstance(value, (int, float, np.integer, np.floating))
-            and not isinstance(value, (bool, np.bool_)), f"{name} must be numeric")
+    require(type(value) in REAL_SCALAR_TYPES, f"{name} must be a supported numeric scalar")
     require(isinstance(value, (int, np.integer)) or bool(np.isfinite(value)),
             f"{name} must be finite")
     return exact(value)
@@ -102,7 +107,7 @@ def numeric_array(values, name, *, allow_fraction=False):
         from oxyformer.provenance import ContractError
         raise ContractError(f"{name} must be a rectangular numeric sequence") from exc
     for value in array.flat:
-        if not (allow_fraction and isinstance(value, Fraction)):
+        if not (allow_fraction and type(value) is Fraction):
             numeric_scalar(value, name)
     return array
 
@@ -336,7 +341,7 @@ class LatentState:
         numeric_scalar(self.error, "latent exposure error")
         validate_numeric(abs(self.error), "exposure_error", "latent exposure error", allow_zero=True)
         factor = self.denominator_factor
-        if not isinstance(factor, Fraction):
+        if type(factor) is not Fraction:
             numeric_scalar(factor, "latent denominator factor")
         factor = exact(factor)
         require(0 < factor < 2, "invalid latent denominator factor")
@@ -386,13 +391,11 @@ def effect(a, config):
 
 
 def structural_mean(a_true, frame, row, state, config):
-    # Cancel the complete dose-independent affine expression before rounding.
-    # Even bounded X can leave a tiny positive baseline after large cancellation.
-    baseline = (Fraction(50) + sum((exact(v) for v in frame.x[row] if v is not None), Fraction(0))/4
-                + exact(config.local_strength)*exact(state.local)
-                + exact(config.regional_strength)*exact(state.regional) + 2*exact(state.illness))
-    mean = wide(baseline) + effect(np.asarray(a_true) - config.migration * state.illness, config)
-    return config.registration_probability * mean / wide(state.denominator_factor)
+    # Combine the entire response before conversion: an admitted positive
+    # rational denominator may be smaller than the output's smallest subnormal.
+    doses = np.asarray(a_true, dtype=object)
+    values = [_scaled_response(dose, frame, row, state, config, wide) for dose in doses.flat]
+    return np.asarray(values, dtype=np.longdouble).reshape(doses.shape)
 
 
 def effect_fraction(dose, config, bits=256):
@@ -408,20 +411,37 @@ def effect_fraction(dose, config, bits=256):
     return beta*(lower+upper)/2
 
 
-def sampled_mean(dose, frame, row, state, config):
-    """Retain the exact sampled dose through the complete response rounding."""
+def _scaled_response(dose, frame, row, state, config, rounding):
+    """Round the complete scaled expression, including nonlinear enclosures."""
     dose = exact(dose)-exact(config.migration)*exact(state.illness)
     baseline = _count_baseline(frame, row, state, config)
     scale = exact(config.registration_probability)/state.denominator_factor
+
+    def convert(value):
+        try:
+            with np.errstate(over="ignore", under="ignore"):
+                return rounding(value)
+        except OverflowError:
+            return np.inf if value > 0 else -np.inf
+
     if config.effect != "nonlinear" or config.beta == 0:
-        return float(scale*(baseline+effect_fraction(dose, config)))
-    bits = 80
-    while True:
-        lower, upper = _sine_bounds(dose/2, bits)
-        values = [float(scale*(baseline+exact(config.beta)*v)) for v in (lower, upper)]
-        if values[0] == values[1]:
-            return values[0]
-        bits *= 2
+        result = convert(scale*(baseline+effect_fraction(dose, config)))
+    else:
+        bits = 80
+        while True:
+            lower, upper = _sine_bounds(dose/2, bits)
+            values = [convert(scale*(baseline+exact(config.beta)*v)) for v in (lower, upper)]
+            if values[0] == values[1]:
+                result = values[0]
+                break
+            bits *= 2
+    require(bool(np.isfinite(result)), "nonfinite structural response")
+    return result
+
+
+def sampled_mean(dose, frame, row, state, config):
+    """Retain the exact sampled dose through the complete response rounding."""
+    return _scaled_response(dose, frame, row, state, config, float)
 
 
 def _count_baseline(frame, row, state, config):
@@ -758,6 +778,10 @@ class AssignmentLaw:
         require(0 <= row < len(frame.original_ids), "invalid frame row")
         components = tuple(tuple(binary64_scalar(v, "support endpoint") for v in c) for c in components)
         self.tail_decay = Fraction(128)
+        # sin(dose/2) needs response resolution as well as density resolution.
+        # Translation by policy/error/migration leaves its frequency unchanged.
+        # Both ordinary and precise integration consume these same panels.
+        self.response_span = Fraction(8) if config.effect == "nonlinear" and config.beta else None
         self.components = components
         self.error = exact(state.error)
         self.scale = exact(config.near_scale)
@@ -864,10 +888,16 @@ class AssignmentLaw:
             edges = sorted({lower, upper} | {exact(v) for v in breakpoints if lower < v < upper})
             for left, right in zip(edges[:-1], edges[1:]):
                 if p.rate == 0:
-                    coordinates = LocalCoordinates(left, right-left, values)
-                    log_weights = (np.log(wide((right-left)/(p.upper-p.lower))/2)
-                                   +np.log(weights)+p.log_probability)
-                    rules.append(QuadraturePiece(coordinates, log_weights))
+                    anchor = left
+                    while anchor < right:
+                        width = right-anchor
+                        if self.response_span is not None:
+                            width = min(width, self.response_span)
+                        coordinates = LocalCoordinates(anchor, width, values)
+                        log_weights = (np.log(wide(width/(p.upper-p.lower))/2)
+                                       +np.log(weights)+p.log_probability)
+                        rules.append(QuadraturePiece(coordinates, log_weights))
+                        anchor += width
                     continue
                 peak = right if p.rate > 0 else left
                 direction = -1 if p.rate > 0 else 1
@@ -876,6 +906,8 @@ class AssignmentLaw:
                 offset = Fraction(0)
                 while offset < stop:
                     width = min(Fraction(4), stop-offset)
+                    if self.response_span is not None:
+                        width = min(width, abs(p.rate)*self.response_span)
                     # Positive units keep membership predicates ordered. The
                     # density offset remains exact even far from the piece peak.
                     a = peak+direction*offset/abs(p.rate)

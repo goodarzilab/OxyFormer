@@ -2249,3 +2249,64 @@ def test_sixth_round2_exact_geometry_accepts_fraction_inputs(fractional):
     # This exception belongs to raw rational geometry, not JSON records.
     with pytest.raises(ContractError, match='numeric'):
         config(beta=Fraction(1))
+
+
+@pytest.mark.parametrize("kind", ["float", "int"])
+def test_continuation_rejects_overridden_scalar_conversions(kind):
+    from oxyformer.validation.generators import PairedWorld
+    class MisleadingFloat(float):
+        def as_integer_ratio(self):
+            return (0, 1)
+    class MisleadingInt(int):
+        def __int__(self):
+            return 0
+    if kind == "float":
+        world = PairedWorld(structural_effect=1., factual_location_effect=0.,
+                            baseline=(0.,), h_s=(0.,), epsilon=(0.,), factual_y=(0.,))
+        with pytest.raises(ContractError, match="numeric|scalar"):
+            world.intervene([MisleadingFloat(1.5e308)])
+    else:
+        with pytest.raises(ContractError, match="numeric|scalar"):
+            config(beta=MisleadingInt(10**100))
+
+
+@pytest.mark.parametrize("effect_name", ["null", "linear", "nonlinear", "sign_changing"])
+def test_continuation_complete_mean_before_denominator_rounding(effect_name):
+    from fractions import Fraction
+    from oxyformer.validation.scm import structural_mean
+    f = replace(frame(1, 1), x=((-100., -100.),))
+    denominator = Fraction(1, 10**5000)
+    state = LatentState(denominator_factor=denominator)
+    dose = {"null": 0, "linear": denominator, "nonlinear": 0,
+            "sign_changing": 5}[effect_name]
+    with np.errstate(all="raise"):
+        actual = structural_mean([dose], f, 0, state, config(effect_name))
+    assert actual.dtype == np.dtype(np.longdouble)
+    assert actual.shape == (1,)
+    assert actual[0] == (1 if effect_name == "linear" else 0)
+
+
+def test_continuation_nonlinear_panels_resolve_response_phase():
+    from fractions import Fraction
+    from oxyformer.validation.generators import _groups, _integration_breakpoints
+    from oxyformer.validation.scm import exact_shift_intervals
+    f = frame(1, 1)
+    for c in (config("nonlinear"), config("nonlinear", extreme_ratios=True),
+              config("nonlinear", assignment="near_deterministic", near_scale=1000.)):
+        p = policy(((-10010., 10010.),))
+        terms = next(iter(_groups(f, c, p).values()))
+        intervals = exact_shift_intervals(((-10010., 10010.),), p.delta_mmhg)
+        boundaries = _integration_breakpoints(terms, ((-10010., 10010.),), p.delta_mmhg, c, intervals)
+        rules = terms[0].law.quadrature(16, boundaries)
+        # dose/2 has fixed frequency; every panel spans at most four radians.
+        assert all(rule.coordinates.unit <= Fraction(8) for rule in rules)
+
+
+def test_continuation_wide_nonlinear_truth_matches_closed_form():
+    f = replace(frame(1, 1), x=((0., 0.),), coordinates=((0., 0.),))
+    c = config("nonlinear", beta=1.)
+    sample = generate_suite_a(f, c, policy(((0., 10000.),)), seed=0)
+    expected = 2/10000*(np.cos(4999)-np.cos(5000)+np.cos(1)-1)
+    assert sample.observed_law_truth.value == pytest.approx(expected, abs=1e-10)
+    assert sample.structural_causal_truth.value == pytest.approx(expected, abs=1e-10)
+    assert sample.integration_uncertainty.converged
