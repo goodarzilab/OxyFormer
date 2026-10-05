@@ -3,9 +3,9 @@ schema_version: 1
 # execution. Each module receives the unchanged contracts.StageRequest API.
 # needs maps original unit IDs to immutable, relative input files. Code units
 # are coordinator merge barriers, never sources of unmerged scientific code.
-# Acquisition producers use source receipts rather than StageResult; only the
-# registry can declare that exemption. All other dependency attempts must carry
-# a passing, verified StageResult, even if a task omits its receipt from needs.
+# Acquisition producers retain their declared source receipts. Every producer
+# also seals its own attempt with a passing StageResult that binds
+# _execution/fingerprint.json; consumers never seal an upstream attempt.
 # Unit IDs and stage names differ: unit tract-gate runs tract-support-gate.
 stages:
   exposure-atlas:
