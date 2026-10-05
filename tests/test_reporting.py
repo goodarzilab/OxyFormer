@@ -1076,3 +1076,95 @@ def test_report_publication_is_stable_with_windows_text_newlines(produced_primar
         content = (root / name).read_bytes()
         assert b'\n' in content
         assert b'\r\n' not in content
+
+
+@pytest.mark.parametrize('rules', [('',), (' \t\n',), ('no retries', ''), (' ', 'no retries')])
+def test_publication_retry_rules_require_every_entry(case, rules):
+    assert evaluate_case(case)['releasable']
+    b, m, r = case
+    scenario = replace(b.coverage[0], registered_retry_rules=rules)
+    b = replace(b, coverage=(scenario,))
+    r = publish_coverage(r, scenario)
+    for receipt in r.items:
+        receipt.result.verify(receipt.request)
+    report = evaluate_case((b, m, r))
+    assert not report['releasable']
+    assert any(g['gate'] == 'coverage:null' and g['status'] == 'failed' for g in report['gates'])
+    assert len(report['estimators']) == 2
+
+
+@pytest.mark.parametrize('field', ['attrition', 'balance_names', 'counties', 'states'])
+@pytest.mark.parametrize('blank', ['', ' \t'])
+def test_publication_diagnostic_labels_require_content(case, field, blank):
+    b, m, r = case
+    values = list(getattr(b, field))
+    values[0] = (blank, values[0][1]) if field == 'attrition' else blank
+    changes = {field: tuple(values)}
+    if field == 'counties':
+        changes['county_locations'] = ((blank, b.county_locations[0][1]),) + b.county_locations[1:]
+    report = evaluate_case((replace(b, **changes), m, r))
+    assert not report['releasable']
+    assert len(report['estimators']) == 2
+
+
+@pytest.mark.parametrize('field', ['reviewer', 'reference', 'definitions', 'require', 'on_failure'])
+@pytest.mark.parametrize('invalid', ['', ' \t', ['text'], {'text': 'value'}, 1])
+def test_publication_approval_text_requires_content(case, field, invalid):
+    approvals = approve(*case)
+    owner = approvals['owner_decisions']
+    if field in ('reviewer', 'reference'):
+        owner['reporting_approvals'][0][field] = invalid
+    else:
+        owner['influence_concentration_gate'][field] = invalid
+    report = evaluate_case(case, approvals)
+    assert not report['releasable']
+    assert len(report['estimators']) == 2
+
+
+@pytest.mark.parametrize('role', ['receipts', 'manifest', 'approvals', 'config'])
+@pytest.mark.parametrize('damage', ['missing', 'hash_mismatch'])
+def test_refusal_retains_authenticated_estimates(produced_primary_case, tmp_path, monkeypatch, role, damage):
+    same_case, _ = produced_primary_case
+    b, m, r = same_case
+    request = make_request(tmp_path, same_case, monkeypatch)
+    task = json.loads(Path(request.task_path).read_text())
+    if role == 'config':
+        path = tmp_path / 'reporting.yaml'
+        path.write_bytes(CONFIG.read_bytes())
+        request = replace(request, config_path=str(path))
+    else:
+        path = Path(task[role])
+    if damage == 'missing':
+        path.unlink()
+    else:
+        path.write_text('changed')
+    result = run_stage(request)
+    root = Path(request.output_dir)
+    report = json.loads((root / 'report.json').read_text())
+    assert result.status == ('blocked' if damage == 'missing' else 'fail')
+    assert report['state'] == ('missing' if damage == 'missing' else 'failed')
+    assert not report['releasable'] and report['evidence_label'] == 'diagnostic-only'
+    assert report['estimators'] == [e.to_dict()['payload'] for e in b.estimates]
+    assert report['bundle_hash'] == b.content_hash
+    if role != 'manifest':
+        assert report['diagnostics'] == json.loads(canonical_json(summarize(b, m)))
+    for name in ('report.html', 'estimators.svg'):
+        content = (root / name).read_text()
+        assert 'diagnostic-only' in content
+        assert all(e.method in content for e in b.estimates)
+
+
+@pytest.mark.parametrize('role', ['bundle', 'task'])
+@pytest.mark.parametrize('damage', ['missing', 'hash_mismatch'])
+def test_refusal_never_displays_unauthenticated_estimates(case, tmp_path, monkeypatch, role, damage):
+    request = make_request(tmp_path, case, monkeypatch)
+    task = json.loads(Path(request.task_path).read_text())
+    path = Path(request.task_path if role == 'task' else task['bundle'])
+    if damage == 'missing':
+        path.unlink()
+    else:
+        path.write_text('changed')
+    result = run_stage(request)
+    report = json.loads((Path(request.output_dir) / 'report.json').read_text())
+    assert result.status != 'pass'
+    assert not report['releasable'] and report['estimators'] == []
