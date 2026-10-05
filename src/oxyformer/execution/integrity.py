@@ -110,6 +110,7 @@ def fingerprint_tree(root, *, exclude=()):
     """
     root = Path(root)
     entries = {}
+    pending = [(root, '.', None)]
 
     def visit(path, relative):
         if relative in exclude:
@@ -137,14 +138,27 @@ def fingerprint_tree(root, *, exclude=()):
             elif stat.S_ISDIR(kind):
                 with os.scandir(path) as children:
                     names = sorted(child.name for child in children)
-                for name in names:
-                    visit(path / name, name if relative == '.' else relative + '/' + name)
+                # Recheck this directory after its children, without consuming
+                # Python call frames for filesystem depth.
+                pending.append((path, relative, before))
+                pending.extend((path / name, name if relative == '.' else relative + '/' + name, None)
+                               for name in reversed(names))
+                return
             if _stable(path.lstat()) != _stable(before):
                 raise OSError('entry changed while fingerprinting')
         except OSError as exc:
             entry['error'] = f'{type(exc).__name__}: {exc}'
 
-    visit(root, '.')
+    while pending:
+        path, relative, before = pending.pop()
+        if before is None:
+            visit(path, relative)
+        else:
+            try:
+                if _stable(path.lstat()) != _stable(before):
+                    raise OSError('entry changed while fingerprinting')
+            except OSError as exc:
+                entries[relative]['error'] = f'{type(exc).__name__}: {exc}'
     return entries
 
 
@@ -184,21 +198,21 @@ def publication_tree(root):
 
 def _restore_control_permissions(path):
     """Restore private control entries, without following links to other trees."""
-    metadata = path.lstat()
-    directory = stat.S_ISDIR(metadata.st_mode)
-    if not directory and not (stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1):
-        # A hardlink may share an upstream inode; atomic receipt replacement
-        # can remove our name without changing that inode's permissions.
-        return False
-    mode = stat.S_IMODE(metadata.st_mode)
-    restored = mode | (0o700 if directory else 0o600)
-    changed = restored != mode
-    if changed:
-        os.chmod(path, restored, follow_symlinks=False)
-    if directory:
-        for child in path.iterdir():
-            changed = _restore_control_permissions(child) or changed
-    return changed
+    pending = [path]
+    while pending:
+        path = pending.pop()
+        metadata = path.lstat()
+        directory = stat.S_ISDIR(metadata.st_mode)
+        if not directory and not (stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1):
+            # Hardlinks may share an upstream inode. Replace receipt entries
+            # atomically instead of changing permissions on shared inodes.
+            continue
+        mode = stat.S_IMODE(metadata.st_mode)
+        restored = mode | (0o700 if directory else 0o600)
+        if restored != mode:
+            os.chmod(path, restored, follow_symlinks=False)
+        if directory:
+            pending.extend(path.iterdir())
 
 
 def _repair_control_directory(root):
@@ -207,7 +221,8 @@ def _repair_control_directory(root):
     path = root / '_execution'
     try:
         if stat.S_ISDIR(path.lstat().st_mode):
-            return _restore_control_permissions(path)
+            _restore_control_permissions(path)
+            return False  # Permission restoration is not a directory collision.
         quarantine = Path(tempfile.mkdtemp(prefix='.control-collision-', dir=root))
         os.rename(path, quarantine / path.name)  # move the entry, never its target
     except FileNotFoundError:
