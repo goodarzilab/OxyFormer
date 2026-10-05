@@ -1,4 +1,4 @@
-"""Offline synthetic execution and campaign acceptance. No scheduler or GPU."""
+"""Offline stage and campaign acceptance."""
 from copy import deepcopy
 from dataclasses import replace
 from hashlib import sha256
@@ -24,6 +24,8 @@ from oxyformer.execution.paths import atomic_json, safe_extract
 from oxyformer.execution.runner import dependency_variable, resolve_dependencies, run as run_worker
 from oxyformer.provenance import ArtifactLineage, ArtifactRecord, ContractError, file_hash
 
+
+SOURCE_NEEDS = {'data-unit': ['data.json', 'receipts.json']}
 
 def fixture_module(repo, function):
     return SimpleNamespace(run_stage=function, __file__=str(repo / 'src/oxyformer/dummy.py'))
@@ -98,6 +100,11 @@ def dummy(request):
                                                       lineage=lineage, kind='fixture') for p in outputs))
 
 
+def initialize_attempt(repo, path):
+    path.mkdir()
+    (path / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+
+
 def task_file(out, **changes):
     task = {'id': 'dummy', 'stage': 'dummy', 'needs': {}, 'outputs': ['value.json']}
     task.update(changes)
@@ -128,6 +135,18 @@ def publish_source_fixture(repo, root):
     published = publish_result(root, result)
     assert published.status == 'pass', published.message
     return published
+
+
+def make_source_fixture(repo, source):
+    source.mkdir()
+    seal_source_fixture(repo, source)
+    return source
+
+
+def seal_source_fixture(repo, source):
+    (source / 'data.json').write_text('{}')
+    (source / 'receipts.json').write_text('{}')
+    publish_source_fixture(repo, source)
 
 
 def test_dummy_stage_atomic_records_and_cache_isolation(runtime, monkeypatch):
@@ -165,12 +184,11 @@ def test_upstream_unchanged_and_output_overlap_rejected(runtime, tmp_path, monke
     before = source.read_bytes(), source.stat().st_mode, source.stat().st_mtime_ns
     publish_source_fixture(repo, upstream)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(upstream))
-    task = task_file(out, needs={'data-unit': ['data.json', 'receipts.json']})
+    task = task_file(out, needs=SOURCE_NEEDS)
     assert run('dummy', out, repo, deps_env=True, task_file=task).status == 'pass'
     assert (source.read_bytes(), source.stat().st_mode, source.stat().st_mtime_ns) == before
     nested = upstream / 'child'
-    nested.mkdir()
-    (nested / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    initialize_attempt(repo, nested)
     with pytest.raises(ContractError, match='overlaps an upstream'):
         run('dummy', nested, repo, deps_env=True, task_file=task)
 
@@ -235,8 +253,7 @@ def test_cli_selects_task(runtime, monkeypatch):
 
 
 def locked_task(repo, out, upstream, monkeypatch):
-    upstream.mkdir()
-    (upstream / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    initialize_attempt(repo, upstream)
     lock = upstream / 'recipe_lock.json'
     def producer(request):
         result = dummy(request)
@@ -279,8 +296,7 @@ def test_continuation_ownership_and_consecutive_steps(runtime, tmp_path, monkeyp
     monkeypatch.setenv('SWARM_DEP_FIRST', str(old))
     for owner, step, expected in [('wrong-owner', 1, 'ownership'), ('work-1', 2, 'consecutive'), ('work-1', 1, None)]:
         out = tmp_path / f'next-{owner}-{step}'
-        out.mkdir()
-        (out / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+        initialize_attempt(repo, out)
         task = task_file(out, id='next', needs={'first': ['_execution/task.json', '_execution/request.json',
                                                    '_execution/result.json', 'value.json']},
                          continuation={'owner': owner, 'step': step, 'predecessor': 'first'})
@@ -444,8 +460,7 @@ def test_failed_upstream_cannot_feed_another_stage(runtime, tmp_path, monkeypatc
     monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, failed))
     assert run('dummy', upstream, repo, task_file=task_file(upstream)).status == 'fail'
     out = tmp_path / 'consumer'
-    out.mkdir()
-    (out / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    initialize_attempt(repo, out)
     monkeypatch.setenv('SWARM_DEP_GATE', str(upstream))
     with pytest.raises(ContractError, match='did not pass'):
         run('dummy', out, repo, deps_env=True,
@@ -562,22 +577,8 @@ def test_safe_tar_dot_prefix_does_not_hide_traversal_or_duplicates(tmp_path):
 
 
 def test_cli_import_from_pristine_repo_keeps_code_roots_clean(runtime, tmp_path):
-    import inspect
     repo, out = runtime
-    original = Path(__file__).parents[1]
-    shutil.copytree(original / 'src/oxyformer', repo / 'src/oxyformer', dirs_exist_ok=True,
-                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
-    shutil.copyfile(original / '.gitignore', repo / '.gitignore')
-    imports = '''from pathlib import Path
-import os
-import json
-from hashlib import sha256
-from oxyformer.contracts import StageResult
-from oxyformer.provenance import ArtifactLineage, ArtifactRecord, file_hash
-from oxyformer.execution.paths import atomic_json
-'''
-    (repo / 'src/oxyformer/dummy.py').write_text(imports + inspect.getsource(dummy) + '\nrun_stage = dummy\n')
-    (out / 'code_commit.txt').write_text(commit(repo))
+    prepare_cli_fixture(repo, out, 'run_stage = dummy\n')
     task = task_file(out)
     env = dict(os.environ, PYTHONPATH=str(repo / 'src'), CUDA_VISIBLE_DEVICES='')
     with (out / 'run.log').open('w') as log:
@@ -798,7 +799,7 @@ def test_upstream_tree_mutation_fails_and_blocks_later_consumer(
     link.symlink_to('victim')
     publish_source_fixture(repo, upstream)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(upstream))
-    needs = {'data-unit': ['data.json', 'receipts.json']}
+    needs = SOURCE_NEEDS
     changed = {'bytes': 'extra/victim', 'chmod': 'extra/victim',
                'added': 'extra/new', 'removed': 'extra/victim',
                'symlink': 'extra/link'}[mutation]
@@ -840,8 +841,7 @@ def test_upstream_tree_mutation_fails_and_blocks_later_consumer(
     else:
         assert os.readlink(link) == '../data.json'
     later = tmp_path / 'later'
-    later.mkdir()
-    (later / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    initialize_attempt(repo, later)
     monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, dummy))
     with pytest.raises(ContractError, match='tainted|fingerprint'):
         run('dummy', later, repo, deps_env=True, task_file=task_file(later, needs=needs))
@@ -857,7 +857,7 @@ def test_read_only_upstream_tree_remains_usable(runtime, tmp_path, monkeypatch):
     (upstream / 'link').symlink_to('data.json')
     publish_source_fixture(repo, upstream)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(upstream))
-    needs = {'data-unit': ['data.json', 'receipts.json']}
+    needs = SOURCE_NEEDS
     before = {p.name: (p.lstat().st_mode, p.lstat().st_size,
                       os.readlink(p) if p.is_symlink() else (None if p.is_dir() else p.read_bytes()))
               for p in upstream.iterdir()}
@@ -931,7 +931,7 @@ def test_post_execution_check_names_proc_fd_chmod(runtime, tmp_path, monkeypatch
         return result
     monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, faulty))
     result = run('dummy', out, repo, deps_env=True,
-                 task_file=task_file(out, needs={'data-unit': ['data.json', 'receipts.json']}))
+                 task_file=task_file(out, needs=SOURCE_NEEDS))
     assert result.status == 'fail'
     assert str(victim) in result.message
     receipt = json.loads((out / '_execution/dependency_check.json').read_text())
@@ -944,17 +944,12 @@ def test_post_execution_check_names_proc_fd_chmod(runtime, tmp_path, monkeypatch
 @pytest.mark.parametrize('when', ['before-consumer', 'during-consumer'])
 def test_transitive_upstream_metadata_cannot_escape_detection(runtime, tmp_path, monkeypatch, when):
     repo, middle = runtime
-    source = tmp_path / 'source'
-    source.mkdir()
-    (source / 'data.json').write_text('{}')
-    (source / 'receipts.json').write_text('{}')
-    publish_source_fixture(repo, source)
+    source = make_source_fixture(repo, tmp_path / 'source')
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     assert run('dummy', middle, repo, deps_env=True,
-               task_file=task_file(middle, id='middle', needs={'data-unit': ['data.json', 'receipts.json']})).status == 'pass'
+               task_file=task_file(middle, id='middle', needs=SOURCE_NEEDS)).status == 'pass'
     later = tmp_path / 'later'
-    later.mkdir()
-    (later / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    initialize_attempt(repo, later)
     monkeypatch.setenv('SWARM_DEP_MIDDLE', str(middle))
     task = task_file(later, needs={'middle': ['value.json']})
     victim = source / 'data.json'
@@ -985,17 +980,16 @@ def test_consumer_binds_published_fingerprint_digest(runtime, tmp_path, monkeypa
     expected = next(a.sha256 for a in published.artifacts if a.path == FINGERPRINT)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     assert run('dummy', out, repo, deps_env=True,
-               task_file=task_file(out, needs={'data-unit': ['data.json', 'receipts.json']})).status == 'pass'
+               task_file=task_file(out, needs=SOURCE_NEEDS)).status == 'pass'
     request = StageRequest.from_json((out / '_execution/request.json').read_text())
     assert dict(zip(request.dependency_paths, request.dependency_hashes))[str(source / FINGERPRINT)] == expected
     # Alter the publication record itself; its original result digest must win.
     (source / FINGERPRINT).write_text('{}')
     later = tmp_path / 'later'
-    later.mkdir()
-    (later / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    initialize_attempt(repo, later)
     with pytest.raises(ContractError, match='fingerprint hash mismatch'):
         run('dummy', later, repo, deps_env=True,
-            task_file=task_file(later, needs={'data-unit': ['data.json', 'receipts.json']}))
+            task_file=task_file(later, needs=SOURCE_NEEDS))
 
 
 def test_unsealed_acquisition_cannot_become_a_new_baseline(runtime, tmp_path, monkeypatch):
@@ -1007,18 +1001,14 @@ def test_unsealed_acquisition_cannot_become_a_new_baseline(runtime, tmp_path, mo
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     with pytest.raises(ContractError, match='stage receipt missing'):
         run('dummy', out, repo, deps_env=True,
-            task_file=task_file(out, needs={'data-unit': ['data.json', 'receipts.json']}))
+            task_file=task_file(out, needs=SOURCE_NEEDS))
     assert not (source / '_execution').exists()
 
 
 def test_restored_upstream_state_is_identical_under_fingerprint_contract(runtime, tmp_path, monkeypatch):
     repo, out = runtime
-    source = tmp_path / 'source'
-    source.mkdir()
+    source = make_source_fixture(repo, tmp_path / 'source')
     victim = source / 'data.json'
-    victim.write_text('{}')
-    (source / 'receipts.json').write_text('{}')
-    publish_source_fixture(repo, source)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     def faulty(request):
         original = victim.read_bytes()
@@ -1028,7 +1018,7 @@ def test_restored_upstream_state_is_identical_under_fingerprint_contract(runtime
         return dummy(request)
     monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, faulty))
     result = run('dummy', out, repo, deps_env=True,
-                 task_file=task_file(out, needs={'data-unit': ['data.json', 'receipts.json']}))
+                 task_file=task_file(out, needs=SOURCE_NEEDS))
     # Fingerprints compare input states, not a history of transient writes.
     assert result.status == 'pass', result.message
     assert victim.read_bytes() == b'{}'
@@ -1058,7 +1048,7 @@ def test_preflight_cannot_rebase_a_changed_dependency(runtime, tmp_path, monkeyp
         return verified
     monkeypatch.setattr(runner, 'verify_published_tree', interleave)
     result = run('dummy', out, repo, deps_env=True,
-                 task_file=task_file(out, needs={'data-unit': ['data.json', 'receipts.json']}))
+                 task_file=task_file(out, needs=SOURCE_NEEDS))
     assert result.status == 'fail'
     assert str(victim if mutation == 'chmod' else extra) in result.message
 
@@ -1066,13 +1056,9 @@ def test_preflight_cannot_rebase_a_changed_dependency(runtime, tmp_path, monkeyp
 @pytest.mark.parametrize('record_index', [0, -1])
 def test_rewritten_upstream_result_is_rejected_by_later_consumers(runtime, tmp_path, monkeypatch, record_index):
     repo, out = runtime
-    source = tmp_path / 'source'
-    source.mkdir()
-    (source / 'data.json').write_text('{}')
-    (source / 'receipts.json').write_text('{}')
-    publish_source_fixture(repo, source)
+    source = make_source_fixture(repo, tmp_path / 'source')
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
-    needs = {'data-unit': ['data.json', 'receipts.json']}
+    needs = SOURCE_NEEDS
     def faulty(request):
         result = dummy(request)
         record = source / '_execution/result.json'
@@ -1088,8 +1074,7 @@ def test_rewritten_upstream_result_is_rejected_by_later_consumers(runtime, tmp_p
     assert result.status == 'fail'
     assert str(source / '_execution/result.json') in result.message
     later = tmp_path / 'later'
-    later.mkdir()
-    (later / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    initialize_attempt(repo, later)
     monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, dummy))
     with pytest.raises(ContractError, match='publication|fingerprint|result record'):
         run('dummy', later, repo, deps_env=True, task_file=task_file(later, needs=needs))
@@ -1107,29 +1092,14 @@ def test_tempfile_cache_does_not_cross_attempts(runtime, tmp_path, monkeypatch):
     assert run('dummy', first, repo, task_file=task_file(first)).status == 'pass'
     shutil.rmtree(first)
     later = tmp_path / 'later'
-    later.mkdir()
-    (later / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    initialize_attempt(repo, later)
     result = run('dummy', later, repo, task_file=task_file(later))
     assert result.status == 'pass', result.message
 
 
 def test_cli_rejects_modules_imported_from_another_checkout(runtime, tmp_path):
-    import inspect
     repo, out = runtime
-    original = Path(__file__).parents[1]
-    shutil.copytree(original / 'src/oxyformer', repo / 'src/oxyformer', dirs_exist_ok=True,
-                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
-    shutil.copyfile(original / '.gitignore', repo / '.gitignore')
-    imports = '''from pathlib import Path
-import os
-import json
-from hashlib import sha256
-from oxyformer.contracts import StageResult
-from oxyformer.provenance import ArtifactLineage, ArtifactRecord, file_hash
-from oxyformer.execution.paths import atomic_json
-'''
-    (repo / 'src/oxyformer/dummy.py').write_text(imports + inspect.getsource(dummy) + '\nrun_stage = dummy\n')
-    (out / 'code_commit.txt').write_text(commit(repo))
+    prepare_cli_fixture(repo, out, 'run_stage = dummy\n')
     other = tmp_path / 'other'
     shutil.copytree(repo, other)
     wrong = other / 'src/oxyformer/dummy.py'
@@ -1157,21 +1127,16 @@ def test_forty_leaf_limit_includes_cpu_slices(spec):
 @pytest.mark.parametrize('name', ['_execution/result.json', '_execution/fingerprint.json'])
 def test_late_publication_control_modes_are_verified(runtime, tmp_path, monkeypatch, name):
     repo, out = runtime
-    source = tmp_path / 'source'
-    source.mkdir()
-    (source / 'data.json').write_text('{}')
-    (source / 'receipts.json').write_text('{}')
-    publish_source_fixture(repo, source)
+    source = make_source_fixture(repo, tmp_path / 'source')
     path = source / name
     path.chmod(path.stat().st_mode ^ 0o100)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     with pytest.raises(ContractError, match='fingerprint mismatch'):
         run('dummy', out, repo, deps_env=True,
-            task_file=task_file(out, needs={'data-unit': ['data.json', 'receipts.json']}))
+            task_file=task_file(out, needs=SOURCE_NEEDS))
 
 
-def run_cli_fixture(repo, out, stage_body, *, needs=None, entrypoint=None, timeout=30):
-    """Execute real copied CLI code and a synthetic stage in a fresh interpreter."""
+def prepare_cli_fixture(repo, out, stage_body):
     import inspect
     original = Path(__file__).parents[1]
     shutil.copytree(original / 'src/oxyformer', repo / 'src/oxyformer', dirs_exist_ok=True,
@@ -1187,6 +1152,11 @@ from oxyformer.execution.paths import atomic_json
 '''
     (repo / 'src/oxyformer/dummy.py').write_text(imports + inspect.getsource(dummy) + '\n' + stage_body)
     (out / 'code_commit.txt').write_text(commit(repo))
+
+
+def run_cli_fixture(repo, out, stage_body, *, needs=None, entrypoint=None, timeout=30):
+    """Execute real copied CLI code and a synthetic stage in a fresh interpreter."""
+    prepare_cli_fixture(repo, out, stage_body)
     command = [sys.executable, '-m', 'oxyformer.cli'] if entrypoint is None else [sys.executable, '-c', entrypoint]
     command += ['run-stage', '--stage', 'dummy', '--repo', str(repo), '--out', str(out),
                 '--task', str(task_file(out, needs=needs or {})), '--deps-env']
@@ -1220,13 +1190,9 @@ def test_cli_undeclared_outside_write_fails(runtime, tmp_path, monkeypatch):
 @pytest.mark.parametrize('control', ['result.json', 'fingerprint.json'])
 def test_identical_control_rewrite_accepts_later_consumers(runtime, tmp_path, monkeypatch, control):
     repo, out = runtime
-    source = tmp_path / 'source'
-    source.mkdir()
-    (source / 'data.json').write_text('{}')
-    (source / 'receipts.json').write_text('{}')
-    publish_source_fixture(repo, source)
+    source = make_source_fixture(repo, tmp_path / 'source')
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
-    needs = {'data-unit': ['data.json', 'receipts.json']}
+    needs = SOURCE_NEEDS
     victim = source / '_execution' / control
     def faulty(request):
         result = dummy(request)
@@ -1236,8 +1202,7 @@ def test_identical_control_rewrite_accepts_later_consumers(runtime, tmp_path, mo
     result = run('dummy', out, repo, deps_env=True, task_file=task_file(out, needs=needs))
     assert result.status == 'pass', result.message
     later = tmp_path / 'later'
-    later.mkdir()
-    (later / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    initialize_attempt(repo, later)
     monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, dummy))
     assert run('dummy', later, repo, deps_env=True,
                task_file=task_file(later, needs=needs)).status == 'pass'
@@ -1261,12 +1226,8 @@ def run_stage(request):
 @pytest.mark.parametrize('worker_kind', ['thread', 'subprocess'])
 def test_cli_waits_for_background_mutation_before_post_check(runtime, tmp_path, monkeypatch, worker_kind):
     repo, out = runtime
-    source = tmp_path / 'source'
-    source.mkdir()
+    source = make_source_fixture(repo, tmp_path / 'source')
     victim = source / 'data.json'
-    victim.write_text('{}')
-    (source / 'receipts.json').write_text('{}')
-    publish_source_fixture(repo, source)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     monkeypatch.setenv('FIXTURE_WORKER_KIND', worker_kind)
     # The harness waits at publication to make the race deterministic. It is
@@ -1301,7 +1262,7 @@ def run_stage(request):
         code = "import time,os; from pathlib import Path; time.sleep(.2); (Path(os.environ['SWARM_DEP_DATA_UNIT'])/'data.json').write_text('[]'); Path(os.environ['FIXTURE_FINISHED']).write_text('done')"
         subprocess.Popen([sys.executable, '-c', code], env=dict(os.environ, FIXTURE_FINISHED=str(Path(request.output_dir) / 'worker-finished')))
     return result
-''', needs={'data-unit': ['data.json', 'receipts.json']}, entrypoint=entrypoint)
+''', needs=SOURCE_NEEDS, entrypoint=entrypoint)
     assert process.returncode == 1, process.stdout + process.stderr
     result = StageResult.from_json((out / '_execution/result.json').read_text())
     assert result.status == 'fail' and str(victim) in result.message
@@ -1313,13 +1274,9 @@ def run_stage(request):
 @pytest.mark.parametrize('control', ['result.json', 'fingerprint.json'])
 def test_control_rewrites_bind_fingerprinted_properties_only(runtime, tmp_path, monkeypatch, operation, control):
     repo, out = runtime
-    source = tmp_path / 'source'
-    source.mkdir()
-    (source / 'data.json').write_text('{}')
-    (source / 'receipts.json').write_text('{}')
-    publish_source_fixture(repo, source)
+    source = make_source_fixture(repo, tmp_path / 'source')
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
-    needs = {'data-unit': ['data.json', 'receipts.json']}
+    needs = SOURCE_NEEDS
     victim = source / '_execution' / control
     before = victim.stat()
     def faulty(request):
@@ -1338,8 +1295,7 @@ def test_control_rewrites_bind_fingerprinted_properties_only(runtime, tmp_path, 
     assert victim.stat().st_mtime_ns == before.st_mtime_ns
     assert victim.stat().st_ctime_ns != before.st_ctime_ns
     later = tmp_path / 'later'
-    later.mkdir()
-    (later / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    initialize_attempt(repo, later)
     monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, dummy))
     assert run('dummy', later, repo, deps_env=True,
                task_file=task_file(later, needs=needs)).status == 'pass'
@@ -1347,8 +1303,7 @@ def test_control_rewrites_bind_fingerprinted_properties_only(runtime, tmp_path, 
     # Both late records must still bind bytes/size and permissions. No stage
     # or verifier repairs the changed upstream file, even after refusal.
     changed = tmp_path / 'changed'
-    changed.mkdir()
-    (changed / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    initialize_attempt(repo, changed)
     def fingerprinted_change(request):
         result = dummy(request)
         if operation == 'copy2':
@@ -1364,8 +1319,7 @@ def test_control_rewrites_bind_fingerprinted_properties_only(runtime, tmp_path, 
     assert check['attempts'][str(source)]['status'] == 'tainted'
     assert '_execution/' + control in check['attempts'][str(source)]['changed_paths']
     refused = tmp_path / 'refused'
-    refused.mkdir()
-    (refused / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    initialize_attempt(repo, refused)
     monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, dummy))
     with pytest.raises(ContractError, match='fingerprint|record'):
         run('dummy', refused, repo, deps_env=True,
@@ -1374,12 +1328,8 @@ def test_control_rewrites_bind_fingerprinted_properties_only(runtime, tmp_path, 
 
 def test_nested_worker_mutation_cannot_outlive_publication(runtime, tmp_path, monkeypatch):
     repo, out = runtime
-    source = tmp_path / 'source'
-    source.mkdir()
+    source = make_source_fixture(repo, tmp_path / 'source')
     victim = source / 'data.json'
-    victim.write_text('{}')
-    (source / 'receipts.json').write_text('{}')
-    publish_source_fixture(repo, source)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     # The helper exits without joining its child. The inherited capture pipe
     # makes this test wait for the finite grandchild before inspecting evidence.
@@ -1392,7 +1342,7 @@ def run_stage(request):
     subprocess.Popen([sys.executable, '-c', helper])
     return result
 '''
-    process = run_cli_fixture(repo, out, body, needs={'data-unit': ['data.json', 'receipts.json']})
+    process = run_cli_fixture(repo, out, body, needs=SOURCE_NEEDS)
     assert victim.read_text() == '[]', process.stdout + process.stderr
     result = StageResult.from_json((out / '_execution/result.json').read_text())
     assert process.returncode == 1 and result.status == 'fail', result.to_json()
@@ -1415,11 +1365,7 @@ def run_stage(request):
 
 def test_changed_fingerprint_fifo_is_refused_without_blocking(runtime, tmp_path, monkeypatch):
     repo, out = runtime
-    source = tmp_path / 'source'
-    source.mkdir()
-    (source / 'data.json').write_text('{}')
-    (source / 'receipts.json').write_text('{}')
-    publish_source_fixture(repo, source)
+    source = make_source_fixture(repo, tmp_path / 'source')
     victim = source / '_execution/fingerprint.json'
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     def faulty(request):
@@ -1429,7 +1375,7 @@ def test_changed_fingerprint_fifo_is_refused_without_blocking(runtime, tmp_path,
         raise RuntimeError('stage failed after replacing control')
     monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, faulty))
     result = run('dummy', out, repo, deps_env=True,
-                 task_file=task_file(out, needs={'data-unit': ['data.json', 'receipts.json']}))
+                 task_file=task_file(out, needs=SOURCE_NEEDS))
     assert result.status == 'fail' and str(victim) in result.message
     # A separate bounded process proves the consumer refuses instead of opening
     # a named pipe in blocking mode. The fixture never supplies a pipe writer.
@@ -1491,11 +1437,7 @@ def run_stage(request):
 
 def test_changing_fingerprint_to_fifo_cannot_skip_post_check(runtime, tmp_path, monkeypatch):
     repo, out = runtime
-    source = tmp_path / 'source'
-    source.mkdir()
-    (source / 'data.json').write_text('{}')
-    (source / 'receipts.json').write_text('{}')
-    publish_source_fixture(repo, source)
+    source = make_source_fixture(repo, tmp_path / 'source')
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     process = run_cli_fixture(repo, out, """def run_stage(request):
     result = dummy(request)
@@ -1503,7 +1445,7 @@ def test_changing_fingerprint_to_fifo_cannot_skip_post_check(runtime, tmp_path, 
     victim.unlink()
     os.mkfifo(victim)
     return result
-""", needs={'data-unit': ['data.json', 'receipts.json']}, timeout=5)
+""", needs=SOURCE_NEEDS, timeout=5)
     assert process.returncode == 1, process.stdout + process.stderr
     result = StageResult.from_json((out / '_execution/result.json').read_text())
     assert result.status == 'fail' and str(source / '_execution/fingerprint.json') in result.message
@@ -1514,11 +1456,7 @@ def test_changing_fingerprint_to_fifo_cannot_skip_post_check(runtime, tmp_path, 
 @pytest.mark.parametrize('control', ['result.json', 'request.json'])
 def test_preflight_control_fifo_swap_is_nonblocking(runtime, tmp_path, control):
     repo, _ = runtime
-    source = tmp_path / 'source'
-    source.mkdir()
-    (source / 'data.json').write_text('{}')
-    (source / 'receipts.json').write_text('{}')
-    publish_source_fixture(repo, source)
+    source = make_source_fixture(repo, tmp_path / 'source')
     code = '''import os,sys
 from pathlib import Path
 from oxyformer.execution import runner
@@ -1548,14 +1486,10 @@ else:
 @pytest.mark.parametrize('relative', ['_execution/fingerprint.json', 'data.json'])
 def test_transitive_fifo_is_refused_before_input_hashing(runtime, tmp_path, monkeypatch, relative):
     repo, middle = runtime
-    source = tmp_path / 'source'
-    source.mkdir()
-    (source / 'data.json').write_text('{}')
-    (source / 'receipts.json').write_text('{}')
-    publish_source_fixture(repo, source)
+    source = make_source_fixture(repo, tmp_path / 'source')
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     assert run('dummy', middle, repo, deps_env=True,
-               task_file=task_file(middle, id='middle', needs={'data-unit': ['data.json', 'receipts.json']})).status == 'pass'
+               task_file=task_file(middle, id='middle', needs=SOURCE_NEEDS)).status == 'pass'
     victim = source / relative
     victim.unlink()
     os.mkfifo(victim)
@@ -1593,8 +1527,7 @@ def test_generated_collector_binds_each_expected_producer(runtime, tmp_path, mon
     attempts = {}
     for task in [*plan['tasks'][:-1], other['tasks'][0]]:
         attempt = tmp_path / task['id']
-        attempt.mkdir()
-        (attempt / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+        initialize_attempt(repo, attempt)
         task_path = attempt / 'input-task.json'
         task_path.write_text(json.dumps(task))  # exact generated task, unedited
         assert run('dummy', attempt, repo, deps_env=True, task_file=task_path).status == 'pass'
@@ -1610,8 +1543,7 @@ def test_generated_collector_binds_each_expected_producer(runtime, tmp_path, mon
     good_task.write_text(json.dumps(selected))
     assert run('dummy', out, repo, deps_env=True, task_file=good_task).status == 'pass'
     wrong = tmp_path / 'wrong-collector'
-    wrong.mkdir()
-    (wrong / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    initialize_attempt(repo, wrong)
     wrong_task = wrong / 'generated-collector.json'
     wrong_task.write_text(good_task.read_text())
     monkeypatch.setenv(dependency_variable(plan['expected_leaves'][-1]),
@@ -1636,8 +1568,7 @@ def test_ignored_untracked_stage_code_is_refused(runtime):
 def test_archive_fifo_change_cannot_skip_failure_receipt(runtime, tmp_path, monkeypatch):
     repo, out = runtime
     source = tmp_path / 'source'
-    source.mkdir()
-    (source / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    initialize_attempt(repo, source)
     def archive_producer(request):
         result = dummy(request)
         archive = Path(request.output_dir) / 'payload.tar'
@@ -1673,15 +1604,14 @@ def test_output_inside_transitive_attempt_is_refused_before_writing(runtime, tmp
     (source / 'data.json').write_text('{}')
     (source / 'receipts.json').write_text('{}')
     nested = source / 'handoff'
-    nested.mkdir()
-    (nested / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    initialize_attempt(repo, nested)
     # Both the proposed output directory and task exist at source publication;
     # starting the invalid consumer must be the first attempted mutation.
     task = task_file(nested, needs={'middle': ['value.json']})
     publish_source_fixture(repo, source)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     assert run('dummy', middle, repo, deps_env=True,
-               task_file=task_file(middle, id='middle', needs={'data-unit': ['data.json', 'receipts.json']})).status == 'pass'
+               task_file=task_file(middle, id='middle', needs=SOURCE_NEEDS)).status == 'pass'
     monkeypatch.setenv('SWARM_DEP_MIDDLE', str(middle))
     before = fingerprint_tree(source)
     with pytest.raises(ContractError, match='overlap|upstream'):
@@ -1768,17 +1698,14 @@ def test_output_containing_transitive_attempt_is_refused_before_writing(runtime,
     from oxyformer.execution.integrity import fingerprint_tree
     repo, middle = runtime
     out = tmp_path / 'consumer'
-    out.mkdir()
-    (out / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    initialize_attempt(repo, out)
     task = task_file(out, needs={'middle': ['value.json']})
     source = out / 'source'
     source.mkdir()
-    (source / 'data.json').write_text('{}')
-    (source / 'receipts.json').write_text('{}')
-    publish_source_fixture(repo, source)
+    seal_source_fixture(repo, source)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     assert run('dummy', middle, repo, deps_env=True,
-               task_file=task_file(middle, id='middle', needs={'data-unit': ['data.json', 'receipts.json']})).status == 'pass'
+               task_file=task_file(middle, id='middle', needs=SOURCE_NEEDS)).status == 'pass'
     monkeypatch.setenv('SWARM_DEP_MIDDLE', str(middle))
     before = fingerprint_tree(out)
     with pytest.raises(ContractError, match='overlap.*' + str(source)):
@@ -1814,8 +1741,7 @@ def test_locked_recipe_checks_scientific_identity_of_transitive_attempts(runtime
     old_task.write_text(json.dumps(dict(value, id='ancestor')))
     assert run('dummy', ancestor, repo, deps_env=True, task_file=old_task).status == 'pass'
     middle = tmp_path / 'middle'
-    middle.mkdir()
-    (middle / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    initialize_attempt(repo, middle)
     monkeypatch.setenv('SWARM_DEP_ANCESTOR', str(ancestor))
     assert run('dummy', middle, repo, deps_env=True,
                task_file=task_file(middle, id='middle', needs={'ancestor': ['value.json']})).status == 'pass'
@@ -1867,9 +1793,8 @@ def test_code_identity_does_not_refresh_upstream_git_index(runtime, tmp_path, mo
     shutil.move(repo, clone)
     if overlap:
         out = source / 'handoff'
-        out.mkdir()
-        (out / 'code_commit.txt').write_text(git(clone, 'rev-parse', 'HEAD'))
-    task = task_file(out, needs={'data-unit': ['data.json', 'receipts.json']})
+        initialize_attempt(clone, out)
+    task = task_file(out, needs=SOURCE_NEEDS)
     (source / 'data.json').write_text('{}')
     (source / 'receipts.json').write_text('{}')
     git(clone, 'status', '--porcelain')
@@ -1954,12 +1879,8 @@ def test_stage_cannot_change_persisted_control_identity(runtime, monkeypatch, co
 @pytest.mark.parametrize('mutate', [False, True])
 def test_reserved_receipt_collision_preserves_upstream_failure(runtime, tmp_path, monkeypatch, control, kind, mutate):
     repo, out = runtime
-    source = tmp_path / 'source'
-    source.mkdir()
+    source = make_source_fixture(repo, tmp_path / 'source')
     victim = source / 'data.json'
-    victim.write_text('{}')
-    (source / 'receipts.json').write_text('{}')
-    publish_source_fixture(repo, source)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     def faulty(request):
         result = dummy(request)
@@ -1975,7 +1896,7 @@ def test_reserved_receipt_collision_preserves_upstream_failure(runtime, tmp_path
         return result
     monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty))
     result = run('dummy', out, repo, deps_env=True,
-                 task_file=task_file(out, needs={'data-unit': ['data.json', 'receipts.json']}))
+                 task_file=task_file(out, needs=SOURCE_NEEDS))
     assert result.status == 'fail'
     collision = out / control if control == '_execution' else out / '_execution' / control
     assert str(victim if mutate else collision) in result.message
@@ -1998,9 +1919,7 @@ def test_unwritable_control_directory_cannot_suppress_upstream_receipts(runtime,
     (source / 'extra').mkdir(parents=True)
     victim = source / 'extra/victim'
     victim.write_text('before')
-    (source / 'data.json').write_text('{}')
-    (source / 'receipts.json').write_text('{}')
-    publish_source_fixture(repo, source)
+    seal_source_fixture(repo, source)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     try:
         process = run_cli_fixture(repo, out, '''def run_stage(request):
@@ -2008,7 +1927,7 @@ def test_unwritable_control_directory_cannot_suppress_upstream_receipts(runtime,
     (Path(os.environ['SWARM_DEP_DATA_UNIT']) / 'extra/victim').write_text('changed')
     (Path(request.output_dir) / '_execution').chmod(0o500)
     return result
-''', needs={'data-unit': ['data.json', 'receipts.json']})
+''', needs=SOURCE_NEEDS)
         assert victim.read_text() == 'changed', process.stdout + process.stderr
         assert process.returncode == 1, process.stdout + process.stderr
         result = StageResult.from_json((out / '_execution/result.json').read_text())
@@ -2018,3 +1937,59 @@ def test_unwritable_control_directory_cannot_suppress_upstream_receipts(runtime,
     finally:
         # Restore only this failed consumer's directory so pytest can clean up.
         (out / '_execution').chmod(0o700)
+
+
+@pytest.mark.parametrize('receipt', ['dependency_check.json', 'result.json'])
+def test_receipt_write_error_after_execution_is_failed_with_changed_paths(runtime, tmp_path, monkeypatch, receipt):
+    repo, out = runtime
+    source = make_source_fixture(repo, tmp_path / 'source')
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
+    entrypoint = """import sys
+from oxyformer.execution import runner, integrity
+from oxyformer.cli import main
+original = integrity._replace_control
+def unavailable(root, relative, text):
+    if relative == '_execution/RECEIPT':
+        raise PermissionError('synthetic receipt write denial: ' + relative)
+    return original(root, relative, text)
+runner._replace_control = integrity._replace_control = unavailable
+raise SystemExit(main(sys.argv[1:]))
+""".replace('RECEIPT', receipt)
+    process = run_cli_fixture(repo, out, """def run_stage(request):
+    result = dummy(request)
+    (Path(os.environ['SWARM_DEP_DATA_UNIT']) / 'data.json').write_text('changed')
+    return result
+""", needs=SOURCE_NEEDS, entrypoint=entrypoint)
+    assert process.returncode == 1, process.stderr
+    assert str(source / 'data.json') in process.stderr
+    assert 'synthetic receipt write denial' in process.stderr
+    assert 'blocked:' not in process.stderr
+
+
+def test_unwritable_control_file_recovery_never_chmods_upstream(tmp_path):
+    from oxyformer.execution.integrity import _repair_control_directory
+    upstream = tmp_path / 'upstream'
+    upstream.mkdir()
+    victim = upstream / 'file'
+    victim.write_text('upstream')
+    victim.chmod(0o400)
+    out = tmp_path / 'attempt'
+    control = out / '_execution'
+    control.mkdir(parents=True)
+    own = control / 'request.json'
+    own.write_text('{}')
+    own.chmod(0o400)
+    (control / 'file-link').symlink_to(victim)
+    (control / 'directory-link').symlink_to(upstream, target_is_directory=True)
+    os.link(victim, control / 'hardlink')
+    nested = control / 'nested'
+    nested.mkdir()
+    nested.chmod(0)
+    try:
+        assert _repair_control_directory(out)
+        assert own.stat().st_mode & 0o600 == 0o600
+        assert nested.stat().st_mode & 0o700 == 0o700
+        assert victim.stat().st_mode & 0o777 == 0o400
+        assert victim.read_text() == 'upstream'
+    finally:
+        nested.chmod(0o700)

@@ -182,13 +182,32 @@ def publication_tree(root):
     return publication_view(fingerprint_tree(root))
 
 
+def _restore_control_permissions(path):
+    """Restore private control entries, without following links to other trees."""
+    metadata = path.lstat()
+    directory = stat.S_ISDIR(metadata.st_mode)
+    if not directory and not (stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1):
+        # A hardlink may share an upstream inode; atomic receipt replacement
+        # can remove our name without changing that inode's permissions.
+        return False
+    mode = stat.S_IMODE(metadata.st_mode)
+    restored = mode | (0o700 if directory else 0o600)
+    changed = restored != mode
+    if changed:
+        os.chmod(path, restored, follow_symlinks=False)
+    if directory:
+        for child in path.iterdir():
+            changed = _restore_control_permissions(child) or changed
+    return changed
+
+
 def _repair_control_directory(root):
     """Recover only the directory this runner reserved in its own attempt."""
     root = directory_path(root)
     path = root / '_execution'
     try:
         if stat.S_ISDIR(path.lstat().st_mode):
-            return False
+            return _restore_control_permissions(path)
         quarantine = Path(tempfile.mkdtemp(prefix='.control-collision-', dir=root))
         os.rename(path, quarantine / path.name)  # move the entry, never its target
     except FileNotFoundError:
