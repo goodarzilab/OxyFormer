@@ -437,3 +437,20 @@ def test_subnormal_variance_accepts_finite_float32_stopping_target(tmp_path):
     feature = FeatureSpec.from_json(state["preprocessing"][0])
     assert feature.mean == 2.5e-162 and feature.scale == 2.5e-162
     assert state["progress"]["history"][0] == pytest.approx(reference_target / 30)
+
+
+@pytest.mark.parametrize("values,expected_mean,expected_scale", [
+    ([2**54 - 1, 2**54 + 1] * 3, float(2**54), 1.),
+    ([.5, .5000000000000001] * 3, .5, 2.**-54),
+])
+def test_population_moments_preserve_small_spread(tmp_path, values, expected_mean, expected_scale):
+    from oxyformer.training.pretrain import _population_moments
+    mean, scale = _population_moments(values)
+    assert mean == expected_mean
+    assert scale == expected_scale
+    view, split, config = make_case(tmp_path)
+    values = values + [expected_mean] * 4
+    view = replace(view, values=tuple((value, row[1], row[2])
+                                     for value, row in zip(values, view.values)))
+    artifact = pretrain(view, split, replace(config, settings=replace(config.settings, max_epochs=1)), 1103)
+    assert artifact.complete

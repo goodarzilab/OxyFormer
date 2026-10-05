@@ -235,6 +235,14 @@ def _publish(path: Path, data: bytes) -> None:
         os.unlink(temporary)
 
 
+def _validate_lineage(identity: CheckpointIdentity, lineage: ArtifactLineage) -> None:
+    require(set(lineage.unit_ids) == set(identity.training_ids),
+            "checkpoint lineage unit IDs disagree with identity")
+    for field in ("split_hash", "config_hash", "environment", "seed"):
+        require(getattr(lineage, field) == getattr(identity, field),
+                f"checkpoint lineage {field} disagrees with identity")
+
+
 def save_checkpoint(output_dir: Path, *, identity: CheckpointIdentity,
                     lineage: ArtifactLineage, state: dict, complete: bool, reason: str,
                     predecessor: CheckpointArtifact | None = None) -> CheckpointArtifact:
@@ -244,6 +252,7 @@ def save_checkpoint(output_dir: Path, *, identity: CheckpointIdentity,
     committed in the same archive. A crash before descriptor publication leaves
     an unreferenced archive, never a partially accepted checkpoint.
     """
+    _validate_lineage(identity, lineage)
     require(model_state_hash(state["model"]) == lineage.model_hash, "checkpoint model hash mismatch")
     arrays = []
     progress = state["progress"]
@@ -276,6 +285,7 @@ def load_checkpoint(artifact: CheckpointArtifact, expected_identity: CheckpointI
     """Verify the trusted descriptor and exact science identity before decoding."""
     require(type(artifact) is CheckpointArtifact, "trusted CheckpointArtifact required")
     require(artifact.identity == expected_identity, "incompatible checkpoint identity")
+    _validate_lineage(artifact.identity, artifact.lineage)
     with Path(artifact.path).open("rb") as stream:
         require(os.fstat(stream.fileno()).st_size == artifact.byte_size,
                 "checkpoint file size/hash mismatch")
