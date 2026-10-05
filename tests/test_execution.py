@@ -25,6 +25,10 @@ from oxyformer.execution.runner import dependency_variable, resolve_dependencies
 from oxyformer.provenance import ArtifactLineage, ArtifactRecord, ContractError, file_hash
 
 
+def fixture_module(repo, function):
+    return SimpleNamespace(run_stage=function, __file__=str(repo / 'src/oxyformer/dummy.py'))
+
+
 def inline_fixture_stage(request, module_name, repo):
     """Inject small closure stages; real process lifecycle is covered by CLI tests."""
     import importlib
@@ -73,7 +77,7 @@ def runtime(tmp_path, monkeypatch):
     out = tmp_path / 'attempt'
     out.mkdir()
     (out / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD') + '\n')
-    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=dummy, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, dummy))
     return repo, out
 
 
@@ -195,7 +199,7 @@ def test_result_symlink_escape(runtime, tmp_path, monkeypatch):
         elsewhere.write_text('{"value":1}')
         target.symlink_to(elsewhere)
         return result
-    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=escaping, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, escaping))
     result = run('dummy', out, repo, task_file=task_file(out))
     assert result.status == 'fail' and 'escapes output' in result.message
 
@@ -239,9 +243,9 @@ def locked_task(repo, out, upstream, monkeypatch):
         lock.write_text(json.dumps({'scientific_fingerprint': scientific_fingerprint(repo)}))
         return replace(result, artifacts=(replace(result.artifacts[0], sha256=file_hash(lock)),))
     with monkeypatch.context() as patch:
-        patch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=producer, __file__=str(repo / 'src/oxyformer/dummy.py')))
+        patch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, producer))
         assert run('dummy', upstream, repo,
-                   task_file=task_file(upstream, outputs=['recipe_lock.json'])).status == 'pass'
+                   task_file=task_file(upstream, id='campaign-lock', outputs=['recipe_lock.json'])).status == 'pass'
     monkeypatch.setenv('SWARM_DEP_CAMPAIGN_LOCK', str(upstream))
     return task_file(out, needs={'campaign-lock': ['recipe_lock.json']},
                      recipe_lock={'dependency': 'campaign-lock', 'path': 'recipe_lock.json',
@@ -437,7 +441,7 @@ def test_failed_upstream_cannot_feed_another_stage(runtime, tmp_path, monkeypatc
     repo, upstream = runtime
     def failed(request):
         return StageResult(request_hash=request.content_hash, status='fail', artifacts=(), message='gate failed')
-    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=failed, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, failed))
     assert run('dummy', upstream, repo, task_file=task_file(upstream)).status == 'fail'
     out = tmp_path / 'consumer'
     out.mkdir()
@@ -509,7 +513,7 @@ def test_campaign_lock_uses_unit_id_distinct_from_stage_name(runtime, tmp_path, 
     lock_settings['module'] = 'oxyformer.dummy'
     stages = {'campaign-lock': lock_settings}
     for stage, unit in [('tract-support-gate', 'tract-gate'), ('simulation-smoke', 'simulation-smoke')]:
-        stages[stage] = {'module': 'oxyformer.dummy', 'outputs': lock_settings['needs'][unit]}
+        stages[stage] = {'unit_id': unit, 'module': 'oxyformer.dummy', 'outputs': lock_settings['needs'][unit]}
     (repo / 'configs/execution/stages.yaml').write_text(yaml.safe_dump({'schema_version': 1, 'stages': stages}))
     head = commit(repo)
     (out / 'code_commit.txt').write_text(head)
@@ -767,7 +771,7 @@ def test_executed_stage_exception_always_publishes_failure(runtime, monkeypatch,
     repo, out = runtime
     def failing(request):
         raise exception
-    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=failing, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, failing))
     result = run('dummy', out, repo, task_file=task_file(out))
     assert result.status == 'fail'
     assert result.message
@@ -816,7 +820,7 @@ def test_upstream_tree_mutation_fails_and_blocks_later_consumer(
         if exit_kind == 'system-exit':
             raise SystemExit(7)
         return result
-    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, faulty))
     result = run('dummy', out, repo, deps_env=True, task_file=task_file(out, needs=needs))
     assert result.status == 'fail'
     assert str(upstream / changed) in result.message
@@ -838,7 +842,7 @@ def test_upstream_tree_mutation_fails_and_blocks_later_consumer(
     later = tmp_path / 'later'
     later.mkdir()
     (later / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
-    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=dummy, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, dummy))
     with pytest.raises(ContractError, match='tainted|fingerprint'):
         run('dummy', later, repo, deps_env=True, task_file=task_file(later, needs=needs))
     assert not (later / 'value.json').exists()
@@ -925,7 +929,7 @@ def test_post_execution_check_names_proc_fd_chmod(runtime, tmp_path, monkeypatch
         if raises:
             raise RuntimeError('synthetic failure after chmod')
         return result
-    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, faulty))
     result = run('dummy', out, repo, deps_env=True,
                  task_file=task_file(out, needs={'data-unit': ['data.json', 'receipts.json']}))
     assert result.status == 'fail'
@@ -947,7 +951,7 @@ def test_transitive_upstream_metadata_cannot_escape_detection(runtime, tmp_path,
     publish_source_fixture(repo, source)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     assert run('dummy', middle, repo, deps_env=True,
-               task_file=task_file(middle, needs={'data-unit': ['data.json', 'receipts.json']})).status == 'pass'
+               task_file=task_file(middle, id='middle', needs={'data-unit': ['data.json', 'receipts.json']})).status == 'pass'
     later = tmp_path / 'later'
     later.mkdir()
     (later / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
@@ -964,7 +968,7 @@ def test_transitive_upstream_metadata_cannot_escape_detection(runtime, tmp_path,
             result = dummy(request)
             victim.chmod(victim.stat().st_mode ^ 0o100)
             return result
-        monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty, __file__=str(repo / 'src/oxyformer/dummy.py')))
+        monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, faulty))
         result = run('dummy', later, repo, deps_env=True, task_file=task)
         assert result.status == 'fail'
         assert str(victim) in result.message
@@ -1022,7 +1026,7 @@ def test_restored_upstream_state_is_identical_under_fingerprint_contract(runtime
         assert victim.read_bytes() == b'[]'
         victim.write_bytes(original)
         return dummy(request)
-    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, faulty))
     result = run('dummy', out, repo, deps_env=True,
                  task_file=task_file(out, needs={'data-unit': ['data.json', 'receipts.json']}))
     # Fingerprints compare input states, not a history of transient writes.
@@ -1079,14 +1083,14 @@ def test_rewritten_upstream_result_is_rejected_by_later_consumers(runtime, tmp_p
                                           parent_hashes=('b' * 64,)))
         record.write_text(replace(published, artifacts=artifacts).to_json())
         return result
-    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, faulty))
     result = run('dummy', out, repo, deps_env=True, task_file=task_file(out, needs=needs))
     assert result.status == 'fail'
     assert str(source / '_execution/result.json') in result.message
     later = tmp_path / 'later'
     later.mkdir()
     (later / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
-    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=dummy, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, dummy))
     with pytest.raises(ContractError, match='publication|fingerprint|result record'):
         run('dummy', later, repo, deps_env=True, task_file=task_file(later, needs=needs))
 
@@ -1099,7 +1103,7 @@ def test_tempfile_cache_does_not_cross_attempts(runtime, tmp_path, monkeypatch):
         scratch = Path(tempfile.mkdtemp())
         assert scratch.is_relative_to(Path(request.output_dir))
         return dummy(request)
-    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=scratch_stage, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, scratch_stage))
     assert run('dummy', first, repo, task_file=task_file(first)).status == 'pass'
     shutil.rmtree(first)
     later = tmp_path / 'later'
@@ -1228,13 +1232,13 @@ def test_identical_control_rewrite_accepts_later_consumers(runtime, tmp_path, mo
         result = dummy(request)
         victim.write_bytes(victim.read_bytes())
         return result
-    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, faulty))
     result = run('dummy', out, repo, deps_env=True, task_file=task_file(out, needs=needs))
     assert result.status == 'pass', result.message
     later = tmp_path / 'later'
     later.mkdir()
     (later / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
-    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=dummy, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, dummy))
     assert run('dummy', later, repo, deps_env=True,
                task_file=task_file(later, needs=needs)).status == 'pass'
 
@@ -1272,12 +1276,12 @@ from pathlib import Path
 import oxyformer.cli as cli
 import oxyformer.execution.runner as runner
 original = runner.publish_result
-def wait_for_worker(root, result):
+def wait_for_worker(root, result, **kwargs):
     deadline = time.monotonic() + 5
     while not (Path(root) / 'worker-finished').exists():
         assert time.monotonic() < deadline
         time.sleep(.01)
-    return original(root, result)
+    return original(root, result, **kwargs)
 runner.publish_result = wait_for_worker
 raise SystemExit(cli.main())
 '''
@@ -1328,7 +1332,7 @@ def test_control_rewrites_bind_fingerprinted_properties_only(runtime, tmp_path, 
             victim.write_bytes(victim.read_bytes())
             os.utime(victim, ns=(before.st_atime_ns, before.st_mtime_ns))
         return result
-    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, faulty))
     result = run('dummy', out, repo, deps_env=True, task_file=task_file(out, needs=needs))
     assert result.status == 'pass', result.message
     assert victim.stat().st_mtime_ns == before.st_mtime_ns
@@ -1336,7 +1340,7 @@ def test_control_rewrites_bind_fingerprinted_properties_only(runtime, tmp_path, 
     later = tmp_path / 'later'
     later.mkdir()
     (later / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
-    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=dummy, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, dummy))
     assert run('dummy', later, repo, deps_env=True,
                task_file=task_file(later, needs=needs)).status == 'pass'
 
@@ -1352,7 +1356,7 @@ def test_control_rewrites_bind_fingerprinted_properties_only(runtime, tmp_path, 
         else:
             victim.write_bytes(victim.read_bytes() + b' ')
         return result
-    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=fingerprinted_change, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, fingerprinted_change))
     result = run('dummy', changed, repo, deps_env=True,
                  task_file=task_file(changed, needs=needs))
     assert result.status == 'fail' and str(victim) in result.message
@@ -1362,7 +1366,7 @@ def test_control_rewrites_bind_fingerprinted_properties_only(runtime, tmp_path, 
     refused = tmp_path / 'refused'
     refused.mkdir()
     (refused / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
-    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=dummy, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, dummy))
     with pytest.raises(ContractError, match='fingerprint|record'):
         run('dummy', refused, repo, deps_env=True,
             task_file=task_file(refused, needs=needs))
@@ -1423,7 +1427,7 @@ def test_changed_fingerprint_fifo_is_refused_without_blocking(runtime, tmp_path,
         victim.unlink()
         os.mkfifo(victim)
         raise RuntimeError('stage failed after replacing control')
-    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty, __file__=str(repo / 'src/oxyformer/dummy.py')))
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, faulty))
     result = run('dummy', out, repo, deps_env=True,
                  task_file=task_file(out, needs={'data-unit': ['data.json', 'receipts.json']}))
     assert result.status == 'fail' and str(victim) in result.message
@@ -1551,7 +1555,7 @@ def test_transitive_fifo_is_refused_before_input_hashing(runtime, tmp_path, monk
     publish_source_fixture(repo, source)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     assert run('dummy', middle, repo, deps_env=True,
-               task_file=task_file(middle, needs={'data-unit': ['data.json', 'receipts.json']})).status == 'pass'
+               task_file=task_file(middle, id='middle', needs={'data-unit': ['data.json', 'receipts.json']})).status == 'pass'
     victim = source / relative
     victim.unlink()
     os.mkfifo(victim)
@@ -1573,7 +1577,8 @@ else:
     assert relative in process.stdout
 
 
-def test_generated_collector_binds_each_expected_producer(runtime, tmp_path, monkeypatch):
+@pytest.mark.parametrize('consumer_kind', ['collector', 'leaf'])
+def test_generated_collector_binds_each_expected_producer(runtime, tmp_path, monkeypatch, consumer_kind):
     repo, out = runtime
     lock_task = locked_task(repo, out, tmp_path / 'lock', monkeypatch)
     lock_ref = json.loads(lock_task.read_text())['recipe_lock']
@@ -1596,8 +1601,13 @@ def test_generated_collector_binds_each_expected_producer(runtime, tmp_path, mon
         attempts[task['id']] = attempt
     for unit in plan['expected_leaves']:
         monkeypatch.setenv(dependency_variable(unit), str(attempts[unit]))
+    selected = plan['tasks'][-1]
+    if consumer_kind == 'leaf':
+        downstream = dict(spec, id='campaign-c', inputs={**spec['inputs'],
+            **{unit: ['value.json'] for unit in plan['expected_leaves']}})
+        selected = expand_campaign(downstream, {})['tasks'][0]
     good_task = out / 'generated-collector.json'
-    good_task.write_text(json.dumps(plan['tasks'][-1]))
+    good_task.write_text(json.dumps(selected))
     assert run('dummy', out, repo, deps_env=True, task_file=good_task).status == 'pass'
     wrong = tmp_path / 'wrong-collector'
     wrong.mkdir()
@@ -1637,9 +1647,9 @@ def test_archive_fifo_change_cannot_skip_failure_receipt(runtime, tmp_path, monk
             tar.addfile(member, io.BytesIO(b'ok'))
         return replace(result, artifacts=(replace(result.artifacts[0], sha256=file_hash(archive)),))
     with monkeypatch.context() as patch:
-        patch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=archive_producer, __file__=str(repo / 'src/oxyformer/dummy.py')))
+        patch.setitem(sys.modules, 'oxyformer.dummy', fixture_module(repo, archive_producer))
         assert run('dummy', source, repo,
-                   task_file=task_file(source, outputs=['payload.tar'])).status == 'pass'
+                   task_file=task_file(source, id='source', outputs=['payload.tar'])).status == 'pass'
     monkeypatch.setenv('SWARM_DEP_SOURCE', str(source))
     process = run_cli_fixture(repo, out, '''from oxyformer.execution.paths import safe_extract
 def run_stage(request):
@@ -1671,7 +1681,7 @@ def test_output_inside_transitive_attempt_is_refused_before_writing(runtime, tmp
     publish_source_fixture(repo, source)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     assert run('dummy', middle, repo, deps_env=True,
-               task_file=task_file(middle, needs={'data-unit': ['data.json', 'receipts.json']})).status == 'pass'
+               task_file=task_file(middle, id='middle', needs={'data-unit': ['data.json', 'receipts.json']})).status == 'pass'
     monkeypatch.setenv('SWARM_DEP_MIDDLE', str(middle))
     before = fingerprint_tree(source)
     with pytest.raises(ContractError, match='overlap|upstream'):
@@ -1768,7 +1778,7 @@ def test_output_containing_transitive_attempt_is_refused_before_writing(runtime,
     publish_source_fixture(repo, source)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     assert run('dummy', middle, repo, deps_env=True,
-               task_file=task_file(middle, needs={'data-unit': ['data.json', 'receipts.json']})).status == 'pass'
+               task_file=task_file(middle, id='middle', needs={'data-unit': ['data.json', 'receipts.json']})).status == 'pass'
     monkeypatch.setenv('SWARM_DEP_MIDDLE', str(middle))
     before = fingerprint_tree(out)
     with pytest.raises(ContractError, match='overlap.*' + str(source)):
@@ -1800,13 +1810,15 @@ def test_module_namespace_cannot_extend_beyond_checked_checkout(runtime, tmp_pat
 def test_locked_recipe_checks_scientific_identity_of_transitive_attempts(runtime, tmp_path, monkeypatch):
     repo, ancestor = runtime
     old_task = locked_task(repo, ancestor, tmp_path / 'old-lock', monkeypatch)
+    value = json.loads(old_task.read_text())
+    old_task.write_text(json.dumps(dict(value, id='ancestor')))
     assert run('dummy', ancestor, repo, deps_env=True, task_file=old_task).status == 'pass'
     middle = tmp_path / 'middle'
     middle.mkdir()
     (middle / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
     monkeypatch.setenv('SWARM_DEP_ANCESTOR', str(ancestor))
     assert run('dummy', middle, repo, deps_env=True,
-               task_file=task_file(middle, needs={'ancestor': ['value.json']})).status == 'pass'
+               task_file=task_file(middle, id='middle', needs={'ancestor': ['value.json']})).status == 'pass'
     (repo / 'src/science.py').write_text('new_science = 2\n')
     head = commit(repo)
     consumer = tmp_path / 'consumer'
@@ -1916,3 +1928,58 @@ def test_regular_reader_rejects_symlink_ancestor(tmp_path):
     (tmp_path / 'alias').symlink_to('stored', target_is_directory=True)
     with pytest.raises(ContractError, match='symlink|directory'):
         read_regular(tmp_path / 'alias/data.json')
+
+
+@pytest.mark.parametrize('control', ['request.json', 'environment.json', 'identity.json'])
+def test_stage_cannot_change_persisted_control_identity(runtime, monkeypatch, control):
+    repo, out = runtime
+    victim = out / '_execution' / control
+    def faulty(request):
+        result = dummy(request)
+        value = json.loads(victim.read_text())
+        if control == 'request.json':
+            value['payload']['code_identity'] = '0' * 40
+        else:
+            value['changed'] = True
+        victim.write_text(json.dumps(value))
+        return result
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty))
+    result = run('dummy', out, repo, task_file=task_file(out))
+    assert result.status == 'fail' and str(victim) in result.message
+    assert StageResult.from_json((out / '_execution/result.json').read_text()).status == 'fail'
+
+
+@pytest.mark.parametrize('control', ['dependency_check.json', 'result.json', 'fingerprint.json', '_execution'])
+@pytest.mark.parametrize('kind', ['file', 'fifo', 'directory', 'symlink'])
+@pytest.mark.parametrize('mutate', [False, True])
+def test_reserved_receipt_collision_preserves_upstream_failure(runtime, tmp_path, monkeypatch, control, kind, mutate):
+    repo, out = runtime
+    source = tmp_path / 'source'
+    source.mkdir()
+    victim = source / 'data.json'
+    victim.write_text('{}')
+    (source / 'receipts.json').write_text('{}')
+    publish_source_fixture(repo, source)
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
+    def faulty(request):
+        result = dummy(request)
+        path = out / control if control == '_execution' else out / '_execution' / control
+        if control == '_execution': path.rename(out / 'saved-controls')
+        if kind == 'file': path.write_text('{}')
+        elif kind == 'fifo': os.mkfifo(path)
+        elif kind == 'directory': path.mkdir()
+        else: path.symlink_to(source / 'receipts.json')
+        if mutate:
+            victim.write_text('[]')
+            raise RuntimeError('stage diagnostic failure')
+        return result
+    monkeypatch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty))
+    result = run('dummy', out, repo, deps_env=True,
+                 task_file=task_file(out, needs={'data-unit': ['data.json', 'receipts.json']}))
+    assert result.status == 'fail'
+    collision = out / control if control == '_execution' else out / '_execution' / control
+    assert str(victim if mutate else collision) in result.message
+    receipt = json.loads((out / '_execution/dependency_check.json').read_text())
+    assert ('data.json' in receipt['attempts'][str(source)]['changed_paths']) == mutate
+    assert StageResult.from_json((out / '_execution/result.json').read_text()).status == 'fail'
+    assert (source / 'receipts.json').read_text() == '{}'

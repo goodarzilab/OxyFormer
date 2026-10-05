@@ -22,8 +22,9 @@ import sys
 import yaml
 
 from oxyformer.contracts import StageRequest, StageResult
-from oxyformer.provenance import ContractError, relative_artifact_path, require
-from .integrity import (FINGERPRINT, post_execution_check, publish_result,
+from oxyformer.provenance import ContractError, canonical_json, relative_artifact_path, require
+from .integrity import (DEPENDENCY_CHECK, FINGERPRINT, RESULT, _replace_control, _repair_control_directory,
+                        post_execution_check, publish_result,
                         directory_path, read_regular, regular_file_stat, regular_file_hash as file_hash,
                         verify_inputs, verify_result, verify_published_tree)
 from .identity import code_identity, environment_record, scientific_fingerprint, verify_recipe
@@ -104,7 +105,7 @@ def verify_dependency_result(root, *, expected_hash=None, trees=None, active=Non
         # digest. Verify the entire recorded lineage, not just direct inputs.
         config = read_mapping(request.config_path)
         hashes = dict(zip(request.dependency_paths, request.dependency_hashes))
-        for parent in config.get('dependencies', {}).values():
+        for unit, parent in config.get('dependencies', {}).items():
             parent = Path(parent)
             require(parent.is_absolute(), 'dependency publication path must be absolute')
             parent = directory_path(parent)
@@ -112,12 +113,18 @@ def verify_dependency_result(root, *, expected_hash=None, trees=None, active=Non
             require(expected is not None, 'dependency fingerprint absent from published request')
             verify_dependency_result(parent, expected_hash=expected, trees=trees,
                                      active=active, verified=verified, output_dir=output_dir)
+            verify_dependency_id(parent, unit)
         if trees is not None:
             trees[str(root)] = tree
         verified[root] = result
         return result
     finally:
         active.remove(root)
+
+
+def verify_dependency_id(root, unit):
+    producer = read_mapping(dependency_file(root, '_execution/task.json'))
+    require(producer.get('id') == unit, f'dependency producer identity mismatch: {unit}')
 
 
 def verify_dependency_recipe(root, lock):
@@ -197,7 +204,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
             require(task_id is None or task.get('id') == task_id, 'task-id mismatch')
     else:
         require(task_id is None, '--task-id requires --task')
-        task = {'id': stage, 'stage': stage, 'needs': settings.get('needs', {}),
+        task = {'id': settings.get('unit_id', stage), 'stage': stage, 'needs': settings.get('needs', {}),
                 'outputs': settings.get('outputs', [])}
     require(task.get('stage') == stage, 'task stage mismatch')
     # Stage-required inputs cannot be removed by a selected shard/task.
@@ -233,11 +240,8 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         require((root / '_execution/result.json').is_file(), f'stage receipt missing or not regular: {root / "_execution/result.json"}')
         result = verify_dependency_result(root, trees=dependency_trees, verified=verified_dependencies,
                                           output_dir=out)
-        if unit in task.get('expected_leaves', []):
-            # The environment key is only wiring. Bind collector fan-in to the
-            # actual producer ID in its hash-verified, published task record.
-            producer = read_mapping(dependency_file(root, '_execution/task.json'))
-            require(producer.get('id') == unit, f'collector producer identity mismatch: {unit}')
+        # Environment keys are wiring, never producer identity authority.
+        verify_dependency_id(root, unit)
         published_hashes[root / FINGERPRINT] = next(
             a.sha256 for a in result.artifacts if a.path == FINGERPRINT)
         allowed = {a.path for a in result.artifacts} | {
@@ -290,6 +294,8 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     environment = environment_record()
     atomic_json(out, '_execution/environment.json', environment)
     atomic_json(out, '_execution/identity.json', {'head': head, 'scientific_fingerprint': scientific_fingerprint(repo)})
+    immutable_controls = {str(out / ('_execution/' + name)): file_hash(out / ('_execution/' + name))
+                          for name in ('request.json', 'environment.json', 'identity.json')}
     try:
         verify_inputs(request)
         module_name = settings.get('module')
@@ -303,7 +309,12 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
                              message=str(exc).strip() or type(exc).__name__)
     check = post_execution_check(dependency_trees)
-    atomic_json(out, '_execution/dependency_check.json', check)
+    control_directory_changed = _repair_control_directory(out)
+    collisions = [str(out / name) for name in (DEPENDENCY_CHECK, RESULT, FINGERPRINT)
+                  if os.path.lexists(out / name)]
+    if control_directory_changed:
+        collisions.append(str(out / '_execution'))
+    _replace_control(out, DEPENDENCY_CHECK, canonical_json(check))
     if check['status'] == 'fail':
         changed = [str(Path(root) / name) for root, detail in check['attempts'].items()
                    for name in detail['changed_paths']]
@@ -316,6 +327,9 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
             # Flush our streams before checking any stage-declared log hash.
             sys.stdout.flush()
             sys.stderr.flush()
+            require(not collisions, 'reserved execution control collision: ' + ', '.join(collisions))
+            for path, digest in immutable_controls.items():
+                require(file_hash(path) == digest, f'execution control changed: {path}')
             verify_result(result, request)
             require(all(not (out / a.path).resolve().is_relative_to(repo) for a in result.artifacts),
                     'artifact overlaps cloned repository')
@@ -330,4 +344,4 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
             result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
                                  message=str(exc).strip() or type(exc).__name__)
     # No status output after artifact validation: run.log may be an artifact.
-    return publish_result(out, result)
+    return publish_result(out, result, owned_controls=True)

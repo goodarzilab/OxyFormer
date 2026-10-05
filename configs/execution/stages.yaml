@@ -29,6 +29,7 @@ stages:
       atlas-pacific: [exposure.parquet, quality.json, artifact_manifest.json]
     outputs: [atlas.parquet, quality.json, artifact_manifest.json]
   tract-support-gate:
+    unit_id: tract-gate
     module: oxyformer.design.gate
     acquisition_receipts: {fetch-us: receipts.json}
     needs:

@@ -21,6 +21,7 @@ from .paths import atomic_json, atomic_write, output_path
 # StageResult is the publication authority and binds FINGERPRINT by SHA-256.
 FINGERPRINT = "_execution/fingerprint.json"
 RESULT = "_execution/result.json"
+DEPENDENCY_CHECK = "_execution/dependency_check.json"
 PUBLICATION_EXCLUSIONS = (FINGERPRINT, RESULT)
 
 
@@ -181,11 +182,37 @@ def publication_tree(root):
     return publication_view(fingerprint_tree(root))
 
 
+def _repair_control_directory(root):
+    """Recover only the directory this runner reserved in its own attempt."""
+    root = directory_path(root)
+    path = root / '_execution'
+    try:
+        if stat.S_ISDIR(path.lstat().st_mode):
+            return False
+        quarantine = Path(tempfile.mkdtemp(prefix='.control-collision-', dir=root))
+        os.rename(path, quarantine / path.name)  # move the entry, never its target
+    except FileNotFoundError:
+        pass
+    path.mkdir()
+    return True
+
+
 def _replace_control(root, relative, text):
-    """Atomically replace only a control file this publisher already reserved."""
-    require(relative in PUBLICATION_EXCLUSIONS, 'not a publication control file')
-    path = output_path(root, relative)
-    require(path.is_file(), 'publication control reservation missing')
+    """Publish the current runner's control without opening a colliding entry.
+
+    Only these three final receipt names are replaceable. Directory collisions
+    are retained inside this attempt; symlinks/FIFOs are replaced as entries,
+    never opened or followed. The caller owns the once-reserved _execution dir.
+    """
+    require(relative in (*PUBLICATION_EXCLUSIONS, DEPENDENCY_CHECK), 'not a publication control file')
+    path = directory_path(root) / relative
+    directory_path(path.parent)
+    try:
+        if stat.S_ISDIR(path.lstat().st_mode):
+            quarantine = Path(tempfile.mkdtemp(prefix='.control-collision-', dir=path.parent))
+            os.rename(path, quarantine / path.name)
+    except FileNotFoundError:
+        pass
     fd, temporary = tempfile.mkstemp(prefix='.publish-', dir=path.parent)
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as stream:
@@ -198,7 +225,7 @@ def _replace_control(root, relative, text):
             os.unlink(temporary)
 
 
-def publish_result(root, result):
+def publish_result(root, result, *, owned_controls=False):
     """Seal a producer's own completed tree; a consumer never calls this.
 
     Reserve both late control filenames before measuring directory sizes. The
@@ -206,11 +233,19 @@ def publish_result(root, result):
     the producer's own two reserved records are replaced, atomically.
     """
     root = directory_path(root)
+    collisions = [str(root / name) for name in PUBLICATION_EXCLUSIONS
+                  if os.path.lexists(root / name)]
+    # Only the runner that reserved this fresh _execution directory may repair
+    # its own receipt slots. Ordinary producer calls retain create-once semantics.
+    require(owned_controls or not collisions, 'publication controls already exist')
+    if collisions and result.status == 'pass':
+        result = replace(result, status='fail', artifacts=(),
+                         message='reserved publication control collision: ' + ', '.join(collisions))
     if result.status != 'pass':
-        atomic_write(root, RESULT, result.to_json())
+        _replace_control(root, RESULT, result.to_json())
         return result
     pending = replace(result, status='blocked', artifacts=(), message='publication incomplete')
-    atomic_write(root, RESULT, pending.to_json())
+    _replace_control(root, RESULT, pending.to_json())
     try:
         atomic_json(root, FINGERPRINT, {})
         for _ in range(3):
