@@ -32,6 +32,9 @@ seeds as independent observations. A bundle's ratios are seed by original ID;
 functional balance arrays are original ID by frozen function. Attrition contains
 sequential remaining counts ending at the frozen target count. Changed-target
 sensitivities retain their own entire Estimate and require an explicit disclosure.
+Incorrect disclosures record a failed gate while retaining every sensitivity
+estimate and the primary diagnostics. Raw sensitivity records also remain
+visible if another consistency check interrupts diagnostic assembly.
 
 `counties` contains globally unique dependence-unit identifiers, such as full
 county FIPS or state-qualified names (`AR:Benton`, `MO:Benton`), with the same
@@ -61,7 +64,9 @@ Scientific parameters are read at runtime from
 `owner_decisions.release_gates` and `owner_decisions.influence_concentration_gate`.
 Fixtures mirror the approved PR #18 parameters in the owner registry.
 The approved concentration definition is county-based: sum final contributions
-within county first, then square. Report D, s_max, G_eff and ranked counties for
+within county first, then square. County sums use `math.fsum` to retain small
+residuals under cancellation; the same accurate totals feed the merged cluster
+and spatial covariance formulas. Report D, s_max, G_eff and ranked counties for
 one-step and CV-TMLE separately. State shares sum these county information
 shares and are descriptive. This uses the orchestrator's clarified PR #18 gate
 instead of inventing a state/block metric or a different information definition.
