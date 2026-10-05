@@ -2524,7 +2524,7 @@ def test_transitive_acquisition_snapshot_is_hash_bound(runtime, acquisition, tmp
     assert_pass(run_task(repo, new_attempt(repo, tmp_path / 'consumer'), needs={'dummy': ['value.json']}))
 
 
-@mark.parametrize('failure', ['invalid-json', 'incomplete', 'io'])
+@mark.parametrize('failure', ['invalid-json', 'incomplete', 'missing', 'directory', 'symlink', 'io'])
 def test_unobserved_acquisition_errors_do_not_taint(runtime, acquisition, monkeypatch, failure):
     from oxyformer.execution import runner, integrity
     receipt = acquisition / 'receipts.json'
@@ -2533,6 +2533,12 @@ def test_unobserved_acquisition_errors_do_not_taint(runtime, acquisition, monkey
         receipt.write_text('{')
     elif failure == 'incomplete':
         receipt.write_text('{"status": "incomplete"}')
+    elif failure in ('missing', 'directory', 'symlink'):
+        receipt.unlink()
+        if failure == 'directory':
+            receipt.mkdir()
+        elif failure == 'symlink':
+            receipt.symlink_to(acquisition / 'payload.tar')
     else:
         # A transport failure is not evidence of changed acquisition bytes.
         runner.verify_acquisition(acquisition, 'receipts.json')
@@ -2660,3 +2666,85 @@ def test_new_unreadable_acquisition_entry_stays_tainted_after_restore(runtime, a
     assert added.name in read_check(active)['attempts'][str(acquisition)]['changed_paths']
     with raises(ContractError, match='tainted'):
         verify_dependency_result(producer)
+
+
+@mark.parametrize('transitive', [False, True])
+@mark.parametrize('phase,damage', [('before-stat', 'missing'), ('before-stat', 'directory'),
+    ('before-stat', 'symlink'), ('before-open', 'missing'), ('before-open', 'symlink')])
+def test_receipt_namespace_observation_survives_restore_before_rescan(
+        runtime, acquisition, tmp_path, monkeypatch, transitive, phase, damage):
+    from oxyformer.execution import runner, integrity
+    repo, producer = runtime
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']}
+    assert_pass(run_task(repo, producer, needs=needs))
+    receipt = acquisition / 'receipts.json'
+    saved, mode = receipt.read_bytes(), receipt.stat().st_mode & 0o777
+    tree = fingerprint_tree(acquisition)
+    original_read, original_dependency, original_open = runner.read_regular, runner.dependency_file, os.open
+    observations = []
+    def mutate_and_restore(operation):
+        receipt.unlink()
+        if damage == 'directory':
+            receipt.mkdir()
+        elif damage == 'symlink':
+            receipt.symlink_to(acquisition / 'payload.tar')
+        try:
+            return operation()
+        finally:
+            if receipt.is_symlink():
+                receipt.unlink()
+            elif receipt.is_dir():
+                receipt.rmdir()
+            receipt.write_bytes(saved)
+            receipt.chmod(mode)
+    def worker(request):
+        def raced_dependency(root, relative):
+            if Path(root) / relative == receipt:
+                return mutate_and_restore(lambda: original_dependency(root, relative))
+            return original_dependency(root, relative)
+        def raced_read(path):
+            if Path(path) != receipt:
+                return original_read(path)
+            def raced_open(path, *args, **kwargs):
+                if Path(path) == receipt:
+                    return mutate_and_restore(lambda: original_open(path, *args, **kwargs))
+                return original_open(path, *args, **kwargs)
+            with monkeypatch.context() as reader:
+                reader.setattr(os, 'open', raced_open)
+                return original_read(path)
+        with monkeypatch.context() as observer:
+            observer.setattr(runner, 'dependency_file' if phase == 'before-stat' else 'read_regular',
+                raced_dependency if phase == 'before-stat' else raced_read)
+            with raises((ContractError, OSError)) as error:
+                if transitive:
+                    verify_dependency_result(producer)
+                else:
+                    runner.verify_acquisition(acquisition, 'receipts.json')
+            observations.append(str(error.value))
+        # The restoration happens before the verifier's generic-error rescan.
+        assert fingerprint_tree(acquisition) == tree
+        return dummy(request)
+    install_stage(monkeypatch, repo, worker)
+    active = new_attempt(repo, tmp_path / 'active')
+    if transitive:
+        monkeypatch.setenv('SWARM_DEP_DUMMY', str(producer))
+        needs = {'dummy': ['value.json']}
+    result = run_task(repo, active, needs=needs)
+    assert_failed(result, receipt)
+    assert str(receipt) in observations[0]
+    assert read_json(Path(str(integrity.publication_receipt(acquisition)) + '.tainted')) == ['receipts.json']
+    assert read_check(active)['attempts'][str(acquisition)]['changed_paths'] == ['receipts.json']
+    with raises(ContractError, match='tainted'):
+        runner.verify_acquisition(acquisition, 'receipts.json')
+    with raises(ContractError, match='tainted'):
+        verify_dependency_result(producer)
+
+
+def test_publication_entries_exclude_stat_timestamps(runtime, monkeypatch):
+    from oxyformer.execution import integrity
+    # Use the exact lag interleaving, then inspect the actual persisted schema.
+    test_publication_directory_timestamp_lag_preserves_content_baseline(runtime, monkeypatch, False)
+    _, out = runtime
+    entries = read_json(out / FINGERPRINT)['entries']
+    assert entries['_execution'].keys() == {'type', 'mode', 'size', 'sha256', 'target'}
+    assert all(not any('time' in key for key in entry) for entry in entries.values())

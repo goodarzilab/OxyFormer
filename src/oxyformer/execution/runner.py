@@ -2,6 +2,7 @@
 Managed outputs are confined; general write prevention is deferred to ARC-1339.
 """
 from hashlib import sha256
+import errno
 import json
 import os
 from pathlib import Path
@@ -80,6 +81,7 @@ def verify_acquisition(root, receipt_name, *, expected_tree=None):
     the independent publication store retains the first validated tree and the
     same permanent taint markers used for stage publications.
     """
+    relative_artifact_path(receipt_name)
     authority = publication_receipt(root, create=True)
     require(not os.path.lexists(str(authority) + '.tainted'), f'tainted upstream fingerprint: {root}')
     baseline = Path(str(authority) + '.acquisition')
@@ -117,16 +119,31 @@ def verify_acquisition(root, receipt_name, *, expected_tree=None):
     if os.path.lexists(baseline):
         compare(read_mapping(baseline)['entries'], f'acquisition fingerprint mismatch (tainted): {root}')
     require(not any('error' in entry for entry in tree.values()), 'acquisition fingerprint unreadable')
+    # Establish valid first-time inputs before interpreting later path/type
+    # failures as observed changes. A rescan cannot erase such observations.
+    for name in (receipt_name, 'payload.tar'):
+        require(tree.get(name, {}).get('sha256') is not None,
+            f'acquisition input is missing or not regular: {Path(root) / name}')
+    observed_name = receipt_name
     try:
         receipt_path = dependency_file(root, receipt_name)
-        dependency_file(root, 'payload.tar')
+        observed_name = 'payload.tar'
+        dependency_file(root, observed_name)
+        observed_name = receipt_name
         receipt_bytes = read_regular(receipt_path)
     except InputChanged as exc:
         refuse_changes([str(exc.path.relative_to(root))], str(exc))
         raise
-    except (OSError, ContractError):
-        # A file may disappear or change type after the snapshot. Recheck for
-        # evidence, but never turn an unrelated transport error into taint.
+    except ContractError as exc:
+        # The snapshot above established regular inputs and receipt_name was
+        # validated before reading. A helper's path/type refusal is a change.
+        refuse_changes([observed_name], str(exc))
+        raise
+    except OSError as exc:
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+            refuse_changes([observed_name], 'acquisition input removed or replaced during verification')
+        # Unknown I/O failure: preserve any positive evidence in a rescan,
+        # but never mistake failure to read for proof of different bytes.
         compare(tree, 'acquisition changed during verification (tainted)', fingerprint_tree(root))
         raise
     refuse_changes([receipt_name] if tree[receipt_name]['sha256'] != sha256(receipt_bytes).hexdigest() else [],
