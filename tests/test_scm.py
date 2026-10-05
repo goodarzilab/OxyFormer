@@ -1708,3 +1708,53 @@ def test_continuation_round1_sampled_nonlinear_local_dose(scale, monkeypatch):
 def test_continuation_round1_positive_integer_tolerance(tolerance):
     result = generate_suite_a(frame(1,1),config('null'),policy(),tolerance=tolerance)
     assert result.observed_law_truth.value == result.structural_causal_truth.value == 0.
+
+
+@pytest.mark.parametrize("scale", [1e-13, float(np.nextafter(1e-13,0.)),
+                                   float(np.nextafter(1e-13,np.inf))])
+def test_continuation_round2_selection_retains_local_coordinates(scale):
+    from decimal import Decimal, localcontext
+    from fractions import Fraction
+    center = float(np.pi-100+2*np.pi*1570)
+    error = .9999999999999999
+    f = replace(frame(1,1), columns=tuple(f'x{i}' for i in range(7)),
+                x=((100.,)*7,), coordinates=((0.,0.),))
+    # At this positive exposure sigmoid(z) differs from exp(z) by <exp(-1100).
+    # The tilted two-sided Laplace transform is consequently an independent
+    # reference to far better than 1e-100 after endpoint amplification.
+    with localcontext() as context:
+        context.prec = 140
+        sine,cosine = _decimal_sin_cos_reduced(Fraction(center)/2+50)
+        sin50,_ = _decimal_sin_cos_reduced(Fraction(50))
+        s = Decimal(Fraction(scale).numerator)/Decimal(Fraction(scale).denominator)
+        k = Decimal(Fraction(.12).numerator)/Decimal(Fraction(.12).denominator)
+        left,right = 1-k*s,1+k*s
+        moment = (left*cosine+s/2*sine)/(left*left+(s/2)**2)/(1/left+1/right)
+        expected = float(400*Fraction(sin50*moment)/(1-Fraction(error)**2))
+    c = config('nonlinear',beta=200.,assignment='near_deterministic',near_scale=scale,
+               survey_inclusion=True,denominator_error=error)
+    result = generate_suite_a(f,c,policy(((center-200,center+200),),delta=200.),tolerance=1e-10)
+    for truth in (result.observed_law_truth,result.structural_causal_truth):
+        assert truth.value == pytest.approx(expected, abs=1e-10, rel=0)
+
+
+@pytest.mark.parametrize("assignment", ['continuous','atoms'])
+def test_continuation_round2_zero_sine_midpoint_terminates(assignment, monkeypatch):
+    import oxyformer.validation.scm as scm
+    original = scm._sine_bounds
+    def guarded(value,bits):
+        assert bits <= 320, 'exact zero at a rounding midpoint failed to terminate'
+        return original(value,bits)
+    monkeypatch.setattr(scm,'_sine_bounds',guarded)
+    f = replace(frame(1,1),columns=('x',),x=((2.**-46,),),coordinates=((0.,0.),))
+    u = .04097352393619469
+    p = policy(((0.,10.),)) if assignment == 'atoms' else policy(((-u,1-u),),delta=.02)
+    result = generate_suite_a(f,config('nonlinear',beta=1.,noise_sd=0.,assignment=assignment),p,seed=0)
+    assert result.observations.y[0] == 50.
+    assert result.observed_law_truth.status == ('design_rejected' if assignment == 'atoms' else 'integrated')
+
+
+@pytest.mark.parametrize("tolerance,order", [(np.float64(1e-8),256),(1e-8,np.int64(256))])
+def test_continuation_round2_numpy_controls(tolerance,order):
+    result = generate_suite_a(frame(1,1),config('null'),policy(),tolerance=tolerance,max_order=order)
+    assert result.observed_law_truth.value == 0.
