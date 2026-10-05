@@ -98,11 +98,21 @@ def numeric_scalar(value, name):
 
 
 def numeric_array(values, name, *, allow_fraction=False):
-    # dtype=object captures each supplied scalar. An already-created numeric
-    # ndarray supplies its stored values; information lost by its caller cannot
-    # be reconstructed here. Never call bare asarray before this boundary.
+    # Inspect raw scalar/container types before NumPy can invoke __array__.
+    # Rebuild owned containers so validation and computation share the same
+    # captured values. ndarray.tolist preserves longdouble scalars when needed.
+    def capture(value):
+        if type(value) is np.ndarray:
+            return capture(value.tolist())
+        if type(value) in (list, tuple, range):
+            return [capture(item) for item in value]
+        if not (allow_fraction and type(value) is Fraction):
+            numeric_scalar(value, name)
+        return value
+
+    captured = capture(values)
     try:
-        array = np.asarray(values, dtype=object)
+        array = np.asarray(captured, dtype=object)
     except (TypeError, ValueError) as exc:
         from oxyformer.provenance import ContractError
         raise ContractError(f"{name} must be a rectangular numeric sequence") from exc
@@ -620,10 +630,11 @@ def exact_shift_intervals(components, delta):
     require lossless binary64 endpoints.
     This continuous truth geometry precedes serialization of observed doses.
     """
-    validate_numeric(delta, "delta", "delta", allow_zero=True, allow_fraction=True)
+    captured_delta = validate_numeric(delta, "delta", "delta", allow_zero=True, allow_fraction=True)
+    require(captured_delta.ndim == 0, "delta must be a scalar")
     if len(components):
         validate_components(components, allow_fraction=True)
-    shift = exact(delta)
+    shift = exact(captured_delta.item())
     if shift == 0:
         return ()
     bounds = tuple((exact(lo),exact(hi)) for lo,hi in components)

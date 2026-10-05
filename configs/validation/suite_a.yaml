@@ -1,7 +1,8 @@
 # Input-type contract (all domain endpoints denote their exact binary values):
 # Python int/float and NumPy integer/floating scalars of every width are accepted.
 # Concrete built-in/NumPy scalar types are admitted; custom subclasses are refused.
-# Lists, tuples and arrays may mix these types; each supplied element is captured
+# Concrete lists, tuples, ranges and NumPy ndarrays may mix these scalar types.
+# Raw objects are checked before any array hook; each element is captured
 # before NumPy promotion and checked exactly. Existing numeric arrays supply
 # their stored values; callers must use object arrays to retain mixed precision.
 # Boolean, complex, string, nonfinite and out-of-domain numbers are refused.

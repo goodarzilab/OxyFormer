@@ -2364,3 +2364,25 @@ def test_continuation_scaled_mean_refuses_true_output_overflow():
                      lambda: sampled_mean(1., frame(1, 1), 0, state, config())):
         with pytest.raises(ContractError, match="nonfinite structural response"):
             evaluate()
+
+
+@pytest.mark.parametrize("reported", [-2, 1000])
+def test_continuation_round1_array_hook_cannot_change_validated_shift(reported):
+    from oxyformer.validation.scm import exact_shift_intervals
+    class Delta:
+        def __array__(self, dtype=None, copy=None):
+            return np.array(2., dtype=dtype)
+        def as_integer_ratio(self):
+            return (reported, 1)
+    with pytest.raises(ContractError, match="numeric"):
+        exact_shift_intervals(((0., 10010.),), Delta())
+
+
+@pytest.mark.parametrize("container", [lambda x: x, lambda x: [x], lambda x: ((x,),)])
+def test_continuation_round1_raw_validation_precedes_array_hooks(container):
+    from oxyformer.validation.scm import numeric_array
+    class NonNumeric:
+        def __array__(self, dtype=None, copy=None):
+            pytest.fail("unsupported object executed an array conversion hook")
+    with pytest.raises(ContractError, match="numeric"):
+        numeric_array(container(NonNumeric()), "raw input")
