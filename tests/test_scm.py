@@ -1659,3 +1659,52 @@ def test_continuation_tail_budget_includes_response_and_selected_normalization(t
     assert 0 < bound < tolerance/16
     cutoffs = [float(term.law.tail_decay) for group in groups.values() for term in group]
     assert min(cutoffs) > (4200 if selected else 60)
+
+
+@pytest.mark.parametrize("coordinate", [-1000., float(np.nextafter(-1000.,np.inf))])
+def test_continuation_round1_amplified_selection_contrast(coordinate):
+    from decimal import Decimal, localcontext
+    from fractions import Fraction
+    error = .9999999999999999
+    f = replace(frame(1,1), columns=tuple(f'x{i}' for i in range(6)),
+                x=((100.,)*6,), coordinates=((coordinate,0.),))
+    c = config('null', local_confounding='omitted', local_strength=200.,
+               assignment='near_deterministic', near_scale=1e-100,
+               survey_inclusion=True, denominator_error=error)
+    with localcontext() as context:
+        context.prec = 140
+        def dec(value):
+            value = Fraction(value)
+            return Decimal(value.numerator)/Decimal(value.denominator)
+        def posterior(a):
+            odds = [1/(1+(-(dec(.7)-dec(.12)*a+dec(.5)*state)).exp()) for state in (-1,1)]
+            return odds[1]/sum(odds)
+        expected = float(400*(posterior(-398)-posterior(-400))/dec(1-Fraction(error)**2))
+    result = generate_suite_a(f,c,policy(((-400.,-390.),)))
+    assert expected > 8e-5
+    assert result.observed_law_truth.value == pytest.approx(expected, abs=1e-8, rel=0)
+    assert result.structural_causal_truth.value == 0.
+
+
+@pytest.mark.parametrize("scale", [1e-100, float(np.nextafter(1e-100,0.)),
+                                   float(np.nextafter(1e-100,np.inf))])
+def test_continuation_round1_sampled_nonlinear_local_dose(scale, monkeypatch):
+    from fractions import Fraction
+    from oxyformer.validation.scm import LocalCoordinates
+    from oxyformer.validation.generators import _sample_observations
+    local = -np.log1p(-np.longdouble(.5))
+    def draw(self,index,u):
+        return LocalCoordinates(Fraction(5),Fraction(scale),np.asarray(-local if self.pieces[index].rate > 0 else local))
+    monkeypatch.setattr(AssignmentLaw,'quantile_coordinates',draw)
+    f = replace(frame(1,1), x=((-100.,-100.),), coordinates=((0.,0.),))
+    c = config('sign_changing', beta=10., assignment='near_deterministic', near_scale=scale, noise_sd=0.)
+    expected = float((Fraction(scale)*Fraction(*local.as_integer_ratio()))**2)
+    observed = _sample_observations(f,c,policy(),0)
+    assert expected > 0
+    assert observed.y[0] == expected
+
+
+@pytest.mark.parametrize("tolerance", [2**64-1, 2**64, 2**64+1, 10**20])
+def test_continuation_round1_positive_integer_tolerance(tolerance):
+    result = generate_suite_a(frame(1,1),config('null'),policy(),tolerance=tolerance)
+    assert result.observed_law_truth.value == result.structural_causal_truth.value == 0.
