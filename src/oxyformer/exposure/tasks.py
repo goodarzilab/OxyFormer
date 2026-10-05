@@ -22,7 +22,7 @@ from oxyformer.data.source_manifest import load_source, validate_shards
 from oxyformer.exposure.population_allocation import PRIMARY, FALLBACK, FALLBACK_CELLS, _validate_vertical_crs
 from oxyformer.contracts import StageResult
 from oxyformer.execution.paths import atomic_json, atomic_write
-from oxyformer.execution.integrity import read_regular
+from oxyformer.execution.integrity import read_regular, open_regular, verify_input_hash
 from oxyformer.provenance import ArtifactLineage, ArtifactRecord, canonical_json, file_hash, require
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -42,13 +42,30 @@ def inspect_dem(acquisition, source=None):
     receipt = json.loads(read_regular(acquisition / 'receipts.json'))
     require(receipt.get('status') == 'complete' and receipt.get('manifest_id') == 'dem', 'DEM acquisition incomplete or wrong source')
     require(receipt['manifest_sha256'] == sha256(canonical_json(source).encode()).hexdigest(), 'DEM receipt differs from dem.json')
+    payload = acquisition / 'payload.tar'
+    failure = None
+    with open_regular(payload) as stream:
+        verify_input_hash(payload, receipt['payload_sha256'])
+        try:
+            result = _inspect_dem_payload(acquisition, source, receipt, stream)
+        except BaseException as exc:
+            # Complete the stable-file observation even when inspection refuses.
+            # Initial invalid metadata stays a validation error; a write during
+            # inspection is retained by the shared reader before that refusal.
+            failure = exc
+    if failure is not None:
+        raise failure
+    return result
+
+
+def _inspect_dem_payload(acquisition, source, receipt, stream):
     resources = {r['id']: r for r in source['resources']}
     acquired = {r['id']: r for r in receipt['resources']}
     require(len(acquired) == len(receipt['resources']) and acquired.keys() == resources.keys(), 'DEM receipt resource inventory mismatch')
     payload = acquisition / 'payload.tar'
     require(payload.stat().st_size == receipt['payload_bytes'], 'DEM payload size mismatch')
     metadata = {}
-    with tarfile.open(payload, 'r:') as archive, rasterio.Env(
+    with tarfile.open(fileobj=stream, mode='r:') as archive, rasterio.Env(
             GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR', GDAL_PAM_ENABLED=False):
         members = {}
         for member in archive:

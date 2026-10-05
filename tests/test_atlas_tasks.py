@@ -321,3 +321,56 @@ def test_dem_inspection_receipt_observation_survives_restore(runtime, acquisitio
     assert json.loads(marker.read_text()) == ['receipts.json']
     with pytest.raises(ContractError, match='tainted'):
         runner.verify_dependency_result(producer)
+
+
+@pytest.mark.parametrize('when', ['before-inspection', 'during-inspection'])
+def test_dem_payload_observation_survives_restore(runtime, acquisition, tmp_path, monkeypatch, when):
+    from test_execution import run_task, assert_pass, assert_failed, install_stage, new_attempt, dummy
+    from oxyformer.execution import runner, integrity
+    repo, producer = runtime
+    source, rid = synthetic_dem(acquisition)
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']}
+    assert_pass(run_task(repo, producer, needs=needs))
+    victim = acquisition / 'payload.tar'
+    saved = victim.read_bytes()
+    with tarfile.open(victim) as archive:
+        member = archive.getmember('dem/' + rid + '.tif')
+        offset = member.offset_data + member.size - 1
+    changed = bytearray(saved); changed[offset] ^= 1
+    original_extract = tarfile.TarFile.extractfile
+    def worker(request):
+        def change_member(archive, member):
+            victim.write_bytes(changed)
+            return original_extract(archive, member)
+        try:
+            with monkeypatch.context() as patch:
+                if when == 'before-inspection':
+                    victim.write_bytes(changed)
+                else:
+                    patch.setattr(tarfile.TarFile, 'extractfile', change_member)
+                with pytest.raises(ContractError):
+                    inspect_dem(acquisition, source)
+        finally:
+            victim.write_bytes(saved)
+        return dummy(request)
+    install_stage(monkeypatch, repo, worker)
+    assert_failed(run_task(repo, new_attempt(repo, tmp_path / 'active'), needs=needs), victim)
+    marker = Path(str(integrity.publication_receipt(acquisition)) + '.tainted')
+    assert json.loads(marker.read_text()) == ['payload.tar']
+    with pytest.raises(ContractError, match='tainted'):
+        runner.verify_dependency_result(producer)
+
+
+def test_initial_invalid_dem_member_digest_refuses_without_taint(runtime, acquisition):
+    from test_execution import run_task, assert_pass
+    from oxyformer.execution import runner, integrity
+    repo, producer = runtime
+    source, _ = synthetic_dem(acquisition)
+    receipt = json.loads((acquisition / 'receipts.json').read_text())
+    receipt['resources'][0]['sha256'] = '0' * 64
+    (acquisition / 'receipts.json').write_text(json.dumps(receipt))
+    assert_pass(run_task(repo, producer, needs={'fetch-data': ['payload.tar', 'receipts.json']}))
+    with pytest.raises(ContractError, match='resource digest mismatch'):
+        inspect_dem(acquisition, source)
+    assert not Path(str(integrity.publication_receipt(acquisition)) + '.tainted').exists()
+    assert_pass(runner.verify_dependency_result(producer))
