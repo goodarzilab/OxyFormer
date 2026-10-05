@@ -128,7 +128,9 @@ def test_stopping_and_reference_ownership(full, tmp_path):
 
 
 def test_unseen_county_offsets_are_not_invented(full):
-    _, artifact = full
-    model = nested._build(state(artifact)["final"]["outcome"])
-    with pytest.raises(ContractError):
-        model.group_offsets(("unseen",))
+    prepared, artifact = full
+    model = nested._build(state(artifact)["final"]["outcome"]).eval()
+    view = subset(prepared.data.covariates(("x",)), artifact.prediction_inputs.original_ids)
+    inputs = replace(artifact.prediction_inputs, counties=("unseen",) * len(view.original_ids))
+    with pytest.raises(ContractError, match="unseen county"):
+        nested._predict(model, view, inputs, prepared.policy)

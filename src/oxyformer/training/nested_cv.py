@@ -15,6 +15,8 @@ import json
 import math
 from pathlib import Path
 import statistics
+import re
+import shutil
 import tarfile
 import time
 
@@ -28,7 +30,7 @@ from oxyformer.data.loaders import LoadedData, validate_split
 from oxyformer.design.eligibility import GeographyTable
 from oxyformer.design.policies import PolicyCovariates, ShiftOrStayPolicy, paired_records
 from oxyformer.design.splits import InnerSplit, tract_count
-from oxyformer.execution.paths import atomic_json, safe_extract
+from oxyformer.execution.paths import atomic_json
 from oxyformer.models.ablations import VARIANTS, build_variant
 from oxyformer.models.county_context import CountyContext
 from oxyformer.models.encoder import FeatureEncoder
@@ -159,6 +161,7 @@ def _build(bundle, *, encoder_state=None):
 def _predict(model, view, inputs, policy, *, outcome_mean=False, base_only=False):
     require(type(view) is CovariateView and view.use == "nuisance", "label-free nuisance view required")
     require(view.original_ids == inputs.original_ids, "prediction alignment mismatch")
+    require(set(inputs.counties) <= set(model.group_offsets.counties), "unseen county prediction requires a transfer experiment")
     action = policy.apply(inputs.a_mmhg, inputs.policy_covariates)
     query = torch.tensor(tuple(zip(action.a_mmhg, action.d_mmhg)), dtype=torch.float32).unsqueeze(-1)
     batch = model.encoder.tokenizer.prepare(view)
@@ -557,9 +560,23 @@ def export_continuation(artifact, path, *, binding, task_id, chain, allowed_root
 
 def import_continuation(path, root, *, binding, chain):
     """Relocate by verified blob digest; serialized absolute paths are never read."""
-    imported = safe_extract(path, root, "predecessor")
-    # safe_extract returns the destination path on the merged runner API.
-    imported = Path(root) / "predecessor" if imported is None else Path(imported)
+    imported = Path(root) / "predecessor"
+    imported.mkdir()
+    # Explicit TAR decoding: a tar containing ZIP checkpoints can itself pass
+    # zipfile.is_zipfile, so generic format sniffing is inappropriate here.
+    with tarfile.open(path, mode="r:") as archive:
+        members = archive.getmembers()
+        require(len({m.name for m in members}) == len(members), "duplicate continuation member")
+        require(sum(m.size for m in members) <= 10 * 1024**3, "continuation exceeds byte limit")
+        for member in members:
+            require(member.isfile() and (member.name == "bundle.json" or
+                re.fullmatch(r"checkpoints/[0-9a-f]{64}\.ofc", member.name) is not None),
+                "unexpected continuation member or link")
+        for member in members:
+            target = imported / member.name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with archive.extractfile(member) as source, target.open("xb") as output:
+                shutil.copyfileobj(source, output)
     header = json.loads((imported / "bundle.json").read_text())
     require(header["version"] == 1 and header["binding"] == binding, "continuation fingerprint mismatch")
     previous_chain = header["chain"]

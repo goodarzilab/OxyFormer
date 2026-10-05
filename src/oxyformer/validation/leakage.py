@@ -20,6 +20,11 @@ def assert_fitted_invariant(before, after):
     assert model_hashes(before) == model_hashes(after), "held-out perturbation changed fitted models"
     a, b = [load_checkpoint(x.checkpoint, x.checkpoint.identity)["controller"] for x in (before, after)]
     assert a["selection"] == b["selection"], "held-out perturbation changed tuning"
+    for kind in a["final"]:
+        assert a["final"][kind]["preprocessing"] == b["final"][kind]["preprocessing"], "preprocessing changed"
+        from oxyformer.contracts import CovariateView
+        ra, rb = [CovariateView.from_json(s["final"][kind]["references"]) for s in (a, b)]
+        assert (ra.original_ids, ra.columns, ra.values) == (rb.original_ids, rb.columns, rb.values), "references changed"
     from oxyformer.training.calibration import AffineCalibration
     ca, cb = [AffineCalibration.from_json(x["calibration"]) for x in (a, b)]
     assert replace(ca, lineage=cb.lineage) == cb, "held-out perturbation changed calibration"
