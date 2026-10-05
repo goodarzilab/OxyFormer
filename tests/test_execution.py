@@ -23,7 +23,7 @@ from oxyformer.execution.campaign import expand_campaign, resources, validate_pl
 from oxyformer.execution.identity import code_identity, scientific_fingerprint, verify_module_origins, verify_recipe
 from oxyformer.execution.paths import atomic_json, atomic_write, isolated_caches, safe_extract
 from oxyformer.execution.runner import (dependency_file, dependency_variable, read_mapping,
-                                        resolve_dependencies, run as run_worker, verify_dependency_result)
+                                        resolve_dependencies, run as run_worker, verify_dependency_result as verify_dependency)
 from oxyformer.provenance import ArtifactLineage, ArtifactRecord, ContractError as Invalid, canonical_json, file_hash
 
 from oxyformer.execution.integrity import (FINGERPRINT, RESULT, _repair_control_directory, changed_paths,
@@ -63,7 +63,7 @@ def assert_failed(result, path):
     assert str(path) in result.message
 
 
-def dependency_check(out):
+def read_check(out):
     return read_json(out / '_execution/dependency_check.json')
 
 
@@ -96,6 +96,10 @@ def run(*args, **kwargs):
 
 def run_task(repo, out, path=None, *, deps_env=True, **task):
     return run('dummy', out, repo, deps_env=deps_env, task_file=path or task_file(out, **task))
+
+
+def run_source(repo, out, **task):
+    return run_task(repo, out, needs=SOURCE_NEEDS, **task)
 
 
 def git(repo, *args):
@@ -229,11 +233,11 @@ def read_request(out):
     return StageRequest.from_json((out / REQUEST).read_text())
 
 
-def read_stage_result(out):
+def read_result(out):
     return StageResult.from_json((out / '_execution/result.json').read_text())
 
 
-def initialize_attempt(repo, path):
+def new_attempt(repo, path):
     path.mkdir()
     (path / COMMIT).write_text(git(repo, 'rev-parse', 'HEAD'))
     return path
@@ -247,7 +251,7 @@ def task_file(out, **changes):
     return path
 
 
-def publish_source_fixture(repo, root, *, parent=None, head=None):
+def publish_source(repo, root, *, parent=None, head=None):
     """Seal the synthetic producer attempt."""
     dependencies = {} if parent is None else {'data-unit': str(parent)}
     inputs = () if parent is None else (str(parent / FINGERPRINT),)
@@ -268,9 +272,9 @@ def publish_source_fixture(repo, root, *, parent=None, head=None):
     return published
 
 
-def make_source_fixture(repo, source, patch=None):
+def make_source(repo, source, patch=None):
     source.mkdir()
-    seal_source_fixture(repo, source)
+    seal_source(repo, source)
     if patch is not None:
         bind(patch, 'data-unit', source)
     return source
@@ -278,7 +282,7 @@ def make_source_fixture(repo, source, patch=None):
 
 @fixture
 def source(runtime, tmp, patch):
-    return make_source_fixture(runtime[0], tmp / 'source', patch)
+    return make_source(runtime[0], tmp / 'source', patch)
 
 
 def source_files(root):
@@ -288,10 +292,10 @@ def source_files(root):
     return root
 
 
-def seal_source_fixture(repo, source):
+def seal_source(repo, source):
     (source / 'data.json').write_text('{}')
     (source / 'receipts.json').write_text('{}')
-    publish_source_fixture(repo, source)
+    publish_source(repo, source)
 
 
 def test_dummy_stage_atomic_records_and_cache_isolation(repo, out, patch):
@@ -325,12 +329,12 @@ def test_upstream_unchanged_and_output_overlap_rejected(repo, out, tmp, patch):
     source.write_text('{"fixture":1}')
     (upstream / 'receipts.json').write_text('{}')
     before = source.read_bytes(), source.stat().st_mode, source.stat().st_mtime_ns
-    publish_source_fixture(repo, upstream)
+    publish_source(repo, upstream)
     bind(patch, 'data-unit', upstream)
     task = task_file(out, needs=SOURCE_NEEDS)
     assert_pass(run_task(repo, out, task))
     assert (source.read_bytes(), source.stat().st_mode, source.stat().st_mtime_ns) == before
-    nested = initialize_attempt(repo, upstream / 'child')
+    nested = new_attempt(repo, upstream / 'child')
     with raises(Invalid, match='overlaps an upstream'):
         run_task(repo, nested, task)
 
@@ -389,7 +393,7 @@ def test_cli_selects_task(repo, out, patch):
 
 
 def locked_task(repo, out, upstream, patch):
-    initialize_attempt(repo, upstream)
+    new_attempt(repo, upstream)
     lock = upstream / 'recipe_lock.json'
     def producer(request):
         result = dummy(request)
@@ -428,7 +432,7 @@ def test_continuation_ownership_and_consecutive_steps(runtime, tmp, patch):
     assert_pass(run_task(repo, old, first_task, deps_env=False))
     bind(patch, 'first', old)
     for owner, step, expected in [('wrong-owner', 1, 'ownership'), ('work-1', 2, 'consecutive'), ('work-1', 1, None)]:
-        out = initialize_attempt(repo, tmp / f'next-{owner}-{step}')
+        out = new_attempt(repo, tmp / f'next-{owner}-{step}')
         task = task_file(out, id='next', needs={'first': [TASK, REQUEST,
                                                    RESULT, 'value.json']},
                          continuation={'owner': owner, 'step': step, 'predecessor': 'first'})
@@ -573,12 +577,17 @@ def test_invalid_campaigns(spec, mutation, error):
         expand_campaign(spec, {})
 
 
+def allocation_record(spec, hours=9, **metadata):
+    return dict(metadata, owner_decisions={
+        'campaign_allocations': {spec['id']: {'kind': spec['kind'], 'gpu_hours': hours}}})
+
+
 @cases('kind', ['final-coverage', 'anchor', 'refit-audit'])
 def test_campaign_allocation_required(spec, kind):
     spec['kind'] = kind
     with raises(Invalid, match='missing owner campaign allocation'):
         expand_campaign(spec, {})
-    approvals = {'owner_decisions': {'campaign_allocations': {spec['id']: {'kind': kind, 'gpu_hours': 9}}}}
+    approvals = allocation_record(spec)
     assert expand_campaign(spec, approvals)['units']
 
 
@@ -596,7 +605,7 @@ def test_failed_upstream_cannot_feed_another_stage(runtime, tmp, patch):
         return StageResult(request_hash=request.content_hash, status='fail', artifacts=(), message='gate failed')
     install_stage(patch, repo, failed)
     assert run_task(repo, upstream, deps_env=False).status == 'fail'
-    out = initialize_attempt(repo, tmp / 'consumer')
+    out = new_attempt(repo, tmp / 'consumer')
     bind(patch, 'gate', upstream)
     with raises(Invalid, match='did not pass'):
         run_task(repo, out, needs={'gate': [RESULT]})
@@ -724,11 +733,11 @@ def test_cli_import_from_pristine_repo_keeps_code_roots_clean(repo, out, tmp, sp
     if entrypoint == 'builder':
         assert validate_plan(read_json(out / 'expanded_units.json'), {}) == expand_campaign(spec, {})
         return
-    assert_pass(verify_dependency_result(out))
+    assert_pass(verify_dependency(out))
     with (out / 'run.log').open('a') as log:
         log.write('unexpected late log write')
     with raises(Invalid, match='fingerprint mismatch.*run.log'):
-        verify_dependency_result(out)
+        verify_dependency(out)
 
 
 def test_locked_primary_stage_cannot_omit_recipe(repo, out):
@@ -746,7 +755,7 @@ def test_exact_campaign_allocation_is_not_rejected_by_float_sum(spec, seconds, a
     spec['kind'] = 'final-coverage'
     spec['work'] = spec['work'][:1]
     spec['work'][0]['slices'] = [{'gpus': 1, 'wall_seconds': value} for value in seconds]
-    approvals = {'owner_decisions': {'campaign_allocations': {spec['id']: {'kind': 'final-coverage', 'gpu_hours': allocation}}}}
+    approvals = allocation_record(spec, allocation)
     assert expand_campaign(spec, approvals)['units']
     approvals['owner_decisions']['campaign_allocations'][spec['id']]['gpu_hours'] = allocation - 1e-9
     with raises(Invalid, match='allocation does not cover'):
@@ -864,8 +873,7 @@ def test_build_tasks_cli_publishes_into_new_or_existing_directory(tmp, spec, exi
 def test_builder_rejects_unanchored_owner_allocation(tmp, spec, kind):
     spec['kind'] = kind
     spec['id'] = 'synthetic-unapproved'
-    approvals = {'schema_version': 1, 'approved_by': 'fixture', 'owner_decisions': {
-        'campaign_allocations': {spec['id']: {'kind': kind, 'gpu_hours': 9}}}}
+    approvals = allocation_record(spec, schema_version=1, approved_by='fixture')
     spec_file = tmp / 'spec.json'
     write_json(spec_file, spec)
     alternate = tmp / 'alternate.yaml'
@@ -885,7 +893,7 @@ def test_executed_stage_exception_always_publishes_failure(repo, out, patch, exc
     result = run_task(repo, out, deps_env=False)
     assert result.status == 'fail'
     assert result.message
-    receipt = read_stage_result(out)
+    receipt = read_result(out)
     assert receipt == result
 
 
@@ -900,7 +908,7 @@ def test_upstream_tree_mutation_fails_and_blocks_later_consumer(
     victim.write_text('original')
     link = extra / 'link'
     link.symlink_to('victim')
-    publish_source_fixture(repo, upstream)
+    publish_source(repo, upstream)
     bind(patch, 'data-unit', upstream)
     changed = {'bytes': 'extra/victim', 'chmod': 'extra/victim',
                'added': 'extra/new', 'removed': 'extra/victim',
@@ -924,13 +932,13 @@ def test_upstream_tree_mutation_fails_and_blocks_later_consumer(
             raise SystemExit(7)
         return result
     install_stage(patch, repo, faulty)
-    result = run_task(repo, out, needs=SOURCE_NEEDS)
+    result = run_source(repo, out)
     assert_failed(result, upstream / changed)
-    assert read_stage_result(out) == result
-    receipt = dependency_check(out)
+    assert read_result(out) == result
+    receipt = read_check(out)
     assert receipt['status'] == 'fail'
     assert changed in receipt['attempts'][str(upstream)]['changed_paths']
-    # The runner must not repair upstream data or modes while reporting failure.
+    # No upstream repair.
     if mutation == 'bytes':
         assert victim.read_text() == 'modified'
     elif mutation == 'chmod':
@@ -941,17 +949,17 @@ def test_upstream_tree_mutation_fails_and_blocks_later_consumer(
         assert not victim.exists()
     else:
         assert os.readlink(link) == '../data.json'
-    later = initialize_attempt(repo, tmp / 'later')
+    later = new_attempt(repo, tmp / 'later')
     install_stage(patch, repo, dummy)
     with raises(Invalid, match='tainted|fingerprint'):
-        run_task(repo, later, needs=SOURCE_NEEDS)
+        run_source(repo, later)
     assert not (later / 'value.json').exists()
 
 
 def test_read_only_upstream_tree_remains_usable(repo, out, tmp, patch):
     upstream = source_files(tmp / 'source')
     (upstream / 'link').symlink_to('data.json')
-    publish_source_fixture(repo, upstream)
+    publish_source(repo, upstream)
     bind(patch, 'data-unit', upstream)
     before = {p.name: (p.lstat().st_mode, p.lstat().st_size,
                       os.readlink(p) if p.is_symlink() else (None if p.is_dir() else p.read_bytes()))
@@ -959,7 +967,7 @@ def test_read_only_upstream_tree_remains_usable(repo, out, tmp, patch):
     for attempt in [out, tmp / 'later']:
         attempt.mkdir(exist_ok=True)
         (attempt / COMMIT).write_text(git(repo, 'rev-parse', 'HEAD'))
-        assert_pass(run_task(repo, attempt, needs=SOURCE_NEEDS))
+        assert_pass(run_source(repo, attempt))
     after = {p.name: (p.lstat().st_mode, p.lstat().st_size,
                      os.readlink(p) if p.is_symlink() else (None if p.is_dir() else p.read_bytes()))
              for p in upstream.iterdir()}
@@ -1008,7 +1016,7 @@ def test_post_execution_check_names_proc_fd_chmod(repo, out, tmp, patch, raises)
     victim = upstream / 'undeclared'
     victim.write_text('unchanged bytes')
     before = file_hash(victim)
-    publish_source_fixture(repo, upstream)
+    publish_source(repo, upstream)
     bind(patch, 'data-unit', upstream)
     def faulty(request):
         result = dummy(request)
@@ -1018,9 +1026,9 @@ def test_post_execution_check_names_proc_fd_chmod(repo, out, tmp, patch, raises)
             raise RuntimeError('synthetic failure after chmod')
         return result
     install_stage(patch, repo, faulty)
-    result = run_task(repo, out, needs=SOURCE_NEEDS)
+    result = run_source(repo, out)
     assert_failed(result, victim)
-    receipt = dependency_check(out)
+    receipt = read_check(out)
     assert receipt['attempts'][str(upstream)]['status'] == 'tainted'
     assert receipt['attempts'][str(upstream)]['changed_paths'] == ['undeclared']
     assert file_hash(victim) == before and victim.stat().st_mode & 0o100
@@ -1030,8 +1038,8 @@ def test_post_execution_check_names_proc_fd_chmod(repo, out, tmp, patch, raises)
 @cases('when', ['before-consumer', 'during-consumer'])
 def test_transitive_upstream_metadata_cannot_escape_detection(runtime, tmp, patch, when, source):
     repo, middle = runtime
-    assert_pass(run_task(repo, middle, id='middle', needs=SOURCE_NEEDS))
-    later = initialize_attempt(repo, tmp / 'later')
+    assert_pass(run_source(repo, middle, id='middle'))
+    later = new_attempt(repo, tmp / 'later')
     bind(patch, 'middle', middle)
     task = task_file(later, needs={'middle': ['value.json']})
     victim = source / 'data.json'
@@ -1052,20 +1060,20 @@ def test_transitive_upstream_metadata_cannot_escape_detection(runtime, tmp, patc
 
 def test_consumer_binds_published_fingerprint_digest(repo, out, tmp, patch):
     source = source_files(tmp / 'source')
-    published = publish_source_fixture(repo, source)
+    published = publish_source(repo, source)
     expected = next(a.sha256 for a in published.artifacts if a.path == FINGERPRINT)
     bind(patch, 'data-unit', source)
-    assert_pass(run_task(repo, out, needs=SOURCE_NEEDS))
+    assert_pass(run_source(repo, out))
     request = read_request(out)
     assert dict(zip(request.dependency_paths, request.dependency_hashes))[str(source / FINGERPRINT)] == expected
-    # Alter the publication record itself; its original result digest must win.
+    # The original result digest must win.
     (source / FINGERPRINT).write_text('{}')
-    later = initialize_attempt(repo, tmp / 'later')
+    later = new_attempt(repo, tmp / 'later')
     with raises(Invalid, match='fingerprint hash mismatch'):
-        run_task(repo, later, needs=SOURCE_NEEDS)
+        run_source(repo, later)
 
 
-def test_restored_upstream_state_is_identical_under_fingerprint_contract(repo, out, tmp, patch, source):
+def test_restored_upstream_state_is_identical_under_fingerprint_contract(repo, out, patch, source):
     victim = source / 'data.json'
     def faulty(request):
         original = victim.read_bytes()
@@ -1074,8 +1082,8 @@ def test_restored_upstream_state_is_identical_under_fingerprint_contract(repo, o
         victim.write_bytes(original)
         return dummy(request)
     install_stage(patch, repo, faulty)
-    result = run_task(repo, out, needs=SOURCE_NEEDS)
-    # Fingerprints compare input states, not a history of transient writes.
+    result = run_source(repo, out)
+    # Fingerprints compare states.
     assert_pass(result)
     assert victim.read_bytes() == b'{}'
 
@@ -1091,7 +1099,7 @@ def test_preflight_cannot_rebase_a_changed_dependency(runtime, tmp, patch, mutat
     (source / 'receipts.json').write_text('{}')
     extra = source / 'undeclared.txt'
     extra.write_text('before')
-    publish_source_fixture(repo, source)
+    publish_source(repo, source)
     bind(patch, 'data-unit', source)
     original = runner.verify_published_tree
     def interleave(root, result, expected_hash=None):
@@ -1103,7 +1111,7 @@ def test_preflight_cannot_rebase_a_changed_dependency(runtime, tmp, patch, mutat
                 extra.write_text('after')
         return verified
     patch.setattr(runner, 'verify_published_tree', interleave)
-    result = run_task(repo, out, needs=SOURCE_NEEDS)
+    result = run_source(repo, out)
     assert_failed(result, victim if mutation == 'chmod' else extra)
 
 
@@ -1120,12 +1128,12 @@ def test_rewritten_upstream_result_is_rejected_by_later_consumers(repo, out, tmp
         record.write_text(replace(published, artifacts=artifacts).to_json())
         return result
     install_stage(patch, repo, faulty)
-    result = run_task(repo, out, needs=SOURCE_NEEDS)
+    result = run_source(repo, out)
     assert_failed(result, source / RESULT)
-    later = initialize_attempt(repo, tmp / 'later')
+    later = new_attempt(repo, tmp / 'later')
     install_stage(patch, repo, dummy)
     with raises(Invalid, match='publication|fingerprint|result record'):
-        run_task(repo, later, needs=SOURCE_NEEDS)
+        run_source(repo, later)
 
 
 def test_tempfile_cache_does_not_cross_attempts(runtime, tmp, patch):
@@ -1139,7 +1147,7 @@ def test_tempfile_cache_does_not_cross_attempts(runtime, tmp, patch):
     install_stage(patch, repo, scratch_stage)
     assert_pass(run_task(repo, first, deps_env=False))
     shutil.rmtree(first)
-    later = initialize_attempt(repo, tmp / 'later')
+    later = new_attempt(repo, tmp / 'later')
     result = run_task(repo, later, deps_env=False)
     assert_pass(result)
 
@@ -1170,11 +1178,11 @@ def test_forty_leaf_limit_includes_cpu_slices(spec):
 
 
 @cases('name', [RESULT, FINGERPRINT])
-def test_late_publication_control_modes_are_verified(repo, out, tmp, patch, name, source):
+def test_late_publication_control_modes_are_verified(repo, out, name, source):
     path = source / name
     path.chmod(path.stat().st_mode ^ 0o100)
     with raises(Invalid, match='fingerprint mismatch'):
-        run_task(repo, out, needs=SOURCE_NEEDS)
+        run_source(repo, out)
 
 
 def prepare_cli_fixture(repo, out, stage_body):
@@ -1220,7 +1228,7 @@ def test_cli_undeclared_outside_write_fails(repo, out, tmp, patch):
     return dummy(request)
 ''')
     assert_exit(process, 1)
-    result = read_stage_result(out)
+    result = read_result(out)
     assert str(outside) in result.message
 
 
@@ -1232,31 +1240,49 @@ def test_identical_control_rewrite_accepts_later_consumers(repo, out, tmp, patch
         victim.write_bytes(victim.read_bytes())
         return result
     install_stage(patch, repo, faulty)
-    result = run_task(repo, out, needs=SOURCE_NEEDS)
+    result = run_source(repo, out)
     assert_pass(result)
-    later = initialize_attempt(repo, tmp / 'later')
+    later = new_attempt(repo, tmp / 'later')
     install_stage(patch, repo, dummy)
-    assert_pass(run_task(repo, later, needs=SOURCE_NEEDS))
+    assert_pass(run_source(repo, later))
 
 
-def test_cli_finalizes_temporary_directories_before_publication(repo, out):
-    process = run_cli_fixture(repo, out, '''import tempfile
+@cases('stage_body,timeout', [
+    ('''import tempfile
 scratch = None
 def run_stage(request):
     global scratch
     scratch = tempfile.TemporaryDirectory()
     (Path(scratch.name) / 'scratch').write_text('temporary work')
     return dummy(request)
-''')
+''', 30),
+    ('''from multiprocessing.shared_memory import SharedMemory
+def run_stage(request):
+    scratch = SharedMemory(create=True, size=1)
+    scratch.close()
+    scratch.unlink()
+    return dummy(request)
+''', 10),
+    ('''import subprocess
+def run_stage(request):
+    result = dummy(request)
+    log = Path(request.output_dir) / 'clean.log'
+    log.write_text('')
+    subprocess.Popen(['/bin/sh', '-c', 'sleep 1; grep -q stale "$1"', 'fixture', str(log)])
+    return result
+''', 30)
+], ids=['temporary-files', 'resource-tracker', 'nonzero-helper'])
+def test_honest_worker_shutdown(repo, out, stage_body, timeout):
+    process = run_cli_fixture(repo, out, stage_body, timeout=timeout)
     assert_exit(process, 0)
-    assert_pass(verify_dependency_result(out))
+    assert_pass(verify_dependency(out))
 
 
 @cases('worker_kind', ['thread', 'subprocess'])
-def test_cli_waits_for_background_mutation_before_post_check(repo, out, tmp, patch, worker_kind, source):
+def test_cli_waits_for_background_mutation_before_post_check(repo, out, patch, worker_kind, source):
     victim = source / 'data.json'
     patch.setenv('FIXTURE_WORKER_KIND', worker_kind)
-    # Delay publication outside the stage to expose its unjoined worker.
+    # Hold publication for the unjoined worker.
     entrypoint = '''import time
 from pathlib import Path
 import oxyformer.cli as cli
@@ -1289,9 +1315,9 @@ def run_stage(request):
     return result
 ''', needs=SOURCE_NEEDS, entrypoint=entrypoint)
     assert_exit(process, 1)
-    result = read_stage_result(out)
+    result = read_result(out)
     assert_failed(result, victim)
-    check = dependency_check(out)
+    check = read_check(out)
     assert check['attempts'][str(source)]['status'] == 'tainted'
 
 
@@ -1311,15 +1337,15 @@ def test_control_rewrites_bind_fingerprinted_properties_only(repo, out, tmp, pat
             os.utime(victim, ns=(before.st_atime_ns, before.st_mtime_ns))
         return result
     install_stage(patch, repo, faulty)
-    result = run_task(repo, out, needs=SOURCE_NEEDS)
+    result = run_source(repo, out)
     assert_pass(result)
     assert victim.stat().st_mtime_ns == before.st_mtime_ns
     assert victim.stat().st_ctime_ns != before.st_ctime_ns
-    later = initialize_attempt(repo, tmp / 'later')
+    later = new_attempt(repo, tmp / 'later')
     install_stage(patch, repo, dummy)
-    assert_pass(run_task(repo, later, needs=SOURCE_NEEDS))
+    assert_pass(run_source(repo, later))
 
-    changed = initialize_attempt(repo, tmp / 'changed')
+    changed = new_attempt(repo, tmp / 'changed')
     def fingerprinted_change(request):
         result = dummy(request)
         if operation == 'copy2':
@@ -1328,18 +1354,18 @@ def test_control_rewrites_bind_fingerprinted_properties_only(repo, out, tmp, pat
             victim.write_bytes(victim.read_bytes() + b' ')
         return result
     install_stage(patch, repo, fingerprinted_change)
-    result = run_task(repo, changed, needs=SOURCE_NEEDS)
+    result = run_source(repo, changed)
     assert_failed(result, victim)
-    check = dependency_check(changed)
+    check = read_check(changed)
     assert check['attempts'][str(source)]['status'] == 'tainted'
     assert '_execution/' + control in check['attempts'][str(source)]['changed_paths']
-    refused = initialize_attempt(repo, tmp / 'refused')
+    refused = new_attempt(repo, tmp / 'refused')
     install_stage(patch, repo, dummy)
     with raises(Invalid, match='fingerprint|record'):
-        run_task(repo, refused, needs=SOURCE_NEEDS)
+        run_source(repo, refused)
 
 
-def test_nested_worker_mutation_cannot_outlive_publication(repo, out, tmp, patch, source):
+def test_nested_worker_mutation_cannot_outlive_publication(repo, out, source):
     victim = source / 'data.json'
     body = '''import subprocess
 import sys
@@ -1352,7 +1378,7 @@ def run_stage(request):
 '''
     process = run_cli_fixture(repo, out, body, needs=SOURCE_NEEDS)
     assert victim.read_text() == '[]', process.stdout + process.stderr
-    result = read_stage_result(out)
+    result = read_result(out)
     assert process.returncode == 1 and result.status == 'fail', result.to_json()
     assert str(victim) in result.message
 
@@ -1384,28 +1410,16 @@ while not (out / '_execution/result.json').exists() and time.monotonic() < deadl
 ''', needs=SOURCE_NEEDS)
     assert_exit(process, 1)
     assert (source / "data.json").read_text() == "changed"
-    assert_failed(read_stage_result(out), source / "data.json")
-    receipt = dependency_check(out)["attempts"][str(source)]
+    assert_failed(read_result(out), source / "data.json")
+    receipt = read_check(out)["attempts"][str(source)]
     assert receipt["status"] == "tainted" and receipt["changed_paths"] == ["data.json"]
     with raises(Invalid, match="fingerprint|pass"):
-        verify_dependency_result(out)
+        verify_dependency(out)
     with raises(Invalid, match="fingerprint"):
-        verify_dependency_result(source)
+        verify_dependency(source)
 
 
-def test_worker_allows_normal_resource_tracker_shutdown(repo, out):
-    process = run_cli_fixture(repo, out, '''from multiprocessing.shared_memory import SharedMemory
-def run_stage(request):
-    scratch = SharedMemory(create=True, size=1)
-    scratch.close()
-    scratch.unlink()
-    return dummy(request)
-''', timeout=10)
-    assert_exit(process, 0)
-    assert_pass(verify_dependency_result(out))
-
-
-def test_changed_fingerprint_fifo_is_refused_without_blocking(repo, out, tmp, patch, source):
+def test_changed_fingerprint_fifo_is_refused_without_blocking(repo, out, patch, source):
     victim = source / FINGERPRINT
     def faulty(request):
         result = dummy(request)
@@ -1413,23 +1427,10 @@ def test_changed_fingerprint_fifo_is_refused_without_blocking(repo, out, tmp, pa
         os.mkfifo(victim)
         raise RuntimeError('stage failed after replacing control')
     install_stage(patch, repo, faulty)
-    result = run_task(repo, out, needs=SOURCE_NEEDS)
+    result = run_source(repo, out)
     assert_failed(result, victim)
     process = refused_dependency_probe(source)
     assert 'fingerprint' in process.stdout
-
-
-def test_worker_accepts_expected_nonzero_housekeeping_status(repo, out):
-    process = run_cli_fixture(repo, out, '''import subprocess
-def run_stage(request):
-    result = dummy(request)
-    log = Path(request.output_dir) / 'clean.log'
-    log.write_text('')
-    subprocess.Popen(['/bin/sh', '-c', 'sleep 1; grep -q stale "$1"', 'fixture', str(log)])
-    return result
-''')
-    assert_exit(process, 0)
-    assert_pass(verify_dependency_result(out))
 
 
 @cases('trace', [None, 'stderr', 'file', 'trace2'])
@@ -1454,7 +1455,7 @@ def run_stage(request):
     return replace(result, artifacts=(*result.artifacts, log))
 ''', entrypoint=entrypoint)
     assert process.returncode == 0, (out / 'run.log').read_text()
-    assert_pass(verify_dependency_result(out))
+    assert_pass(verify_dependency(out))
 
 
 @cases('hook_kind', ['fsmonitor', 'filter'])
@@ -1480,18 +1481,18 @@ def test_git_observers_cannot_write_after_upstream_check(repo, out, patch, sourc
             git(repo, 'status', '--porcelain')
         return result
     install_stage(patch, repo, configured)
-    result = run_task(repo, out, needs=SOURCE_NEEDS)
+    result = run_source(repo, out)
     if stage_calls_git:
         assert victim.read_text() == 'changed'
         assert_failed(result, victim)
-        assert 'data.json' in dependency_check(out)['attempts'][str(source)]['changed_paths']
+        assert 'data.json' in read_check(out)['attempts'][str(source)]['changed_paths']
     else:
         assert victim.read_bytes() == before, 'identity observer executed a stage-configured hook'
         assert_pass(result)
-        assert_pass(verify_dependency_result(out))
+        assert_pass(verify_dependency(out))
 
 
-def test_changing_fingerprint_to_fifo_cannot_skip_post_check(repo, out, tmp, patch, source):
+def test_changing_fingerprint_to_fifo_cannot_skip_post_check(repo, out, source):
     process = run_cli_fixture(repo, out, """def run_stage(request):
     result = dummy(request)
     victim = Path(os.environ['SWARM_DEP_DATA_UNIT']) / '_execution/fingerprint.json'
@@ -1500,15 +1501,15 @@ def test_changing_fingerprint_to_fifo_cannot_skip_post_check(repo, out, tmp, pat
     return result
 """, needs=SOURCE_NEEDS, timeout=5)
     assert_exit(process, 1)
-    result = read_stage_result(out)
+    result = read_result(out)
     assert_failed(result, source / FINGERPRINT)
-    check = dependency_check(out)
+    check = read_check(out)
     assert check['attempts'][str(source)]['status'] == 'tainted'
 
 
 @cases('control', ['result.json', 'request.json'])
 def test_preflight_control_fifo_swap_is_nonblocking(repo, tmp, control):
-    source = make_source_fixture(repo, tmp / 'source')
+    source = make_source(repo, tmp / 'source')
     code = '''import os,sys
 from pathlib import Path
 from oxyformer.execution import runner
@@ -1533,9 +1534,9 @@ else:
 
 
 @cases('relative', [FINGERPRINT, 'data.json'])
-def test_transitive_fifo_is_refused_before_input_hashing(runtime, tmp, patch, relative, source):
+def test_transitive_fifo_is_refused_before_input_hashing(runtime, relative, source):
     repo, middle = runtime
-    assert_pass(run_task(repo, middle, id='middle', needs=SOURCE_NEEDS))
+    assert_pass(run_source(repo, middle, id='middle'))
     victim = source / relative
     victim.unlink()
     os.mkfifo(victim)
@@ -1557,7 +1558,7 @@ def test_generated_collector_binds_each_expected_producer(repo, out, tmp, patch,
     other = expand_campaign(dict(spec, id='campaign-b'), {})
     attempts = {}
     for task in [*plan['tasks'][:-1], other['tasks'][0]]:
-        attempt = initialize_attempt(repo, tmp / task['id'])
+        attempt = new_attempt(repo, tmp / task['id'])
         task_path = attempt / 'input-task.json'
         write_json(task_path, task)  # exact generated task, unedited
         assert_pass(run_task(repo, attempt, task_path))
@@ -1572,7 +1573,7 @@ def test_generated_collector_binds_each_expected_producer(repo, out, tmp, patch,
     good_task = out / 'generated-collector.json'
     write_json(good_task, selected)
     assert_pass(run_task(repo, out, good_task))
-    wrong = initialize_attempt(repo, tmp / 'wrong-collector')
+    wrong = new_attempt(repo, tmp / 'wrong-collector')
     wrong_task = wrong / 'generated-collector.json'
     wrong_task.write_text(good_task.read_text())
     patch.setenv(dependency_variable(plan['expected_leaves'][-1]),
@@ -1594,7 +1595,7 @@ def test_ignored_untracked_stage_code_is_refused(repo, out):
 
 
 def test_archive_fifo_change_cannot_skip_failure_receipt(repo, out, tmp, patch):
-    source = initialize_attempt(repo, tmp / 'source')
+    source = new_attempt(repo, tmp / 'source')
     def archive_producer(request):
         result = dummy(request)
         archive = Path(request.output_dir) / 'payload.tar'
@@ -1617,7 +1618,7 @@ def run_stage(request):
     return result
 ''', needs={'source': ['payload.tar']}, timeout=5)
     assert_exit(process, 1)
-    result = read_stage_result(out)
+    result = read_result(out)
     assert_failed(result, source / 'payload.tar')
 
 
@@ -1626,14 +1627,14 @@ def test_transitive_output_overlap(runtime, tmp, patch, inside):
     repo, middle = runtime
     if inside:
         source = source_files(tmp / 'source')
-        out = initialize_attempt(repo, source / 'handoff')
+        out = new_attempt(repo, source / 'handoff')
     else:
-        out = initialize_attempt(repo, tmp / 'consumer')
+        out = new_attempt(repo, tmp / 'consumer')
         source = source_files(out / 'source')
     task = task_file(out, needs={'middle': ['value.json']})
-    publish_source_fixture(repo, source)
+    publish_source(repo, source)
     bind(patch, 'data-unit', source)
-    assert_pass(run_task(repo, middle, id='middle', needs=SOURCE_NEEDS))
+    assert_pass(run_source(repo, middle, id='middle'))
     bind(patch, 'middle', middle)
     root = source if inside else out
     before = fingerprint_tree(root)
@@ -1648,7 +1649,7 @@ def test_transitive_output_overlap(runtime, tmp, patch, inside):
                                       'src/oxyformer/notes.md', 'scripts/notes.md',
                                       'src/oxyformer/helper.pyc'])
 @cases('derive', ['commit', 'recipe'])
-def test_identity_rejects_every_ignored_file_in_code_roots(repo, out, relative, derive):
+def test_identity_rejects_ignored_code(repo, out, relative, derive):
     path = repo / relative
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text('unrecorded code or resource\n')
@@ -1660,7 +1661,7 @@ def test_identity_rejects_every_ignored_file_in_code_roots(repo, out, relative, 
 
 @cases('flag', ['--assume-unchanged', '--skip-worktree'])
 @cases('derive', ['commit', 'recipe'])
-def test_identity_checks_disk_bytes_even_when_index_suppresses_status(repo, out, flag, derive):
+def test_identity_checks_disk_despite_index_flags(repo, out, flag, derive):
     git(repo, 'update-index', flag, 'src/oxyformer/dummy.py')
     (repo / 'src/oxyformer/dummy.py').write_text('unrecorded = True\n')
     assert git(repo, 'status', '--porcelain') == ''
@@ -1734,7 +1735,7 @@ def test_locked_recipe_checks_scientific_identity_of_transitive_attempts(runtime
     value = read_json(old_task)
     write_json(old_task, dict(value, id='ancestor'))
     assert_pass(run_task(repo, ancestor, old_task))
-    middle = initialize_attempt(repo, tmp / 'middle')
+    middle = new_attempt(repo, tmp / 'middle')
     bind(patch, 'ancestor', ancestor)
     assert_pass(run_task(repo, middle, id='middle', needs={'ancestor': ['value.json']}))
     (repo / SCIENCE).write_text('new_science = 2\n')
@@ -1760,9 +1761,7 @@ def test_builder_refuses_modified_checkout_approvals(repo, tmp, spec, kind):
     spec.update(id='unapproved', kind=kind)
     spec_file = tmp / 'spec.json'
     write_json(spec_file, spec)
-    (repo / APPROVALS).write_text(yaml.safe_dump({
-        'schema_version': 1, 'approved_by': 'fixture', 'owner_decisions': {
-            'campaign_allocations': {'unapproved': {'kind': kind, 'gpu_hours': 9}}}}))
+    (repo / APPROVALS).write_text(yaml.safe_dump(allocation_record(spec, schema_version=1, approved_by='fixture')))
     process = build_tasks('--spec', spec_file, '--out', tmp / 'plan', root=repo, timeout=10)
     assert process.returncode != 0, 'builder accepted modified owner allocations'
     assert 'approvals' in process.stderr and 'HEAD' in process.stderr
@@ -1776,12 +1775,12 @@ def test_code_identity_does_not_refresh_upstream_git_index(repo, out, tmp, patch
     clone = source / 'src'
     shutil.move(repo, clone)
     if overlap:
-        out = initialize_attempt(clone, source / 'handoff')
+        out = new_attempt(clone, source / 'handoff')
     task = task_file(out, needs=SOURCE_NEEDS)
     (source / 'data.json').write_text('{}')
     (source / 'receipts.json').write_text('{}')
     git(clone, 'status', '--porcelain')
-    publish_source_fixture(clone, source)
+    publish_source(clone, source)
     victim = clone / SCIENCE
     meta = victim.stat()
     os.utime(victim, ns=(meta.st_atime_ns, meta.st_mtime_ns + 1000000000))
@@ -1841,13 +1840,13 @@ def test_stage_cannot_change_persisted_control_identity(repo, out, patch, contro
     patch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty))
     result = run_task(repo, out, deps_env=False)
     assert_failed(result, victim)
-    assert read_stage_result(out).status == 'fail'
+    assert read_result(out).status == 'fail'
 
 
 @cases('control', ['dependency_check.json', 'result.json', 'fingerprint.json', '_execution'])
 @cases('kind', ['file', 'fifo', 'directory', 'symlink'])
 @cases('mutate', [False, True])
-def test_reserved_receipt_collision_preserves_upstream_failure(repo, out, tmp, patch, control, kind, mutate, source):
+def test_reserved_receipt_collision_preserves_upstream_failure(repo, out, patch, control, kind, mutate, source):
     victim = source / 'data.json'
     def faulty(request):
         result = dummy(request)
@@ -1862,13 +1861,13 @@ def test_reserved_receipt_collision_preserves_upstream_failure(repo, out, tmp, p
             raise RuntimeError('stage diagnostic failure')
         return result
     patch.setitem(sys.modules, 'oxyformer.dummy', SimpleNamespace(run_stage=faulty))
-    result = run_task(repo, out, needs=SOURCE_NEEDS)
+    result = run_source(repo, out)
     assert result.status == 'fail'
     collision = out / control if control == '_execution' else out / '_execution' / control
     assert str(victim if mutate else collision) in result.message
-    receipt = dependency_check(out)
+    receipt = read_check(out)
     assert ('data.json' in receipt['attempts'][str(source)]['changed_paths']) == mutate
-    assert read_stage_result(out).status == 'fail'
+    assert read_result(out).status == 'fail'
     assert (source / 'receipts.json').read_text() == '{}'
 
 
@@ -1885,7 +1884,7 @@ def test_unwritable_control_directory_cannot_suppress_upstream_receipts(runtime,
     (source / 'extra').mkdir(parents=True)
     victim = source / 'extra/victim'
     victim.write_text('before')
-    seal_source_fixture(repo, source)
+    seal_source(repo, source)
     bind(patch, 'data-unit', source)
     try:
         process = run_cli_fixture(repo, out, '''def run_stage(request):
@@ -1896,17 +1895,17 @@ def test_unwritable_control_directory_cannot_suppress_upstream_receipts(runtime,
 ''', needs=SOURCE_NEEDS)
         assert victim.read_text() == 'changed', process.stdout + process.stderr
         assert_exit(process, 1)
-        result = read_stage_result(out)
+        result = read_result(out)
         assert_failed(result, victim)
-        receipt = dependency_check(out)
+        receipt = read_check(out)
         assert 'extra/victim' in receipt['attempts'][str(source)]['changed_paths']
     finally:
-        # Restore only this failed consumer's directory so pytest can clean up.
+        # Clean up only this consumer.
         (out / '_execution').chmod(0o700)
 
 
 @cases('receipt', ['dependency_check.json', 'result.json'])
-def test_receipt_write_error_after_execution_is_failed_with_changed_paths(repo, out, tmp, patch, receipt, source):
+def test_receipt_write_error_after_execution_is_failed_with_changed_paths(repo, out, receipt, source):
     entrypoint = """import sys
 from oxyformer.execution import runner, integrity
 from oxyformer.cli import main
@@ -1975,7 +1974,7 @@ def test_read_only_isolated_cache_is_an_honest_passing_stage(repo, out, patch, k
 
 
 @cases('location', ['upstream', 'cache'])
-def test_deep_tree_preserves_detection_and_publication(repo, out, tmp, patch, location, source):
+def test_deep_tree_preserves_detection_and_publication(repo, out, patch, location, source):
     created = []
     def stage(request):
         result = dummy(request)
@@ -1989,17 +1988,17 @@ def test_deep_tree_preserves_detection_and_publication(repo, out, tmp, patch, lo
         return result
     install_stage(patch, repo, stage)
     try:
-        result = run_task(repo, out, needs=SOURCE_NEEDS)
-        assert read_stage_result(out) == result
+        result = run_source(repo, out)
+        assert read_result(out) == result
         if location == 'upstream':
             assert_failed(result, created[-1])
-            check = dependency_check(out)
+            check = read_check(out)
             assert created[-1].relative_to(source).as_posix() in check['attempts'][str(source)]['changed_paths']
             with raises(Invalid, match='fingerprint mismatch'):
-                verify_dependency_result(source)
+                verify_dependency(source)
         else:
             assert_pass(result)
-            assert verify_dependency_result(out) == result
+            assert verify_dependency(out) == result
     finally:
         for path in reversed(created):
             path.rmdir()
@@ -2010,10 +2009,10 @@ def test_rewritten_upstream_publication_fails_changer_and_transitive_collector(r
     source.mkdir()
     victim = source / 'undeclared'
     victim.write_text('before')
-    seal_source_fixture(repo, source)
+    seal_source(repo, source)
     bind(patch, 'data-unit', source)
-    middle = initialize_attempt(repo, tmp / 'middle')
-    assert_pass(run_task(repo, middle, id='middle', needs=SOURCE_NEEDS))
+    middle = new_attempt(repo, tmp / 'middle')
+    assert_pass(run_source(repo, middle, id='middle'))
     bind(patch, 'middle', middle)
     def rewritten(request):
         result = dummy(request)
@@ -2021,7 +2020,7 @@ def test_rewritten_upstream_publication_fails_changer_and_transitive_collector(r
         fingerprint = read_json(source / FINGERPRINT)
         fingerprint['entries'] = publication_tree(source)
         (source / FINGERPRINT).write_text(canonical_json(fingerprint))
-        producer = read_stage_result(source)
+        producer = read_result(source)
         producer = replace(producer, artifacts=tuple(
             replace(a, sha256=file_hash(source / FINGERPRINT)) if a.path == FINGERPRINT else a
             for a in producer.artifacts))
@@ -2030,17 +2029,16 @@ def test_rewritten_upstream_publication_fails_changer_and_transitive_collector(r
     install_stage(patch, repo, rewritten)
     failed = run_task(repo, out, id='changing', needs={'middle': ['value.json']})
     assert_failed(failed, victim)
-    assert read_stage_result(out) == failed
-    check = dependency_check(out)
+    assert read_result(out) == failed
+    check = read_check(out)
     assert check['status'] == 'fail'
     assert check['attempts'][str(source)]['status'] == 'tainted'
     assert 'undeclared' in check['attempts'][str(source)]['changed_paths']
     install_stage(patch, repo, dummy)
     bind(patch, 'changing', out)
-    # Refuse both the failed changer and the previously passing middle whose
-    # persisted request binds the ancestor's original publication identity.
+    # Refuse the changer and the middle bound to its changed ancestor.
     for unit, reason in [('changing', 'did not pass'), ('middle', 'input hash mismatch')]:
-        collector = initialize_attempt(repo, tmp / ('collector-' + unit))
+        collector = new_attempt(repo, tmp / ('collector-' + unit))
         with raises(Invalid, match=reason):
             run_task(repo, collector, needs={unit: ['value.json']})
         assert not (collector / '_execution').exists()
@@ -2055,9 +2053,9 @@ def test_deep_valid_dependency_lineage_does_not_exhaust_python_stack(repo, tmp):
         root.mkdir()
         for name in SOURCE_NEEDS['data-unit']:
             (root / name).write_text('{}')
-        publish_source_fixture(repo, root, parent=parent, head=head)
+        publish_source(repo, root, parent=parent, head=head)
         parent = root
-    assert_pass(verify_dependency_result(parent))
+    assert_pass(verify_dependency(parent))
 
 
 def check_checkout_change(repo, out, patch, kind):
@@ -2080,7 +2078,7 @@ def check_checkout_change(repo, out, patch, kind):
     assert read_request(out).code_identity == original
     assert read_json(out / IDENTITY)['head'] == original
     assert result.status == 'fail', 'changed checkout passed under the original identity'
-    assert read_stage_result(out) == result
+    assert read_result(out) == result
     if kind == 'commit':
         assert 'code identity changed' in result.message
         assert original in result.message and git(repo, 'rev-parse', 'HEAD') in result.message
@@ -2090,7 +2088,7 @@ def check_checkout_change(repo, out, patch, kind):
         assert (out / COMMIT).read_text().strip() == original
         assert git(repo, 'status', '--porcelain') == ''
         with raises(Invalid, match='did not pass'):
-            verify_dependency_result(out)
+            verify_dependency(out)
 
 
 @cases('commit_change', [True, False])
@@ -2140,8 +2138,7 @@ def test_builder_replacement_approvals(repo, tmp, spec, kind, altered):
     (repo / 'scripts').mkdir()
     shutil.copyfile(ROOT / 'scripts/build_tasks.py', repo / 'scripts/build_tasks.py')
     spec['kind'] = 'final-coverage'
-    approved = {'owner_decisions': {'campaign_allocations': {
-        spec['id']: {'kind': spec['kind'], 'gpu_hours': 9}}}}
+    approved = allocation_record(spec)
     original = {} if altered else approved
     (repo / APPROVALS).write_text(yaml.safe_dump(original))
     commit(repo)
@@ -2181,10 +2178,10 @@ def run_stage(request):
     assert read_request(out).code_identity == original
     assert read_json(out / IDENTITY)['head'] == original
     assert_exit(process, 1)
-    result = read_stage_result(out)
+    result = read_result(out)
     assert_failed(result, SCIENCE)
     with raises(Invalid, match='did not pass'):
-        verify_dependency_result(out)
+        verify_dependency(out)
 
 
 def test_builder_existing_expansion_cannot_leave_mixed_task_manifest(tmp, spec):
