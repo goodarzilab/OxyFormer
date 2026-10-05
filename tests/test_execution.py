@@ -1165,7 +1165,7 @@ def test_late_publication_control_modes_are_verified(runtime, tmp_path, monkeypa
             task_file=task_file(out, needs={'data-unit': ['data.json', 'receipts.json']}))
 
 
-def run_cli_fixture(repo, out, stage_body, *, needs=None, entrypoint=None):
+def run_cli_fixture(repo, out, stage_body, *, needs=None, entrypoint=None, timeout=30):
     """Execute real copied CLI code and a synthetic stage in a fresh interpreter."""
     import inspect
     original = Path(__file__).parents[1]
@@ -1185,8 +1185,17 @@ from oxyformer.execution.paths import atomic_json
     command = [sys.executable, '-m', 'oxyformer.cli'] if entrypoint is None else [sys.executable, '-c', entrypoint]
     command += ['run-stage', '--stage', 'dummy', '--repo', str(repo), '--out', str(out),
                 '--task', str(task_file(out, needs=needs or {})), '--deps-env']
-    return subprocess.run(command, cwd=repo, env=dict(os.environ, PYTHONPATH=str(repo / 'src'),
-                          CUDA_VISIBLE_DEVICES=''), capture_output=True, text=True, timeout=30)
+    process = subprocess.Popen(command, cwd=repo, env=dict(os.environ, PYTHONPATH=str(repo / 'src'),
+                               CUDA_VISIBLE_DEVICES=''), stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        import signal
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
+        raise
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 @pytest.mark.xfail(strict=True, reason='ARC-1339: general outside-write confinement is an owner-deferred host-runtime limitation')
@@ -1357,3 +1366,17 @@ def run_stage(request):
     result = StageResult.from_json((out / '_execution/result.json').read_text())
     assert process.returncode == 1 and result.status == 'fail', result.to_json()
     assert str(victim) in result.message
+
+
+def test_worker_allows_normal_resource_tracker_shutdown(runtime):
+    from oxyformer.execution.runner import verify_dependency_result
+    repo, out = runtime
+    process = run_cli_fixture(repo, out, '''from multiprocessing.shared_memory import SharedMemory
+def run_stage(request):
+    scratch = SharedMemory(create=True, size=1)
+    scratch.close()
+    scratch.unlink()
+    return dummy(request)
+''', timeout=10)
+    assert process.returncode == 0, process.stdout + process.stderr
+    assert verify_dependency_result(out).status == 'pass'
