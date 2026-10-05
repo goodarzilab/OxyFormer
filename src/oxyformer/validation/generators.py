@@ -27,7 +27,7 @@ from oxyformer.validation.scm import (
     sampled_mean, effect_fraction, LocalCoordinates, exact, exact_shift_intervals, wide, observation_transition_points, _count_baseline, _sine_bounds,
     numeric_scalar, binary64_scalar, integer_scalar, normalize_record_numbers,
     validate_numeric, validate_policy_domain, validate_seed, REGISTERED_NUMERIC_BOX, NUMERIC_DOMAIN, NUMERIC_MARGIN, NUMERIC_ZERO_EXCEPTIONS,
-    MIN_INTEGRATION_TOLERANCE, INTEGRATION_TOLERANCE_DOMAIN,
+    MIN_INTEGRATION_TOLERANCE, INTEGRATION_TOLERANCE_DOMAIN, LATENT_DENOMINATOR_DOMAIN,
 )
 
 
@@ -296,6 +296,15 @@ def _integration_breakpoints(terms, components, delta, config, shift_intervals):
                                 value = root+sign*distance/abs(slope)
                                 if lo < value < hi:
                                     boundaries.add(value)
+    # A zero/small assignment slope does not bound nonlinear response
+    # oscillations. Partition each recorded component into exact spans <= 16
+    # (sine phase span <= 8) before either ordinary or precise quadrature.
+    if config.effect == "nonlinear" and config.beta != 0:
+        for term in terms:
+            for piece in term.law.pieces:
+                left, right = piece.lower+term.law.error, piece.upper+term.law.error
+                panels = max(1, math.ceil((right-left)/16))
+                boundaries.update(left+(right-left)*i/panels for i in range(1, panels))
     boundaries.update(v-delta for v in tuple(boundaries))
     return boundaries
 
@@ -982,7 +991,8 @@ def load_suite_a(path: str | Path):
     expected = {"id": "suite-a-100x-v1", "margin": NUMERIC_MARGIN,
                 "registered_box": {k:list(v) for k,v in REGISTERED_NUMERIC_BOX.items()},
                 "supported_box": {k:list(v) for k,v in NUMERIC_DOMAIN.items()},
-                "integration_tolerance": dict(INTEGRATION_TOLERANCE_DOMAIN)}
+                "integration_tolerance": dict(INTEGRATION_TOLERANCE_DOMAIN),
+                "latent_denominator": dict(LATENT_DENOMINATOR_DOMAIN)}
     require(isinstance(declaration, dict), "recipe numeric_domain must be a mapping")
     declaration = dict(declaration)
     # Existing v1 declarations expressed these same disabled-zero exceptions
