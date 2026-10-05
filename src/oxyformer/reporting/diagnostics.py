@@ -1,16 +1,34 @@
 """Read-only summaries; use merged seed-averaged Estimate and covariance APIs."""
 from dataclasses import asdict
 from decimal import Decimal
+from math import fsum
 
 import numpy as np
 
 from oxyformer.contracts import source_lineage_hash
-from oxyformer.estimation.covariance import align_estimates, cluster_covariance, spatial_sensitivities
+from oxyformer.estimation.covariance import AlignedInfluence, align_estimates, cluster_covariance, spatial_sensitivities
 from oxyformer.provenance import require
 from oxyformer.reporting.records import CV_TMLE_METHODS
 from oxyformer.validation.overlap import overlap_report
 
 CONCENTRATION_FORMULA = "U_g=sum_{i in county g} u_i (unkernelized); D=sum_g U_g^2; s_g=U_g^2/D; s_max=max_g s_g; G_eff=1/sum_g s_g^2"
+
+
+def county_totals(influence, counties):
+    """Accurately sum finite county contributions despite cancellation."""
+    grouped = {}
+    for value, county in zip(influence, counties):
+        grouped.setdefault(county, []).append(float(value))
+    return {county: fsum(values) for county, values in grouped.items()}
+
+
+def sensitivity_records(bundle):
+    """Preserve every estimate; disclosure validity is a separate release gate."""
+    return [{"name": item.name, "estimate": asdict(item.estimate), "target_change": item.target_change,
+             "changed_spec_fields": {name: {"primary": value, "sensitivity": getattr(item.estimate.spec, name)}
+                                     for name, value in asdict(bundle.spec).items()
+                                     if value != getattr(item.estimate.spec, name)}}
+            for item in bundle.sensitivities]
 
 
 def concentration(influence, counties, states):
@@ -22,10 +40,10 @@ def concentration(influence, counties, states):
     """
     u = np.asarray(influence, dtype=np.float64)
     require(bool(np.isfinite(u).all()), "nonfinite influence")
-    totals, county_states = {}, {}
-    for value, county, state in zip(u, counties, states):
+    county_states = {}
+    for county, state in zip(counties, states):
         require(county_states.setdefault(county, state) == state, "county crosses states")
-        totals[county] = totals.get(county, 0.0) + float(value)
+    totals = county_totals(u, counties)
     values = np.array(list(totals.values()), dtype=np.float64)
     require(bool(np.isfinite(values).all()), "nonfinite county influence")
     scale = float(np.abs(values).max())
@@ -75,8 +93,17 @@ def summarize(bundle, manifest):
     county = dict(zip(bundle.original_ids, bundle.counties))
     locations = dict(bundle.county_locations)
     require(len(locations) == len(bundle.county_locations), "duplicate county locations")
-    clustered = cluster_covariance(aligned, county, interpretation="geographic_process")
-    spatial = spatial_sensitivities(aligned, county, locations, interpretation="geographic_process")
+    # Aggregate accurately before using the merged covariance formulas, whose
+    # internal sequential sum would otherwise lose the same county information.
+    # Original-observation vectors below remain unchanged and seed-averaged.
+    columns = [county_totals(column, (county[oid] for oid in aligned.original_ids))
+               for column in zip(*aligned.values)]
+    county_ids = tuple(columns[0])
+    aggregated = AlignedInfluence(county_ids, aligned.endpoints,
+                                  tuple(tuple(column[g] for column in columns) for g in county_ids))
+    groups = {g: g for g in county_ids}
+    clustered = cluster_covariance(aggregated, groups, interpretation="geographic_process")
+    spatial = spatial_sensitivities(aggregated, groups, locations, interpretation="geographic_process")
     overlap = {str(seed): overlap_report(bundle.weights, ratio, bundle.observed_exposure,
                                        bundle.shifted_exposure, bundle.balance_names,
                                        bundle.balance_observed, bundle.balance_shifted)
@@ -85,13 +112,7 @@ def summarize(bundle, manifest):
     for method, estimate in estimates.items():
         lookup = dict(zip(estimate.original_ids, estimate.influence))
         information[method] = concentration([lookup[oid] for oid in bundle.original_ids], bundle.counties, bundle.states)
-    sensitivities = []
-    for item in bundle.sensitivities:
-        changed = {name: {"primary": value, "sensitivity": getattr(item.estimate.spec, name)}
-                   for name, value in asdict(bundle.spec).items() if value != getattr(item.estimate.spec, name)}
-        require(not changed or item.target_change.strip().lower() != "unchanged", "undisclosed target change")
-        sensitivities.append({"name": item.name, "estimate": asdict(item.estimate),
-                              "target_change": item.target_change, "changed_spec_fields": changed})
+    sensitivities = sensitivity_records(bundle)
     one = estimates.get("mtp_one_step")
     confirmations = [e for name, e in estimates.items() if name in CV_TMLE_METHODS]
     differences = {e.method: e.value - one.value for e in confirmations} if one else {}

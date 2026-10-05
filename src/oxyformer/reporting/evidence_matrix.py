@@ -10,7 +10,7 @@ import math
 from pathlib import Path
 
 from oxyformer.provenance import ContractError, read_artifact, require
-from oxyformer.reporting.diagnostics import summarize
+from oxyformer.reporting.diagnostics import sensitivity_records, summarize
 from oxyformer.reporting.records import CoverageScenario, CV_TMLE_METHODS, STAGE_GATES
 
 LIMITATIONS = (
@@ -203,7 +203,8 @@ def evaluate(bundle, manifest, receipts, approvals, config_hash):
     """Pure report assembly apart from verifying upstream immutable artifacts."""
     report = {"schema_version": 1, "stage": manifest.stage, "state": "blocked", "releasable": False,
               "evidence_label": "diagnostic-only", "limitations": list(LIMITATIONS), "gates": [],
-              "estimators": [asdict(e) for e in bundle.estimates], "warnings": [],
+              "estimators": [asdict(e) for e in bundle.estimates],
+              "sensitivities": sensitivity_records(bundle), "warnings": [],
               "bundle_hash": bundle.content_hash, "manifest_hash": manifest.content_hash,
               "receipts_hash": receipts.content_hash, "config_hash": config_hash}
     gates = report["gates"]
@@ -217,6 +218,11 @@ def evaluate(bundle, manifest, receipts, approvals, config_hash):
         splits = {e.lineage.split_hash for e in bundle.estimates}
         if None in splits or len(splits) != 1:
             gates.append({"gate": "input_consistency", "status": "failed", "reason": "estimator split mismatch"})
+        for item in report["sensitivities"]:
+            disclosed = not item["changed_spec_fields"] or item["target_change"].strip().lower() != "unchanged"
+            gates.append({"gate": f"sensitivity_disclosure:{item['name']}",
+                          "status": "pass" if disclosed else "failed",
+                          "reason": "target change disclosed" if disclosed else "undisclosed target change"})
         report["multiplicity"] = multiplicity(bundle.p_values, manifest.mortality_family)
         methods = [e.method for e in bundle.estimates]
         paired = "mtp_one_step" in methods and any(m in CV_TMLE_METHODS for m in methods)

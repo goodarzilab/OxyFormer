@@ -15,6 +15,7 @@ import yaml
 
 from oxyformer.contracts import StageRequest, StageResult
 from oxyformer.provenance import ArtifactLineage, ArtifactRecord, ContractError, canonical_json, file_hash, read_artifact, require
+from oxyformer.reporting.diagnostics import sensitivity_records
 from oxyformer.reporting.evidence_matrix import LIMITATIONS, evaluate, require_container
 from oxyformer.reporting.records import ExpectedTasks, ReportBundle, STAGE_GATES, TaskReceipts
 from oxyformer.reporting.render import render_forest, render_html
@@ -56,6 +57,7 @@ def run_stage(request: StageRequest) -> StageResult:
         require(Path(task["approvals"]).resolve() == OWNER_APPROVALS.resolve(), "approval path is not owner registry")
         bundle = read_artifact(task["bundle"], ReportBundle, dependencies[task["bundle"]])
         report["estimators"] = [e.to_dict()["payload"] for e in bundle.estimates]
+        report["sensitivities"] = sensitivity_records(bundle)
         manifest = read_artifact(task["manifest"], ExpectedTasks, dependencies[task["manifest"]])
         receipts = read_artifact(task["receipts"], TaskReceipts, dependencies[task["receipts"]])
         require(manifest.stage == request.stage, "reporting stage mismatch")
