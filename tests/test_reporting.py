@@ -2,7 +2,6 @@
 from copy import deepcopy
 from dataclasses import replace
 from hashlib import sha256
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -22,6 +21,7 @@ from oxyformer.reporting.evidence_matrix import STAGE_GATES, evaluate, multiplic
 from oxyformer.reporting.records import CoverageScenario, ExpectedTask, ExpectedTasks, ReportBundle, Sensitivity, TaskReceipt, TaskReceipts
 from oxyformer.reporting.render import render_forest, render_html
 from oxyformer.reporting import stage
+import oxyformer.validation.geography_probes as probes
 from oxyformer.validation.overlap import overlap_report, weight_diagnostics
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -422,16 +422,7 @@ def test_report_isolation_hash_mismatch_and_missing_inputs(case, tmp_path, monke
     assert report['state'] == 'missing'
 
 
-def load_probes():
-    spec = importlib.util.spec_from_file_location('reporting_test_geography_probes', ROOT/'geography_probes.py')
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
 def test_diagnostic_geography_and_probe_outputs_cannot_be_nuisance_inputs(case):
-    probes = load_probes()
     registry = FeatureRegistry(registry_id='diagnostics', rules=(
         FeatureRule(name='latitude', role='precise_geography', endpoints=('synthetic',), uses=('diagnostic',), approval_id='synthetic'),))
     values = [[0.], [1.], [2.], [3.]]
@@ -456,7 +447,6 @@ def test_diagnostic_geography_and_probe_outputs_cannot_be_nuisance_inputs(case):
 
 
 def test_probe_fitting_does_not_see_heldout_exposure():
-    probes = load_probes()
     registry = FeatureRegistry(registry_id='diagnostics', rules=(FeatureRule(name='terrain', role='exposure_proxy', endpoints=('synthetic',), uses=('diagnostic',), approval_id='synthetic'),))
     view = probes.DiagnosticView(endpoint='synthetic', registry=registry, original_ids=('a','b','c'), columns=('terrain',), values=((0.,),(1.,),(2.,)))
     first = probes.exposure_probe(view, {'a':0., 'b':2., 'c':4.}, ('a','b'), ('c',))
@@ -562,7 +552,6 @@ def test_review_plain_cv_tmle_name_is_paired_and_concentration_checked(case):
 
 
 def test_review_nonfinite_diagnostic_values_rejected_at_construction():
-    probes = load_probes()
     registry = FeatureRegistry(registry_id='diagnostics', rules=(FeatureRule(name='terrain', role='exposure_proxy', endpoints=('synthetic',), uses=('diagnostic',), approval_id='synthetic'),))
     for value in (float('nan'), float('inf')):
         with pytest.raises(ContractError, match='nonfinite'):
