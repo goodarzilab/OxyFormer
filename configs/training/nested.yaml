@@ -1,0 +1,17 @@
+# Frozen science; execution slices never change this procedure.
+outer_folds: 5
+inner_folds: 3
+seeds: [1103, 2207, 3301]
+learning_rates: [0.0003, 0.001]
+dropouts: [0.0, 0.1]
+weight_decay: 0.0001
+max_epochs: 150
+patience: 15
+gradient_norm: 1.0
+ssl_epochs: 30
+precision: fp32
+bf16_enabled: false
+max_slice_seconds: 14400
+checkpoint_margin_seconds: 120
+minimum_outer_training_tracts: 8
+minimum_inner_fitting_tracts: 4
