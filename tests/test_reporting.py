@@ -71,7 +71,7 @@ def case(tmp_path):
     spec = EstimandSpec(endpoint='usaleep_life_expectancy', target_id='synthetic target', outcome_scale='years',
                         policy_id='synthetic shift2', weight_id='equal tract', adjustment_schema_hash='4'*64,
                         inference_unit='county', source_lineage_hash=source_lineage_hash((source,)))
-    lineage = ArtifactLineage(source_hashes=(source.payload_hash,), unit_ids=ids, parent_hashes=(),
+    lineage = ArtifactLineage(source_hashes=(source.payload_hash,), unit_ids=ids, parent_hashes=('7'*64, '8'*64, '5'*64, '9'*64),
                               split_hash='5'*64, config_hash='6'*64, model_hash=None,
                               environment=(('python', 'synthetic'),), seed=None, parameter_count=None)
     seeds = (1103, 2207, 3301)
@@ -772,3 +772,132 @@ def test_review_state_qualified_county_identities_remain_distinct(case):
     report = evaluate_case((b, m, r))
     assert report['state'] == 'released'
     assert report['diagnostics']['cluster_covariance']['dependence_units'] == 40
+
+
+@pytest.fixture
+def produced_primary_case(case):
+    """Actual merged producers, forty counties and two distinct valid OOF fits."""
+    from test_scores import make_fixture
+    from oxyformer.contracts import OOFNuisances
+    from oxyformer.data.loaders import load_records
+    from oxyformer.estimation.mtp import one_step
+    from oxyformer.estimation.targeting import cv_tmle
+
+    b, m, receipts = case
+    policy, original_data, original_split, _, _ = make_fixture()
+    ids = b.original_ids
+    n = len(ids)
+    lineage = replace(original_data.manifest.lineage, unit_ids=ids)
+    data_manifest = replace(original_data.manifest, original_ids=ids, lineage=lineage)
+    data = load_records([dict(id=oid, y=float(2*(i % 2)), a=1., w=1.) for i, oid in enumerate(ids)],
+                        data_manifest, data_manifest.spec, data_manifest.schema_hash)
+    split = replace(original_split, original_ids=ids, fold_ids=tuple(i % 2 for i in range(n)),
+                    lineage=replace(lineage, parent_hashes=(data_manifest.content_hash,)))
+    nuisances = OOFNuisances(spec=data_manifest.spec, original_ids=ids*2, fold_ids=split.fold_ids*2,
+                            seed_ids=(1103,)*n+(2207,)*n, mu_a=(1.,)*(2*n), mu_d=(2.,)*(2*n),
+                            r_a=(1.5,)*(2*n), r_d=(1.5,)*(2*n), origin_weights=(1.,)*(2*n),
+                            lineage=replace(lineage, parent_hashes=(data_manifest.content_hash,),
+                                            split_hash=split.content_hash))
+    weights = dict.fromkeys(ids, 1.)
+    one = one_step(nuisances, data, weights, data_manifest.spec, split=split, policy=policy)
+    tmle = cv_tmle(nuisances, data, weights, 'identity', data_manifest.spec, split=split, policy=policy).estimate
+    other = replace(nuisances, mu_a=(.8,)*(2*n))
+    different_fit = cv_tmle(other, data, weights, 'identity', data_manifest.spec, split=split, policy=policy).estimate
+    b = replace(b, spec=data_manifest.spec, sources=data_manifest.sources,
+                estimates=(one, tmle), seed_ids=split.seed_ids, ratios=((1.5,)*n,)*2)
+    m = replace(m, spec=data_manifest.spec, seed_ids=split.seed_ids)
+    return (b, m, receipts), different_fit
+
+
+def assert_primary_input_failure(report, methods):
+    assert report['state'] == 'failed'
+    assert not report['releasable']
+    assert report['evidence_label'] == 'diagnostic-only'
+    gate = next(g for g in report['gates'] if g['gate'] == 'primary_input_consistency')
+    assert gate['status'] == 'failed'
+    assert [e['method'] for e in report['estimators']] == methods
+    assert set(report['diagnostics']['information']) == set(methods)
+    assert set(report['diagnostics']['spatial_sensitivities']) == {'50.0', '100.0', '200.0'}
+    assert len(report['diagnostics']['aligned_influence']['values']) == 40
+    assert 'overlap_by_seed' in report['diagnostics']
+    assert 'multiplicity' in report and 'coverage_evidence' in report
+    for render in (render_html, render_forest):
+        assert all(method in render(report) for method in methods)
+    return gate
+
+
+def test_primary_input_different_initial_oof_from_actual_producers_never_releases(produced_primary_case):
+    same_case, different_fit = produced_primary_case
+    b, m, receipts = same_case
+    assert evaluate_case(same_case)['state'] == 'released'
+    one = b.estimates[0]
+    assert one.lineage.split_hash == different_fit.lineage.split_hash
+    assert one.lineage.parent_hashes[0] != different_fit.lineage.parent_hashes[0]
+    assert one.lineage.parent_hashes[1:] == different_fit.lineage.parent_hashes[1:]
+    report = evaluate_case((replace(b, estimates=(one, different_fit)), m, receipts))
+    assert_primary_input_failure(report, ['mtp_one_step', 'cv_tmle_identity'])
+    assert all(g['status'] == 'pass' for g in report['gates']
+               if g['gate'].startswith('influence_concentration:'))
+
+
+@pytest.mark.parametrize('method', ['cv_tmle', 'cv_tmle_identity', 'cv_tmle_logistic', 'cv_tmle_poisson'])
+@pytest.mark.parametrize('slot', range(4))
+def test_primary_input_every_confirmation_and_parent_role_checked(case, method, slot):
+    b, m, r = case
+    parents = list(b.estimates[1].lineage.parent_hashes)
+    parents[slot] = 'f'*64
+    # Keep valid confirmations before the invalid one: every primary is checked.
+    confirmations = tuple(replace(b.estimates[1], method=name) for name in
+                          ('cv_tmle', 'cv_tmle_identity', 'cv_tmle_logistic', 'cv_tmle_poisson') if name != method)
+    altered = replace(b.estimates[1], method=method,
+                      lineage=replace(b.estimates[1].lineage, parent_hashes=tuple(parents)))
+    estimates = (b.estimates[0],) + confirmations + (altered,)
+    report = evaluate_case((replace(b, estimates=estimates), m, r))
+    assert_primary_input_failure(report, [e.method for e in estimates])
+
+
+@pytest.mark.parametrize('method', ['mtp_one_step', 'cv_tmle', 'cv_tmle_identity', 'cv_tmle_logistic', 'cv_tmle_poisson'])
+@pytest.mark.parametrize('length', range(4))
+def test_primary_input_requires_four_parents(case, method, length):
+    b, m, r = case
+    one, tmle = b.estimates
+    estimate = one if method == 'mtp_one_step' else replace(tmle, method=method)
+    altered = replace(estimate, lineage=replace(estimate.lineage, parent_hashes=estimate.lineage.parent_hashes[:length]))
+    estimates = (altered, tmle) if method == 'mtp_one_step' else (one, altered)
+    report = evaluate_case((replace(b, estimates=estimates), m, r))
+    assert_primary_input_failure(report, [e.method for e in estimates])
+
+
+@pytest.mark.parametrize('split_hash', ['f'*64, None])
+def test_primary_input_common_prefix_must_bind_split_hash(case, split_hash):
+    b, m, r = case
+    estimates = tuple(replace(e, lineage=replace(e.lineage, split_hash=split_hash)) for e in b.estimates)
+    assert estimates[0].lineage.parent_hashes == estimates[1].lineage.parent_hashes
+    report = evaluate_case((replace(b, estimates=estimates), m, r))
+    assert_primary_input_failure(report, [e.method for e in estimates])
+
+
+def test_primary_input_prefix_order_matters(case):
+    b, m, r = case
+    parents = b.estimates[1].lineage.parent_hashes
+    changed = replace(b.estimates[1], lineage=replace(b.estimates[1].lineage,
+                      parent_hashes=(parents[1], parents[0], parents[2], parents[3])))
+    report = evaluate_case((replace(b, estimates=(b.estimates[0], changed)), m, r))
+    assert_primary_input_failure(report, ['mtp_one_step', 'cv_tmle_identity'])
+
+
+def test_primary_input_suffix_provenance_and_nonprimary_inputs_remain_visible(case):
+    b, m, r = case
+    one, tmle = (replace(e, lineage=replace(e.lineage, parent_hashes=e.lineage.parent_hashes+(suffix,)))
+                 for e, suffix in zip(b.estimates, ('a'*64, 'b'*64)))
+    comparator = replace(one, method='riesz_comparator', lineage=replace(one.lineage, parent_hashes=()))
+    sensitivity = Sensitivity(name='alternate OOF', estimate=replace(tmle, lineage=replace(tmle.lineage,
+                              parent_hashes=('c'*64,))), target_change='unchanged')
+    report = evaluate_case((replace(b, estimates=(one, tmle, comparator), sensitivities=(sensitivity,)), m, r))
+    assert report['state'] == 'released'
+    gate = next(g for g in report['gates'] if g['gate'] == 'primary_input_consistency')
+    assert gate['status'] == 'pass'
+    assert set(gate['inputs']) == {'mtp_one_step', 'cv_tmle_identity'}
+    for estimate, row in zip((one, tmle, comparator), report['estimators']):
+        assert tuple(row['lineage']['parent_hashes']) == estimate.lineage.parent_hashes
+    assert report['diagnostics']['sensitivities'][0]['estimate']['lineage']['parent_hashes'] == ('c'*64,)
