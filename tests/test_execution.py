@@ -2195,3 +2195,26 @@ def test_builder_existing_expansion_cannot_leave_mixed_task_manifest(tmp, spec):
     assert process.returncode != 0
     assert read_json(out / 'expanded_units.json') == old
     assert not (out / 'task_manifest.json').exists(), 'new tasks were published beside an older expansion'
+
+
+def test_worker_cache_isolation_survives_module_destructors(repo, out, tmp, patch):
+    source = source_files(tmp / 'source')
+    (source / 'scratch').write_text('upstream cache')
+    publish_source(repo, source)
+    before = fingerprint_tree(source)
+    bind(patch, 'data-unit', source)
+    patch.setenv('HF_HOME', str(source))
+    process = run_cli_fixture(repo, out, '''cleaner = None
+class Cleaner:
+    def __del__(self, env=os.environ, unlink=os.unlink):
+        unlink(env['HF_HOME'] + '/scratch')
+def run_stage(request):
+    global cleaner
+    (Path(os.environ['HF_HOME']) / 'scratch').write_text('owned cache')
+    cleaner = Cleaner()
+    return dummy(request)
+''', needs=SOURCE_NEEDS)
+    assert process.returncode == 0, read_result(out).to_json()
+    assert fingerprint_tree(source) == before
+    assert not (out / '_execution/cache/hf_home/scratch').exists()
+    assert_pass(verify_dependency(out))
