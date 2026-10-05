@@ -123,7 +123,7 @@ analysis; reporting does not choose among estimators or bandwidths.
 
 The three existing report/asset scripts accept `--v2-request REQUEST.json`,
 using this same isolated stage and outputs. Their legacy mode remains available
-and is visibly marked exploratory. The root `geography_probes.py` uses copied
+and is visibly marked exploratory. The module `oxyformer.validation.geography_probes` uses copied
 DiagnosticViews and a held-out linear reconstruction baseline. It grants no
 training permissions: the shared FeatureRegistry/CovariateView contract refuses
 precise geography and exposure proxies as nuisances. Renaming forbidden values
