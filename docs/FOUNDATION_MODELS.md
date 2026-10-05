@@ -41,7 +41,13 @@ package, version, repository, revision, filename and SHA-256 must also match one
 of the four shipped registered identities, synchronized with the YAML registry
 by tests. A caller's self-consistent alternative descriptor is refused. Local
 provisioning paths and saved runtime versions are deployment-specific; neither
-changes the selected checkpoint identity. Missing packages,
+changes the selected checkpoint identity. Each fit makes a private local copy,
+verifies that copy and passes only its path to the backend; replacing the shared
+provisioned path cannot substitute weights between verification and loading.
+The copy is retained for the adapter's lifetime for possible lazy reads, is
+read-only after verification, and is removed on fit failure or adapter cleanup.
+Provisioning must allow one additional checkpoint-sized temporary file per
+live adapter. Missing packages,
 files, floating revisions or mismatched fingerprints block that comparator.
 The expected runtime manifest and model registry are trusted configuration.
 
@@ -116,6 +122,8 @@ not be silently encoded by this adapter. County/geography is not a predictor.
   unequal weights, zero weights and non-unit constants all block the comparator.
   Exact unit-ness is checked in the supplied numeric precision, including
   extended-precision values immediately adjacent to one, before any conversion.
+  Tensor weights are checked in Torch, including CPU bfloat16, without a NumPy
+  conversion; NumPy weights retain their own dtype.
   Neither replication nor unweighted fitting substitutes for weighted training.
 - `fit_outcome` consumes exactly `split.training_ids(fold)` in order. `fit_origin`
   consumes authoritative `PolicyPairs`: original rows then shifted rows, the same

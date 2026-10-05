@@ -112,7 +112,7 @@ def backend(request, monkeypatch, tmp_path):
     def load(path, **kwargs):
         assert kwargs['download_if_not_exists'] is False
         assert kwargs['version'] == 'v2'
-        loader_calls.append(kwargs)
+        loader_calls.append({**kwargs, "path": str(path)})
         return [model], SimpleNamespace(borders=[0]), [SimpleNamespace()], SimpleNamespace()
     module = SimpleNamespace(TabICLRegressor=MockEstimator, TabICLClassifier=MockEstimator,
                              TabPFNRegressor=MockEstimator, TabPFNClassifier=MockEstimator,
@@ -153,9 +153,16 @@ def test_local_only_pinned_constructors(backend, fold):
     if model.package == 'tabicl':
         assert kwargs['allow_auto_download'] is False
         assert kwargs['checkpoint_version'] == model.checkpoint.filename
-        assert kwargs['model_path'] == model.checkpoint.path
+        assert kwargs['model_path'] != model.checkpoint.path
+        loaded_path = Path(kwargs['model_path'])
+        assert loaded_path.name == model.checkpoint.filename
+        assert sha256(loaded_path.read_bytes()).hexdigest() == model.checkpoint.sha256
     else:
         assert len(backend[1]) == 1
+        loaded_path = Path(backend[1][0]['path'])
+        assert str(loaded_path) != model.checkpoint.path
+        assert loaded_path.name == model.checkpoint.filename
+        assert sha256(loaded_path.read_bytes()).hexdigest() == model.checkpoint.sha256
         other = fitted(backend, fold)
         assert kwargs['model_path'].model is not other._estimator.kwargs['model_path'].model
 
@@ -673,3 +680,56 @@ def test_selected_checkpoint_identities_accept_local_provisioning_paths(tmp_path
         checkpoint = icl.Checkpoint(**identity, path=str(tmp_path/item['filename']), environment=environment)
         assert checkpoint.path == str(tmp_path/item['filename'])
         assert checkpoint.package_version == item['package_version']
+
+
+@pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float16, torch.float32,
+                                   torch.float64, torch.int64, torch.bool])
+def test_exact_unit_tensor_weights_are_accepted(backend, fold, dtype):
+    model = backend[0]().fit_outcome(fold[0], fold[2], 0, np.arange(4.), [1., 3., 7., 2.],
+                                    sample_weight=torch.ones(4, dtype=dtype), weight_semantics='unit')
+    assert model._estimator is not None
+
+
+@pytest.mark.parametrize('direction', [0., 2.])
+def test_nonunit_bfloat16_weights_are_refused(backend, fold, direction):
+    weights = torch.ones(4, dtype=torch.bfloat16)
+    weights[1] = torch.nextafter(weights[1], torch.tensor(direction, dtype=weights.dtype))
+    assert weights[1] != 1
+    with pytest.raises(ContractError, match='unsupported.*weight'):
+        backend[0]().fit_outcome(fold[0], fold[2], 0, np.arange(4.), np.arange(4.),
+                                sample_weight=weights, weight_semantics='unit')
+
+
+def test_checkpoint_replacement_cannot_change_loaded_bytes(backend, fold, monkeypatch, tmp_path):
+    model = backend[0]()
+    source = Path(model.checkpoint.path)
+    registered_bytes = source.read_bytes()
+    replacement = tmp_path/'replacement.ckpt'
+    replacement.write_bytes(b'replacement synthetic weights')
+    loaded = []
+    def replace_before_load(*args):
+        # Happens after validation, immediately before the backend opens its path.
+        replacement.replace(source)
+        backend_path = Path(args[0]) if args else source
+        loaded.append(backend_path.read_bytes())
+        return MockEstimator()
+    monkeypatch.setattr(model, '_make_estimator', replace_before_load)
+    model.fit_outcome(fold[0], fold[2], 0, np.arange(4.), np.arange(4.),
+                      sample_weight=np.ones(4), weight_semantics='unit')
+    assert loaded == [registered_bytes]
+    assert source.read_bytes() != registered_bytes
+
+
+def test_corrupt_private_checkpoint_copy_blocks_and_is_removed(backend, fold, monkeypatch):
+    model = backend[0]()
+    destinations = []
+    def corrupt_copy(source, destination):
+        destinations.append(Path(destination))
+        Path(destination).write_bytes(b'changed during deployment copy')
+    monkeypatch.setattr(icl, 'copyfile', corrupt_copy)
+    monkeypatch.setattr(model, '_make_estimator', lambda *args: pytest.fail('must verify before loading'))
+    with pytest.raises(ContractError, match='checkpoint hash mismatch'):
+        model.fit_outcome(fold[0], fold[2], 0, np.arange(4.), np.arange(4.),
+                          sample_weight=np.ones(4), weight_semantics='unit')
+    assert len(destinations) == 1 and not destinations[0].exists()
+    assert model._estimator is None

@@ -20,7 +20,7 @@ class TabPFNComparator(TabICLComparator):
     max_context_rows = 1_000
     max_features = 500
 
-    def _make_estimator(self):
+    def _make_estimator(self, checkpoint_path):
         try:
             module = import_module("tabpfn")
             loader = import_module("tabpfn.model_loading")
@@ -28,7 +28,7 @@ class TabPFNComparator(TabICLComparator):
             raise ContractError("missing optional dependency tabpfn; request provisioning") from exc
         regression = self.family == "identity"
         models, criterion, configs, inference = loader.load_model_criterion_config(
-            self.checkpoint.path, check_bar_distribution_criterion=regression,
+            checkpoint_path, check_bar_distribution_criterion=regression,
             estimator_type="regressor" if regression else "classifier", version="v2",
             download_if_not_exists=False, n_estimators_override=8,
             devices=[torch.device("cpu")], force_inference_dtype=torch.float32)
