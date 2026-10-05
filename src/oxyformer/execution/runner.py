@@ -12,12 +12,14 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 
 import yaml
 
 from oxyformer.contracts import StageRequest, StageResult
 from oxyformer.provenance import ContractError, file_hash, relative_artifact_path, require
-from .integrity import fingerprint_tree, post_execution_check
+from .integrity import (FINGERPRINT, fingerprint_tree, post_execution_check,
+                        publish_result, verify_published_tree)
 from .identity import code_identity, environment_record, scientific_fingerprint, verify_recipe
 from .paths import atomic_json, atomic_write, isolated_caches, output_path
 
@@ -71,6 +73,7 @@ def verify_dependency_result(root):
     result = StageResult.from_json(result_file.read_text())
     require(Path(request.output_dir).resolve() == root, 'dependency attempt owner mismatch')
     require(result.status == 'pass', 'dependency stage did not pass')
+    verify_published_tree(root, result)
     result.verify(request)
     return result
 
@@ -116,7 +119,7 @@ def verify_continuation(task, deps):
     verify_dependency_result(deps[predecessor])
 
 
-def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, approvals=None):
+def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, approvals=None, report=None):
     out = Path(out).absolute()
     require(out.is_dir() and not out.is_symlink(), 'output must be an existing attempt directory')
     out = out.resolve(strict=True)
@@ -168,6 +171,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     require(deps_env or not needs, 'dependencies require --deps-env')
     deps = resolve_dependencies(needs) if needs else {}
     files = []
+    published_hashes = {}
     stage_dependencies = []
     dependency_trees = {}
     for unit, root in deps.items():
@@ -186,18 +190,21 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         acquisition_receipt = settings.get('acquisition_receipts', {}).get(unit)
         if acquisition_receipt is not None:
             require(acquisition_receipt in needs[unit], 'acquisition receipt must be a declared input')
-        if acquisition_receipt is None or (root / '_execution/result.json').exists():
-            require((root / '_execution/result.json').is_file(), f'stage receipt missing: {unit}')
-            result = verify_dependency_result(root)
-            stage_dependencies.append(root)
-            allowed = {a.path for a in result.artifacts} | {
-                '_execution/task.json', '_execution/request.json', '_execution/result.json',
-                '_execution/environment.json', '_execution/identity.json'}
-            require(set(needs[unit]) <= allowed, 'dependency file not declared by passing stage')
-            for relative in ('_execution/request.json', '_execution/result.json'):
-                path = dependency_file(root, relative)
-                if path not in files:
-                    files.append(path)
+        # Every producer now seals its own attempt. An acquisition receipt
+        # describes source data but cannot replace the publication fingerprint.
+        require((root / '_execution/result.json').is_file(), f'stage receipt missing: {unit}')
+        result = verify_dependency_result(root)
+        published_hashes[root / FINGERPRINT] = next(
+            a.sha256 for a in result.artifacts if a.path == FINGERPRINT)
+        stage_dependencies.append(root)
+        allowed = {a.path for a in result.artifacts} | {
+            '_execution/task.json', '_execution/request.json', '_execution/result.json',
+            '_execution/environment.json', '_execution/identity.json'}
+        require(set(needs[unit]) <= allowed, 'dependency file not declared by passing stage')
+        for relative in ('_execution/request.json', '_execution/result.json', FINGERPRINT):
+            path = dependency_file(root, relative)
+            if path not in files:
+                files.append(path)
     require(len(set(files)) == len(files), 'duplicate dependency files')
     for relative in task.get('outputs', []):
         require(not relative.startswith('_execution/'), 'reserved execution output')
@@ -233,7 +240,8 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     request = StageRequest(stage=stage, config_path=str(config_path), config_hash=file_hash(config_path),
                            task_path=str(task_path), task_hash=file_hash(task_path),
                            dependency_paths=tuple(map(str, files)),
-                           dependency_hashes=tuple(map(file_hash, files)),
+                           dependency_hashes=tuple(published_hashes[p] if p in published_hashes
+                                                   else file_hash(p) for p in files),
                            output_dir=str(out), code_identity=head)
     atomic_write(out, '_execution/request.json', request.to_json())
     environment = environment_record()
@@ -274,5 +282,10 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
                    for name in detail['changed_paths']]
         result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
                              message='upstream attempt tainted; changed paths: ' + ', '.join(changed))
-    atomic_write(out, '_execution/result.json', result.to_json())
-    return result
+    if report is not None:
+        report(result)
+    # Flush redirected run.log before fingerprinting it. The CLI emits no
+    # further success output after publication, so that log is bound too.
+    sys.stdout.flush()
+    sys.stderr.flush()
+    return publish_result(out, result)
