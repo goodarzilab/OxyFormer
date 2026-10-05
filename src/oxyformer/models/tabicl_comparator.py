@@ -34,6 +34,44 @@ SUPPORTED_OUTCOME_SCALES = MappingProxyType({
     "bernoulli": frozenset({"risk_difference"}),
 })
 
+# Shipped with the package so installed adapters do not depend on a repository path.
+# Keep synchronized with configs/models/foundations.yaml (verified in tests).
+CHECKPOINT_IDENTITY_FIELDS = ('package', 'package_version', 'repository', 'revision', 'filename', 'sha256')
+REGISTERED_CHECKPOINTS = frozenset({
+    (
+        'tabicl',
+        '2.2.0',
+        'jingang/TabICL',
+        '4dcd344ece2c00be9e831fdd35bed57b5ad83e19',
+        'tabicl-classifier-v2-20260212.ckpt',
+        'bdc7dbd5e4ff21f8f0456fcf90c6b7cdf72dbea960f2d05b19bec19f9b3d4ed0',
+    ),
+    (
+        'tabicl',
+        '2.2.0',
+        'jingang/TabICL',
+        '4dcd344ece2c00be9e831fdd35bed57b5ad83e19',
+        'tabicl-regressor-v2-20260212.ckpt',
+        '0db9cb538f114e79026bf08f45f41ad8dd7ad2de2aaca9a5ca8cd3bd9748ae7a',
+    ),
+    (
+        'tabpfn',
+        '9.1.0',
+        'Prior-Labs/TabPFN-v2-clf',
+        'f851f2a3c941544733b712d8c0f96dfae9b28862',
+        'tabpfn-v2-classifier-finetuned-zk73skhh.ckpt',
+        'cf8c519c01eaf1613ee91239006d57b1c806ff5f23ac1aeb1315ba1015210e49',
+    ),
+    (
+        'tabpfn',
+        '9.1.0',
+        'Prior-Labs/TabPFN-v2-reg',
+        '4972a65a1b30806315c6f92499959ffbfc69a673',
+        'tabpfn-v2-regressor.ckpt',
+        '2ab5a07d5c41dfe6db9aa7ae106fc6de898326c2765be66505a07e2868c10736',
+    ),
+})
+
 
 def runtime_environment(package: str) -> tuple[tuple[str, str], ...]:
     """Provisioner records this after installation; consumers compare exactly."""
@@ -65,6 +103,8 @@ class Checkpoint:
                 and Path(self.filename).name == self.filename, "explicit checkpoint filename required")
         require(Path(self.path).is_absolute() and Path(self.path).name == self.filename,
                 "explicit absolute local checkpoint path required; floating defaults forbidden")
+        identity = tuple(getattr(self, field) for field in CHECKPOINT_IDENTITY_FIELDS)
+        require(identity in REGISTERED_CHECKPOINTS, "unregistered checkpoint identity; comparator blocked")
         env = tuple(sorted(tuple(x) for x in self.environment))
         require(len(env) == len({x[0] for x in env}) and
                 set(dict(env)) == {"python", *RUNTIME_PACKAGES, self.package},
