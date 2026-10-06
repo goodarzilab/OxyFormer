@@ -30,7 +30,9 @@ from oxyformer.provenance import (
     read_artifact, require,
 )
 
-OWNER_APPROVALS = Path(__file__).resolve().parents[3] / "configs" / "approvals.yaml"
+ROOT = Path(__file__).resolve().parents[3]
+OWNER_APPROVALS = ROOT / "configs" / "approvals.yaml"
+DESIGN_CONFIG = ROOT / "configs" / "design.yaml"
 INFERENCE_FRAME = (
     "Equal-tract inference is conditional on the sealed geographic support design, "
     "approved raw-X registry, frozen support policy, atlas coverage and buffer-specific "
@@ -169,6 +171,32 @@ def _publish(request, payloads, lineage, status, message):
     return StageResult(request_hash=request.content_hash, status=status, artifacts=tuple(records), message=message)
 
 
+def design_configuration(request):
+    """Read scientific settings only from this checkout's design configuration.
+
+    The dispatcher envelope is transport metadata. It cannot supply a support
+    recipe, threshold or approval override. Keep the direct tract_design API
+    available for existing callers and the synthetic design tests.
+    """
+    from oxyformer.execution.runner import read_mapping
+    canonical = read_mapping(DESIGN_CONFIG)
+    require(canonical.get("schema_version") == 1 and canonical.get("stage") == "tract_design",
+            "invalid repository design configuration")
+    submitted = read_mapping(request.config_path)
+    if request.stage == "tract_design":
+        require(submitted == canonical, "design settings differ from repository configuration")
+        return canonical
+    require(request.stage == submitted.get("stage") == "tract-support-gate",
+            "invalid design stage configuration")
+    require(submitted.get("settings", {}).get("module") == "oxyformer.design.gate",
+            "invalid registered design module")
+    require(submitted.get("approvals") == read_mapping(OWNER_APPROVALS),
+            "dispatcher approvals differ from repository owner file")
+    require(submitted.get("input_sources", {}).get(str(OWNER_APPROVALS)) == file_hash(OWNER_APPROVALS),
+            "dispatcher owner file is not hash-bound")
+    return canonical
+
+
 def run_stage(request: StageRequest) -> StageResult:
     status, message = "blocked", "missing design prerequisites"
     design = {"status": "blocked", "effect_release_authorized": False}
@@ -181,9 +209,7 @@ def run_stage(request: StageRequest) -> StageResult:
                               seed=1103, parameter_count=None)
     try:
         request.verify_inputs()
-        config = yaml.safe_load(Path(request.config_path).read_text())
-        require(config.get("schema_version") == 1 and config.get("stage") == request.stage == "tract_design",
-                "invalid design stage configuration")
+        config = design_configuration(request)
         values = _inputs(request, json.loads(Path(request.task_path).read_text()))
         manifest, covariates = values["data_manifest"], values["covariates"]
         geography, atlas, graph = values["geography"], values["atlas"], values["entity_graph"]
