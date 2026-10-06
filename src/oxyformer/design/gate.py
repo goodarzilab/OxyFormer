@@ -30,7 +30,9 @@ from oxyformer.provenance import (
     read_artifact, require,
 )
 
-OWNER_APPROVALS = Path(__file__).resolve().parents[3] / "configs" / "approvals.yaml"
+ROOT = Path(__file__).resolve().parents[3]
+OWNER_APPROVALS = ROOT / "configs" / "approvals.yaml"
+DESIGN_CONFIG = ROOT / "configs" / "design.yaml"
 INFERENCE_FRAME = (
     "Equal-tract inference is conditional on the sealed geographic support design, "
     "approved raw-X registry, frozen support policy, atlas coverage and buffer-specific "
@@ -98,6 +100,8 @@ def validate_approvals(config, approvals, manifest, covariates, geography, atlas
 
 
 def _inputs(request, task):
+    if request.stage == "tract-support-gate":
+        return dispatched_values(request)
     roles = task.get("dependencies", {})
     types = {"data_manifest": DataManifest, "covariates": CovariateView,
              "geography": GeographyTable, "atlas": CollectedAtlas, "entity_graph": EntityGraph}
@@ -111,6 +115,70 @@ def _inputs(request, task):
         raise MissingPrerequisite("approval dependency must be this repository's read-only owner file")
     values = {role: read_artifact(roles[role], cls, dependencies[roles[role]]) for role, cls in types.items()}
     values["approvals"] = yaml.safe_load(Path(roles["approvals"]).read_text())
+    return values
+
+
+def collected_atlas(paths, tract_ids=None):
+    """Map the collected product using the pinned owner decision, without imputation.
+
+    Zero-population/incomplete rows are absent from the usable atlas and remain
+    explicit in its missing-tract accounting. The original file hashes remain
+    parents of the request and the conversion is entirely outcome blind.
+    """
+    import pandas as pd
+    from oxyformer.data.tract_inputs import tract_decisions
+    from oxyformer.design.eligibility import AtlasRow
+    from oxyformer.execution.runner import read_mapping
+    decision = tract_decisions()
+    parquet, quality_path, manifest_path = (paths['atlas-collect', n] for n in
+                                           ('atlas.parquet', 'quality.json', 'artifact_manifest.json'))
+    publication = json.loads(manifest_path.read_text())
+    require(publication['kind'] == 'atlas-collect' and publication['status'] == 'pass',
+            'collected atlas publication did not pass')
+    require(publication['files'] == {'atlas.parquet': file_hash(parquet), 'quality.json': file_hash(quality_path)},
+            'collected atlas publication binding mismatch')
+    # The passing, runner-sealed collector already reconciled every block in
+    # quality.json. Recheck its file binding above, without materializing the
+    # nationwide block ledger a second time in the tract design process.
+    frame = pd.read_parquet(parquet)
+    require(not frame.duplicated(['tract_id', 'scenario']).any(), 'duplicate atlas tract/scenario')
+    require((frame.population >= 0).all() and (frame.missing_population >= 0).all(),
+            'invalid atlas population accounting')
+    selected = frame[frame.scenario == decision['placement_scenario']]
+    require(len(selected) > 0 and not selected.tract_id.duplicated().any(), 'missing or duplicate design atlas rows')
+    # Gate coverage is checked on the endpoint frame. Uninhabited Census
+    # tracts outside that frame do not become missing endpoint observations.
+    expected = tuple(sorted(selected.tract_id if tract_ids is None else tract_ids))
+    selected = selected[selected.tract_id.isin(expected)]
+    rows, missing = [], sorted(set(expected) - set(selected.tract_id))
+    for record in selected.sort_values('tract_id').to_dict('records'):
+        complete = record['population'] > 0 and record['missing_population'] == 0
+        require(record['status'] == ('complete' if complete else
+                'zero_population' if record['population'] == 0 else 'missing_dem'), 'inconsistent atlas status')
+        if not complete:
+            missing.append(record['tract_id'])
+            continue
+        rows.append(AtlasRow(tract_id=record['tract_id'], exposure_mmhg=float(record[decision['exposure_field']]),
+            inhabited_elevation_m=float(record['elevation_' + decision['inhabited_elevation'] + '_m']),
+            population=float(record['population']), allocation_qualified=True))
+    owner = read_mapping(OWNER_APPROVALS)['owner_decisions']
+    return CollectedAtlas(rows=tuple(rows), source_hashes=tuple(sorted(set(publication['source_identities'].values()))),
+        footprint=owner['exposure_atlas_footprint'], expected_tract_ids=expected, missing_tract_ids=tuple(sorted(missing)),
+        coverage_complete=not missing, mapping_review_id='configs/approvals.yaml#owner_decisions.tract_design')
+
+
+def dispatched_values(request):
+    from oxyformer.data.tract_inputs import dispatch_inputs
+    from oxyformer.execution.runner import read_mapping
+    paths = dispatch_inputs(request)
+    hashes = dict(zip(request.dependency_paths, request.dependency_hashes))
+    values = {}
+    for role, cls in [('data_manifest', DataManifest), ('covariates', CovariateView),
+                      ('geography', GeographyTable), ('entity_graph', EntityGraph)]:
+        path = paths['tract-inputs', role + '.json']
+        values[role] = read_artifact(path, cls, hashes[str(path)])
+    values['atlas'] = collected_atlas(paths, values['data_manifest'].original_ids)
+    values['approvals'] = read_mapping(OWNER_APPROVALS)
     return values
 
 
@@ -169,6 +237,31 @@ def _publish(request, payloads, lineage, status, message):
     return StageResult(request_hash=request.content_hash, status=status, artifacts=tuple(records), message=message)
 
 
+def design_configuration(request):
+    """Read scientific settings only from this checkout's design configuration.
+
+    The dispatcher envelope is transport metadata. It cannot supply a support
+    recipe, threshold or approval override. Keep the direct tract_design API
+    available for existing callers and the synthetic design tests.
+    """
+    from oxyformer.execution.runner import read_mapping
+    from oxyformer.data.tract_inputs import tract_decisions, validate_dispatch_approvals
+    tract_decisions()
+    canonical = read_mapping(DESIGN_CONFIG)
+    require(canonical.get("schema_version") == 1 and canonical.get("stage") == "tract_design",
+            "invalid repository design configuration")
+    submitted = read_mapping(request.config_path)
+    if request.stage == "tract_design":
+        require(submitted == canonical, "design settings differ from repository configuration")
+        return canonical
+    require(request.stage == submitted.get("stage") == "tract-support-gate",
+            "invalid design stage configuration")
+    require(submitted.get("settings", {}).get("module") == "oxyformer.design.gate",
+            "invalid registered design module")
+    validate_dispatch_approvals(submitted)
+    return canonical
+
+
 def run_stage(request: StageRequest) -> StageResult:
     status, message = "blocked", "missing design prerequisites"
     design = {"status": "blocked", "effect_release_authorized": False}
@@ -181,9 +274,7 @@ def run_stage(request: StageRequest) -> StageResult:
                               seed=1103, parameter_count=None)
     try:
         request.verify_inputs()
-        config = yaml.safe_load(Path(request.config_path).read_text())
-        require(config.get("schema_version") == 1 and config.get("stage") == request.stage == "tract_design",
-                "invalid design stage configuration")
+        config = design_configuration(request)
         values = _inputs(request, json.loads(Path(request.task_path).read_text()))
         manifest, covariates = values["data_manifest"], values["covariates"]
         geography, atlas, graph = values["geography"], values["atlas"], values["entity_graph"]
