@@ -181,7 +181,7 @@ def record_taints(check):
                     pass  # Taint is permanent; a later observer cannot clear it.
 
 
-def _acquisition_binding(path):
+def _acquisition_binding(path, *, use_active=True):
     """Find an active dependency or durable acquisition binding without resolving it.
 
     Both successful and refused reads consult the same immutable authority.
@@ -195,7 +195,7 @@ def _acquisition_binding(path):
     for root, entries in reversed(_ACQUISITION_READS.get()):
         if path.is_relative_to(root):
             return root, str(path.relative_to(root)), entries
-    state = _observation_state()
+    state = _observation_state() if use_active else None
     if state is not None:
         for root, entries in sorted(state['trees'].items(), key=lambda item: len(item[0]), reverse=True):
             root = Path(root)
@@ -586,7 +586,11 @@ def post_execution_check(before, *, observed_changes=None, identities=None):
     attempts = {}
     for root, expected in before.items():
         # Validate any acquisition authority before observing this tree.
-        _acquisition_binding(root)
+        try:
+            _acquisition_binding(root, use_active=False)
+        except (OSError, ContractError) as exc:
+            _record_refusal(root, exc)
+            raise
         actual = fingerprint_tree(root)
         # Unrelated I/O is not mutation evidence for either dependency kind.
         tainted = acquisition_changed_paths(expected, actual)
@@ -603,6 +607,9 @@ def post_execution_check(before, *, observed_changes=None, identities=None):
                 observed_changes.extend(str(Path(root) / name) for name in changed)
             # A later dependency's I/O error must not erase this observation.
             record_taints({'attempts': {root: attempts[root]}})
+        if changed or unreadable:
+            witnesses = changed or [name for name, entry in actual.items() if 'error' in entry]
+            _record_refusal(root, 'dependency check failed: ' + ', '.join(witnesses))
     return {'status': 'fail' if any(a['status'] != 'unchanged' for a in attempts.values()) else 'pass',
         'attempts': attempts}
 
