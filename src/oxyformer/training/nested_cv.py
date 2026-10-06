@@ -211,12 +211,12 @@ def _predict(model, view, inputs, policy, *, outcome_mean=False, base_only=False
     require(view.original_ids == inputs.original_ids, "prediction alignment mismatch")
     require(set(inputs.counties) <= set(model.group_offsets.counties), "unseen county prediction requires a transfer experiment")
     action = policy.apply(inputs.a_mmhg, inputs.policy_covariates)
-    query = torch.tensor(tuple(zip(action.a_mmhg, action.d_mmhg)), dtype=torch.float32).unsqueeze(-1)
+    query = torch.tensor(tuple(zip(action.a_mmhg, action.d_mmhg)), dtype=torch.float32, device=next(model.parameters()).device).unsqueeze(-1)
     batch = model.encoder.tokenizer.prepare(view)
     raw = fitting._raw(batch, model.encoder.tokenizer.features)
-    context = (torch.zeros((len(view.original_ids), 4, 64)) if model.county_context is None
+    context = (query.new_zeros((len(view.original_ids), 4, 64)) if model.county_context is None
                else model.county_context(inputs.original_ids, inputs.counties))
-    offset = torch.zeros(len(view.original_ids)) if base_only else model.group_offsets(inputs.counties)
+    offset = query.new_zeros(len(view.original_ids)) if base_only else model.group_offsets(inputs.counties)
     method = ((model.mean if outcome_mean else model.linear_predictor)
               if isinstance(model, OutcomeTransformer) else model.logits)
     result = method(query, batch, raw, context, offset)
@@ -230,11 +230,11 @@ def _profile(model, config, view, inputs):
         with torch.no_grad():
             base = _predict(model, view, inputs, config.policy, base_only=True)[:, 0]
             target = torch.tensor(_values(config, config.data.manifest.outcome_field, view.original_ids),
-                                  dtype=torch.float32)
+                                  dtype=torch.float32, device=base.device)
             units = {c: _weight_unit([w for county, w in zip(inputs.counties, inputs.origin_weights)
                                      if county == c]) for c in set(inputs.counties)}
             weights = torch.tensor([w / units[c] for c, w in zip(inputs.counties, inputs.origin_weights)],
-                                   dtype=torch.float64)
+                                   dtype=torch.float64, device=base.device)
             model.group_offsets.update_identity(view.original_ids, target.double(), base.double(), weights)
 
 
@@ -249,7 +249,7 @@ def _scratch(config, split, ids, view, root, seed):
     identity = fitting.CheckpointIdentity(training_ids=ids, data_hash=view.content_hash,
         split_hash=split.content_hash, config_hash=digest([settings.to_dict(), "no-ssl"]),
         preprocessing_hash=digest([f.to_dict() for f in features]), seed=seed,
-        scientific_code_hash=digest("preprocessing-only"), environment=environment_identity(torch.device("cpu")))
+        scientific_code_hash=digest("preprocessing-only"), environment=environment_identity(torch.device(config.device)))
     lineage = _lineage(config.data.manifest, identity, ids, (view.content_hash,),
         model_hash=model_state_hash(tensors), parameter_count=sum(v.numel() for v in tensors.values()))
     root.mkdir(parents=True)
@@ -262,7 +262,7 @@ def _scratch(config, split, ids, view, root, seed):
 def _train_transaction(config, bundle, encoder_state, view, stopping, epochs, seed, budget, saved=None):
     """One transaction per original-record minibatch, including both copies."""
     torch.manual_seed(seed)
-    model = _build(bundle, encoder_state=encoder_state)
+    model = _build(bundle, encoder_state=encoder_state).to(config.device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=bundle["learning_rate"],
                                  weight_decay=config.settings.weight_decay)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=1.)
@@ -279,7 +279,7 @@ def _train_transaction(config, bundle, encoder_state, view, stopping, epochs, se
         scheduler.load_state_dict(saved["scheduler"])
         sampler.load_state_dict(saved["sampler"])
         progress, best = saved["progress"], saved["best"]
-        restore_rng(saved["rng"])
+        restore_rng(saved["rng"], config.device)
     complete, reason = False, None
     while not complete:
         reason = budget.reason()
@@ -357,7 +357,7 @@ def _train_transaction(config, bundle, encoder_state, view, stopping, epochs, se
             sampler.finish_epoch()
             progress["phase"] = "start"
     state = dict(model=deepcopy(model.state_dict()), optimizer=optimizer.state_dict(),
-        scheduler=scheduler.state_dict(), sampler=sampler.state_dict(), rng=capture_rng(),
+        scheduler=scheduler.state_dict(), sampler=sampler.state_dict(), rng=capture_rng(config.device),
         progress=progress, best=best)
     if complete:
         model.load_state_dict(best, strict=True)
@@ -517,13 +517,13 @@ def _advance(config, outer, manifest, identity, controller, root, budget, varian
                 controller["results"].append(result)
         controller["position"] += 1
     calibration = AffineCalibration.from_json(controller["calibration"])
-    model = _build(controller["final"]["origin"]).eval()
+    model = _build(controller["final"]["origin"]).to(config.device).eval()
     metadata = _inputs(config, calibration.original_ids)
     with torch.no_grad():
         refit = _predict(model, subset(all_view, calibration.original_ids), metadata, config.policy)
     positive_refit, _, _ = paired_tensors(refit, metadata.origin_weights)
     calibration.ratios(positive_refit)
-    diagnostics = transfer_diagnostics(calibration, controller["oof_logits"], refit,
+    diagnostics = transfer_diagnostics(calibration, controller["oof_logits"], refit.cpu(),
         metadata.origin_weights, lineage=_lineage(manifest, identity, calibration.original_ids,
             (calibration.content_hash, model_state_hash(_tensor_state(controller)))))
     controller["transfer_diagnostics"] = diagnostics.to_json()
@@ -543,13 +543,15 @@ def run_fold(config, outer, seed, *, geography, variant="A0"):
     destination = Path(config.output_dir)
     require(not any(p.is_symlink() for p in (destination, *destination.parents)),
             "symlink in fitting output path")
-    with fitting._numerics():
+    config = replace(config, device=str(fitting.resolve_device(config.device)))
+    with fitting._numerics(config.device):
         identity = fitting._science_identity(config, outer, manifest, seed, allowed)
         identity = replace(identity, config_hash=digest([identity.config_hash, variant, geography.content_hash]))
         controller = dict(position=0, initializations={}, ssl_pending=None, active=None,
             results=[], final={}, selection=None, calibration=None,
             counts={"ssl_fits": 0, "nuisance_fits": 0, "batches": 0},
-            compute={"wall_seconds": 0., "cpu_seconds": 0., "gpu_seconds": 0., "device": "cpu"})
+            compute={"wall_seconds": 0., "cpu_seconds": 0., "gpu_seconds": 0., "device": config.device,
+                     "gpu_seconds_scope": "single_device_elapsed_not_kernel_utilization"})
         if config.predecessor is not None:
             require(not config.predecessor.complete, "fold is already complete")
             require(config.predecessor.fold == config.fold and config.predecessor.seed == seed,
@@ -565,7 +567,12 @@ def run_fold(config, outer, seed, *, geography, variant="A0"):
             controller, complete, reason = _advance(config, outer, manifest, identity,
                 controller, root, budget, variant, groups)
         controller["counts"]["batches"] += budget.batches
-        controller["compute"]["wall_seconds"] += time.monotonic() - budget.started
+        if torch.device(config.device).type == "cuda":
+            torch.cuda.synchronize(config.device)
+        elapsed = time.monotonic() - budget.started
+        controller["compute"]["wall_seconds"] += elapsed
+        if torch.device(config.device).type == "cuda":
+            controller["compute"]["gpu_seconds"] += elapsed
         controller["compute"]["cpu_seconds"] += time.process_time() - cpu_started
         tensors = fitting._tensor_state(controller)
         lineage = _lineage(manifest, identity, allowed, (manifest.content_hash, outer.content_hash),
@@ -580,7 +587,7 @@ def run_fold(config, outer, seed, *, geography, variant="A0"):
             fold=config.fold, seed=seed, prediction_inputs=_inputs(config, held), checkpoint=checkpoint)
 
 
-def predict(artifacts, view, policy):
+def predict(artifacts, view, policy, *, device=None):
     """Frozen prediction accepts only copied X and routing; never LoadedData."""
     require(type(artifacts) is FoldArtifacts and artifacts.complete, "unfinished procedure cannot predict")
     require(type(view) is CovariateView and view.use == "nuisance", "label-free nuisance view required")
@@ -589,12 +596,14 @@ def predict(artifacts, view, policy):
     require(set(view.original_ids) == set(artifacts.prediction_inputs.original_ids), "held-out IDs mismatch")
     inputs = fitting._take_inputs(artifacts.prediction_inputs, view.original_ids)
     controller = load_checkpoint(artifacts.checkpoint, artifacts.checkpoint.identity)["controller"]
-    with fitting._numerics(), torch.no_grad():
-        mu = _predict(_build(controller["final"]["outcome"]).eval(), view, inputs, policy, outcome_mean=True)
+    selected = fitting.resolve_device(device or dict(artifacts.checkpoint.identity.environment)["device"])
+    with fitting._numerics(selected), torch.no_grad():
+        mu = _predict(_build(controller["final"]["outcome"]).to(selected).eval(), view, inputs, policy, outcome_mean=True)
         calibration = AffineCalibration.from_json(controller["calibration"])
+        prediction_environment = environment_identity(selected)
         ratio = (torch.ones_like(mu) if policy.is_identity else calibration.ratios(
-            _predict(_build(controller["final"]["origin"]).eval(), view, inputs, policy)))
-    lineage = replace(artifacts.checkpoint.lineage, unit_ids=view.original_ids,
+            _predict(_build(controller["final"]["origin"]).to(selected).eval(), view, inputs, policy)))
+    lineage = replace(artifacts.checkpoint.lineage, unit_ids=view.original_ids, environment=prediction_environment,
         parent_hashes=(artifacts.data_manifest.content_hash, artifacts.checkpoint.content_hash, view.content_hash))
     return OOFNuisances(spec=artifacts.spec, original_ids=view.original_ids,
         fold_ids=(artifacts.fold,) * len(view.original_ids), seed_ids=(artifacts.seed,) * len(view.original_ids),
@@ -756,7 +765,7 @@ def run_stage(request: StageRequest) -> StageResult:
         for name in ("work", "predecessor", "relocated", "continuation.tar", "progress.json",
                      "artifact_manifest.json", "nuisances.parquet", "model_bundle.tar", "metrics.json"):
             require(not output_path(root, name).exists(), "attempt output already exists: " + name)
-        binding = {"code": request.code_identity, "environment": list(map(list, environment_identity(torch.device("cpu")))),
+        binding = {"code": request.code_identity, "environment": list(map(list, fitting.fit_environment(parameters.get("device", "auto")))),
             "recipe": lock_ref["sha256"], "endpoint": endpoint.content_hash,
             "parameters": parameters, "stage": request.stage,
             "source_code": digest([(str(p.relative_to(Path(__file__).parents[1])), file_hash(p))
@@ -769,7 +778,7 @@ def run_stage(request: StageRequest) -> StageResult:
         require(set(limits) <= {"seconds", "margin_seconds", "max_batches"}, "unknown slice limit")
         options = _settings(lock, endpoint)
         fit_config = endpoint.configuration(parameters["outer_fold"], root / "work",
-            **options, predecessor=predecessor, slice_seconds=limits.get("seconds", 14400.),
+            **options, device=parameters.get("device", "auto"), predecessor=predecessor, slice_seconds=limits.get("seconds", 14400.),
             checkpoint_margin_seconds=limits.get("margin_seconds", 120.), max_batches=limits.get("max_batches"))
         artifact = (predecessor if predecessor is not None and predecessor.complete else
                     run_fold(fit_config, endpoint.outer, parameters["seed"], geography=endpoint.geography, variant=variant))
