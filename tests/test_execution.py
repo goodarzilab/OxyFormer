@@ -2741,7 +2741,7 @@ def test_receipt_namespace_observation_survives_restore_before_rescan(
     assert_failed(result, receipt)
     assert str(receipt) in observations[0]
     assert read_json(Path(str(integrity.publication_receipt(acquisition)) + '.tainted')) == ['receipts.json']
-    assert read_check(active)['attempts'][str(acquisition)]['changed_paths'] == ['receipts.json']
+    assert read_check(active)['attempts'][str(acquisition)]['changed_paths'] == ['.', 'receipts.json']
     with raises(ContractError, match='tainted'):
         runner.verify_acquisition(acquisition, 'receipts.json')
     with raises(ContractError, match='tainted'):
