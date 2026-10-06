@@ -368,3 +368,13 @@ def test_stage_publishes_typed_products_and_gate_accepts_dispatch_handoff(tmp_pa
     from dataclasses import replace
     with pytest.raises(ContractError, match='not hash-bound'):
         gate._inputs(replace(gate_request,config_hash=file_hash(gate_request.config_path)), {})
+
+
+def test_atlas_coverage_is_endpoint_scoped_and_missing_ids_stay_explicit(tmp_path):
+    from oxyformer.design.gate import collected_atlas
+    paths = collected_fixture(tmp_path)
+    endpoint = collected_atlas(paths, (IDS[0],))
+    assert endpoint.coverage_complete and endpoint.expected_tract_ids == (IDS[0],)
+    missing = collected_atlas(paths, (IDS[0], IDS[1]))
+    assert not missing.coverage_complete and missing.missing_tract_ids == (IDS[1],)
+    assert tuple(r.tract_id for r in missing.rows) == (IDS[0],)

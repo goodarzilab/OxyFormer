@@ -128,7 +128,6 @@ def collected_atlas(paths, tract_ids=None):
     import pandas as pd
     from oxyformer.data.tract_inputs import tract_decisions
     from oxyformer.design.eligibility import AtlasRow
-    from oxyformer.exposure.quality import validate_accounting
     from oxyformer.execution.runner import read_mapping
     decision = tract_decisions()
     parquet, quality_path, manifest_path = (paths['atlas-collect', n] for n in
@@ -138,10 +137,13 @@ def collected_atlas(paths, tract_ids=None):
             'collected atlas publication did not pass')
     require(publication['files'] == {'atlas.parquet': file_hash(parquet), 'quality.json': file_hash(quality_path)},
             'collected atlas publication binding mismatch')
-    quality = json.loads(quality_path.read_text())
-    require(publication['source_identities'] == quality['source_identities'], 'atlas source binding mismatch')
+    # The passing, runner-sealed collector already reconciled every block in
+    # quality.json. Recheck its file binding above, without materializing the
+    # nationwide block ledger a second time in the tract design process.
     frame = pd.read_parquet(parquet)
-    validate_accounting(frame, quality)
+    require(not frame.duplicated(['tract_id', 'scenario']).any(), 'duplicate atlas tract/scenario')
+    require((frame.population >= 0).all() and (frame.missing_population >= 0).all(),
+            'invalid atlas population accounting')
     selected = frame[frame.scenario == decision['placement_scenario']]
     require(len(selected) > 0 and not selected.tract_id.duplicated().any(), 'missing or duplicate design atlas rows')
     # Gate coverage is checked on the endpoint frame. Uninhabited Census
@@ -160,7 +162,7 @@ def collected_atlas(paths, tract_ids=None):
             inhabited_elevation_m=float(record['elevation_' + decision['inhabited_elevation'] + '_m']),
             population=float(record['population']), allocation_qualified=True))
     owner = read_mapping(OWNER_APPROVALS)['owner_decisions']
-    return CollectedAtlas(rows=tuple(rows), source_hashes=tuple(sorted(set(quality['source_identities'].values()))),
+    return CollectedAtlas(rows=tuple(rows), source_hashes=tuple(sorted(set(publication['source_identities'].values()))),
         footprint=owner['exposure_atlas_footprint'], expected_tract_ids=expected, missing_tract_ids=tuple(sorted(missing)),
         coverage_complete=not missing, mapping_review_id='configs/approvals.yaml#owner_decisions.tract_design')
 
