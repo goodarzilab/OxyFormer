@@ -517,7 +517,7 @@ def _advance(config, outer, manifest, identity, controller, root, budget, varian
                 controller["results"].append(result)
         controller["position"] += 1
     calibration = AffineCalibration.from_json(controller["calibration"])
-    model = _build(controller["final"]["origin"]).to(config.device).eval()
+    model = _build(controller["final"]["origin"]).to(fitting.resolve_device(config.device)).eval()
     metadata = _inputs(config, calibration.original_ids)
     with torch.no_grad():
         refit = _predict(model, subset(all_view, calibration.original_ids), metadata, config.policy)
