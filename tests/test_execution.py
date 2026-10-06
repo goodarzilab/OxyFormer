@@ -1897,7 +1897,7 @@ def test_unwritable_control_directory_cannot_suppress_upstream_receipts(runtime,
         pytest.skip('this reproduction requires ordinary Unix permissions')
     repo, out = runtime
     source = tmp_path / 'source'
-    (source / 'extra').mkdir(parents=True)
+    (source / '_execution/extra').mkdir(parents=True)
     victim = source / '_execution/extra/victim'
     victim.write_text('before')
     seal_source(repo, source)
@@ -3739,10 +3739,11 @@ def test_caught_dependency_enumeration_io_allows_only_clean_retry(runtime, acqui
     repo, out = runtime
     root = acquisition if kind == 'acquisition' else source
     needs = {'fetch-data': ['payload.tar', 'receipts.json']} if kind == 'acquisition' else SOURCE_NEEDS
+    enumerated = root if kind == 'acquisition' else root / '_execution'
     original = os.scandir
     def faulty(request):
         def unavailable(path):
-            if Path(path) == root:
+            if Path(path) == enumerated:
                 raise OSError(errno.EIO, 'transient dependency enumeration failure', str(path))
             return original(path)
         with monkeypatch.context() as patch:
