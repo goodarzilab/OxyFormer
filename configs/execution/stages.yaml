@@ -86,8 +86,17 @@ stages:
     needs:
       legacy-inputs: [elevcan_source.tar.gz]
     outputs: [results.json, reproduction_bundle.tar, artifact_manifest.json]
+  simulation-inputs:
+    module: oxyformer.validation.smoke_inputs
+    needs: {}
+    outputs: [endpoint.json, frame.json, artifact_manifest.json]
   simulation-smoke:
     module: oxyformer.validation.coverage
+    needs:
+      simulation-inputs: [endpoint.json, frame.json, artifact_manifest.json]
+    outputs: [result.json, timing.json, artifact_manifest.json]
+  # No runnable lock task until complete production profiles, measured batching
+  # and an owner final-coverage allocation exist. Smoke cannot supply these.
   campaign-lock:
     module: oxyformer.validation.campaign
     needs:
