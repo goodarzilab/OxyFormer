@@ -129,3 +129,16 @@ def test_cuda_continuation_is_exact_and_cpu_resume_is_refused(cuda_nested, tmp_p
     with pytest.raises(ContractError, match="identity"):
         nested_cv.run_fold(replace(config, device="cpu", output_dir=str(tmp_path / "wrong-device"),
             predecessor=partial, max_batches=None), prepared.outer, 1103, geography=prepared.geography)
+
+
+def test_forced_tf32_is_refused_before_cuda_execution(monkeypatch):
+    # The documented override bypasses PyTorch's FP32 precision setting.
+    # Verify refusal before CUDA state is entered, including on CPU-only CI.
+    monkeypatch.setenv("TORCH_ALLOW_TF32_CUBLAS_OVERRIDE", "1")
+    monkeypatch.setattr(fit, "resolve_device", lambda device: torch.device("cuda:0"))
+    def forbidden_device(device):
+        pytest.fail("CUDA execution reached with forced TF32")
+    monkeypatch.setattr(torch.cuda, "device", forbidden_device)
+    with pytest.raises(ContractError, match="TF32"):
+        with fit._numerics("cuda"):
+            pytest.fail("forced TF32 was admitted")

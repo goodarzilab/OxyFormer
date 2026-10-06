@@ -693,6 +693,8 @@ def _numerics(device="cpu"):
     device = resolve_device(device)
     with ExitStack() as stack:
         if device.type == "cuda":
+            require(os.environ.get("TORCH_ALLOW_TF32_CUBLAS_OVERRIDE") != "1",
+                    "forced TF32 is incompatible with full-precision fitting")
             workspace = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
             if workspace is None:
                 os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
