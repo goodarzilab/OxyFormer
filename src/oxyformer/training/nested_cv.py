@@ -375,7 +375,7 @@ def _grouped_ssl(config, split, fitting, view, root, seed, budget, predecessor, 
                           max_epochs=config.ssl_epochs, stopping_ids=stop)
     remaining = (None if config.max_batches is None else config.max_batches - budget.batches)
     seconds = max(.01, config.slice_seconds - (time.monotonic() - budget.started))
-    ssl_config = PretrainConfig(settings=settings, output_dir=str(root),
+    ssl_config = PretrainConfig(settings=settings, output_dir=str(root), device=config.device,
         predecessor=predecessor, stop_request=budget.request, max_batches=remaining,
         slice_seconds=seconds, checkpoint_margin_seconds=min(config.checkpoint_margin_seconds, seconds / 2))
     artifact = pretrain(subset(view, fitting, use="ssl"), split, ssl_config, seed)
@@ -517,7 +517,7 @@ def _advance(config, outer, manifest, identity, controller, root, budget, varian
                 controller["results"].append(result)
         controller["position"] += 1
     calibration = AffineCalibration.from_json(controller["calibration"])
-    model = _build(controller["final"]["origin"]).to(fitting.resolve_device(config.device)).eval()
+    model = _build(controller["final"]["origin"]).to(config.device).eval()
     metadata = _inputs(config, calibration.original_ids)
     with torch.no_grad():
         refit = _predict(model, subset(all_view, calibration.original_ids), metadata, config.policy)
