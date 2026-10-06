@@ -667,7 +667,7 @@ class _ReferenceDropout(TorchDispatchMode):
         kwargs = kwargs or {}
         if operation == torch.ops.aten.native_dropout.default and args[0].is_cuda:
             values, probability, training = args
-            if training and probability > 0:
+            if training and 0 < probability < 1:
                 mask = torch.empty_like(values, device="cpu").bernoulli_(1 - probability)
                 selected = mask.to(device=values.device, dtype=torch.bool)
                 scaled = mask.div_(1 - probability).to(values.device)
@@ -693,7 +693,10 @@ def _numerics(device="cpu"):
     device = resolve_device(device)
     with ExitStack() as stack:
         if device.type == "cuda":
-            os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+            workspace = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
+            if workspace is None:
+                os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+                stack.callback(os.environ.pop, "CUBLAS_WORKSPACE_CONFIG", None)
             require(os.environ["CUBLAS_WORKSPACE_CONFIG"] in (":4096:8", ":16:8"),
                     "CUDA determinism requires CUBLAS_WORKSPACE_CONFIG=:4096:8 or :16:8")
             stack.enter_context(torch.cuda.device(device))
@@ -701,15 +704,19 @@ def _numerics(device="cpu"):
             warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
             stack.callback(torch.use_deterministic_algorithms, deterministic, warn_only=warn_only)
             torch.use_deterministic_algorithms(True)
-            for owner, name, value in (
+            settings = (
                 (torch.backends, "fp32_precision", "ieee"),
                 (torch.backends.cuda.matmul, "fp32_precision", "ieee"),
                 (torch.backends.cudnn, "fp32_precision", "ieee"),
                 (torch.backends.cudnn, "deterministic", True),
                 (torch.backends.cudnn, "benchmark", False),
-            ):
-                old = getattr(owner, name)
+            )
+            # Snapshot all values before setting a parent precision policy:
+            # parent settings also change the effective child getters.
+            previous = [(owner, name, getattr(owner, name)) for owner, name, _ in settings]
+            for owner, name, old in previous:
                 stack.callback(setattr, owner, name, old)
+            for owner, name, value in settings:
                 setattr(owner, name, value)
             from torch.nn.attention import SDPBackend, sdpa_kernel
             stack.enter_context(sdpa_kernel(SDPBackend.MATH))
@@ -741,7 +748,7 @@ def _ssl(config, split, fitting, view, root, seed, budget, predecessor):
                           max_epochs=config.ssl_epochs, stopping_ids=stop)
     remaining = (None if config.max_batches is None else config.max_batches - budget.batches)
     seconds = max(.01, config.slice_seconds - (time.monotonic() - budget.started))
-    ssl_config = PretrainConfig(settings=settings, output_dir=str(root), device=config.device,
+    ssl_config = PretrainConfig(settings=settings, output_dir=str(root), device=str(resolve_device(config.device)),
         predecessor=predecessor, stop_request=budget.request, max_batches=remaining,
         slice_seconds=seconds, checkpoint_margin_seconds=min(config.checkpoint_margin_seconds, seconds / 2))
     artifact = pretrain(subset(view, fitting, use="ssl"), split, ssl_config, seed)
@@ -955,7 +962,7 @@ def _fit_controller(config, outer, manifest, identity, controller, root, budget)
                 controller["results"].append(result)
         controller["position"] += 1
     calibration = AffineCalibration.from_json(controller["calibration"])
-    model = _build(controller["final"]["origin"]).to(config.device).eval()
+    model = _build(controller["final"]["origin"]).to(resolve_device(config.device)).eval()
     metadata = _inputs(config, calibration.original_ids)
     with torch.no_grad():
         refit = _predict(model, subset(all_view, calibration.original_ids), metadata, config.policy)
