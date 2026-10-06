@@ -142,3 +142,10 @@ def test_forced_tf32_is_refused_before_cuda_execution(monkeypatch):
     with pytest.raises(ContractError, match="TF32"):
         with fit._numerics("cuda"):
             pytest.fail("forced TF32 was admitted")
+
+
+def test_visible_gpu_does_not_change_default(monkeypatch):
+    monkeypatch.delenv("OXYFORMER_DEVICE", raising=False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert fit.resolve_device().type == "cpu"
+    assert fit.resolve_device(fit.FitConfig.__dataclass_fields__["device"].default).type == "cpu"

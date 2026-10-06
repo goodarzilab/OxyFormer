@@ -4044,3 +4044,70 @@ def test_remote_restored_directory_swap_without_kernel_events(runtime, acquisiti
     monkeypatch.setattr(integrity, '_NamespaceWatch', SilentWatch, raising=False)
     test_restored_directory_swap_refuses_publication(
         runtime, acquisition, source, tmp_path, monkeypatch, 'stage')
+
+
+def test_allocation_threads_prefers_slurm(monkeypatch, tmp_path):
+    from oxyformer.execution.runner import allocation_threads
+    monkeypatch.setenv('SLURM_CPUS_PER_TASK', '8')
+    monkeypatch.setattr(os, 'sched_getaffinity', lambda pid: set(range(224)))
+    assert allocation_threads(membership=tmp_path / 'absent') == 8
+    for value in ('0', '-1', '8(x2)', ''):
+        monkeypatch.setenv('SLURM_CPUS_PER_TASK', value)
+        with raises(ContractError, match='positive integer'):
+            allocation_threads()
+
+
+@mark.parametrize('version', [1, 2])
+@mark.parametrize('quota,affinity,expected', [(250000, 224, 2), (800000, 4, 4), (50000, 8, 1), (-1, 8, 8)])
+def test_allocation_threads_cgroup_ancestors(monkeypatch, tmp_path, version, quota, affinity, expected):
+    from oxyformer.execution.runner import allocation_threads
+    monkeypatch.delenv('SLURM_CPUS_PER_TASK', raising=False)
+    monkeypatch.setattr(os, 'sched_getaffinity', lambda pid: set(range(affinity)))
+    root = tmp_path / 'cgroup'
+    parent = root if version == 2 else root / 'cpu,cpuacct'
+    (parent / 'job/step').mkdir(parents=True)
+    membership = tmp_path / 'membership'
+    membership.write_text('0::/job/step\n' if version == 2 else '2:cpu,cpuacct:/job/step\n')
+    if version == 2:
+        (parent / 'cpu.max').write_text(f'{quota if quota > 0 else "max"} 100000\n')
+        (parent / 'job/step/cpu.max').write_text('max 100000\n')
+    else:
+        (parent / 'cpu.cfs_quota_us').write_text(str(quota))
+        (parent / 'cpu.cfs_period_us').write_text('100000')
+    assert allocation_threads(cgroup_root=root, membership=membership) == expected
+
+
+def test_stage_launcher_bounds_threads_and_records_identity(runtime, monkeypatch):
+    repo, out = runtime
+    stage = '''
+_reference = run_stage
+
+def run_stage(request):
+    import torch
+    from oxyformer.training.fit import fit_environment
+    assert os.environ['OMP_NUM_THREADS'] == os.environ['MKL_NUM_THREADS'] == '8'
+    assert torch.get_num_threads() == 8
+    identity = dict(fit_environment())
+    assert identity['device'] == 'cpu'
+    assert identity['threads'] == '8'
+    assert identity['env_OMP_NUM_THREADS'] == identity['env_MKL_NUM_THREADS'] == '"8"'
+    return _reference(request)
+'''
+    # dummy is the fixture's real stage entry point.
+    stage = stage.replace('_reference = run_stage', '_reference = dummy')
+    prepare_cli_fixture(repo, out, stage)
+    prepared = out / 'src'
+    shutil.move(repo, prepared)
+    launcher = out / 'launcher.sh'
+    launcher.write_text((ROOT / 'scripts/slurm/run_stage.sh').read_text().replace(
+        '/mnt/weka/home/hgoodarzi/envs/oxyformer/bin/python', sys.executable))
+    environment = fixture_env(prepared)
+    environment.update(SWARM_UNIT_DIR=str(out), STAGE='dummy', TASK_MANIFEST=str(task_file(out)),
+        SLURM_CPUS_PER_TASK='8', OMP_NUM_THREADS='224', MKL_NUM_THREADS='224', OXYFORMER_DEVICE='cpu')
+    process = subprocess.run(['bash', str(launcher), '--prepared'], env=environment,
+        cwd=prepared, capture_output=True, text=True, timeout=90)
+    assert process.returncode == 0, process.stderr + (out / 'run.log').read_text()
+    threads = read_json(out / '_execution/environment.json')['threads']
+    assert threads['source'] == 'SLURM_CPUS_PER_TASK'
+    assert threads['allocated_cpus'] == threads['torch'] == 8
+    assert threads['OMP_NUM_THREADS'] == threads['MKL_NUM_THREADS'] == '8'
