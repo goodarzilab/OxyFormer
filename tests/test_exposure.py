@@ -271,8 +271,7 @@ def test_reproducible_collection(tmp_path, shard_fixture):
     b = collect_request(tmp_path / 'collection-b', inventory, paths, reverse=True)
     for req in [a, b]:
         result = run_stage(req)
-        assert result.status == 'pass', result.message
-        result.verify(req)
+        assert_missing_dem_publication(req, result, {'centroid': 0.0, 'distributed': 0.0}, [])
     for name in ['atlas.parquet', 'quality.json']:
         assert file_hash(Path(a.output_dir) / name) == file_hash(Path(b.output_dir) / name)
     atlas = pd.read_parquet(Path(a.output_dir) / 'atlas.parquet')
@@ -947,18 +946,158 @@ def test_declared_missing_tar_member_fails_instead_of_blocking(tmp_path, shard_f
 
 
 
-def test_stage_coverage_failure_still_declares_accounting_artifacts(tmp_path, shard_fixture):
-    tile = write_raster(tmp_path / 'missing-dem.tif', [0, -9999])
-    acquisition(tmp_path, 'dem', [('synthetic', Path(tile.path))])
-    req = boundary_request(tmp_path, shard_fixture, 'exposure-atlas')
-    result = run_stage(req)
-    assert result.status == 'fail' and len(result.artifacts) == 3
+def assert_missing_dem_publication(req, result, totals, tracts):
+    assert result.status == 'pass', result.message
+    assert len(result.artifacts) == 3
     result.verify(req)
     out = Path(req.output_dir)
-    frame = pd.read_parquet(out / 'exposure.parquet')
-    assert frame.population.eq(100).all() and frame.missing_population.eq(60).all()
-    assert frame.pressure_mmhg.isna().all()
-    assert json.loads((out / 'artifact_manifest.json').read_text())['status'] == 'fail'
+    summary = dict(missing_population_by_scenario=totals, missing_dem_tracts=tracts)
+    for name in ('quality.json', 'artifact_manifest.json'):
+        record = json.loads((out / name).read_text())
+        assert {key: record[key] for key in summary} == summary
+    assert json.loads((out / 'artifact_manifest.json').read_text())['status'] == 'pass'
+    assert canonical_json(summary) in result.message
+
+
+@pytest.fixture
+def missing_dem_shards(tmp_path, shard_fixture):
+    inventory, _ = shard_fixture
+    tile = write_raster(tmp_path / 'missing-dem.tif', [0, -9999])
+    acquisition(tmp_path, 'dem', [('synthetic', Path(tile.path))])
+    paths = []
+    for state, tract in [('AL', '01001000100'), ('AZ', '04001000100')]:
+        task = json.loads((tmp_path / ('shard-' + state) / 'task.json').read_text())
+        req = request(tmp_path / ('missing-' + state), 'exposure-atlas', task,
+                      [inventory, tmp_path / 'census-receipt.json', tmp_path / 'census.tar',
+                       tmp_path / 'dem-receipt.json', tmp_path / 'dem.tar'])
+        result = run_stage(req)
+        assert_missing_dem_publication(req, result, {'centroid': 60.0, 'distributed': 60.0}, [tract])
+        out = Path(req.output_dir)
+        frame = pd.read_parquet(out / 'exposure.parquet')
+        assert frame.population.eq(100).all() and frame.covered_population.eq(40).all()
+        assert frame.missing_population.eq(60).all() and frame.status.eq('missing_dem').all()
+        assert frame[['pressure_mmhg', 'oxygen_deficit_mmhg', 'elevation_p10_m',
+                      'elevation_p50_m', 'elevation_p90_m']].isna().all().all()
+        quality = json.loads((out / 'quality.json').read_text())
+        for scenario in ('centroid', 'distributed'):
+            omitted = [r for r in quality['blocks'] if r['scenario'] == scenario and r['nodata'] > 0]
+            assert len(omitted) == 1 and omitted[0]['tract_id'] == tract and omitted[0]['nodata'] == 60
+        paths.extend([out / 'artifact_manifest.json', out / 'exposure.parquet', out / 'quality.json'])
+    return inventory, paths
+
+
+def test_missing_dem_shards_and_collection_publish(tmp_path, missing_dem_shards):
+    inventory, paths = missing_dem_shards
+    requests = [collect_request(tmp_path / 'missing-collection', inventory, paths),
+                collect_request(tmp_path / 'missing-reversed', inventory, paths, reverse=True)]
+    for req in requests:
+        result = run_stage(req)
+        assert_missing_dem_publication(req, result, {'centroid': 120.0, 'distributed': 120.0},
+                                       ['01001000100', '04001000100'])
+        atlas = pd.read_parquet(Path(req.output_dir) / 'atlas.parquet')
+        expected = pd.concat([pd.read_parquet(paths[i]) for i in (1, 4)], ignore_index=True)
+        expected = expected.sort_values(['tract_id', 'scenario']).reset_index(drop=True)
+        pd.testing.assert_frame_equal(atlas, expected)
+    for name in ('atlas.parquet', 'quality.json'):
+        assert file_hash(Path(requests[0].output_dir) / name) == file_hash(Path(requests[1].output_dir) / name)
+
+
+@pytest.mark.parametrize('problem', ['block_mass', 'tract_mass', 'status', 'imputed'])
+def test_missing_dem_collection_rejects_broken_accounting(tmp_path, missing_dem_shards, problem):
+    inventory, paths = missing_dem_shards
+    frame = pd.read_parquet(paths[1])
+    quality = json.loads(paths[2].read_text())
+    if problem == 'block_mass':
+        quality['blocks'][0]['covered_population'] += 1
+    elif problem == 'tract_mass':
+        frame.loc[0, 'missing_population'] += 1
+    elif problem == 'status':
+        frame.loc[0, 'status'] = 'complete'
+    else:
+        frame.loc[0, 'oxygen_deficit_mmhg'] = 0.0
+    # Rebind hashes so the accounting checks, rather than the identity checks,
+    # must reject the inconsistent payload.
+    frame.to_parquet(paths[1], index=False)
+    paths[2].write_text(canonical_json(quality))
+    manifest = json.loads(paths[0].read_text())
+    manifest['files'] = {'exposure.parquet': file_hash(paths[1]), 'quality.json': file_hash(paths[2])}
+    paths[0].write_text(canonical_json(manifest))
+    req = collect_request(tmp_path / 'invalid-missing-collection', inventory, paths)
+    result = run_stage(req)
+    assert result.status == 'fail' and result.artifacts == ()
+    assert not (Path(req.output_dir) / 'atlas.parquet').exists()
+
+
+@pytest.mark.parametrize('field', ['pressure_mmhg', 'oxygen_deficit_mmhg', 'elevation_p10_m',
+                                   'elevation_p50_m', 'elevation_p90_m'])
+@pytest.mark.parametrize('value', [np.inf, -np.inf])
+@pytest.mark.parametrize('legacy_inf_mask', [False, True])
+def test_missing_dem_collection_rejects_infinite_exposure(
+        tmp_path, missing_dem_shards, monkeypatch, field, value, legacy_inf_mask):
+    inventory, paths = missing_dem_shards
+    frame = pd.read_parquet(paths[1])
+    frame.loc[0, field] = value
+    frame.to_parquet(paths[1], index=False)
+    manifest = json.loads(paths[0].read_text())
+    manifest['files']['exposure.parquet'] = file_hash(paths[1])
+    paths[0].write_text(canonical_json(manifest))
+    req = collect_request(tmp_path / 'infinite-missing-collection', inventory, paths)
+    if legacy_inf_mask:
+        # pandas 2.x could count infinity as missing via mode.use_inf_as_na.
+        # Reproduce that mask semantics on pandas 3.x, where the option is gone.
+        original_isna = pd.DataFrame.isna
+
+        def isna_including_infinity(frame):
+            mask = original_isna(frame)
+            numeric = frame.select_dtypes(include='number').columns
+            mask[numeric] |= np.isinf(frame[numeric])
+            return mask
+
+        monkeypatch.setattr(pd.DataFrame, 'isna', isna_including_infinity)
+    result = run_stage(req)
+    assert result.status == 'fail' and result.artifacts == ()
+    assert not (Path(req.output_dir) / 'atlas.parquet').exists()
+
+
+def test_missing_dem_summary_keeps_scenarios_separate(tmp_path, shard_fixture, monkeypatch):
+    tile = write_raster(tmp_path / 'partial-dem.tif', [0, 0, -9999])
+    geography = blocks()
+    # The second block has half its distributed mass on nodata; its centroid
+    # lands on nodata. Retain a separate, fully covered tract in the shard.
+    geography.loc[0, 'block_id'] = '010010002001001'
+    geography.loc[0, 'tract_id'] = '01001000200'
+    geography.loc[1, 'geometry'] = box(100, 0, 300, 100)
+    frame, quality = build_exposure(sources(tile), geography, SPEC)
+    monkeypatch.setattr('oxyformer.exposure.build._build_shard', lambda *args: (frame, quality, ['AL']))
+    req = boundary_request(tmp_path, shard_fixture, 'exposure-atlas')
+    result = run_stage(req)
+    assert_missing_dem_publication(req, result, {'centroid': 60.0, 'distributed': 30.0}, ['01001000100'])
+    published = pd.read_parquet(Path(req.output_dir) / 'exposure.parquet')
+    pd.testing.assert_frame_equal(published, frame)
+    assert published[published.tract_id == '01001000200'].status.eq('complete').all()
+    assert published[published.tract_id == '01001000100'].status.eq('missing_dem').all()
+
+
+@pytest.mark.parametrize('problem', ['block_mass', 'status'])
+def test_missing_dem_shard_rejects_broken_accounting(tmp_path, shard_fixture, monkeypatch, problem):
+    import oxyformer.exposure.build as module
+    tile = write_raster(tmp_path / 'broken-dem.tif', [0, -9999])
+    acquisition(tmp_path, 'dem', [('synthetic', Path(tile.path))])
+    req = boundary_request(tmp_path, shard_fixture, 'exposure-atlas')
+    original = module._build_shard
+
+    def broken(*args):
+        frame, quality, shards = original(*args)
+        if problem == 'block_mass':
+            quality['blocks'][0]['covered_population'] += 1
+        else:
+            frame.loc[0, 'status'] = 'complete'
+        return frame, quality, shards
+
+    monkeypatch.setattr(module, '_build_shard', broken)
+    result = run_stage(req)
+    assert result.status == 'fail' and result.artifacts == ()
+    assert list(Path(req.output_dir).iterdir()) == []
 
 
 @pytest.mark.parametrize('old_default', [False, True])

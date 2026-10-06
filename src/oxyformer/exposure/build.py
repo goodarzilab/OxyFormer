@@ -283,6 +283,28 @@ def _collect(request, task, config, groups):
     return exposure, quality, sorted(seen)
 
 
+def _coverage_summary(exposure, quality):
+    """Summarize validated omissions without dropping or filling tract rows."""
+    missing = exposure.missing_population > 0
+    attributed = set(zip(exposure.loc[missing, 'tract_id'], exposure.loc[missing, 'scenario']))
+    omitted = {(row['tract_id'], row['scenario']) for row in quality['blocks']
+               if any(row[reason] > 0 for reason in REASONS)}
+    require(attributed == omitted, 'missing DEM tract attribution mismatch')
+    expected = np.where(exposure.population == 0, 'zero_population',
+                        np.where(missing, 'missing_dem', 'complete'))
+    require((exposure.status == expected).all(), 'inconsistent tract coverage status')
+    values = ['pressure_mmhg', 'oxygen_deficit_mmhg', 'elevation_p10_m',
+              'elevation_p50_m', 'elevation_p90_m']
+    incomplete = exposure.loc[exposure.status != 'complete', values]
+    # Numeric NaN is independent of pandas' legacy infinity-as-missing option.
+    require(all(math.isnan(value) for row in incomplete.itertuples(index=False, name=None)
+                for value in row), 'incomplete tract exposure must be null')
+    return dict(missing_population_by_scenario={
+        scenario: math.fsum(exposure.loc[exposure.scenario == scenario, 'missing_population'])
+        for scenario in quality['allocation']['scenarios']},
+        missing_dem_tracts=sorted(exposure.loc[missing, 'tract_id'].unique()))
+
+
 def _exception_message(exc):
     """Bound diagnostics without relying on a backend exception's formatter."""
     prefix = f'{type(exc).__module__}.{type(exc).__qualname__}: '
@@ -309,7 +331,8 @@ def run_stage(request: StageRequest) -> StageResult:
     text subject to marked truncation; direct reader/build APIs still raise.
     Resource exceptions report execution failure, not scientific invalidity.
 
-    Coverage failure writes and declares its accounting artifacts. An exception
+    Validated missing DEM coverage publishes with per-tract missing_dem status
+    and null exposures; the tract gate decides eligibility. An exception
     after publication can leave undeclared files: StageResult is authoritative
     for this invocation, and handlers never delete, overwrite, repair or retry.
     Native crashes or inability to construct a result are outside this boundary.
@@ -341,14 +364,16 @@ def run_stage(request: StageRequest) -> StageResult:
         exposure = exposure.sort_values(['tract_id', 'scenario']).reset_index(drop=True)
         validate_accounting(exposure, quality)
         validate_owner_approval(use_fallback=any(t['product'] == FALLBACK for t in quality['dem_tiles']))
-        status = 'fail' if (exposure.missing_population > 0).any() else 'pass'
+        coverage = _coverage_summary(exposure, quality)
+        quality.update(coverage)
+        status = 'pass'
         exposure.to_parquet(output / filename, index=False)
         (output / 'quality.json').write_text(canonical_json(quality))
         manifest = dict(schema_version=1, kind=request.stage, status=status, request_hash=request.content_hash,
             code_identity=request.code_identity, shard_ids=shard_ids,
             shard_manifest_hash=request.dependency_hashes[task['shard_manifest']],
             source_identities=quality['source_identities'], physical_hash=PHYSICS.content_hash,
-            allocation_hash=quality['allocation_hash'],
+            allocation_hash=quality['allocation_hash'], **coverage,
             files={name: file_hash(output / name) for name in (filename, 'quality.json')})
         (output / 'artifact_manifest.json').write_text(canonical_json(manifest))
         lineage = ArtifactLineage(source_hashes=tuple(sorted(quality['source_identities'].values())),
@@ -361,7 +386,7 @@ def run_stage(request: StageRequest) -> StageResult:
             artifacts=tuple(ArtifactRecord(path=name, sha256=file_hash(output / name), lineage=lineage, kind=kind)
                             for name, kind in ((filename, 'exposure'), ('quality.json', 'quality'),
                                                ('artifact_manifest.json', 'artifact_manifest'))),
-            message='Exposure population and omission accounting written' if status == 'pass' else 'Missing DEM population; exposure withheld')
+            message='Exposure population and omission accounting written; ' + canonical_json(coverage))
         result.verify(request)
         return result
     except FileNotFoundError as exc:
