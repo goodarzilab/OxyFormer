@@ -124,3 +124,11 @@ Readers retain acquisition bindings across I/O. Final checks persist each
 difference immediately. Authority I/O errors propagate; taint and publication
 commits share a lock. DEM inspection checks its payload hash and stable stream
 even on refusal; GDAL reads the verified descriptor.
+
+Detection covers each declared dependency root and everything beneath it, including
+restored writes and replacement of the root itself. Rename-and-restore of a
+directory above that root is deliberate hostile-local-actor evasion and is out
+of scope; prevention is tracked in ARC-1339. Metadata-only observations with
+identical bytes fail the observing stage but allow retry without permanent taint.
+Incomplete integrity observations also fail that stage; only positive evidence of
+content or namespace changes creates permanent taint (owner decision, 2026-10-06).

@@ -120,7 +120,8 @@ def verify_acquisition(root, receipt_name, *, expected_tree=None):
         observed_name = receipt_name
         receipt_bytes = read_regular(receipt_path)
     except InputChanged as exc:
-        refuse_changes([str(exc.path.relative_to(root))], str(exc))
+        if exc.content_changed:
+            refuse_changes([str(exc.path.relative_to(root))], str(exc))
         raise
     except ContractError as exc:
         # The snapshot above established regular inputs and receipt_name was
@@ -424,6 +425,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
                 observed = json.loads(read_regular(marker))
                 changed.extend(str(Path(root) / name) for name in observed)
                 detail['changed_paths'] = sorted(set(detail['changed_paths']) | set(observed))
+                detail['tainted_paths'] = sorted(set(detail['tainted_paths']) | set(observed))
                 detail['status'] = 'tainted'
                 check['status'] = 'fail'
         changed = [str(Path(root) / name) for root, detail in check['attempts'].items()
@@ -437,7 +439,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         _replace_control(out, DEPENDENCY_CHECK, canonical_json(check))
         if check['status'] == 'fail':
             result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
-                message=('upstream attempt tainted; changed paths: ' + ', '.join(changed)) if changed
+                message=('upstream attempt changed; changed paths: ' + ', '.join(changed)) if changed
                 else 'upstream fingerprint unreadable: ' + ', '.join(root for root, detail in
                     check['attempts'].items() if detail['status'] == 'unreadable'))
         else:
@@ -467,6 +469,6 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     except BaseException as exc:
         message = 'stage finalization failed: ' + (str(exc).strip() or type(exc).__name__)
         if changed:
-            message += '; upstream attempt tainted; changed paths: ' + ', '.join(changed)
+            message += '; upstream attempt changed; changed paths: ' + ', '.join(changed)
         print('failed: ' + message, file=sys.stderr)
         return StageResult(request_hash=request.content_hash, status='fail', artifacts=(), message=message)

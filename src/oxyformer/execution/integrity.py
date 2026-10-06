@@ -88,11 +88,12 @@ def verify_publication(root, result):
 
 def record_taints(check):
     for root, detail in check['attempts'].items():
-        if detail['changed_paths']:
+        tainted = detail.get('tainted_paths', detail['changed_paths'])
+        if tainted:
             receipt = publication_receipt(root)
             with publication_lock(receipt):
                 try:
-                    atomic_json(receipt.parent, receipt.name + '.tainted', detail['changed_paths'])
+                    atomic_json(receipt.parent, receipt.name + '.tainted', tainted)
                 except FileExistsError:
                     pass  # Taint is permanent; a later observer cannot clear it.
 
@@ -138,9 +139,12 @@ def observe_acquisition(path, *, metadata=None, digest=None):
     if digest is not None:
         known['sha256'] = digest
     if old is None or any(old.get(key) != value for key, value in known.items()):
-        _taint_observation(binding)
+        content_changed = old is None or any(old.get(key) != value
+            for key, value in known.items() if key != 'mode')
+        if content_changed:
+            _taint_observation(binding)
         raise InputChanged(path, 'input hash mismatch' if digest is not None
-            else 'input metadata differs from acquisition baseline')
+            else 'input metadata differs from acquisition baseline', content_changed=content_changed)
 
 
 class InputTypeError(ContractError):
@@ -164,8 +168,9 @@ def acquisition_read(path, *, kind=stat.S_IFREG):
     try:
         yield
     except (OSError, InputTypeError, InputChanged) as exc:
-        if (isinstance(exc, (InputTypeError, InputChanged))
-                or exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.EISDIR)):
+        if (isinstance(exc, InputTypeError)
+                or isinstance(exc, InputChanged) and exc.content_changed
+                or isinstance(exc, OSError) and exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.EISDIR)):
             if binding is not None and binding[2].get(binding[1], {}).get('type') == kind:
                 _taint_observation(binding)
         raise
@@ -186,9 +191,16 @@ def verify_input_hash(path, expected, *, hash_file=None):
 class InputChanged(ContractError):
     """A reader observed a change, as distinct from invalid input or I/O failure."""
 
-    def __init__(self, path, message):
+    def __init__(self, path, message, *, content_changed=True):
         self.path = Path(path)
+        self.content_changed = content_changed
         super().__init__(f'{message}: {path}')
+
+
+def _content_metadata(metadata):
+    # Timestamps, inode identity and permissions alone do not prove changed bytes.
+    return (stat.S_IFMT(metadata.st_mode),
+        metadata.st_size if stat.S_ISREG(metadata.st_mode) else None)
 
 
 def _stable(metadata):
@@ -239,17 +251,20 @@ def open_regular(path):
         with os.fdopen(fd, 'rb') as stream:
             opened = os.fstat(stream.fileno())
             if not stat.S_ISREG(opened.st_mode) or _stable(opened) != _stable(before):
-                raise InputChanged(path, 'input changed before reading')
+                raise InputChanged(path, 'input changed before reading',
+                    content_changed=_content_metadata(opened) != _content_metadata(before))
             yield stream
             try:
                 after = regular_file_stat(path)
-            except ContractError as exc:
+            except InputTypeError as exc:
                 raise InputChanged(path, 'input type or directory changed while reading') from exc
             except FileNotFoundError as exc:
                 raise InputChanged(path, 'input removed while reading') from exc
             if (_stable(os.fstat(stream.fileno())) != _stable(before)
                     or _stable(after) != _stable(before)):
-                raise InputChanged(path, 'input changed while reading')
+                raise InputChanged(path, 'input changed while reading',
+                    content_changed=any(_content_metadata(item) != _content_metadata(before)
+                        for item in (os.fstat(stream.fileno()), after)))
 
 
 def read_regular(path):
@@ -314,13 +329,17 @@ def fingerprint_tree(root, *, exclude=()):
                 digest = sha256()
                 fd = _open_observed_regular(path)
                 with os.fdopen(fd, 'rb') as stream:
-                    if _stable(os.fstat(stream.fileno())) != _stable(before):
-                        raise InputChanged(path, 'entry changed before hashing')
+                    opened = os.fstat(stream.fileno())
+                    if _stable(opened) != _stable(before):
+                        raise InputChanged(path, 'entry changed before hashing',
+                            content_changed=_content_metadata(opened) != _content_metadata(before))
                     for chunk in iter(lambda: stream.read(1024 * 1024), b''):
                         digest.update(chunk)
-                    if _stable(os.fstat(stream.fileno())) != _stable(before):
-                        raise InputChanged(path, 'entry changed while hashing')
-                entry['sha256'] = digest.hexdigest()
+                    entry['sha256'] = digest.hexdigest()
+                    after = os.fstat(stream.fileno())
+                    if _stable(after) != _stable(before):
+                        raise InputChanged(path, 'entry changed while hashing',
+                            content_changed=_content_metadata(after) != _content_metadata(before))
             elif stat.S_ISDIR(kind):
                 names = []
                 pending.append((path, relative, before))
@@ -334,10 +353,12 @@ def fingerprint_tree(root, *, exclude=()):
                     pending.extend((path / name, name if relative == '.' else relative + '/' + name, None)
                         for name in reversed(sorted(names)))
                 return
-            if _stable(path.lstat()) != _stable(before):
-                raise InputChanged(path, 'entry changed while fingerprinting')
+            after = path.lstat()
+            if _stable(after) != _stable(before):
+                raise InputChanged(path, 'entry changed while fingerprinting',
+                    content_changed=_content_metadata(after) != _content_metadata(before))
         except (OSError, InputChanged) as exc:
-            if isinstance(exc, InputChanged):
+            if isinstance(exc, InputChanged) and exc.content_changed:
                 entry['changed'] = True
             if isinstance(exc, OSError) and exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
                 entry['missing'] = True
@@ -355,9 +376,10 @@ def fingerprint_tree(root, *, exclude=()):
                 if _stable(after) != _stable(before):
                     if _stable(after)[:4] == _stable(before)[:4]:
                         entries[relative]['timestamps_only'] = True
-                    raise InputChanged(path, 'entry changed while fingerprinting')
+                    raise InputChanged(path, 'entry changed while fingerprinting',
+                        content_changed=_content_metadata(after) != _content_metadata(before))
             except (OSError, InputChanged) as exc:
-                if isinstance(exc, InputChanged):
+                if isinstance(exc, InputChanged) and exc.content_changed:
                     entries[relative]['changed'] = True
                 if isinstance(exc, OSError) and exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
                     entries[relative]['missing'] = True
@@ -382,12 +404,13 @@ def acquisition_changed_paths(before, after):
             if not any('error' in after.get(parent, {}) for parent in parents):
                 changed.append(name)
         elif 'error' in new:
-            known = {key: new[key] for key in ('type', 'mode', 'size', 'target', 'sha256')
+            known = {key: new[key] for key in ('type', 'size', 'target', 'sha256')
                 if key in new and (key not in ('target', 'sha256') or new[key] is not None)}
             if (old is None or new.get('changed') or new.get('missing')
                     or any(old.get(key) != value for key, value in known.items())):
                 changed.append(name)
-        elif old != new:
+        elif old is None or any(old.get(key) != new.get(key)
+                for key in ('type', 'size', 'target', 'sha256')):
             changed.append(name)
     return sorted(changed)
 
@@ -398,7 +421,7 @@ def _dependency_identity(metadata):
 
 def snapshot_dependency_identities(trees):
     """Capture file and directory identity outside portable content baselines."""
-    return {root: {name: _dependency_identity((Path(root) / name).lstat())
+    return {root: {name: {'identity': _dependency_identity((Path(root) / name).lstat()), 'entry': entry}
         for name, entry in entries.items() if entry.get('type') in (stat.S_IFREG, stat.S_IFDIR)}
         for root, entries in trees.items()}
 
@@ -409,26 +432,41 @@ def check_dependency_identities(identities, *, observed_changes=None):
     Reads may change atime; it and mtime are excluded. Directory ctime retains
     rename/restore evidence even when the original regular files are untouched.
     Restoring bytes or mtime cannot restore kernel-maintained ctime.
-    Unknown I/O failures refuse without creating a permanent mutation marker.
+    Identity alone refuses this run. Only observed content/namespace differences
+    create permanent taint; failed content observations also remain retryable.
     """
     attempts = {}
     for root, files in identities.items():
-        detail = attempts[root] = {'changed_paths': [], 'unreadable_paths': []}
+        detail = attempts[root] = {'changed_paths': [], 'tainted_paths': [], 'unreadable_paths': []}
         for name, expected in files.items():
             path = Path(root) / name
+            tainted = False
             try:
                 metadata = path.lstat()
             except OSError as exc:
-                changed = exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP)
+                changed = tainted = exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP)
                 if not changed:
                     detail['unreadable_paths'].append(name)
             else:
-                changed = _dependency_identity(metadata) != tuple(expected)
+                changed = _dependency_identity(metadata) != tuple(expected['identity'])
+                if changed:
+                    old = expected['entry']
+                    tainted = (stat.S_IFMT(metadata.st_mode) != old['type']
+                        or stat.S_ISREG(metadata.st_mode) and metadata.st_size != old['size'])
+                    if not tainted and stat.S_ISREG(metadata.st_mode):
+                        # Observe first, then persist once below. A marker-write
+                        # failure must propagate, not be mistaken for input I/O.
+                        current = fingerprint_tree(path)
+                        tainted = bool(acquisition_changed_paths({'.': old}, current))
+                        if any('error' in entry for entry in current.values()):
+                            detail['unreadable_paths'].append(name)
             if changed:
                 detail['changed_paths'].append(name)
                 if observed_changes is not None:
                     observed_changes.append(str(path))
-                record_taints({'attempts': {root: {'changed_paths': detail['changed_paths']}}})
+                if tainted:
+                    detail['tainted_paths'].append(name)
+                    record_taints({'attempts': {root: detail}})
     return attempts
 
 
@@ -445,12 +483,15 @@ def post_execution_check(before, *, observed_changes=None, identities=None):
         _acquisition_binding(root)
         actual = fingerprint_tree(root)
         # Unrelated I/O is not mutation evidence for either dependency kind.
-        changed = acquisition_changed_paths(expected, actual)
+        tainted = acquisition_changed_paths(expected, actual)
+        changed = sorted(set(tainted) | {name for name, entry in actual.items()
+            if 'error' not in entry and expected.get(name) != entry})
         identity = identities.get(root, {})
         changed = sorted(set(changed) | set(identity.get('changed_paths', [])))
+        tainted = sorted(set(tainted) | set(identity.get('tainted_paths', [])))
         unreadable = any('error' in entry for entry in actual.values()) or bool(identity.get('unreadable_paths'))
-        attempts[root] = {'status': 'tainted' if changed else 'unreadable' if unreadable else 'unchanged',
-            'changed_paths': changed, 'fingerprint': actual}
+        attempts[root] = {'status': 'tainted' if tainted else 'changed' if changed else 'unreadable' if unreadable else 'unchanged',
+            'changed_paths': changed, 'tainted_paths': tainted, 'fingerprint': actual}
         if changed:
             if observed_changes is not None:
                 observed_changes.extend(str(Path(root) / name) for name in changed)

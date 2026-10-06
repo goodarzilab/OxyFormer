@@ -1038,7 +1038,8 @@ def test_post_execution_check_names_proc_fd_chmod(runtime, tmp_path, monkeypatch
     assert result.status == 'fail'
     assert str(victim) in result.message
     receipt = read_check(out)
-    assert receipt['attempts'][str(upstream)]['status'] == 'tainted'
+    assert receipt['attempts'][str(upstream)]['status'] == 'changed'
+    assert receipt['attempts'][str(upstream)]['tainted_paths'] == []
     assert receipt['attempts'][str(upstream)]['changed_paths'] == ['undeclared']
     assert file_hash(victim) == before and victim.stat().st_mode & 0o100
     assert not (tmp_path / '.oxyformer-integrity').exists()
@@ -1097,7 +1098,7 @@ def test_unsealed_acquisition_cannot_become_a_new_baseline(runtime, tmp_path, mo
     assert not (source / '_execution').exists()
 
 
-def test_restored_upstream_content_is_equal_but_run_is_tainted(runtime, tmp_path, monkeypatch, source):
+def test_restored_upstream_content_still_refuses_the_observing_run(runtime, tmp_path, monkeypatch, source):
     repo, out = runtime
     victim = source / 'data.json'
     def faulty(request):
@@ -1111,8 +1112,7 @@ def test_restored_upstream_content_is_equal_but_run_is_tainted(runtime, tmp_path
     # Portable content is restored, but the per-run kernel identity is not.
     assert_failed(result, victim)
     assert victim.read_bytes() == b'{}'
-    with raises(ContractError, match='tainted'):
-        verify_dependency_result(source)
+    assert_pass(verify_dependency_result(source))
 
 
 @mark.parametrize('mutation', ['chmod', 'undeclared_bytes'])
@@ -1343,7 +1343,7 @@ def run_stage(request):
 
 @mark.parametrize('operation', ['rewrite_restore_mtime', 'copy2'])
 @mark.parametrize('control', ['result.json', 'fingerprint.json'])
-def test_control_rewrites_taint_even_with_restored_mtime(runtime, tmp_path, monkeypatch, operation, control, source):
+def test_control_rewrites_refuse_even_with_restored_mtime(runtime, tmp_path, monkeypatch, operation, control, source):
     repo, out = runtime
     victim = source / '_execution' / control
     before = victim.stat()
@@ -1364,8 +1364,7 @@ def test_control_rewrites_taint_even_with_restored_mtime(runtime, tmp_path, monk
     assert victim.stat().st_ctime_ns != before.st_ctime_ns
     later = new_attempt(repo, tmp_path / 'later')
     install_stage(monkeypatch, repo, dummy)
-    with raises(ContractError, match='tainted'):
-        run_task(repo, later, needs=SOURCE_NEEDS)
+    assert_pass(run_task(repo, later, needs=SOURCE_NEEDS))
     # Independently retain the content/mode-change checks on a fresh producer.
     source = make_source(repo, tmp_path / 'changed-source', monkeypatch)
     victim = source / '_execution' / control
@@ -1382,7 +1381,7 @@ def test_control_rewrites_taint_even_with_restored_mtime(runtime, tmp_path, monk
     result = run_task(repo, changed, needs=SOURCE_NEEDS)
     assert_failed(result, victim)
     check = read_check(changed)
-    assert check['attempts'][str(source)]['status'] == 'tainted'
+    assert check['attempts'][str(source)]['status'] == ('changed' if operation == 'copy2' else 'tainted')
     assert '_execution/' + control in check['attempts'][str(source)]['changed_paths']
     refused = new_attempt(repo, tmp_path / 'refused')
     install_stage(monkeypatch, repo, dummy)
@@ -2970,7 +2969,7 @@ def test_successful_acquisition_reader_preserves_positive_difference(runtime, ac
     saved, mode = victim.read_bytes(), victim.stat().st_mode & 0o777
     def worker(request):
         if reader == 'stat':
-            victim.chmod(mode ^ 0o020)
+            victim.write_bytes(saved + b' ')  # Different size is positive content evidence.
         else:
             victim.write_bytes(b' ' + saved[1:])  # same size, different observed bytes
         try:
@@ -3343,11 +3342,11 @@ def test_restored_acquisition_write_refuses_publication(runtime, acquisition, tm
     assert victim.stat().st_mtime_ns == metadata.st_mtime_ns
     assert_failed(result, victim)
     assert read_check(out)['attempts'][str(acquisition)]['changed_paths'] == ['payload.tar']
-    assert read_json(Path(str(publication_receipt(acquisition)) + '.tainted')) == ['payload.tar']
+    assert not Path(str(publication_receipt(acquisition)) + '.tainted').exists()
     with raises(ContractError, match='did not pass'):
         verify_dependency_result(out)
-    with raises(ContractError, match='tainted'):
-        run_task(repo, new_attempt(repo, tmp_path / 'retry'), needs=needs)
+    install_stage(monkeypatch, repo, dummy)
+    assert_pass(run_task(repo, new_attempt(repo, tmp_path / 'retry'), needs=needs))
 
 
 @mark.parametrize('transitive', [False, True])
@@ -3375,9 +3374,8 @@ def test_restored_stage_write_refuses_publication(runtime, source, tmp_path, mon
     assert fingerprint_tree(source) == before
     assert_failed(result, victim)
     assert read_check(out)['attempts'][str(source)]['changed_paths'] == ['data.json']
-    assert read_json(Path(str(publication_receipt(source)) + '.tainted')) == ['data.json']
-    with raises(ContractError, match='tainted'):
-        verify_dependency_result(source)
+    assert not Path(str(publication_receipt(source)) + '.tainted').exists()
+    assert_pass(verify_dependency_result(source))
 
 
 def test_restored_write_during_publication_is_refused(runtime, acquisition, monkeypatch):
@@ -3394,7 +3392,7 @@ def test_restored_write_during_publication_is_refused(runtime, acquisition, monk
     result = run_task(repo, out, needs={'fetch-data': ['payload.tar', 'receipts.json']})
     assert_failed(result, victim)
     assert not integrity.publication_receipt(out).exists()
-    assert read_json(Path(str(integrity.publication_receipt(acquisition)) + '.tainted')) == ['payload.tar']
+    assert not Path(str(integrity.publication_receipt(acquisition)) + '.tainted').exists()
 
 
 @mark.parametrize('changed', [False, True])
@@ -3413,8 +3411,7 @@ def test_file_identity_io_failure_preserves_only_positive_changes(runtime, acqui
         nonlocal enabled
         result = dummy(request)
         if changed:
-            victim.write_bytes(b'changed')
-            victim.write_bytes(saved)
+            victim.write_bytes(b'changed')  # Positive bytes, even when another path is unreadable.
         enabled = True
         return result
     monkeypatch.setattr(Path, 'lstat', failing_stat)
@@ -3433,7 +3430,7 @@ def test_file_identity_io_failure_preserves_only_positive_changes(runtime, acqui
             needs={'fetch-data': ['payload.tar', 'receipts.json']}))
 
 
-def test_directory_timestamp_write_taints_dependency(runtime, acquisition, monkeypatch):
+def test_directory_timestamp_write_refuses_dependency(runtime, acquisition, monkeypatch):
     repo, out = runtime
     def worker(request):
         result = dummy(request)
@@ -3478,10 +3475,10 @@ def test_restored_directory_swap_refuses_publication(runtime, acquisition, sourc
         marker_exists=marker.exists(), output=read_json(out/'value.json'))
     assert record['consumed_changed_bytes'] and record['content_restored'] and record['original_file_identity_restored']
     assert_failed(result, root)
-    assert read_json(marker) == ['.']
-
-    with raises(ContractError, match='tainted'):
-        run_task(repo, new_attempt(repo, tmp_path / 'retry'), needs=needs)
+    # Root identity changed, but the verifier never observed the replacement bytes.
+    assert not marker.exists()
+    install_stage(monkeypatch, repo, dummy)
+    assert_pass(run_task(repo, new_attempt(repo, tmp_path / 'retry'), needs=needs))
 
 
 def test_published_dependency_io_failure_does_not_taint(runtime, source, tmp_path, monkeypatch):
@@ -3508,3 +3505,77 @@ def test_published_dependency_io_failure_does_not_taint(runtime, source, tmp_pat
     assert result.status=='fail'
     assert not marker.exists()
     assert_pass(verify_dependency_result(source))
+
+
+@mark.parametrize('kind', ['acquisition', 'stage'])
+@mark.parametrize('when', ['execution', 'read', 'publication'])
+def test_metadata_only_observation_fails_then_allows_retry(runtime, acquisition, source, tmp_path, monkeypatch, kind, when):
+    from oxyformer.execution import runner, integrity
+    repo, out = runtime
+    root = acquisition if kind == 'acquisition' else source
+    victim = root / ('payload.tar' if kind == 'acquisition' else 'data.json')
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']} if kind == 'acquisition' else SOURCE_NEEDS
+    saved = victim.read_bytes()
+    before = victim.stat()
+    def metadata_change():
+        link = tmp_path / 'temporary-hard-link'
+        os.link(victim, link)
+        link.unlink()
+    def worker(request):
+        result = dummy(request)
+        if when == 'read':
+            with integrity.open_regular(victim) as stream:
+                assert stream.read() == saved
+                metadata_change()
+        elif when == 'execution':
+            metadata_change()
+        return result
+    original_publish = runner.publish_result
+    def publish(*args, **kwargs):
+        metadata_change()
+        return original_publish(*args, **kwargs)
+    with monkeypatch.context() as patch:
+        install_stage(patch, repo, worker)
+        if when == 'publication':
+            patch.setattr(runner, 'publish_result', publish)
+        result = run_task(repo, out, needs=needs)
+    assert_failed(result, victim)
+    assert not integrity.publication_receipt(out).exists()
+    assert victim.read_bytes() == saved
+    assert victim.stat().st_ctime_ns != before.st_ctime_ns
+    assert not Path(str(integrity.publication_receipt(root)) + '.tainted').exists()
+    install_stage(monkeypatch, repo, dummy)
+    assert_pass(run_task(repo, new_attempt(repo, tmp_path / 'retry'), needs=needs))
+
+
+@mark.parametrize('kind', ['acquisition', 'stage'])
+def test_incomplete_observation_after_metadata_change_allows_retry(runtime, acquisition, source, tmp_path, monkeypatch, kind):
+    from oxyformer.execution import integrity
+    import errno
+    repo, out = runtime
+    root = acquisition if kind == 'acquisition' else source
+    victim = root / ('payload.tar' if kind == 'acquisition' else 'data.json')
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']} if kind == 'acquisition' else SOURCE_NEEDS
+    original_open = os.open
+    enabled = False
+    def unavailable(path, *args, **kwargs):
+        if enabled and Path(path) == victim:
+            raise OSError(errno.EIO, 'synthetic incomplete content observation', str(path))
+        return original_open(path, *args, **kwargs)
+    def worker(request):
+        nonlocal enabled
+        result = dummy(request)
+        link = tmp_path / 'temporary-hard-link'
+        os.link(victim, link)
+        link.unlink()
+        enabled = True
+        return result
+    with monkeypatch.context() as patch:
+        patch.setattr(os, 'open', unavailable)
+        install_stage(patch, repo, worker)
+        result = run_task(repo, out, needs=needs)
+    assert_failed(result, victim)
+    assert not integrity.publication_receipt(out).exists()
+    assert not Path(str(integrity.publication_receipt(root)) + '.tainted').exists()
+    install_stage(monkeypatch, repo, dummy)
+    assert_pass(run_task(repo, new_attempt(repo, tmp_path / 'retry'), needs=needs))
