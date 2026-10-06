@@ -293,6 +293,10 @@ def _coverage_summary(exposure, quality):
     expected = np.where(exposure.population == 0, 'zero_population',
                         np.where(missing, 'missing_dem', 'complete'))
     require((exposure.status == expected).all(), 'inconsistent tract coverage status')
+    values = ['pressure_mmhg', 'oxygen_deficit_mmhg', 'elevation_p10_m',
+              'elevation_p50_m', 'elevation_p90_m']
+    require(exposure.loc[exposure.status != 'complete', values].isna().all().all(),
+            'incomplete tract exposure must be null')
     return dict(missing_population_by_scenario={
         scenario: math.fsum(exposure.loc[exposure.scenario == scenario, 'missing_population'])
         for scenario in quality['allocation']['scenarios']},

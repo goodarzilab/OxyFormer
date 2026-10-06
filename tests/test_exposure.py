@@ -1028,6 +1028,23 @@ def test_missing_dem_collection_rejects_broken_accounting(tmp_path, missing_dem_
     assert not (Path(req.output_dir) / 'atlas.parquet').exists()
 
 
+@pytest.mark.parametrize('field', ['pressure_mmhg', 'oxygen_deficit_mmhg', 'elevation_p10_m',
+                                   'elevation_p50_m', 'elevation_p90_m'])
+@pytest.mark.parametrize('value', [np.inf, -np.inf])
+def test_missing_dem_collection_rejects_infinite_exposure(tmp_path, missing_dem_shards, field, value):
+    inventory, paths = missing_dem_shards
+    frame = pd.read_parquet(paths[1])
+    frame.loc[0, field] = value
+    frame.to_parquet(paths[1], index=False)
+    manifest = json.loads(paths[0].read_text())
+    manifest['files']['exposure.parquet'] = file_hash(paths[1])
+    paths[0].write_text(canonical_json(manifest))
+    req = collect_request(tmp_path / 'infinite-missing-collection', inventory, paths)
+    result = run_stage(req)
+    assert result.status == 'fail' and result.artifacts == ()
+    assert not (Path(req.output_dir) / 'atlas.parquet').exists()
+
+
 def test_missing_dem_summary_keeps_scenarios_separate(tmp_path, shard_fixture, monkeypatch):
     tile = write_raster(tmp_path / 'partial-dem.tif', [0, 0, -9999])
     geography = blocks()
