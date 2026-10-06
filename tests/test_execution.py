@@ -720,8 +720,7 @@ def test_cli_import_from_pristine_repo_keeps_code_roots_clean(runtime, tmp_path,
     assert_pass(verify_dependency_result(out))
     with (out / 'run.log').open('a') as log:
         log.write('unexpected late log write')
-    with raises(ContractError, match='fingerprint mismatch.*run.log'):
-        verify_dependency_result(out)
+    assert_pass(verify_dependency_result(out))
 
 
 def test_locked_primary_stage_cannot_omit_recipe(runtime):
@@ -903,17 +902,17 @@ def test_upstream_tree_mutation_fails_and_blocks_later_consumer(
     upstream = tmp_path / 'upstream'
     upstream.mkdir()
     source_files(upstream)
-    extra = upstream / 'extra'
-    extra.mkdir()
+    extra = upstream / '_execution/extra'
+    extra.mkdir(parents=True)
     victim = extra / 'victim'
     victim.write_text('original')
     link = extra / 'link'
     link.symlink_to('victim')
     publish_source(repo, upstream)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(upstream))
-    changed = {'bytes': 'extra/victim', 'chmod': 'extra/victim',
-        'added': 'extra/new', 'removed': 'extra/victim',
-        'symlink': 'extra/link'}[mutation]
+    changed = {'bytes': '_execution/extra/victim', 'chmod': '_execution/extra/victim',
+        'added': '_execution/extra/new', 'removed': '_execution/extra/victim',
+        'symlink': '_execution/extra/link'}[mutation]
     def faulty(request):
         result = dummy(request)
         if mutation == 'bytes':
@@ -1021,7 +1020,8 @@ def test_post_execution_check_names_proc_fd_chmod(runtime, tmp_path, monkeypatch
     upstream = tmp_path / 'source'
     upstream.mkdir()
     source_files(upstream)
-    victim = upstream / 'undeclared'
+    victim = upstream / '_execution/extra.txt'
+    victim.parent.mkdir(exist_ok=True)
     victim.write_text('unchanged bytes')
     before = file_hash(victim)
     publish_source(repo, upstream)
@@ -1040,7 +1040,7 @@ def test_post_execution_check_names_proc_fd_chmod(runtime, tmp_path, monkeypatch
     receipt = read_check(out)
     assert receipt['attempts'][str(upstream)]['status'] == 'changed'
     assert receipt['attempts'][str(upstream)]['tainted_paths'] == []
-    assert receipt['attempts'][str(upstream)]['changed_paths'] == ['undeclared']
+    assert receipt['attempts'][str(upstream)]['changed_paths'] == ['_execution/extra.txt']
     assert file_hash(victim) == before and victim.stat().st_mode & 0o100
     assert not (tmp_path / '.oxyformer-integrity').exists()
 
@@ -1115,7 +1115,7 @@ def test_restored_upstream_content_still_refuses_the_observing_run(runtime, tmp_
     assert_pass(verify_dependency_result(source))
 
 
-@mark.parametrize('mutation', ['chmod', 'undeclared_bytes'])
+@mark.parametrize('mutation', ['chmod', 'execution_bytes'])
 def test_preflight_cannot_rebase_a_changed_dependency(runtime, tmp_path, monkeypatch, mutation):
     import oxyformer.execution.runner as runner
     repo, out = runtime
@@ -1124,7 +1124,8 @@ def test_preflight_cannot_rebase_a_changed_dependency(runtime, tmp_path, monkeyp
     victim = source / 'data.json'
     victim.write_text('{}')
     (source / 'receipts.json').write_text('{}')
-    extra = source / 'undeclared.txt'
+    extra = source / '_execution/extra.txt'
+    extra.parent.mkdir(exist_ok=True)
     extra.write_text('before')
     publish_source(repo, source)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
@@ -1897,14 +1898,14 @@ def test_unwritable_control_directory_cannot_suppress_upstream_receipts(runtime,
     repo, out = runtime
     source = tmp_path / 'source'
     (source / 'extra').mkdir(parents=True)
-    victim = source / 'extra/victim'
+    victim = source / '_execution/extra/victim'
     victim.write_text('before')
     seal_source(repo, source)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
     try:
         process = run_cli(repo, out, '''def run_stage(request):
     result = dummy(request)
-    (Path(os.environ['SWARM_DEP_DATA_UNIT']) / 'extra/victim').write_text('changed')
+    (Path(os.environ['SWARM_DEP_DATA_UNIT']) / '_execution/extra/victim').write_text('changed')
     (Path(request.output_dir) / '_execution').chmod(0o500)
     return result
 ''', needs=SOURCE_NEEDS)
@@ -1913,7 +1914,7 @@ def test_unwritable_control_directory_cannot_suppress_upstream_receipts(runtime,
         result = read_result(out)
         assert_failed(result, victim)
         receipt = read_check(out)
-        assert 'extra/victim' in receipt['attempts'][str(source)]['changed_paths']
+        assert '_execution/extra/victim' in receipt['attempts'][str(source)]['changed_paths']
     finally:
         # Restore only this failed consumer's directory so pytest can clean up.
         (out / '_execution').chmod(0o700)
@@ -1996,7 +1997,7 @@ def test_deep_tree_preserves_detection_and_publication(runtime, tmp_path, monkey
     created = []
     def stage(request):
         result = dummy(request)
-        path = source if location == 'upstream' else Path(os.environ['HF_HOME'])
+        path = source / '_execution' if location == 'upstream' else Path(os.environ['HF_HOME'])
         for _ in range(1150):
             path = path / 'd'
             path.mkdir()
@@ -2026,7 +2027,8 @@ def test_rewritten_upstream_publication_fails_changer_and_transitive_collector(r
     repo, out = runtime
     source = tmp_path / 'source'
     source.mkdir()
-    victim = source / 'undeclared'
+    victim = source / '_execution/extra.txt'
+    victim.parent.mkdir(exist_ok=True)
     victim.write_text('before')
     seal_source(repo, source)
     monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(source))
@@ -2037,7 +2039,7 @@ def test_rewritten_upstream_publication_fails_changer_and_transitive_collector(r
         result = dummy(request)
         victim.write_text('changed')
         fingerprint = read_json(source / FINGERPRINT)
-        fingerprint['entries'] = publication_tree(source)
+        fingerprint['entries'] = publication_tree(source, SOURCE_NEEDS['data-unit'])
         (source / FINGERPRINT).write_text(canonical_json(fingerprint))
         producer = read_result(source)
         producer = replace(producer, artifacts=tuple(
@@ -2052,7 +2054,7 @@ def test_rewritten_upstream_publication_fails_changer_and_transitive_collector(r
     check = read_check(out)
     assert check['status'] == 'fail'
     assert check['attempts'][str(source)]['status'] == 'tainted'
-    assert 'undeclared' in check['attempts'][str(source)]['changed_paths']
+    assert '_execution/extra.txt' in check['attempts'][str(source)]['changed_paths']
     install_stage(monkeypatch, repo, dummy)
     monkeypatch.setenv('SWARM_DEP_CHANGING', str(out))
     # Refuse both the failed changer and the previously passing middle whose
@@ -3791,3 +3793,225 @@ def test_acquisition_scan_evidence_precedes_authority_io(runtime, acquisition, t
     assert added.name in read_json(marker)
     with raises(ContractError, match='tainted'):
         run_task(repo, new_attempt(repo, tmp_path / 'future'), needs=needs)
+
+
+COORDINATOR_FILES = ('unit.json', 'events.jsonl', 'receipt.json', 'submitted.json',
+    'job.sbatch', 'slurm-123.out', 'code_commit.txt', 'run.log', 'src/launcher.py')
+
+
+def coordinator_files(root, text):
+    for name in COORDINATOR_FILES:
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+
+
+@mark.parametrize('when', ['before-admission', 'during-execution', 'during-publication'])
+def test_coordinator_attempt_writes_do_not_enter_publication(runtime, tmp_path, monkeypatch, when):
+    from oxyformer.execution import integrity
+    repo, out = runtime
+    upstream = tmp_path / 'coordinator-attempt'
+    upstream.mkdir()
+    source_files(upstream)
+    coordinator_files(upstream, 'before publication')
+    original_replace = integrity._replace_control
+    def interleave(root, relative, text):
+        original_replace(root, relative, text)
+        if Path(root) == upstream and relative == FINGERPRINT:
+            coordinator_files(upstream, 'coordinator progress')
+            (upstream / 'slurm-456.out').write_text('new scheduler log')
+    if when == 'during-publication':
+        monkeypatch.setattr(integrity, '_replace_control', interleave)
+    publish_source(repo, upstream)
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(upstream))
+    def coordinator_update():
+        coordinator_files(upstream, 'after publication')
+        (upstream / 'slurm-789.out').write_text('new scheduler log')
+        (upstream / 'src/bytecode').mkdir()
+        (upstream / 'unit.json').unlink()
+    if when == 'before-admission':
+        coordinator_update()
+    def consumer(request):
+        if when == 'during-execution':
+            coordinator_update()
+        return dummy(request)
+    install_stage(monkeypatch, repo, consumer)
+    assert_pass(run_task(repo, out, needs=SOURCE_NEEDS))
+    entries = read_json(upstream / FINGERPRINT)['entries']
+    assert not (set(COORDINATOR_FILES) & set(entries))
+    assert not any(name.startswith('src/') or name.startswith('slurm-') for name in entries)
+    assert_pass(verify_dependency_result(upstream))
+    assert not Path(str(integrity.publication_receipt(upstream)) + '.tainted').exists()
+
+
+@mark.parametrize('name', COORDINATOR_FILES)
+def test_needs_only_accept_published_artifacts(runtime, tmp_path, monkeypatch, name):
+    repo, out = runtime
+    upstream = tmp_path / 'coordinator-attempt'
+    upstream.mkdir()
+    source_files(upstream)
+    coordinator_files(upstream, 'launcher')
+    publish_source(repo, upstream)
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(upstream))
+    with raises(ContractError, match='dependency file not declared'):
+        run_task(repo, out, needs={'data-unit': [name]})
+    assert not (out / 'value.json').exists()
+
+
+@mark.parametrize('name', ['data.json', '_execution/task.json'])
+@mark.parametrize('restore', [False, True])
+def test_published_changes_with_coordinator_files_refuse(runtime, tmp_path, monkeypatch, name, restore):
+    from oxyformer.execution.integrity import publication_receipt, read_regular
+    repo, out = runtime
+    upstream = tmp_path / 'coordinator-attempt'
+    upstream.mkdir()
+    source_files(upstream)
+    coordinator_files(upstream, 'launcher')
+    publish_source(repo, upstream)
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(upstream))
+    victim = upstream / name
+    original = victim.read_bytes()
+    def faulty(request):
+        result = dummy(request)
+        coordinator_files(upstream, 'after publication')
+        victim.write_bytes(b'changed published content')
+        if restore:
+            try:
+                with raises(ContractError):
+                    read_regular(victim)
+            finally:
+                victim.write_bytes(original)
+        return result
+    install_stage(monkeypatch, repo, faulty)
+    assert_failed(run_task(repo, out, needs=SOURCE_NEEDS), victim)
+    marker = Path(str(publication_receipt(upstream)) + '.tainted')
+    assert name in read_json(marker)
+    with raises(ContractError, match='tainted'):
+        verify_dependency_result(upstream)
+
+
+def test_existing_coordinator_taint_is_not_cleared(runtime, source):
+    from oxyformer.execution.integrity import publication_receipt
+    marker = Path(str(publication_receipt(source)) + '.tainted')
+    marker.write_text('["events.jsonl", "receipt.json"]')
+    before = marker.read_bytes()
+    with raises(ContractError, match='tainted'):
+        verify_dependency_result(source)
+    assert marker.read_bytes() == before
+
+
+@mark.parametrize('relative', ['run.log', 'nested/published.json'])
+def test_declared_artifacts_are_selected_by_declaration_not_filename(runtime, tmp_path, monkeypatch, relative):
+    repo, upstream = runtime
+    assert_pass(run_task(repo, upstream, id='producer', outputs=[relative]))
+    monkeypatch.setenv('SWARM_DEP_PRODUCER', str(upstream))
+    if '/' in relative:
+        # An undeclared sibling changes directory size/ctime, not publication.
+        (upstream / 'nested/coordinator.json').write_text('progress')
+    consumer = new_attempt(repo, tmp_path / 'consumer')
+    assert_pass(run_task(repo, consumer, needs={'producer': [relative]}))
+    victim = upstream / relative
+    victim.write_text('changed artifact')
+    with raises(ContractError, match='fingerprint.*' + relative):
+        verify_dependency_result(upstream)
+
+
+def test_unpublished_special_and_unreadable_files_are_not_observed(runtime, tmp_path, monkeypatch):
+    from oxyformer.execution.integrity import publication_receipt
+    repo, out = runtime
+    upstream = tmp_path / 'coordinator-attempt'
+    upstream.mkdir()
+    source_files(upstream)
+    coordinator_files(upstream, 'launcher')
+    publish_source(repo, upstream)
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(upstream))
+    (upstream / 'events.jsonl').unlink()
+    os.mkfifo(upstream / 'events.jsonl')
+    original_lstat = Path.lstat
+    def unreadable(path, *args, **kwargs):
+        if path == upstream / 'src':
+            raise PermissionError('launcher source is not a stage output')
+        return original_lstat(path, *args, **kwargs)
+    monkeypatch.setattr(Path, 'lstat', unreadable)
+    assert_pass(run_task(repo, out, needs=SOURCE_NEEDS))
+    assert not Path(str(publication_receipt(upstream)) + '.tainted').exists()
+
+
+def test_legacy_publication_projects_bound_artifacts_without_clearing_taint(runtime, tmp_path, monkeypatch):
+    from oxyformer.execution import integrity
+    repo, out = runtime
+    upstream = tmp_path / 'legacy-attempt'
+    upstream.mkdir()
+    source_files(upstream)
+    coordinator_files(upstream, 'launcher')
+    original_replace = integrity._replace_control
+    def legacy_control(root, relative, text):
+        if relative == FINGERPRINT:
+            value = json.loads(text)
+            value['schema_version'] = 1
+            text = canonical_json(value)
+        original_replace(root, relative, text)
+    with monkeypatch.context() as legacy:
+        legacy.setattr(integrity, '_settled_publication_tree',
+            lambda root, artifacts: integrity.publication_view(fingerprint_tree(root)))
+        legacy.setattr(integrity, '_replace_control', legacy_control)
+        publish_source(repo, upstream)
+    assert read_json(upstream / FINGERPRINT)['schema_version'] == 1
+    coordinator_files(upstream, 'coordinator completed')
+    monkeypatch.setenv('SWARM_DEP_DATA_UNIT', str(upstream))
+    assert_pass(run_task(repo, out, needs=SOURCE_NEEDS))
+    (upstream / 'data.json').write_text('changed published data')
+    with raises(ContractError, match='fingerprint.*data.json'):
+        verify_dependency_result(upstream)
+    (upstream / 'data.json').write_text('{}')
+    with raises(ContractError, match='tainted'):
+        verify_dependency_result(upstream)
+
+
+def test_shared_artifact_directory_swap_is_detected(runtime, tmp_path, monkeypatch):
+    repo, upstream = runtime
+    assert_pass(run_task(repo, upstream, id='producer', outputs=['nested/data.json']))
+    monkeypatch.setenv('SWARM_DEP_PRODUCER', str(upstream))
+    directory = upstream / 'nested'
+    parked = upstream / 'parked'
+    def faulty(request):
+        result = dummy(request)
+        directory.rename(parked)
+        try:
+            shutil.copytree(parked, directory)
+            (directory / 'data.json').write_text('changed bytes')
+            assert (directory / 'data.json').read_text() == 'changed bytes'
+        finally:
+            shutil.rmtree(directory)
+            parked.rename(directory)
+        return result
+    install_stage(monkeypatch, repo, faulty)
+    consumer = new_attempt(repo, tmp_path / 'consumer')
+    assert_failed(run_task(repo, consumer, needs={'producer': ['nested/data.json']}), directory)
+
+
+def test_namespace_observation_failure_refuses_without_taint(runtime, source, tmp_path, monkeypatch):
+    from oxyformer.execution import integrity
+    repo, out = runtime
+    original_read = os.read
+    def worker(request):
+        result = dummy(request)
+        fd = integrity._observation_state()['watch'].fd
+        def unreadable(handle, size):
+            if handle == fd:
+                raise OSError('synthetic namespace observation failure')
+            return original_read(handle, size)
+        monkeypatch.setattr(os, 'read', unreadable)
+        return result
+    install_stage(monkeypatch, repo, worker)
+    assert run_task(repo, out, needs=SOURCE_NEEDS).status == 'fail'
+    monkeypatch.setattr(os, 'read', original_read)
+    assert not Path(str(integrity.publication_receipt(source)) + '.tainted').exists()
+    install_stage(monkeypatch, repo, dummy)
+    assert_pass(run_task(repo, new_attempt(repo, tmp_path / 'retry'), needs=SOURCE_NEEDS))
+
+
+def test_existing_continuation_needs_may_name_published_execution_records(runtime, source):
+    repo, out = runtime
+    assert_pass(run_task(repo, out, needs={'data-unit': ['data.json', '_execution/task.json',
+        '_execution/request.json', '_execution/result.json']}))

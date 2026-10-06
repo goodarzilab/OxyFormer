@@ -5,12 +5,14 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import replace
 from hashlib import sha256
+import ctypes
 import errno
 import fcntl
 import json
 import os
 from pathlib import Path
 import stat
+import struct
 import tempfile
 
 from oxyformer.contracts import StageResult
@@ -66,11 +68,71 @@ def require_complete_observations(root):
     state = _observation_state()
     require(state is None or state['root'] == str(root), 'observation attempt mismatch')
     if state is not None:
+        watch = state.get('watch')
+        changed = [] if watch is None else sorted(str(Path(root) / name) for root, name in watch.changes())
+        require(not changed, 'upstream directory identity changed: ' + ', '.join(changed))
         require(not state['failures'], 'integrity observation refused: ' + '; '.join(state['failures']))
     receipt = publication_receipt(root)
     marker = Path(str(receipt) + '.refused')
     if authority_exists(marker):
         require(False, 'integrity observation refused: ' + json.loads(read_regular(marker))['message'])
+
+
+class _NamespaceWatch:
+    """Watch shared directories for replacement without watching sibling writes.
+
+    Their ctime/size legitimately change when the coordinator creates files.
+    Inotify's self-move/delete events retain rename-and-restore evidence while
+    file ctimes and complete _execution directory identities remain strict.
+    """
+    def __init__(self, trees):
+        self.fd = None
+        self.paths = {}
+        self.changed = set()
+        shared = [(root, name) for root, entries in trees.items()
+            for name, entry in entries.items() if entry.get('partial')]
+        if not shared:
+            return
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.inotify_init1.argtypes = [ctypes.c_int]
+        libc.inotify_init1.restype = ctypes.c_int
+        libc.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
+        libc.inotify_add_watch.restype = ctypes.c_int
+        self.fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
+        if self.fd < 0:
+            raise OSError(ctypes.get_errno(), 'cannot observe published directory identity')
+        try:
+            for root, name in shared:
+                path = Path(root) / name
+                # IN_MOVE_SELF | IN_DELETE_SELF | IN_ONLYDIR | IN_DONT_FOLLOW.
+                wd = libc.inotify_add_watch(self.fd, os.fsencode(path), 0xC00 | 0x3000000)
+                if wd < 0:
+                    raise OSError(ctypes.get_errno(), 'cannot watch published directory', str(path))
+                self.paths.setdefault(wd, []).append((root, name))
+        except BaseException:
+            self.close()
+            raise
+
+    def changes(self):
+        if self.fd is not None:
+            while True:
+                try:
+                    raw = os.read(self.fd, 65536)
+                except BlockingIOError:
+                    break
+                require(bool(raw), 'directory identity observation ended')
+                offset = 0
+                while offset < len(raw):
+                    wd, mask, _, length = struct.unpack_from('iIII', raw, offset)
+                    offset += 16 + length
+                    require(not mask & 0x4000, 'directory identity observation overflow')
+                    self.changed.update(self.paths.get(wd, ()))
+        return self.changed
+
+    def close(self):
+        if self.fd is not None and self.fd >= 0:
+            os.close(self.fd)
+        self.fd = None
 
 
 @contextmanager
@@ -80,11 +142,13 @@ def observe_dependencies(root, trees):
     receipt = publication_receipt(root, create=True)
     atomic_json(receipt.parent, receipt.name + '.observation-inputs', {'attempt': root, 'trees': trees})
     previous = os.environ.get(_OBSERVATION_ENV)
-    _OBSERVATION_STATES[root] = {'root': root, 'trees': trees, 'failures': []}
+    watch = _NamespaceWatch(trees)
+    _OBSERVATION_STATES[root] = {'root': root, 'trees': trees, 'failures': [], 'watch': watch}
     os.environ[_OBSERVATION_ENV] = root
     try:
         yield
     finally:
+        watch.close()
         _OBSERVATION_STATES.pop(root, None)
         if previous is None:
             os.environ.pop(_OBSERVATION_ENV, None)
@@ -200,7 +264,11 @@ def _acquisition_binding(path, *, use_active=True):
         for root, entries in sorted(state['trees'].items(), key=lambda item: len(item[0]), reverse=True):
             root = Path(root)
             if path.is_relative_to(root):
-                return root, str(path.relative_to(root)), entries
+                name = str(path.relative_to(root))
+                if entries.get('.', {}).get('published') is not None:
+                    if name not in entries and not name.startswith('_execution/'):
+                        continue
+                return root, name, entries
     for root in (path, *path.parents):
         if store.is_relative_to(root):
             continue
@@ -235,6 +303,8 @@ def observe_acquisition(path, *, metadata=None, digest=None):
     old = binding[2].get(binding[1])
     known = {} if metadata is None else dict(type=stat.S_IFMT(metadata.st_mode),
         mode=stat.S_IMODE(metadata.st_mode), size=metadata.st_size)
+    if old is not None and old.get('partial') and known.get('type') == stat.S_IFDIR:
+        known.pop('size', None)
     if digest is not None:
         known['sha256'] = digest
     if old is None or any(old.get(key) != value for key, value in known.items()):
@@ -483,15 +553,27 @@ def verify_result(result, request):
             f'artifact hash mismatch: {artifact.path}')
 
 
-def fingerprint_tree(root, *, exclude=()):
-    """Return every entry, including '.', and explicit errors on unreadable paths.
+def fingerprint_tree(root, *, exclude=(), include=None):
+    """Fingerprint the selected subtrees and their directory ancestors.
 
-    Entries omit timestamps and inodes. Those are used only for within-read
-    stability checks; the stored view binds types, modes, sizes, bytes and links.
+    With no selection, include every entry (the acquisition boundary). Partial
+    ancestors bind type and mode, but sibling writes cannot affect their size
+    or timestamp observations. Entries omit timestamps and inodes; those are
+    used only for read stability and separate per-run identity observations.
     """
     root = Path(root)
     entries = {}
     pending = [(root, '.', None)]
+    selected = None if include is None else tuple(sorted(set(include)))
+
+    def partial(relative):
+        return selected is not None and not any(relative == name or relative.startswith(name + '/')
+            for name in selected)
+
+    def signature(metadata, relative):
+        if partial(relative) and stat.S_ISDIR(metadata.st_mode):
+            return (metadata.st_dev, metadata.st_ino, metadata.st_mode)
+        return _stable(metadata)
 
     def visit(path, relative):
         if relative in exclude:
@@ -521,6 +603,18 @@ def fingerprint_tree(root, *, exclude=()):
                         raise InputChanged(path, 'entry changed while hashing',
                             content_changed=_content_metadata(after) != _content_metadata(before))
             elif stat.S_ISDIR(kind):
+                if partial(relative):
+                    # Only traverse selected children; never open or enumerate
+                    # coordinator/launcher siblings, even when unreadable.
+                    entry.update(size=0, partial=True)
+                    if relative == '.':
+                        entry['published'] = list(selected)
+                    prefix = '' if relative == '.' else relative + '/'
+                    names = {name[len(prefix):].split('/')[0] for name in selected
+                        if name.startswith(prefix)}
+                    pending.append((path, relative, before))
+                    pending.extend((path / name, prefix + name, None) for name in reversed(sorted(names)))
+                    return
                 names = []
                 pending.append((path, relative, before))
                 try:
@@ -553,7 +647,7 @@ def fingerprint_tree(root, *, exclude=()):
         else:
             try:
                 after = path.lstat()
-                if _stable(after) != _stable(before):
+                if signature(after, relative) != signature(before, relative):
                     if _stable(after)[:4] == _stable(before)[:4]:
                         entries[relative]['timestamps_only'] = True
                     raise InputChanged(path, 'entry changed while fingerprinting',
@@ -595,13 +689,14 @@ def acquisition_changed_paths(before, after):
     return sorted(changed)
 
 
-def _dependency_identity(metadata):
-    return (metadata.st_dev, metadata.st_ino, stat.S_IFMT(metadata.st_mode), metadata.st_ctime_ns)
+def _dependency_identity(metadata, entry):
+    return (metadata.st_dev, metadata.st_ino, stat.S_IFMT(metadata.st_mode),
+        stat.S_IMODE(metadata.st_mode) if entry.get('partial') else metadata.st_ctime_ns)
 
 
 def snapshot_dependency_identities(trees):
     """Capture file and directory identity outside portable content baselines."""
-    return {root: {name: {'identity': _dependency_identity((Path(root) / name).lstat()), 'entry': entry}
+    return {root: {name: {'identity': _dependency_identity((Path(root) / name).lstat(), entry), 'entry': entry}
         for name, entry in entries.items() if entry.get('type') in (stat.S_IFREG, stat.S_IFDIR)}
         for root, entries in trees.items()}
 
@@ -609,12 +704,16 @@ def snapshot_dependency_identities(trees):
 def check_dependency_identities(identities, *, observed_changes=None):
     """Retain each kernel-observed change before checking another path.
 
-    Reads may change atime; it and mtime are excluded. Directory ctime retains
-    rename/restore evidence even when the original regular files are untouched.
+    Reads may change atime; it and mtime are excluded. Complete directory
+    ctimes retain rename/restore evidence. Shared ancestors use self-move/delete
+    watches because coordinator sibling creation also changes their ctime.
     Restoring bytes or mtime cannot restore kernel-maintained ctime.
     Identity alone refuses this run. Only observed content/namespace differences
     create permanent taint; failed content observations also remain retryable.
     """
+    state = _observation_state()
+    watch = None if state is None else state.get('watch')
+    moved = set() if watch is None else watch.changes()
     attempts = {}
     for root, files in identities.items():
         detail = attempts[root] = {'changed_paths': [], 'tainted_paths': [], 'unreadable_paths': []}
@@ -628,7 +727,8 @@ def check_dependency_identities(identities, *, observed_changes=None):
                 if not changed:
                     detail['unreadable_paths'].append(name)
             else:
-                changed = _dependency_identity(metadata) != tuple(expected['identity'])
+                changed = (_dependency_identity(metadata, expected['entry']) != tuple(expected['identity'])
+                    or (root, name) in moved)
                 if changed:
                     old = expected['entry']
                     tainted = (stat.S_IFMT(metadata.st_mode) != old['type']
@@ -665,7 +765,7 @@ def post_execution_check(before, *, observed_changes=None, identities=None):
         except (OSError, ContractError) as exc:
             _record_refusal(root, exc)
             raise
-        actual = fingerprint_tree(root)
+        actual = fingerprint_tree(root, include=expected.get('.', {}).get('published'))
         # Unrelated I/O is not mutation evidence for either dependency kind.
         tainted = acquisition_changed_paths(expected, actual)
         changed = sorted(set(tainted) | {name for name, entry in actual.items()
@@ -693,11 +793,27 @@ def publication_view(entries):
         if name not in PUBLICATION_EXCLUSIONS}
 
 
-def publication_tree(root):
-    return publication_view(fingerprint_tree(root))
+def _legacy_publication_scope(entries, selected):
+    """Project an authenticated v1 baseline without rewriting it or its taint."""
+    scoped = {}
+    for name, entry in entries.items():
+        full = any(name == path or name.startswith(path + '/') for path in selected)
+        ancestor = name == '.' or any(path.startswith(name + '/') for path in selected)
+        if full or ancestor:
+            entry = dict(entry)
+            if not full and entry.get('type') == stat.S_IFDIR:
+                entry.update(size=0, partial=True)
+                if name == '.':
+                    entry['published'] = list(selected)
+            scoped[name] = entry
+    return scoped
 
 
-def _settled_publication_tree(root):
+def publication_tree(root, artifacts):
+    return publication_view(fingerprint_tree(root, include=('_execution', *artifacts)))
+
+
+def _settled_publication_tree(root, artifacts):
     """Allow our own control-directory timestamps to settle, never rebaseline.
 
     Weka can expose pre-rename mtime/ctime once after _replace_control, even
@@ -706,7 +822,7 @@ def _settled_publication_tree(root):
     remain identical to the first observation; other errors are not retried.
     Upstream fingerprinting remains strict and never calls this helper.
     """
-    first = publication_tree(root)
+    first = publication_tree(root, artifacts)
     control = first.get('_execution', {})
     if not (control.get('type') == stat.S_IFDIR and control.get('timestamps_only')
             and 'error' in control):
@@ -714,7 +830,7 @@ def _settled_publication_tree(root):
     expected = dict(first, _execution={key: value for key, value in control.items()
         if key not in ('error', 'changed', 'timestamps_only')})
     for _ in range(3):
-        current = publication_tree(root)
+        current = publication_tree(root, artifacts)
         if current == expected:
             return current
         detail = current.get('_execution', {})
@@ -799,17 +915,18 @@ def publish_result(root, result, *, owned_controls=False, dependency_roots=(), d
     _replace_control(root, RESULT, pending.to_json())
     try:
         atomic_json(root, FINGERPRINT, {})
+        artifacts = tuple(a.path for a in result.artifacts)
         for _ in range(3):
-            entries = _settled_publication_tree(root)
+            entries = _settled_publication_tree(root, artifacts)
             errors = [str(root / name) for name, entry in entries.items() if 'error' in entry]
             require(not errors, 'publication fingerprint unreadable: ' + ', '.join(errors))
-            value = {'schema_version': 1, 'attempt': str(root),
+            value = {'schema_version': 2, 'attempt': str(root),
                 'excluded': list(PUBLICATION_EXCLUSIONS), 'entries': entries,
                 'stage_result': result.to_dict(),
                 'control_modes': {name: stat.S_IMODE((root / name).lstat().st_mode)
                     for name in PUBLICATION_EXCLUSIONS}}
             _replace_control(root, FINGERPRINT, canonical_json(value))
-            if _settled_publication_tree(root) == entries:
+            if _settled_publication_tree(root, artifacts) == entries:
                 break
         else:
             raise ValueError('attempt changed during fingerprint publication')
@@ -817,7 +934,7 @@ def publish_result(root, result, *, owned_controls=False, dependency_roots=(), d
             lineage=result.artifacts[0].lineage, kind='attempt_fingerprint')
         published = replace(result, artifacts=(*result.artifacts, fingerprint))
         _replace_control(root, RESULT, published.to_json())
-        require(_settled_publication_tree(root) == entries, 'attempt changed during result publication')
+        require(_settled_publication_tree(root, artifacts) == entries, 'attempt changed during result publication')
         record_publication(root, published, dependency_roots=dependency_roots,
             dependency_identities=dependency_identities)
         return published
@@ -850,7 +967,7 @@ def _verify_published_tree(root, result, expected_hash):
     value = json.loads(raw)
     require(isinstance(value, dict) and set(value) == {
             'schema_version', 'attempt', 'excluded', 'entries', 'stage_result', 'control_modes'}
-        and value['schema_version'] == 1 and value['attempt'] == str(root)
+        and value['schema_version'] in (1, 2) and value['attempt'] == str(root)
         and value['excluded'] == list(PUBLICATION_EXCLUSIONS)
         and isinstance(value['entries'], dict), 'invalid dependency fingerprint record')
     original_result = replace(result, artifacts=tuple(a for a in result.artifacts if a.path != FINGERPRINT))
@@ -858,9 +975,15 @@ def _verify_published_tree(root, result, expected_hash):
     require(bool(original_result.artifacts) and
         records[0].lineage == original_result.artifacts[0].lineage,
         'dependency fingerprint artifact lineage changed since publication')
-    actual = fingerprint_tree(root)
-    changed = changed_paths(value['entries'], publication_view(actual))
-    tainted = acquisition_changed_paths(value['entries'], publication_view(actual))
+    selected = tuple(sorted({'_execution', *(a.path for a in original_result.artifacts)}))
+    expected = value['entries']
+    if value['schema_version'] == 1:
+        expected = _legacy_publication_scope(expected, selected)
+    require(expected.get('.', {}).get('published') == list(selected),
+        'dependency publication scope mismatch')
+    actual = fingerprint_tree(root, include=selected)
+    changed = changed_paths(expected, publication_view(actual))
+    tainted = acquisition_changed_paths(expected, publication_view(actual))
     control_hashes = {FINGERPRINT: records[0].sha256, RESULT: sha256(result.to_json().encode()).hexdigest()}
     for name, digest in control_hashes.items():
         entry = actual.get(name, {})
