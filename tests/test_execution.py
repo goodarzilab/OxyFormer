@@ -2012,7 +2012,7 @@ def test_deep_tree_preserves_detection_and_publication(runtime, tmp_path, monkey
             assert_failed(result, created[-1])
             check = read_check(out)
             assert created[-1].relative_to(source).as_posix() in check['attempts'][str(source)]['changed_paths']
-            with raises(ContractError, match='fingerprint mismatch'):
+            with raises(ContractError, match='tainted upstream fingerprint'):
                 verify_dependency_result(source)
         else:
             assert_pass(result)
