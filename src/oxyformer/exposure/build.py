@@ -295,8 +295,10 @@ def _coverage_summary(exposure, quality):
     require((exposure.status == expected).all(), 'inconsistent tract coverage status')
     values = ['pressure_mmhg', 'oxygen_deficit_mmhg', 'elevation_p10_m',
               'elevation_p50_m', 'elevation_p90_m']
-    require(exposure.loc[exposure.status != 'complete', values].isna().all().all(),
-            'incomplete tract exposure must be null')
+    incomplete = exposure.loc[exposure.status != 'complete', values]
+    # Numeric NaN is independent of pandas' legacy infinity-as-missing option.
+    require(all(math.isnan(value) for row in incomplete.itertuples(index=False, name=None)
+                for value in row), 'incomplete tract exposure must be null')
     return dict(missing_population_by_scenario={
         scenario: math.fsum(exposure.loc[exposure.scenario == scenario, 'missing_population'])
         for scenario in quality['allocation']['scenarios']},

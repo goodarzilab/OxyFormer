@@ -1031,7 +1031,9 @@ def test_missing_dem_collection_rejects_broken_accounting(tmp_path, missing_dem_
 @pytest.mark.parametrize('field', ['pressure_mmhg', 'oxygen_deficit_mmhg', 'elevation_p10_m',
                                    'elevation_p50_m', 'elevation_p90_m'])
 @pytest.mark.parametrize('value', [np.inf, -np.inf])
-def test_missing_dem_collection_rejects_infinite_exposure(tmp_path, missing_dem_shards, field, value):
+@pytest.mark.parametrize('legacy_inf_mask', [False, True])
+def test_missing_dem_collection_rejects_infinite_exposure(
+        tmp_path, missing_dem_shards, monkeypatch, field, value, legacy_inf_mask):
     inventory, paths = missing_dem_shards
     frame = pd.read_parquet(paths[1])
     frame.loc[0, field] = value
@@ -1040,6 +1042,18 @@ def test_missing_dem_collection_rejects_infinite_exposure(tmp_path, missing_dem_
     manifest['files']['exposure.parquet'] = file_hash(paths[1])
     paths[0].write_text(canonical_json(manifest))
     req = collect_request(tmp_path / 'infinite-missing-collection', inventory, paths)
+    if legacy_inf_mask:
+        # pandas 2.x could count infinity as missing via mode.use_inf_as_na.
+        # Reproduce that mask semantics on pandas 3.x, where the option is gone.
+        original_isna = pd.DataFrame.isna
+
+        def isna_including_infinity(frame):
+            mask = original_isna(frame)
+            numeric = frame.select_dtypes(include='number').columns
+            mask[numeric] |= np.isinf(frame[numeric])
+            return mask
+
+        monkeypatch.setattr(pd.DataFrame, 'isna', isna_including_infinity)
     result = run_stage(req)
     assert result.status == 'fail' and result.artifacts == ()
     assert not (Path(req.output_dir) / 'atlas.parquet').exists()
