@@ -8,6 +8,9 @@ inputs (historical relative name -> hashed dependency), python/rscript, options.
 Repaired mode accepts records (JSON records), manifest (DataManifest), confounders
 (explicit names). Phase26 additionally needs split (SplitManifest), entities
 (EntityGraph), fold, epochs and seed. All paths must be StageRequest dependencies.
+Input paths may also be {dependency: unit-id, path: relative-output} references
+resolved through the runner's hash-bound configuration. Runtime executables are
+selected explicitly; they are inventoried by preflight, not scientific inputs.
 Every report states its mode, identities and interpretation. v2 execution belongs
 to the owning common stage, selected by the compatibility launcher.
 """
@@ -16,6 +19,7 @@ import math
 from pathlib import Path
 import platform
 import subprocess
+import tarfile
 
 from oxyformer.contracts import DataManifest, SplitManifest, StageResult
 from oxyformer.execution.paths import atomic_json, output_path
@@ -153,5 +157,22 @@ def run_stage(request):
         environment=(("python", platform.python_version()),), seed=None, parameter_count=None)
     records = tuple(ArtifactRecord(path=str(p.relative_to(output)), sha256=file_hash(p), lineage=lineage,
         kind="legacy_report" if p == report_path else "legacy_output") for p in artifacts)
+    # Export the plan interface without changing the isolated historical report.
+    # The shell runner owns run.log; hashing that live stream here is invalid.
+    results_path = atomic_json(output, "results.json", _finite(report))
+    records += (ArtifactRecord(path=results_path.name, sha256=file_hash(results_path),
+        lineage=lineage, kind="legacy_report"),)
+    bundle_path = output_path(output, "reproduction_bundle.tar")
+    with tarfile.open(bundle_path, "x:") as bundle:
+        for artifact in records:
+            bundle.add(output / artifact.path, arcname=artifact.path, recursive=False)
+    records += (ArtifactRecord(path=bundle_path.name, sha256=file_hash(bundle_path),
+        lineage=lineage, kind="legacy_bundle"),)
+    manifest_path = atomic_json(output, "artifact_manifest.json", {
+        "schema_version": 1, "request_hash": request.content_hash, "status": report["status"],
+        "artifacts": [record.to_dict() for record in records],
+    })
+    records += (ArtifactRecord(path=manifest_path.name, sha256=file_hash(manifest_path),
+        lineage=lineage, kind="artifact_manifest"),)
     return StageResult(request_hash=request.content_hash, status=report["status"], artifacts=records,
         message=report.get("reason", mode + ": " + report["status"] + "; see isolated legacy report"))

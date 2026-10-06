@@ -44,10 +44,22 @@ stages:
       fetch-us: [payload.tar, receipts.json]
       atlas-collect: [atlas.parquet, quality.json, artifact_manifest.json]
     outputs: [design.json, splits.json, support_report.json, gate.json, artifact_manifest.json]
+  legacy-inputs:
+    module: oxyformer.legacy.tasks
+    acquisition_receipts: {fetch-us: receipts.json}
+    needs:
+      fetch-us: [payload.tar, receipts.json]
+    outputs: [elevcan_source.tar.gz, source_manifest.json]
   legacy-reproduction:
     module: oxyformer.legacy
+    # No runnable task until historical or approved repaired inputs exist.
+    needs: {}
+    outputs: [results.json, reproduction_bundle.tar, artifact_manifest.json]
   elevcan-reproduction:
     module: oxyformer.legacy
+    needs:
+      legacy-inputs: [elevcan_source.tar.gz]
+    outputs: [results.json, reproduction_bundle.tar, artifact_manifest.json]
   simulation-smoke:
     module: oxyformer.validation.coverage
   campaign-lock:

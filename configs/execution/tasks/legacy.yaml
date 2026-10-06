@@ -1,0 +1,23 @@
+schema_version: 1
+# Only tasks with honestly provisioned public inputs belong here.
+# initial-release: missing historical S1901/BYAREA_COUNTY and phase2/25 tables.
+# repaired-benchmark: no merged approved county records/DataManifest producer.
+# run.log belongs to scripts/slurm/run_stage.sh, which opens it before admission;
+# it is a plan output, not a stage artifact or an input to scientific results.
+tasks:
+- id: legacy-inputs
+  stage: legacy-inputs
+  needs:
+    fetch-us: [payload.tar, receipts.json]
+  outputs: [elevcan_source.tar.gz, source_manifest.json]
+- id: elevcan-repro
+  stage: elevcan-reproduction
+  needs:
+    legacy-inputs: [elevcan_source.tar.gz]
+  outputs: [results.json, reproduction_bundle.tar, artifact_manifest.json]
+  parameters:
+    mode: elevcan-reproduction
+    source_archive: {dependency: legacy-inputs, path: elevcan_source.tar.gz}
+    allow_download: false
+    rscript: /mnt/weka/home/hgoodarzi/oxyformer-swarm/envs/elevcan-r/bin/Rscript
+    timeout_seconds: 3600
