@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "status": "admission_required",
+  "executable": false,
+  "authority": ["docs/plan/OXYFORMER_V2_PLAN.md", "docs/orchestrator-mandate.md", "configs/approvals.yaml"],
+  "limits": {"leaves_per_instance": 40, "gpu_hours_per_leaf": 4, "run_gpu_hours": 2500, "gpu_concurrency": 8, "cpu_concurrency": 6},
+  "production": {"outer_folds": [0, 1, 2, 3, 4], "inner_folds": [0, 1, 2], "seeds": [1103, 2207, 3301], "learning_rates": [0.0003, 0.001], "dropouts": [0, 0.1], "ssl_max_epochs": 30, "nuisance_max_epochs": 150, "minimum_final_repetitions_per_scenario": 1000},
+  "templates": [
+    {"kind": "primary", "stage": "primary", "variants": ["A0"], "dimensions": ["endpoint", "target", "outer_fold", "seed"], "owner_allocation_required": false},
+    {"kind": "ablation", "stage": "ablation", "variants": ["A1", "A2", "A3", "A4", "A5", "A6", "A7", "F0", "F1"], "unit_weight_only": ["A6", "A7", "F0", "F1"], "dimensions": ["endpoint", "target", "variant", "outer_fold", "seed"], "owner_allocation_required": false},
+    {"kind": "screening", "stage": "coverage", "dimensions": ["scenario", "independent_repetition"], "after": "campaign-lock", "recipe_mutable": false, "owner_allocation_required": false},
+    {"kind": "final-coverage", "stage": "coverage", "dimensions": ["scenario", "independent_repetition"], "after": "screening-collector", "owner_allocation_required": true},
+    {"kind": "anchor", "stage": "anchor", "dimensions": ["endpoint", "target", "outer_fold", "seed"], "owner_allocation_required": true},
+    {"kind": "refit-audit", "stage": "refit-audit", "dimensions": ["deletion", "endpoint", "new_target", "outer_fold", "seed"], "owner_allocation_required": true}
+  ],
+  "expansion": {
+    "api": "oxyformer.execution.campaign.expand_campaign",
+    "validation": "oxyformer.execution.campaign.validate_plan",
+    "budget_basis": "measured complete production procedure including setup and publication",
+    "continuation": "same scientific identity and exact state; all slices count as leaves",
+    "collector": "depends on every declared leaf including intermediate continuations; require terminal complete=true",
+    "overflow": "block or prospectively authorize additional complete instances; never truncate work"
+  },
+  "final_collector": {
+    "id": "tract-release",
+    "dependency_roles": ["primary-collector", "final-coverage-collector", "anchor-review", "audit-collect"],
+    "required_gates": ["legacy_reproduction", "analytic", "coverage", "physiology_anchor", "birth_anchor", "support", "refit_audit", "spatial_sensitivity", "estimator_agreement", "geography_isolation", "overlap"],
+    "resolution": "bind every role to all concrete collector IDs and every expected task request hash before admission"
+  },
+  "early_path": {"stages": ["atlas-inputs", "exposure-atlas", "atlas-collect", "tract-support-gate"], "must_not_depend_on": ["release-docs", "release-docs-r2", "campaign-lock", "tract-release"]},
+  "current_capability_blocks": [
+    "design stage name/config/typed-input binding differs from the merged runner",
+    "generic expansion omits nested execution limits and per-slice terminal output contracts",
+    "generic report collectors omit bundle/manifest/receipts/approval bindings",
+    "coverage collection does not publish reporting CoverageScenario artifacts",
+    "nested runner is CPU-only; GPU timing cannot be assumed",
+    "A5-A7 and F0-F1 require resumable signed-correction/foundation adapters",
+    "coverage batching requires complete repetitions; interrupted repetitions lack cross-leaf continuation",
+    "final-coverage, anchor and refit-audit allocations and scoped release approvals are absent"
+  ],
+  "shared_root_promotion": {"planned": false, "authority_if_requested": "PI"}
+}
