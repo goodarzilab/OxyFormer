@@ -5,14 +5,12 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import replace
 from hashlib import sha256
-import ctypes
 import errno
 import fcntl
 import json
 import os
 from pathlib import Path
 import stat
-import struct
 import tempfile
 
 from oxyformer.contracts import StageResult
@@ -68,71 +66,11 @@ def require_complete_observations(root):
     state = _observation_state()
     require(state is None or state['root'] == str(root), 'observation attempt mismatch')
     if state is not None:
-        watch = state.get('watch')
-        changed = [] if watch is None else sorted(str(Path(root) / name) for root, name in watch.changes())
-        require(not changed, 'upstream directory identity changed: ' + ', '.join(changed))
         require(not state['failures'], 'integrity observation refused: ' + '; '.join(state['failures']))
     receipt = publication_receipt(root)
     marker = Path(str(receipt) + '.refused')
     if authority_exists(marker):
         require(False, 'integrity observation refused: ' + json.loads(read_regular(marker))['message'])
-
-
-class _NamespaceWatch:
-    """Watch shared directories for replacement without watching sibling writes.
-
-    Their ctime/size legitimately change when the coordinator creates files.
-    Inotify's self-move/delete events retain rename-and-restore evidence while
-    file ctimes and complete _execution directory identities remain strict.
-    """
-    def __init__(self, trees):
-        self.fd = None
-        self.paths = {}
-        self.changed = set()
-        shared = [(root, name) for root, entries in trees.items()
-            for name, entry in entries.items() if entry.get('partial')]
-        if not shared:
-            return
-        libc = ctypes.CDLL(None, use_errno=True)
-        libc.inotify_init1.argtypes = [ctypes.c_int]
-        libc.inotify_init1.restype = ctypes.c_int
-        libc.inotify_add_watch.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_uint32]
-        libc.inotify_add_watch.restype = ctypes.c_int
-        self.fd = libc.inotify_init1(os.O_NONBLOCK | os.O_CLOEXEC)
-        if self.fd < 0:
-            raise OSError(ctypes.get_errno(), 'cannot observe published directory identity')
-        try:
-            for root, name in shared:
-                path = Path(root) / name
-                # IN_MOVE_SELF | IN_DELETE_SELF | IN_ONLYDIR | IN_DONT_FOLLOW.
-                wd = libc.inotify_add_watch(self.fd, os.fsencode(path), 0xC00 | 0x3000000)
-                if wd < 0:
-                    raise OSError(ctypes.get_errno(), 'cannot watch published directory', str(path))
-                self.paths.setdefault(wd, []).append((root, name))
-        except BaseException:
-            self.close()
-            raise
-
-    def changes(self):
-        if self.fd is not None:
-            while True:
-                try:
-                    raw = os.read(self.fd, 65536)
-                except BlockingIOError:
-                    break
-                require(bool(raw), 'directory identity observation ended')
-                offset = 0
-                while offset < len(raw):
-                    wd, mask, _, length = struct.unpack_from('iIII', raw, offset)
-                    offset += 16 + length
-                    require(not mask & 0x4000, 'directory identity observation overflow')
-                    self.changed.update(self.paths.get(wd, ()))
-        return self.changed
-
-    def close(self):
-        if self.fd is not None and self.fd >= 0:
-            os.close(self.fd)
-        self.fd = None
 
 
 @contextmanager
@@ -142,13 +80,11 @@ def observe_dependencies(root, trees):
     receipt = publication_receipt(root, create=True)
     atomic_json(receipt.parent, receipt.name + '.observation-inputs', {'attempt': root, 'trees': trees})
     previous = os.environ.get(_OBSERVATION_ENV)
-    watch = _NamespaceWatch(trees)
-    _OBSERVATION_STATES[root] = {'root': root, 'trees': trees, 'failures': [], 'watch': watch}
+    _OBSERVATION_STATES[root] = {'root': root, 'trees': trees, 'failures': []}
     os.environ[_OBSERVATION_ENV] = root
     try:
         yield
     finally:
-        watch.close()
         _OBSERVATION_STATES.pop(root, None)
         if previous is None:
             os.environ.pop(_OBSERVATION_ENV, None)
@@ -689,31 +625,36 @@ def acquisition_changed_paths(before, after):
     return sorted(changed)
 
 
-def _dependency_identity(metadata, entry):
-    return (metadata.st_dev, metadata.st_ino, stat.S_IFMT(metadata.st_mode),
-        stat.S_IMODE(metadata.st_mode) if entry.get('partial') else metadata.st_ctime_ns)
+def _dependency_identity(metadata):
+    return (metadata.st_dev, metadata.st_ino, stat.S_IFMT(metadata.st_mode), metadata.st_ctime_ns)
 
 
 def snapshot_dependency_identities(trees):
-    """Capture file and directory identity outside portable content baselines."""
-    return {root: {name: {'identity': _dependency_identity((Path(root) / name).lstat(), entry), 'entry': entry}
-        for name, entry in entries.items() if entry.get('type') in (stat.S_IFREG, stat.S_IFDIR)}
-        for root, entries in trees.items()}
+    """Capture file identity and namespace witnesses outside content baselines."""
+    identities = {}
+    for root, entries in trees.items():
+        files = identities[root] = {}
+        for name, entry in entries.items():
+            if entry.get('type') not in (stat.S_IFREG, stat.S_IFDIR):
+                continue
+            path = Path(root) / name
+            record = files[name] = {'identity': _dependency_identity(path.lstat()), 'entry': entry}
+            if entry.get('partial'):
+                record['parent_identity'] = _dependency_identity(path.parent.lstat())
+    return identities
 
 
 def check_dependency_identities(identities, *, observed_changes=None):
     """Retain each kernel-observed change before checking another path.
 
     Reads may change atime; it and mtime are excluded. Complete directory
-    ctimes retain rename/restore evidence. Shared ancestors use self-move/delete
-    watches because coordinator sibling creation also changes their ctime.
+    ctimes retain rename/restore evidence. For shared ancestors, a rename also
+    changes the containing directory's ctime; sibling file writes do not.
+    Consult both witnesses, including on filesystems without remote inotify.
     Restoring bytes or mtime cannot restore kernel-maintained ctime.
     Identity alone refuses this run. Only observed content/namespace differences
     create permanent taint; failed content observations also remain retryable.
     """
-    state = _observation_state()
-    watch = None if state is None else state.get('watch')
-    moved = set() if watch is None else watch.changes()
     attempts = {}
     for root, files in identities.items():
         detail = attempts[root] = {'changed_paths': [], 'tainted_paths': [], 'unreadable_paths': []}
@@ -727,10 +668,22 @@ def check_dependency_identities(identities, *, observed_changes=None):
                 if not changed:
                     detail['unreadable_paths'].append(name)
             else:
-                changed = (_dependency_identity(metadata, expected['entry']) != tuple(expected['identity'])
-                    or (root, name) in moved)
+                identity = _dependency_identity(metadata)
+                old = expected['entry']
+                changed = identity != tuple(expected['identity'])
+                if (changed and old.get('partial') and identity[:3] == tuple(expected['identity'])[:3]
+                        and stat.S_IMODE(metadata.st_mode) == old['mode']):
+                    try:
+                        parent = _dependency_identity(path.parent.lstat())
+                    except OSError:
+                        detail['unreadable_paths'].append(name)
+                        changed = False
+                    else:
+                        # Both witnesses changing is conservatively refused.
+                        # Unrelated edits to both directories can also trigger
+                        # this metadata-only refusal, but cannot taint content.
+                        changed = parent != tuple(expected['parent_identity'])
                 if changed:
-                    old = expected['entry']
                     tainted = (stat.S_IFMT(metadata.st_mode) != old['type']
                         or stat.S_ISREG(metadata.st_mode) and metadata.st_size != old['size'])
                     if not tainted and stat.S_ISREG(metadata.st_mode):

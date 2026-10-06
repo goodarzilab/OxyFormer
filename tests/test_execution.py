@@ -3,6 +3,7 @@ from copy import deepcopy
 from contextlib import nullcontext
 from dataclasses import replace
 from hashlib import sha256
+from functools import lru_cache
 import io
 import inspect
 import json
@@ -22,7 +23,7 @@ import yaml
 from oxyformer.cli import main
 from oxyformer.contracts import StageRequest, StageResult
 from oxyformer.execution.campaign import expand_campaign, resources, validate_plan
-from oxyformer.execution.identity import code_identity, scientific_fingerprint, verify_module_origins, verify_recipe
+from oxyformer.execution.identity import code_identity, environment_record, scientific_fingerprint, verify_module_origins, verify_recipe
 from oxyformer.execution.paths import atomic_json, atomic_write, isolated_caches, safe_extract
 from oxyformer.execution.runner import (dependency_file, dependency_variable, read_mapping,
     resolve_dependencies, run as run_worker, verify_dependency_result)
@@ -124,10 +125,19 @@ def substitute(repo, relative, text, kind='commit', checkout=True):
     return original
 
 
+@lru_cache(maxsize=1)
+def fixture_environment_record():
+    # Inline synthetic stages share one interpreter and installed environment.
+    # CLI integration tests still execute the real recorder in each subprocess.
+    return environment_record()
+
+
 @pytest.fixture
 def runtime(tmp_path, monkeypatch):
     monkeypatch.delenv('SWARM_UNIT_DIR', raising=False)
     monkeypatch.setenv('PYTHONDONTWRITEBYTECODE', '1')
+    monkeypatch.setattr('oxyformer.execution.runner.environment_record',
+        lambda: deepcopy(fixture_environment_record()))
     repo = tmp_path / 'repo'
     repo.mkdir()
     (repo / 'configs/execution').mkdir(parents=True)
@@ -263,6 +273,7 @@ def seal_source(repo, source):
 
 
 def test_dummy_stage_atomic_records_and_cache_isolation(runtime, monkeypatch):
+    monkeypatch.setattr('oxyformer.execution.runner.environment_record', environment_record)
     repo, out = runtime
     monkeypatch.setenv('HF_HOME', '/unrelated/cache')
     assert_pass(run_task(repo, out, deps_env=False))
@@ -1227,6 +1238,7 @@ def prepare_cli_fixture(repo, out, stage_body):
 import os
 import json
 from hashlib import sha256
+from functools import lru_cache
 from oxyformer.contracts import StageResult
 from oxyformer.provenance import ArtifactLineage, ArtifactRecord, file_hash
 from oxyformer.execution.paths import atomic_json
@@ -3994,19 +4006,20 @@ def test_shared_artifact_directory_swap_is_detected(runtime, tmp_path, monkeypat
 def test_namespace_observation_failure_refuses_without_taint(runtime, source, tmp_path, monkeypatch):
     from oxyformer.execution import integrity
     repo, out = runtime
-    original_read = os.read
+    original_lstat = Path.lstat
     def worker(request):
         result = dummy(request)
-        fd = integrity._observation_state()['watch'].fd
-        def unreadable(handle, size):
-            if handle == fd:
+        (source / 'events.jsonl').write_text('coordinator progress')
+        def unreadable(path, *args, **kwargs):
+            if path == source.parent:
                 raise OSError('synthetic namespace observation failure')
-            return original_read(handle, size)
-        monkeypatch.setattr(os, 'read', unreadable)
+            return original_lstat(path, *args, **kwargs)
+        monkeypatch.setattr(Path, 'lstat', unreadable)
         return result
     install_stage(monkeypatch, repo, worker)
-    assert run_task(repo, out, needs=SOURCE_NEEDS).status == 'fail'
-    monkeypatch.setattr(os, 'read', original_read)
+    result = run_task(repo, out, needs=SOURCE_NEEDS)
+    assert result.status == 'fail' and 'namespace observation failure' in result.message
+    monkeypatch.setattr(Path, 'lstat', original_lstat)
     assert not Path(str(integrity.publication_receipt(source)) + '.tainted').exists()
     install_stage(monkeypatch, repo, dummy)
     assert_pass(run_task(repo, new_attempt(repo, tmp_path / 'retry'), needs=SOURCE_NEEDS))
@@ -4016,3 +4029,18 @@ def test_existing_continuation_needs_may_name_published_execution_records(runtim
     repo, out = runtime
     assert_pass(run_task(repo, out, needs={'data-unit': ['data.json', '_execution/task.json',
         '_execution/request.json', '_execution/result.json']}))
+
+
+def test_remote_restored_directory_swap_without_kernel_events(runtime, acquisition, source, tmp_path, monkeypatch):
+    """Weka need not deliver another compute node's inotify events locally."""
+    from oxyformer.execution import integrity
+    class SilentWatch:
+        def __init__(self, trees):
+            pass
+        def changes(self):
+            return set()
+        def close(self):
+            pass
+    monkeypatch.setattr(integrity, '_NamespaceWatch', SilentWatch, raising=False)
+    test_restored_directory_swap_refuses_publication(
+        runtime, acquisition, source, tmp_path, monkeypatch, 'stage')
