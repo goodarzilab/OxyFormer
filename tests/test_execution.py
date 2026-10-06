@@ -1267,7 +1267,7 @@ def test_cli_undeclared_outside_write_fails(runtime, tmp_path, monkeypatch):
 
 
 @mark.parametrize('control', ['result.json', 'fingerprint.json'])
-def test_identical_control_rewrite_taints_later_consumers(runtime, tmp_path, monkeypatch, control, source):
+def test_identical_control_rewrite_refuses_then_allows_retry(runtime, tmp_path, monkeypatch, control, source):
     repo, out = runtime
     victim = source / '_execution' / control
     def faulty(request):
@@ -1279,8 +1279,7 @@ def test_identical_control_rewrite_taints_later_consumers(runtime, tmp_path, mon
     assert_failed(result, victim)
     later = new_attempt(repo, tmp_path / 'later')
     install_stage(monkeypatch, repo, dummy)
-    with raises(ContractError, match='tainted'):
-        run_task(repo, later, needs=SOURCE_NEEDS)
+    assert_pass(run_task(repo, later, needs=SOURCE_NEEDS))
 
 
 def test_cli_finalizes_temporary_directories_before_publication(runtime):

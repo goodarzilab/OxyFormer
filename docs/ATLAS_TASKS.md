@@ -26,7 +26,7 @@ match that receipt. A create-once tree baseline lives in the independent
 publication store, never in the read-only acquisition. Direct and transitive
 consumers check that baseline and retain the normal post-execution change check
 and permanent taint marker. All other dependencies still require a published
-passing StageResult. Observed changes remain tainted even after restoration,
+passing StageResult. Observed content and namespace differences remain tainted even after restoration,
 including when another consumer detects the write during execution. Shared
 readers and request hash checks retain observed namespace or byte differences
 after acquisition admission, including worker-side request verification. A
@@ -120,7 +120,7 @@ at most three times, requiring every recorded entry, byte, mode and size to matc
 the original observation. It never replaces the content baseline to obtain a
 pass, and upstream fingerprinting does not use these retries.
 
-Readers retain acquisition bindings across I/O. Final checks persist each
+Readers retain acquisition bindings across I/O. Final checks persist each proven content or namespace
 difference immediately. Authority I/O errors propagate; taint and publication
 commits share a lock. DEM inspection checks its payload hash and stable stream
 even on refusal; GDAL reads the verified descriptor.
