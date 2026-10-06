@@ -336,7 +336,7 @@ def test_stage_publishes_typed_products_and_gate_accepts_dispatch_handoff(tmp_pa
     from oxyformer.design import gate
     from oxyformer.provenance import read_artifact
     from oxyformer.contracts import CovariateView
-    acquisition, source, mapping = acquisition_fixture(tmp_path / 'raw-acquisition')
+    acquisition, source, mapping = acquisition_fixture(tmp_path / 'raw-acquisition', extra_acs=True)
     census = tmp_path / 'census'
     census.mkdir()
     for n in ('payload.tar','receipts.json'):
@@ -348,6 +348,8 @@ def test_stage_publishes_typed_products_and_gate_accepts_dispatch_handoff(tmp_pa
     result = tract_inputs.run_stage(request)
     result.verify(request)
     assert result.status == 'pass'
+    pool_record = next(a for a in result.artifacts if a.path == 'acs_pool.parquet')
+    assert pool_record.lineage.unit_ids == tuple(IDS + ['01001000400'])
     out = Path(request.output_dir)
     view = read_artifact(out / 'covariates.json', CovariateView, file_hash(out / 'covariates.json'))
     assert view.original_ids == tuple(IDS)
@@ -378,3 +380,42 @@ def test_atlas_coverage_is_endpoint_scoped_and_missing_ids_stay_explicit(tmp_pat
     missing = collected_atlas(paths, (IDS[0], IDS[1]))
     assert not missing.coverage_complete and missing.missing_tract_ids == (IDS[1],)
     assert tuple(r.tract_id for r in missing.rows) == (IDS[0],)
+
+
+@pytest.mark.parametrize('pin', ['expected_sha256', 'expected_bytes'])
+def test_null_optional_us_acquisition_pin_is_absent_not_mismatched(tmp_path, pin):
+    acquisition, source, mapping = acquisition_fixture(tmp_path)
+    source['resources'][0][pin] = None
+    receipt_path = acquisition / 'receipts.json'
+    receipt = json.loads(receipt_path.read_text())
+    receipt['manifest_sha256'] = sha256(canonical_json(source).encode()).hexdigest()
+    receipt_path.write_text(canonical_json(receipt))
+    frame, metadata, *_ = tract_inputs.load_us_inputs(acquisition / 'payload.tar', receipt_path,
+        tmp_path / 'scratch', source=source, mapping=mapping, states={'AL': '01'})
+    assert tuple(frame.original_id) == tuple(metadata.original_id) == tuple(IDS)
+
+
+def test_census_acquisition_streams_sf1_and_accepts_null_optional_pins(tmp_path):
+    archive = sf1_fixture(tmp_path / 'sf1.zip')
+    blob = archive.read_bytes()
+    payload = tmp_path / 'payload.tar'
+    with tarfile.open(payload, 'w') as tar:
+        info = tarfile.TarInfo('census/sf1_al.zip')
+        info.size = len(blob)
+        tar.addfile(info, io.BytesIO(blob))
+    resource = dict(id='sf1_al', destination='census/sf1_al.zip', bytes=len(blob), sha256=sha256(blob).hexdigest())
+    for null in (False, True):
+        spec = dict(id=resource['id'], destination=resource['destination'], max_bytes=len(blob),
+            expected_bytes=None if null else len(blob), expected_sha256=None if null else resource['sha256'])
+        source = dict(id='census', resources=[spec])
+        receipt = dict(status='complete', manifest_id='census',
+            manifest_sha256=sha256(canonical_json(source).encode()).hexdigest(),
+            payload_sha256=file_hash(payload), payload_bytes=payload.stat().st_size, resources=[resource])
+        receipt_path = tmp_path / ('receipt-' + str(null) + '.json')
+        receipt_path.write_text(canonical_json(receipt))
+        scratch = tmp_path / ('scratch-' + str(null))
+        scratch.mkdir()
+        coordinates = tract_inputs.census_coordinates(payload, receipt_path, scratch,
+            source=source, states={'AL': '01'})
+        assert coordinates == {IDS[0]: (35., -87.)}
+        assert not list(scratch.iterdir())

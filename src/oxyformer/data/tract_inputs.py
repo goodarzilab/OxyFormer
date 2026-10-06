@@ -39,6 +39,13 @@ def _source_file(path, section, source_id, uri, license_hash):
         mapping_status=section['mapping_status'], mapping_review_id=MAPPING))
 
 
+def _check_resource_pins(spec, size, digest):
+    # The acquisition schema represents absent optional pins either by omission
+    # or by null. Recorded receipt hashes are still always verified separately.
+    for key, actual in [('expected_bytes', size), ('expected_sha256', digest)]:
+        require(spec.get(key) is None or spec[key] == actual, 'source pin mismatch: ' + key)
+
+
 def load_us_inputs(payload, receipt_path, scratch, *, source=None, mapping=None, states=None):
     """Return the full footprint ACS frame, USALEEP metadata, and source bindings.
 
@@ -76,8 +83,7 @@ def load_us_inputs(payload, receipt_path, scratch, *, source=None, mapping=None,
             require(entry['destination'] == spec['destination'], 'US resource destination mismatch')
             member = members[entry['destination']]
             require(member.size == entry['bytes'] and member.size <= spec['max_bytes'], 'US resource size mismatch')
-            require(spec.get('expected_bytes', member.size) == member.size and
-                    spec.get('expected_sha256', entry['sha256']) == entry['sha256'], 'US source pin mismatch')
+            _check_resource_pins(spec, member.size, entry['sha256'])
             # Verify the full compressed resource as bytes without retaining it.
             with archive.extractfile(member) as stream:
                 digest = sha256()
@@ -294,8 +300,9 @@ def census_coordinates(payload, receipt_path, scratch, *, source=None, states=No
     for state, fips in sorted(states.items()):
         rid = 'sf1_' + state.lower()
         entry, spec = acquired[rid], declared[rid]
-        require(entry['destination'] == spec['destination'] and entry['bytes'] == spec['expected_bytes']
-                and entry['bytes'] <= spec['max_bytes'], 'Census resource identity mismatch')
+        require(entry['destination'] == spec['destination'] and entry['bytes'] <= spec['max_bytes'],
+                'Census resource identity mismatch')
+        _check_resource_pins(spec, entry['bytes'], entry['sha256'])
         path = Path(scratch) / (rid + '.zip')
         extract_member(payload, entry['destination'], path, entry['sha256'])
         current = sf1_coordinates(path, state, fips)
@@ -332,6 +339,7 @@ def typed_geography(manifest, metadata, coordinates):
 def run_stage(request):
     """Publish only outcome-free typed inputs and the full approved ACS pool."""
     import tempfile
+    from dataclasses import replace
     from oxyformer.contracts import StageResult
     from oxyformer.execution.paths import atomic_write, atomic_json
     from oxyformer.provenance import ArtifactRecord
@@ -356,6 +364,8 @@ def run_stage(request):
                      census_payload_sha256=file_hash(paths['fetch-census', 'payload.tar']))
         atomic_json(out, 'input_audit.json', audit)
     task = json.loads(Path(request.task_path).read_text())
+    pool_lineage = replace(manifest.lineage, unit_ids=tuple(frame.original_id))
     return StageResult(request_hash=request.content_hash, status='pass', message='Typed outcome-free tract inputs built',
-        artifacts=tuple(ArtifactRecord(path=name, sha256=file_hash(out / name), lineage=manifest.lineage,
+        artifacts=tuple(ArtifactRecord(path=name, sha256=file_hash(out / name),
+                        lineage=pool_lineage if name == 'acs_pool.parquet' else manifest.lineage,
                         kind='tract_input') for name in task['outputs']))
