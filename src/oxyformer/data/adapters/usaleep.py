@@ -91,8 +91,11 @@ def join_outcomes(covariates, outcomes):
     }
 
 
-def load_usaleep(bundle, mapping):
+def load_usaleep(bundle, mapping, *, numeric_identifiers=False):
     """Validate raw File A and retain only flag-1 outcomes in the primary frame.
+
+    numeric_identifiers enables the pinned public CSV's unpadded numeric FIPS
+    representation. Existing direct callers keep the strict fixed-width API.
 
     A missing/unknown outcome, SE or mortality flag fails closed: the inspected
     release contains only finite estimates/SEs and flags 1/2/3, with no documented
@@ -117,9 +120,16 @@ def load_usaleep(bundle, mapping):
     _require(all(set(r) == set(expected_fields) and None not in r.values() for r in records),
              "malformed USALEEP record")
     frame = pd.DataFrame(records).rename(columns=expected_fields)
+    # The pinned CDC CSV writes these numeric identifiers without leading
+    # zeroes. Restore only their documented fixed widths, preserving strings;
+    # decimal, signed, whitespace and over-width tokens are never coerced.
+    for column, width in (("original_id", 11), ("state_fips", 2),
+                          ("county_fips", 3), ("tract_code", 6)):
+        pattern = rf"[0-9]{{1,{width}}}" if numeric_identifiers else rf"[0-9]{{{width}}}"
+        _require(frame[column].str.fullmatch(pattern).all(), f"invalid {column}")
+        if numeric_identifiers:
+            frame[column] = frame[column].str.zfill(width)
     _ids(frame, "USALEEP")
-    for column, width in (("state_fips", 2), ("county_fips", 3), ("tract_code", 6)):
-        _require(frame[column].str.fullmatch(rf"[0-9]{{{width}}}").all(), f"invalid {column}")
     _require((frame.original_id == frame.state_fips + frame.county_fips + frame.tract_code).all(),
              "USALEEP 2010 tract components disagree")
     _require(frame.mortality_input_flag.isin(section["flags"]).all(), "unknown mortality flag")

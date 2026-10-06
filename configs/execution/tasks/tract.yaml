@@ -1,0 +1,34 @@
+# Owner decision content identity: values are read only from approvals.yaml.
+schema_version: 1
+tract_design_sha256: 51b64d264dd084c5944cd6281b827d969e7a0ce6a37fdf749275fbc9bb8b91b7
+tasks:
+- id: tract-inputs
+  stage: tract-inputs
+  needs:
+    fetch-us:
+    - payload.tar
+    - receipts.json
+    fetch-census:
+    - payload.tar
+    - receipts.json
+  outputs: &id001
+  - data_manifest.json
+  - covariates.json
+  - geography.json
+  - entity_graph.json
+  - acs_pool.parquet
+  - input_audit.json
+- id: tract-gate
+  stage: tract-support-gate
+  needs:
+    tract-inputs: *id001
+    atlas-collect:
+    - atlas.parquet
+    - quality.json
+    - artifact_manifest.json
+  outputs:
+  - design.json
+  - splits.json
+  - support_report.json
+  - gate.json
+  - artifact_manifest.json
