@@ -1,6 +1,8 @@
 """Detect upstream state changes after worker exit; never repair upstream.
 Managed outputs are confined; general write prevention is deferred to ARC-1339.
 """
+from hashlib import sha256
+import errno
 import json
 import os
 from pathlib import Path
@@ -12,8 +14,11 @@ import yaml
 from oxyformer.contracts import StageRequest, StageResult
 from oxyformer.provenance import ContractError, canonical_json, relative_artifact_path, require
 from .integrity import (DEPENDENCY_CHECK, FINGERPRINT, RESULT, _replace_control, _repair_control_directory,
-    post_execution_check, publish_result, record_taints,
+    post_execution_check, publish_result, record_taints, snapshot_dependency_identities, observe_dependencies,
     directory_path, read_regular, regular_file_stat, regular_file_hash as file_hash,
+    fingerprint_tree, publication_receipt, InputChanged, acquisition_read, _acquisition_binding,
+    integrity_observation,
+    acquisition_changed_paths, verify_input_hash, authority_exists,
     verify_inputs, verify_result, verify_published_tree)
 from .identity import git_bytes, code_identity, environment_record, scientific_fingerprint, verify_recipe
 from .paths import atomic_json, atomic_write, output_path
@@ -38,6 +43,14 @@ def resolve_dependencies(ids, environ=None):
     return result
 
 
+class _JsonSafeLoader(yaml.SafeLoader):
+    """Keep YAML date spellings JSON-compatible without changing source bytes."""
+
+
+_JsonSafeLoader.add_constructor('tag:yaml.org,2002:timestamp',
+    lambda loader, node: loader.construct_scalar(node))
+
+
 def read_mapping(path, *, expected_bytes=None):
     path = Path(path)
     raw = read_regular(path)
@@ -48,7 +61,7 @@ def read_mapping(path, *, expected_bytes=None):
     except json.JSONDecodeError:
         require(path.suffix.lower() != '.json', f'invalid JSON: {path}')
         try:
-            value = yaml.safe_load(text)
+            value = yaml.load(text, Loader=_JsonSafeLoader)
         except yaml.YAMLError as yaml_error:
             raise ContractError(f'invalid YAML: {path}') from yaml_error
     require(isinstance(value, dict), f'expected mapping: {path}')
@@ -58,13 +71,106 @@ def read_mapping(path, *, expected_bytes=None):
 def dependency_file(root, relative):
     relative_artifact_path(relative)
     path = Path(root) / relative
-    regular_file_stat(path)
-    require(path.resolve(strict=True).is_relative_to(root), f'dependency file escapes attempt: {path}')
-    return path
+    with acquisition_read(path):
+        regular_file_stat(path)
+        require(path.resolve(strict=True).is_relative_to(root), f'dependency file escapes attempt: {path}')
+        return path
+
+
+def verify_acquisition(root, receipt_name, *, expected_tree=None):
+    with integrity_observation(root):
+        binding = _acquisition_binding(root)
+        return _verify_acquisition(root, receipt_name, expected_tree=expected_tree,
+            observed_tree=None if binding is None else binding[2])
+
+
+def _verify_acquisition(root, receipt_name, *, expected_tree, observed_tree):
+    """Bind a complete acquisition to a create-once external tree baseline.
+
+    Acquisition producers predate StageResult. Never write into their attempts;
+    the independent publication store retains the first validated tree and the
+    same permanent taint markers used for stage publications.
+    """
+    relative_artifact_path(receipt_name)
+    authority = publication_receipt(root, create=True)
+    require(not authority_exists(str(authority) + '.tainted'), f'tainted upstream fingerprint: {root}')
+    baseline = Path(str(authority) + '.acquisition')
+    tree = fingerprint_tree(root)
+
+    def refuse_changes(changed, message):
+        if changed:
+            record_taints({'attempts': {str(root): {'changed_paths': sorted(set(changed))}}})
+            raise ContractError(message + '; changed paths: ' +
+                ', '.join(str(Path(root) / name) for name in sorted(set(changed))))
+
+    def compare(expected, message, actual=None):
+        actual = tree if actual is None else actual
+        refuse_changes(acquisition_changed_paths(expected, actual), message)
+
+    refuse_changes([name for name, entry in tree.items() if entry.get('changed')],
+        'acquisition changed during fingerprinting (tainted)')
+
+    if observed_tree is not None:
+        compare(observed_tree, 'acquisition fingerprint mismatch against observation binding (tainted)')
+    if expected_tree is not None:
+        compare(expected_tree, 'acquisition fingerprint differs from consumer baseline (tainted)')
+    if authority_exists(baseline):
+        compare(read_mapping(baseline)['entries'], f'acquisition fingerprint mismatch (tainted): {root}')
+    require(not any('error' in entry for entry in tree.values()), 'acquisition fingerprint unreadable')
+    # Establish valid first-time inputs before interpreting later path/type
+    # failures as observed changes. A rescan cannot erase such observations.
+    for name in (receipt_name, 'payload.tar'):
+        require(tree.get(name, {}).get('sha256') is not None,
+            f'acquisition input is missing or not regular: {Path(root) / name}')
+    observed_name = receipt_name
+    try:
+        receipt_path = dependency_file(root, receipt_name)
+        observed_name = 'payload.tar'
+        dependency_file(root, observed_name)
+        observed_name = receipt_name
+        receipt_bytes = read_regular(receipt_path)
+    except InputChanged as exc:
+        if exc.content_changed:
+            refuse_changes([str(exc.path.relative_to(root))], str(exc))
+        raise
+    except ContractError as exc:
+        # The snapshot above established regular inputs and receipt_name was
+        # validated before reading. A helper's path/type refusal is a change.
+        refuse_changes([observed_name], str(exc))
+        raise
+    except OSError as exc:
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+            refuse_changes([observed_name], 'acquisition input removed or replaced during verification')
+        # Unknown I/O failure: preserve any positive evidence in a rescan,
+        # but never mistake failure to read for proof of different bytes.
+        compare(tree, 'acquisition changed during verification (tainted)', fingerprint_tree(root))
+        raise
+    refuse_changes([receipt_name] if tree[receipt_name]['sha256'] != sha256(receipt_bytes).hexdigest() else [],
+        'acquisition receipt changed during verification (tainted)')
+    receipt = json.loads(receipt_bytes)
+    require(isinstance(receipt, dict), 'acquisition receipt must be a mapping')
+    require(receipt.get('status') == 'complete', 'acquisition receipt is not complete')
+    require(tree['payload.tar']['sha256'] == receipt.get('payload_sha256'), 'acquisition payload hash mismatch')
+    require(tree['payload.tar']['size'] == receipt.get('payload_bytes'), 'acquisition payload size mismatch')
+    value = {'attempt': str(root), 'receipt': receipt_name, 'entries': tree}
+    try:
+        atomic_json(baseline.parent, baseline.name, value)
+    except FileExistsError:
+        original = read_mapping(baseline)
+        compare(original['entries'], f'acquisition fingerprint mismatch (tainted): {root}')
+        require(original == value, f'acquisition baseline identity mismatch: {root}')
+    require(not authority_exists(str(authority) + '.tainted'), f'tainted upstream fingerprint: {root}')
+    return tree
 
 
 def verify_dependency_result(root, *, expected_hash=None, trees=None, active=None, verified=None,
     output_dir=None):
+    with integrity_observation(root):
+        return _verify_dependency_result(root, expected_hash=expected_hash, trees=trees,
+            active=active, verified=verified, output_dir=output_dir)
+
+
+def _verify_dependency_result(root, *, expected_hash, trees, active, verified, output_dir):
     """Verify the complete lineage with an explicit postorder traversal."""
     root = directory_path(root)
     active = set() if active is None else active
@@ -100,7 +206,6 @@ def verify_dependency_result(root, *, expected_hash=None, trees=None, active=Non
                     require(Path(request.output_dir).resolve() == current, 'dependency attempt owner mismatch')
                     require(result.status == 'pass', 'dependency stage did not pass')
                     tree = verify_published_tree(current, result, expected)
-                    verify_result(result, request)
                     config = read_mapping(request.config_path)
                     hashes = dict(zip(request.dependency_paths, request.dependency_hashes))
                     parents = []
@@ -108,9 +213,23 @@ def verify_dependency_result(root, *, expected_hash=None, trees=None, active=Non
                         parent = Path(parent)
                         require(parent.is_absolute(), 'dependency publication path must be absolute')
                         parent = directory_path(parent)
-                        digest = hashes.get(str(parent / FINGERPRINT))
-                        require(digest is not None, 'dependency fingerprint absent from published request')
-                        parents.append((parent, digest, parent_unit, False))
+                        acquisition = config.get('acquisitions', {}).get(parent_unit)
+                        if acquisition is not None:
+                            if output_dir is not None:
+                                require(not output_dir.is_relative_to(parent) and not parent.is_relative_to(output_dir),
+                                    f'output overlaps an upstream attempt: {parent}')
+                            snapshots = read_mapping(current / '_execution/dependencies.json')
+                            require(str(parent) in snapshots, 'acquisition baseline absent from published request')
+                            require(str(current / '_execution/dependencies.json') in hashes,
+                                'acquisition baseline not bound to published request')
+                            acquisition_tree = verify_acquisition(parent, acquisition, expected_tree=snapshots[str(parent)])
+                            if trees is not None:
+                                trees[str(parent)] = acquisition_tree
+                        else:
+                            digest = hashes.get(str(parent / FINGERPRINT))
+                            require(digest is not None, 'dependency fingerprint absent from published request')
+                            parents.append((parent, digest, parent_unit, False))
+                    verify_result(result, request)
                     pending[current] = (result, tree)
                     stack.append((current, expected, unit, True))
                     stack.extend(reversed(parents))
@@ -218,17 +337,27 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     deps = resolve_dependencies(needs) if needs else {}
     files = []
     published_hashes = {}
+    acquisition_hashes = {}
     dependency_trees = {}
     verified_dependencies = {}
+    acquisitions = {}
     for unit, root in deps.items():
         require(not out.is_relative_to(root) and not root.is_relative_to(out),
             f'output overlaps an upstream attempt: {root}')
         require(isinstance(needs[unit], list) and needs[unit], 'dependency requires explicit files')
-        for relative in needs[unit]:
-            files.append(dependency_file(root, relative))
         acquisition_receipt = settings.get('acquisition_receipts', {}).get(unit)
         if acquisition_receipt is not None:
             require(acquisition_receipt in needs[unit], 'acquisition receipt must be a declared input')
+            require('payload.tar' in needs[unit], 'acquisition payload must be a declared input')
+            dependency_trees[str(root)] = verify_acquisition(root, acquisition_receipt)
+            acquisitions[unit] = acquisition_receipt
+        for relative in needs[unit]:
+            path = dependency_file(root, relative)
+            files.append(path)
+            if acquisition_receipt is not None:
+                acquisition_hashes[path] = dependency_trees[str(root)][relative]['sha256']
+        if acquisition_receipt is not None:
+            continue
         require((root / '_execution/result.json').is_file(), f'stage receipt missing or not regular: {root / "_execution/result.json"}')
         result = verify_dependency_result(root, trees=dependency_trees, verified=verified_dependencies,
             output_dir=out)
@@ -269,7 +398,8 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         require(file_hash(approvals_file) == file_hash(repo / 'configs/approvals.yaml'),
             'locked approvals differ from fingerprinted repository config')
     config = {'stage': stage, 'settings': settings, 'approvals': approvals_value,
-        'input_sources': sources, 'dependencies': {k: str(v) for k, v in deps.items()}}
+        'input_sources': sources, 'dependencies': {k: str(v) for k, v in deps.items()},
+        'acquisitions': acquisitions, 'yaml_timestamp_policy': 'preserve_scalar_text'}
     config_path = atomic_json(out, '_execution/config.json', config)
     task_path = atomic_json(out, '_execution/task.json', task)
     tree_path = atomic_json(out, '_execution/dependencies.json', dependency_trees)
@@ -278,7 +408,8 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         task_path=str(task_path), task_hash=file_hash(task_path),
         dependency_paths=tuple(map(str, files)),
         dependency_hashes=tuple(published_hashes[p] if p in published_hashes
-            else file_hash(p) for p in files),
+            else verify_input_hash(p, acquisition_hashes[p], hash_file=file_hash)
+            if p in acquisition_hashes else file_hash(p) for p in files),
         output_dir=str(out), code_identity=head)
     atomic_write(out, '_execution/request.json', request.to_json())
     environment = environment_record()
@@ -286,59 +417,76 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     atomic_json(out, '_execution/identity.json', {'head': head, 'scientific_fingerprint': scientific_fingerprint(repo)})
     immutable_controls = {str(out / ('_execution/' + name)): file_hash(out / ('_execution/' + name))
         for name in ('request.json', 'environment.json', 'identity.json')}
-    try:
-        verify_inputs(request)
-        module_name = settings.get('module')
-        require(isinstance(module_name, str) and module_name.startswith('oxyformer.'),
-            'stage module not registered')
-        if execute is None:
-            from .worker import execute
-        result = execute(request, module_name, repo)
-        require(isinstance(result, StageResult), 'stage did not return StageResult')
-    except BaseException as exc:
-        result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
-            message=str(exc).strip() or type(exc).__name__)
-    changed = []
-    try:
-        check = post_execution_check(dependency_trees)
-        changed = [str(Path(root) / name) for root, detail in check['attempts'].items()
-            for name in detail['changed_paths']]
-        record_taints(check)
-        control_directory_changed = _repair_control_directory(out)
-        collisions = [str(out / name) for name in (DEPENDENCY_CHECK, RESULT, FINGERPRINT)
-            if os.path.lexists(out / name)]
-        if control_directory_changed:
-            collisions.append(str(out / '_execution'))
-        _replace_control(out, DEPENDENCY_CHECK, canonical_json(check))
-        if check['status'] == 'fail':
+    with observe_dependencies(out, dependency_trees):
+        dependency_identities = snapshot_dependency_identities(dependency_trees)
+        try:
+            verify_inputs(request)
+            module_name = settings.get('module')
+            require(isinstance(module_name, str) and module_name.startswith('oxyformer.'),
+                'stage module not registered')
+            if execute is None:
+                from .worker import execute
+                module_name = 'oxyformer.execution.integrity'
+            result = execute(request, module_name, repo)
+            require(isinstance(result, StageResult), 'stage did not return StageResult')
+        except BaseException as exc:
             result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
-                message='upstream attempt tainted; changed paths: ' + ', '.join(changed))
-        else:
-            try:
-                sys.stdout.flush()
-                sys.stderr.flush()
-                require(not collisions, 'reserved execution control collision: ' + ', '.join(collisions))
-                for path, digest in immutable_controls.items():
-                    require(file_hash(path) == digest, f'execution control changed: {path}')
-                verify_result(result, request)
-                require(all(not (out / a.path).resolve().is_relative_to(repo) for a in result.artifacts),
-                    'artifact overlaps cloned repository')
-                require(all(not a.path.startswith('_execution/') for a in result.artifacts), 'reserved execution artifact')
-                declared = set(task.get('outputs', []))
-                if result.status == 'pass':
-                    require(declared <= {a.path for a in result.artifacts}, 'stage omitted declared outputs')
-                for path, digest in sources.items():
-                    require(file_hash(path) == digest, f'input source changed: {path}')
-                observed_head = code_identity(repo, out)
-                require(observed_head == request.code_identity,
-                    f'code identity changed: recorded {request.code_identity}, observed {observed_head}')
-            except BaseException as exc:
+                message=str(exc).strip() or type(exc).__name__)
+        changed = []
+        try:
+            check = post_execution_check(dependency_trees, observed_changes=changed, identities=dependency_identities)
+            # Another consumer may have observed a write that was restored before
+            # this final snapshot. Such observed taints remain permanent.
+            for root, detail in check['attempts'].items():
+                marker = Path(str(publication_receipt(root)) + '.tainted')
+                if authority_exists(marker):
+                    observed = json.loads(read_regular(marker))
+                    changed.extend(str(Path(root) / name) for name in observed)
+                    detail['changed_paths'] = sorted(set(detail['changed_paths']) | set(observed))
+                    detail['tainted_paths'] = sorted(set(detail['tainted_paths']) | set(observed))
+                    detail['status'] = 'tainted'
+                    check['status'] = 'fail'
+            changed = [str(Path(root) / name) for root, detail in check['attempts'].items()
+                for name in detail['changed_paths']]
+            record_taints(check)
+            control_directory_changed = _repair_control_directory(out)
+            collisions = [str(out / name) for name in (DEPENDENCY_CHECK, RESULT, FINGERPRINT)
+                if os.path.lexists(out / name)]
+            if control_directory_changed:
+                collisions.append(str(out / '_execution'))
+            _replace_control(out, DEPENDENCY_CHECK, canonical_json(check))
+            if check['status'] == 'fail':
                 result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
-                    message=str(exc).strip() or type(exc).__name__)
-        return publish_result(out, result, owned_controls=True)
-    except BaseException as exc:
-        message = 'stage finalization failed: ' + (str(exc).strip() or type(exc).__name__)
-        if changed:
-            message += '; upstream attempt tainted; changed paths: ' + ', '.join(changed)
-        print('failed: ' + message, file=sys.stderr)
-        return StageResult(request_hash=request.content_hash, status='fail', artifacts=(), message=message)
+                    message=('upstream attempt changed; changed paths: ' + ', '.join(changed)) if changed
+                    else 'upstream fingerprint unreadable: ' + ', '.join(root for root, detail in
+                        check['attempts'].items() if detail['status'] == 'unreadable'))
+            else:
+                try:
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+                    require(not collisions, 'reserved execution control collision: ' + ', '.join(collisions))
+                    for path, digest in immutable_controls.items():
+                        require(file_hash(path) == digest, f'execution control changed: {path}')
+                    verify_result(result, request)
+                    require(all(not (out / a.path).resolve().is_relative_to(repo) for a in result.artifacts),
+                        'artifact overlaps cloned repository')
+                    require(all(not a.path.startswith('_execution/') for a in result.artifacts), 'reserved execution artifact')
+                    declared = set(task.get('outputs', []))
+                    if result.status == 'pass':
+                        require(declared <= {a.path for a in result.artifacts}, 'stage omitted declared outputs')
+                    for path, digest in sources.items():
+                        require(file_hash(path) == digest, f'input source changed: {path}')
+                    observed_head = code_identity(repo, out)
+                    require(observed_head == request.code_identity,
+                        f'code identity changed: recorded {request.code_identity}, observed {observed_head}')
+                except BaseException as exc:
+                    result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
+                        message=str(exc).strip() or type(exc).__name__)
+            return publish_result(out, result, owned_controls=True, dependency_roots=dependency_trees,
+                dependency_identities=dependency_identities)
+        except BaseException as exc:
+            message = 'stage finalization failed: ' + (str(exc).strip() or type(exc).__name__)
+            if changed:
+                message += '; upstream attempt changed; changed paths: ' + ', '.join(changed)
+            print('failed: ' + message, file=sys.stderr)
+            return StageResult(request_hash=request.content_hash, status='fail', artifacts=(), message=message)
