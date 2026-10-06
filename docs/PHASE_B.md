@@ -83,6 +83,12 @@ scheduler termination produces a portable checkpoint. Admission requires a
 reviewed owning-unit bridge that sets safe execution limits and distinguishes
 partial from terminal outputs. The direct continuation APIs are testable;
 that does not make the generic multi-slice task an admitted production chain.
+The generic reporting collector also lacks the required bundle, expected-task
+manifest, receipt and approval bindings. Independently constructed reporting
+tasks accept these fields, but the current expander drops extra collector
+fields. A reviewed producer must also publish canonical `CoverageScenario`
+artifacts: the coverage collector's JSON summaries alone do not satisfy the
+reporting evidence interface.
 
 Long nested fits must preserve optimizer/scheduler/RNG/sampler, models,
 preprocessing, calibration, fold/reference/source/config identities and frozen

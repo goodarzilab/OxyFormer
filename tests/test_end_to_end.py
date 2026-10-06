@@ -161,7 +161,7 @@ def build_chain(root):
         feature_kinds=(("female_share", "numeric"),), families=(("female_share",),),
         county_field="county", exposure_assignment_level="tract")
     arguments = [(prepared, root, fold, seed) for fold in range(5) for seed in nested.SEEDS]
-    with ProcessPoolExecutor(max_workers=2, mp_context=multiprocessing.get_context("spawn")) as pool:
+    with ProcessPoolExecutor(max_workers=5, mp_context=multiprocessing.get_context("spawn")) as pool:
         parts = list(pool.map(fit_partition, arguments))
     fields = ("original_ids", "fold_ids", "seed_ids", "mu_a", "mu_d", "r_a", "r_d", "origin_weights")
     lineage = replace(parts[0].lineage, unit_ids=prepared.outer.original_ids,
