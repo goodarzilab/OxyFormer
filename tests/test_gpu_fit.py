@@ -6,13 +6,14 @@ nested network; reductions use FP64 but cannot recover FP32 forward precision.
 No estimator, grid, seed, stopping schedule or scientific gate is replaced.
 """
 from dataclasses import replace
+from unittest.mock import patch
 
 import pytest
 import torch
 
 from oxyformer.provenance import ContractError
 from oxyformer.training import fit, nested_cv
-from oxyformer.training.checkpoint import capture_rng
+from oxyformer.training.checkpoint import CheckpointArtifact, capture_rng
 from test_nested_cv import endpoint, tiny_config, predictions, state
 
 GPU = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable: CPU-only wheel or no visible GPU")
@@ -74,8 +75,19 @@ def cuda_nested(tmp_path_factory):
         fitted = {}
         for device in ("cpu", "cuda"):
             config = tiny_config(prepared, root / device, device=device)
-            fitted[device] = nested_cv.run_fold(config, prepared.outer, 1103, geography=prepared.geography)
+            seen = set()
+            original_step = torch.optim.AdamW.step
+            def observed_step(optimizer, *args, **kwargs):
+                seen.update(parameter.device.type for group in optimizer.param_groups
+                            for parameter in group["params"])
+                return original_step(optimizer, *args, **kwargs)
+            with patch.object(torch.optim.AdamW, "step", observed_step):
+                fitted[device] = nested_cv.run_fold(config, prepared.outer, 1103, geography=prepared.geography)
             assert fitted[device].complete
+            assert seen == {device}, "Every SSL/nuisance AdamW update must use the requested device"
+            for initialization in state(fitted[device])["initializations"].values():
+                identity = CheckpointArtifact.from_json(initialization).identity
+                assert dict(identity.environment)["device"].startswith(device)
         yield prepared, fitted
     finally:
         torch.set_num_threads(old)
