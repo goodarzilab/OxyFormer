@@ -1097,7 +1097,7 @@ def test_unsealed_acquisition_cannot_become_a_new_baseline(runtime, tmp_path, mo
     assert not (source / '_execution').exists()
 
 
-def test_restored_upstream_state_is_identical_under_fingerprint_contract(runtime, tmp_path, monkeypatch, source):
+def test_restored_upstream_content_is_equal_but_run_is_tainted(runtime, tmp_path, monkeypatch, source):
     repo, out = runtime
     victim = source / 'data.json'
     def faulty(request):
@@ -1108,9 +1108,11 @@ def test_restored_upstream_state_is_identical_under_fingerprint_contract(runtime
         return dummy(request)
     install_stage(monkeypatch, repo, faulty)
     result = run_task(repo, out, needs=SOURCE_NEEDS)
-    # Fingerprints compare input states, not a history of transient writes.
-    assert_pass(result)
+    # Portable content is restored, but the per-run kernel identity is not.
+    assert_failed(result, victim)
     assert victim.read_bytes() == b'{}'
+    with raises(ContractError, match='tainted'):
+        verify_dependency_result(source)
 
 
 @mark.parametrize('mutation', ['chmod', 'undeclared_bytes'])
@@ -1265,7 +1267,7 @@ def test_cli_undeclared_outside_write_fails(runtime, tmp_path, monkeypatch):
 
 
 @mark.parametrize('control', ['result.json', 'fingerprint.json'])
-def test_identical_control_rewrite_accepts_later_consumers(runtime, tmp_path, monkeypatch, control, source):
+def test_identical_control_rewrite_taints_later_consumers(runtime, tmp_path, monkeypatch, control, source):
     repo, out = runtime
     victim = source / '_execution' / control
     def faulty(request):
@@ -1274,10 +1276,11 @@ def test_identical_control_rewrite_accepts_later_consumers(runtime, tmp_path, mo
         return result
     install_stage(monkeypatch, repo, faulty)
     result = run_task(repo, out, needs=SOURCE_NEEDS)
-    assert_pass(result)
+    assert_failed(result, victim)
     later = new_attempt(repo, tmp_path / 'later')
     install_stage(monkeypatch, repo, dummy)
-    assert_pass(run_task(repo, later, needs=SOURCE_NEEDS))
+    with raises(ContractError, match='tainted'):
+        run_task(repo, later, needs=SOURCE_NEEDS)
 
 
 def test_cli_finalizes_temporary_directories_before_publication(runtime):
@@ -1340,7 +1343,7 @@ def run_stage(request):
 
 @mark.parametrize('operation', ['rewrite_restore_mtime', 'copy2'])
 @mark.parametrize('control', ['result.json', 'fingerprint.json'])
-def test_control_rewrites_bind_fingerprinted_properties_only(runtime, tmp_path, monkeypatch, operation, control, source):
+def test_control_rewrites_taint_even_with_restored_mtime(runtime, tmp_path, monkeypatch, operation, control, source):
     repo, out = runtime
     victim = source / '_execution' / control
     before = victim.stat()
@@ -1356,12 +1359,16 @@ def test_control_rewrites_bind_fingerprinted_properties_only(runtime, tmp_path, 
         return result
     install_stage(monkeypatch, repo, faulty)
     result = run_task(repo, out, needs=SOURCE_NEEDS)
-    assert_pass(result)
+    assert_failed(result, victim)
     assert victim.stat().st_mtime_ns == before.st_mtime_ns
     assert victim.stat().st_ctime_ns != before.st_ctime_ns
     later = new_attempt(repo, tmp_path / 'later')
     install_stage(monkeypatch, repo, dummy)
-    assert_pass(run_task(repo, later, needs=SOURCE_NEEDS))
+    with raises(ContractError, match='tainted'):
+        run_task(repo, later, needs=SOURCE_NEEDS)
+    # Independently retain the content/mode-change checks on a fresh producer.
+    source = make_source(repo, tmp_path / 'changed-source', monkeypatch)
+    victim = source / '_execution' / control
 
     changed = new_attempt(repo, tmp_path / 'changed')
     def fingerprinted_change(request):
