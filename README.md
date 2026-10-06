@@ -25,7 +25,10 @@ coverage or clinical release evidence. See the execution guide for exact
 reproductions and scope limits.
 
 The current package is under `src/oxyformer/`. Tests use synthetic fixtures,
-CPU execution and no network. Run from the checkout on a Slurm compute node:
+CPU execution and no network. The command below targets this lab's Slurm
+settings and installed interpreter. Other hosts require equivalent verified
+environments and their own scheduler settings. Run from the checkout on a
+Slurm compute node:
 
 ```sh
 srun --partition=standard --account=root --nodes=1 --ntasks=1 \

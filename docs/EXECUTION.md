@@ -71,6 +71,24 @@ The registered command then uses that clone's CLI with `--repo`, `--out`,
 `--prepared` shell path is only for a worker that already performed the same
 clone/identity preparation; it is not permission to reuse an unreviewed tree.
 
+Cloning `dev` selects the launch revision; it does not override the locked
+scientific identity. Before invoking a locked stage, `execution.runner` calls
+`verify_recipe` and requires the clone's `tracked-science-v2` fingerprint to
+match the recipe. It also checks the scientific fingerprints of locked upstream
+attempts, including transitive dependencies. The fingerprint covers tracked
+files except `*.md` outside `src/`, `scripts/` and `docs/plan/`. Each clone's
+full commit is still recorded and bound to its stage request.
+
+If an ordinary merge advances `dev` with changed source, config or frozen-plan
+content, a later leaf refuses with `recipe scientific code/config drift` before
+producing scientific output. Do not combine results from different scientific
+fingerprints or rewrite the old lock. A changed scientific recipe requires a
+new prospective lock, timing and authorizations. A documentation-only merge
+can preserve the scientific fingerprint and pass the generic lock check;
+portable nested continuation additionally binds its full request code identity
+and may refuse that change. A clone prefix alone is not evidence that either
+identity check passed.
+
 Only normalized dependency variables resolve upstream work: for example,
 `atlas-mid-atlantic` becomes `SWARM_DEP_ATLAS_MID_ATLANTIC`. IDs must not collide
 after normalization. Never search run directories for the newest output or
@@ -118,8 +136,11 @@ links; they may not shorten tuning or restart from an approximate state.
 
 ## Offline verification
 
-Run from this checkout on a compute node. The login node is for editing, Git,
-GitHub and review-gate calls only. No tests, mutations, probes or acquisition
+The commands below use this lab's installed interpreters and Slurm settings.
+On another host, provision and verify the equivalent environments and use its
+site-approved scheduler settings; these absolute interpreter paths are local
+to this run. Run from this checkout on a compute node. The login node is for
+editing, Git, GitHub and review-gate calls only. No tests, mutations, probes or acquisition
 reads belong there. This command preserves the required inner test command:
 
 ```sh
@@ -132,8 +153,8 @@ srun --partition=standard --account=root --nodes=1 --ntasks=1 \
 Before every review round repeat the complete suite with
 `/mnt/weka/home/hgoodarzi/oxyformer-swarm/envs/ci-cpu/bin/python`. The owner
 replaced the obsolete ten-minute complete-suite limit with a 3,600-second
-timeout; eight-CPU full runs take approximately 25–30 minutes. Record failures
-and build-specific skips; do not relax tolerances to hide CPU float32 differences.
+timeout; the measured eight-CPU full runs in this attempt took approximately
+32–33 minutes. Record failures and build-specific skips; do not relax tolerances to hide CPU float32 differences.
 Also run `tests/test_end_to_end.py tests/test_plan_integrity.py` **without `-B`**
 in both environments before review, matching CI's ordinary interpreter mode.
 Do not make tests depend on bytecode flags. The integration additions must add
