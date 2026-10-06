@@ -3196,7 +3196,7 @@ def test_acquisition_authority_lookup_io_never_becomes_absence(runtime, acquisit
     result = run_task(repo, new_attempt(repo, tmp_path / 'active'), needs=needs)
     assert not marker.exists(), 'unrelated lookup/enumeration EIO invented mutation evidence'
     assert len(observed) == 1 and str(baseline) in observed[0]
-    assert_pass(result)
+    assert_failed(result, baseline)
     install_stage(monkeypatch, repo, dummy)
     assert_pass(run_task(repo, new_attempt(repo, tmp_path / 'retry'), needs=needs))
     assert_pass(verify_dependency_result(producer))
@@ -3578,3 +3578,123 @@ def test_incomplete_observation_after_metadata_change_allows_retry(runtime, acqu
     assert not Path(str(integrity.publication_receipt(root)) + '.tainted').exists()
     install_stage(monkeypatch, repo, dummy)
     assert_pass(run_task(repo, new_attempt(repo, tmp_path / 'retry'), needs=needs))
+
+
+@mark.parametrize('reader', ['request', 'hash', 'bytes', 'admission'])
+def test_published_content_observation_survives_restore(runtime, source, tmp_path, monkeypatch, reader):
+    from oxyformer.execution import integrity
+    repo, out = runtime
+    victim = source / 'data.json'
+    saved = victim.read_bytes()
+    def faulty(request):
+        victim.write_bytes(b'[]')
+        try:
+            with raises(ContractError):
+                if reader == 'admission':
+                    verify_dependency_result(source)
+                elif reader == 'request':
+                    request.verify_inputs()
+                elif reader == 'hash':
+                    integrity.regular_file_hash(victim)
+                else:
+                    integrity.read_regular(victim)
+        finally:
+            victim.write_bytes(saved)
+        return dummy(request)
+    install_stage(monkeypatch, repo, faulty)
+    result = run_task(repo, out, needs=SOURCE_NEEDS)
+    assert_failed(result, victim)
+    marker = Path(str(integrity.publication_receipt(source)) + '.tainted')
+    assert read_json(marker) == ['data.json']
+    with raises(ContractError, match='tainted'):
+        verify_dependency_result(source)
+
+
+@mark.parametrize('kind', ['acquisition', 'stage'])
+@mark.parametrize('separate_worker', [False, True])
+def test_caught_integrity_io_refuses_only_the_observing_attempt(runtime, acquisition, source, tmp_path, monkeypatch, kind, separate_worker):
+    from oxyformer.execution import integrity
+    import errno
+    repo, out = runtime
+    root = acquisition if kind == 'acquisition' else source
+    victim = root / ('payload.tar' if kind == 'acquisition' else 'data.json')
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']} if kind == 'acquisition' else SOURCE_NEEDS
+    monkeypatch.setenv('FIXTURE_OBSERVED_PATH', str(victim))
+    if separate_worker:
+        process = run_cli(repo, out, '''import errno
+from oxyformer.execution.integrity import read_regular
+def run_stage(request):
+    victim = Path(os.environ['FIXTURE_OBSERVED_PATH'])
+    original = os.open
+    def unavailable(path, *args, **kwargs):
+        if Path(path) == victim:
+            raise OSError(errno.EIO, 'transient integrity read error', str(path))
+        return original(path, *args, **kwargs)
+    os.open = unavailable
+    try:
+        try:
+            read_regular(victim)
+        except OSError:
+            pass
+    finally:
+        os.open = original
+    return dummy(request)
+''', needs=needs)
+        assert_exit(process, 1)
+        result = read_result(out)
+    else:
+        original = os.open
+        def faulty(request):
+            def unavailable(path, *args, **kwargs):
+                if Path(path) == victim:
+                    raise OSError(errno.EIO, 'transient integrity read error', str(path))
+                return original(path, *args, **kwargs)
+            with monkeypatch.context() as patch:
+                patch.setattr(os, 'open', unavailable)
+                with raises(OSError, match='transient integrity read error'):
+                    integrity.read_regular(victim)
+            return dummy(request)
+        install_stage(monkeypatch, repo, faulty)
+        result = run_task(repo, out, needs=needs)
+    assert_failed(result, victim)
+    assert not integrity.publication_receipt(out).exists()
+    assert not Path(str(integrity.publication_receipt(root)) + '.tainted').exists()
+    install_stage(monkeypatch, repo, dummy)
+    assert_pass(run_task(repo, new_attempt(repo, tmp_path / 'clean-retry'), needs=needs))
+
+
+def test_worker_retains_caught_io_when_refusal_record_is_unwritable(runtime, source, tmp_path, monkeypatch):
+    from oxyformer.execution import integrity
+    repo, out = runtime
+    victim = source / 'data.json'
+    monkeypatch.setenv('FIXTURE_OBSERVED_PATH', str(victim))
+    process = run_cli(repo, out, '''import errno
+from oxyformer.execution import integrity
+def run_stage(request):
+    result = dummy(request)
+    victim = Path(os.environ['FIXTURE_OBSERVED_PATH'])
+    original_open, original_write = os.open, integrity.atomic_json
+    def unavailable(path, *args, **kwargs):
+        if Path(path) == victim:
+            raise OSError(errno.EIO, 'transient input observation failure', str(path))
+        return original_open(path, *args, **kwargs)
+    def unavailable_record(root, relative, value):
+        if relative.endswith('.refused'):
+            raise OSError(errno.EIO, 'refusal record temporarily unwritable')
+        return original_write(root, relative, value)
+    os.open, integrity.atomic_json = unavailable, unavailable_record
+    try:
+        try:
+            integrity.read_regular(victim)
+        except OSError:
+            pass
+    finally:
+        os.open, integrity.atomic_json = original_open, original_write
+    return result
+''', needs=SOURCE_NEEDS)
+    assert_exit(process, 1)
+    assert_failed(read_result(out), victim)
+    assert not Path(str(integrity.publication_receipt(source)) + '.tainted').exists()
+    assert not Path(str(integrity.publication_receipt(out)) + '.refused').exists()
+    install_stage(monkeypatch, repo, dummy)
+    assert_pass(run_task(repo, new_attempt(repo, tmp_path / 'clean-retry'), needs=SOURCE_NEEDS))

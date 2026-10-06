@@ -14,7 +14,7 @@ import yaml
 from oxyformer.contracts import StageRequest, StageResult
 from oxyformer.provenance import ContractError, canonical_json, relative_artifact_path, require
 from .integrity import (DEPENDENCY_CHECK, FINGERPRINT, RESULT, _replace_control, _repair_control_directory,
-    post_execution_check, publish_result, record_taints, snapshot_dependency_identities,
+    post_execution_check, publish_result, record_taints, snapshot_dependency_identities, observe_dependencies,
     directory_path, read_regular, regular_file_stat, regular_file_hash as file_hash,
     fingerprint_tree, publication_receipt, InputChanged, acquisition_read,
     acquisition_changed_paths, verify_input_hash, authority_exists,
@@ -401,74 +401,76 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     atomic_json(out, '_execution/identity.json', {'head': head, 'scientific_fingerprint': scientific_fingerprint(repo)})
     immutable_controls = {str(out / ('_execution/' + name)): file_hash(out / ('_execution/' + name))
         for name in ('request.json', 'environment.json', 'identity.json')}
-    dependency_identities = snapshot_dependency_identities(dependency_trees)
-    try:
-        verify_inputs(request)
-        module_name = settings.get('module')
-        require(isinstance(module_name, str) and module_name.startswith('oxyformer.'),
-            'stage module not registered')
-        if execute is None:
-            from .worker import execute
-        result = execute(request, module_name, repo)
-        require(isinstance(result, StageResult), 'stage did not return StageResult')
-    except BaseException as exc:
-        result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
-            message=str(exc).strip() or type(exc).__name__)
-    changed = []
-    try:
-        check = post_execution_check(dependency_trees, observed_changes=changed, identities=dependency_identities)
-        # Another consumer may have observed a write that was restored before
-        # this final snapshot. Such observed taints remain permanent.
-        for root, detail in check['attempts'].items():
-            marker = Path(str(publication_receipt(root)) + '.tainted')
-            if authority_exists(marker):
-                observed = json.loads(read_regular(marker))
-                changed.extend(str(Path(root) / name) for name in observed)
-                detail['changed_paths'] = sorted(set(detail['changed_paths']) | set(observed))
-                detail['tainted_paths'] = sorted(set(detail['tainted_paths']) | set(observed))
-                detail['status'] = 'tainted'
-                check['status'] = 'fail'
-        changed = [str(Path(root) / name) for root, detail in check['attempts'].items()
-            for name in detail['changed_paths']]
-        record_taints(check)
-        control_directory_changed = _repair_control_directory(out)
-        collisions = [str(out / name) for name in (DEPENDENCY_CHECK, RESULT, FINGERPRINT)
-            if os.path.lexists(out / name)]
-        if control_directory_changed:
-            collisions.append(str(out / '_execution'))
-        _replace_control(out, DEPENDENCY_CHECK, canonical_json(check))
-        if check['status'] == 'fail':
+    with observe_dependencies(out, dependency_trees):
+        dependency_identities = snapshot_dependency_identities(dependency_trees)
+        try:
+            verify_inputs(request)
+            module_name = settings.get('module')
+            require(isinstance(module_name, str) and module_name.startswith('oxyformer.'),
+                'stage module not registered')
+            if execute is None:
+                from .worker import execute
+                module_name = 'oxyformer.execution.integrity'
+            result = execute(request, module_name, repo)
+            require(isinstance(result, StageResult), 'stage did not return StageResult')
+        except BaseException as exc:
             result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
-                message=('upstream attempt changed; changed paths: ' + ', '.join(changed)) if changed
-                else 'upstream fingerprint unreadable: ' + ', '.join(root for root, detail in
-                    check['attempts'].items() if detail['status'] == 'unreadable'))
-        else:
-            try:
-                sys.stdout.flush()
-                sys.stderr.flush()
-                require(not collisions, 'reserved execution control collision: ' + ', '.join(collisions))
-                for path, digest in immutable_controls.items():
-                    require(file_hash(path) == digest, f'execution control changed: {path}')
-                verify_result(result, request)
-                require(all(not (out / a.path).resolve().is_relative_to(repo) for a in result.artifacts),
-                    'artifact overlaps cloned repository')
-                require(all(not a.path.startswith('_execution/') for a in result.artifacts), 'reserved execution artifact')
-                declared = set(task.get('outputs', []))
-                if result.status == 'pass':
-                    require(declared <= {a.path for a in result.artifacts}, 'stage omitted declared outputs')
-                for path, digest in sources.items():
-                    require(file_hash(path) == digest, f'input source changed: {path}')
-                observed_head = code_identity(repo, out)
-                require(observed_head == request.code_identity,
-                    f'code identity changed: recorded {request.code_identity}, observed {observed_head}')
-            except BaseException as exc:
+                message=str(exc).strip() or type(exc).__name__)
+        changed = []
+        try:
+            check = post_execution_check(dependency_trees, observed_changes=changed, identities=dependency_identities)
+            # Another consumer may have observed a write that was restored before
+            # this final snapshot. Such observed taints remain permanent.
+            for root, detail in check['attempts'].items():
+                marker = Path(str(publication_receipt(root)) + '.tainted')
+                if authority_exists(marker):
+                    observed = json.loads(read_regular(marker))
+                    changed.extend(str(Path(root) / name) for name in observed)
+                    detail['changed_paths'] = sorted(set(detail['changed_paths']) | set(observed))
+                    detail['tainted_paths'] = sorted(set(detail['tainted_paths']) | set(observed))
+                    detail['status'] = 'tainted'
+                    check['status'] = 'fail'
+            changed = [str(Path(root) / name) for root, detail in check['attempts'].items()
+                for name in detail['changed_paths']]
+            record_taints(check)
+            control_directory_changed = _repair_control_directory(out)
+            collisions = [str(out / name) for name in (DEPENDENCY_CHECK, RESULT, FINGERPRINT)
+                if os.path.lexists(out / name)]
+            if control_directory_changed:
+                collisions.append(str(out / '_execution'))
+            _replace_control(out, DEPENDENCY_CHECK, canonical_json(check))
+            if check['status'] == 'fail':
                 result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
-                    message=str(exc).strip() or type(exc).__name__)
-        return publish_result(out, result, owned_controls=True, dependency_roots=dependency_trees,
-            dependency_identities=dependency_identities)
-    except BaseException as exc:
-        message = 'stage finalization failed: ' + (str(exc).strip() or type(exc).__name__)
-        if changed:
-            message += '; upstream attempt changed; changed paths: ' + ', '.join(changed)
-        print('failed: ' + message, file=sys.stderr)
-        return StageResult(request_hash=request.content_hash, status='fail', artifacts=(), message=message)
+                    message=('upstream attempt changed; changed paths: ' + ', '.join(changed)) if changed
+                    else 'upstream fingerprint unreadable: ' + ', '.join(root for root, detail in
+                        check['attempts'].items() if detail['status'] == 'unreadable'))
+            else:
+                try:
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+                    require(not collisions, 'reserved execution control collision: ' + ', '.join(collisions))
+                    for path, digest in immutable_controls.items():
+                        require(file_hash(path) == digest, f'execution control changed: {path}')
+                    verify_result(result, request)
+                    require(all(not (out / a.path).resolve().is_relative_to(repo) for a in result.artifacts),
+                        'artifact overlaps cloned repository')
+                    require(all(not a.path.startswith('_execution/') for a in result.artifacts), 'reserved execution artifact')
+                    declared = set(task.get('outputs', []))
+                    if result.status == 'pass':
+                        require(declared <= {a.path for a in result.artifacts}, 'stage omitted declared outputs')
+                    for path, digest in sources.items():
+                        require(file_hash(path) == digest, f'input source changed: {path}')
+                    observed_head = code_identity(repo, out)
+                    require(observed_head == request.code_identity,
+                        f'code identity changed: recorded {request.code_identity}, observed {observed_head}')
+                except BaseException as exc:
+                    result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
+                        message=str(exc).strip() or type(exc).__name__)
+            return publish_result(out, result, owned_controls=True, dependency_roots=dependency_trees,
+                dependency_identities=dependency_identities)
+        except BaseException as exc:
+            message = 'stage finalization failed: ' + (str(exc).strip() or type(exc).__name__)
+            if changed:
+                message += '; upstream attempt changed; changed paths: ' + ', '.join(changed)
+            print('failed: ' + message, file=sys.stderr)
+            return StageResult(request_hash=request.content_hash, status='fail', artifacts=(), message=message)

@@ -22,6 +22,88 @@ RESULT = "_execution/result.json"
 DEPENDENCY_CHECK = "_execution/dependency_check.json"
 PUBLICATION_EXCLUSIONS = (FINGERPRINT, RESULT)
 _ACQUISITION_READS = ContextVar('acquisition_reads', default=())
+_OBSERVATION_STATES = {}
+_RECORDING_REFUSAL = ContextVar('recording_refusal', default=False)
+_OBSERVATION_ENV = 'OXYFORMER_OBSERVATION_ATTEMPT'
+
+
+
+def _observation_state():
+    root = os.environ.get(_OBSERVATION_ENV)
+    if root is None:
+        return None
+    if root not in _OBSERVATION_STATES:
+        state = _OBSERVATION_STATES[root] = {'root': root, 'trees': {}, 'failures': []}
+        try:
+            receipt = publication_receipt(root)
+            value = json.loads(read_regular(str(receipt) + '.observation-inputs'))
+            require(value['attempt'] == root, 'observation attempt mismatch')
+            state['trees'] = value['trees']
+        except BaseException as exc:
+            state['failures'].append(str(exc))
+            raise
+    return _OBSERVATION_STATES[root]
+
+
+def _record_refusal(path, error):
+    if _RECORDING_REFUSAL.get() or _OBSERVATION_ENV not in os.environ:
+        return
+    token = _RECORDING_REFUSAL.set(True)
+    try:
+        state = _observation_state()
+        message = f'{path}: {error}'
+        state['failures'].append(message)
+        receipt = publication_receipt(state['root'])
+        try:
+            atomic_json(receipt.parent, receipt.name + '.refused', {'message': message})
+        except FileExistsError:
+            pass  # The first refusal is sufficient and belongs only to this attempt.
+    finally:
+        _RECORDING_REFUSAL.reset(token)
+
+
+def require_complete_observations(root):
+    state = _observation_state()
+    require(state is None or state['root'] == str(root), 'observation attempt mismatch')
+    if state is not None:
+        require(not state['failures'], 'integrity observation refused: ' + '; '.join(state['failures']))
+    receipt = publication_receipt(root)
+    marker = Path(str(receipt) + '.refused')
+    if authority_exists(marker):
+        require(False, 'integrity observation refused: ' + json.loads(read_regular(marker))['message'])
+
+
+@contextmanager
+def observe_dependencies(root, trees):
+    """Bind worker reads and retain refusals for this attempt, never its retry."""
+    root = str(root)
+    receipt = publication_receipt(root, create=True)
+    atomic_json(receipt.parent, receipt.name + '.observation-inputs', {'attempt': root, 'trees': trees})
+    previous = os.environ.get(_OBSERVATION_ENV)
+    _OBSERVATION_STATES[root] = {'root': root, 'trees': trees, 'failures': []}
+    os.environ[_OBSERVATION_ENV] = root
+    try:
+        yield
+    finally:
+        _OBSERVATION_STATES.pop(root, None)
+        if previous is None:
+            os.environ.pop(_OBSERVATION_ENV, None)
+        else:
+            os.environ[_OBSERVATION_ENV] = previous
+
+
+def run_stage(request):
+    """Worker dispatch retains a caught reader failure even if its marker I/O fails."""
+    import importlib
+    state = _observation_state()
+    require(state is not None and state['root'] == request.output_dir, 'worker observation binding missing')
+    verify_input_hash(request.config_path, request.config_hash)
+    config = json.loads(read_regular(request.config_path))
+    module_name = config['settings']['module']
+    require(module_name.startswith('oxyformer.') and module_name != __name__, 'invalid observed stage module')
+    result = importlib.import_module(module_name).run_stage(request)
+    require_complete_observations(request.output_dir)
+    return result
 
 
 def publication_receipt(root, *, create=False):
@@ -66,6 +148,7 @@ def record_publication(root, result, *, dependency_roots=(), dependency_identiti
         for name in detail['changed_paths'] + detail['unreadable_paths']]
     require(not refused, 'upstream path identity changed or unreadable: ' + ', '.join(refused))
     with publication_lock(receipt):
+        require_complete_observations(root)
         # The authoritative release and permanent taints share one ordering.
         # A recorded upstream taint cannot slip between this check and commit.
         for dependency in dependency_roots:
@@ -99,7 +182,7 @@ def record_taints(check):
 
 
 def _acquisition_binding(path):
-    """Find a durable acquisition ancestor, without resolving the observed path.
+    """Find an active dependency or durable acquisition binding without resolving it.
 
     Both successful and refused reads consult the same immutable authority.
     The authority lives outside acquisitions and cannot recursively bind itself.
@@ -112,6 +195,12 @@ def _acquisition_binding(path):
     for root, entries in reversed(_ACQUISITION_READS.get()):
         if path.is_relative_to(root):
             return root, str(path.relative_to(root)), entries
+    state = _observation_state()
+    if state is not None:
+        for root, entries in sorted(state['trees'].items(), key=lambda item: len(item[0]), reverse=True):
+            root = Path(root)
+            if path.is_relative_to(root):
+                return root, str(path.relative_to(root)), entries
     for root in (path, *path.parents):
         if store.is_relative_to(root):
             continue
@@ -161,18 +250,22 @@ def acquisition_read(path, *, kind=stat.S_IFREG):
     """
     # Prepare authority before observing input, and share it with nested
     # readers/comparisons. Never discover it after positive evidence exists.
-    binding = _acquisition_binding(path)
+    binding = None
     token = None
-    if binding is not None:
-        token = _ACQUISITION_READS.set((*_ACQUISITION_READS.get(), (binding[0], binding[2])))
     try:
+        binding = _acquisition_binding(path)
+        if binding is not None:
+            token = _ACQUISITION_READS.set((*_ACQUISITION_READS.get(), (binding[0], binding[2])))
         yield
     except (OSError, InputTypeError, InputChanged) as exc:
-        if (isinstance(exc, InputTypeError)
-                or isinstance(exc, InputChanged) and exc.content_changed
-                or isinstance(exc, OSError) and exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.EISDIR)):
-            if binding is not None and binding[2].get(binding[1], {}).get('type') == kind:
-                _taint_observation(binding)
+        try:
+            if (isinstance(exc, InputTypeError)
+                    or isinstance(exc, InputChanged) and exc.content_changed
+                    or isinstance(exc, OSError) and exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.EISDIR)):
+                if binding is not None and binding[2].get(binding[1], {}).get('type') == kind:
+                    _taint_observation(binding)
+        finally:
+            _record_refusal(path, exc)
         raise
     finally:
         if token is not None:
@@ -657,6 +750,7 @@ def publish_result(root, result, *, owned_controls=False, dependency_roots=(), d
 def verify_published_tree(root, result, expected_hash=None):
     """Read the recorded baseline, hash-check it, then compare current entries."""
     root = directory_path(root)
+    verify_publication(root, result)
     records = [record for record in result.artifacts if record.path == FINGERPRINT]
     require(len(records) == 1 and records[0].kind == 'attempt_fingerprint',
         'dependency publication fingerprint missing')
@@ -680,6 +774,15 @@ def verify_published_tree(root, result, expected_hash=None):
         'dependency fingerprint artifact lineage changed since publication')
     actual = fingerprint_tree(root)
     changed = changed_paths(value['entries'], publication_view(actual))
+    tainted = acquisition_changed_paths(value['entries'], publication_view(actual))
+    control_hashes = {FINGERPRINT: records[0].sha256, RESULT: sha256(result.to_json().encode()).hexdigest()}
+    for name, digest in control_hashes.items():
+        entry = actual.get(name, {})
+        if (entry.get('missing') or entry.get('changed')
+                or entry.get('type', stat.S_IFREG) != stat.S_IFREG
+                or entry.get('sha256') is not None and entry['sha256'] != digest):
+            tainted.append(name)
+    record_taints({'attempts': {str(root): {'changed_paths': sorted(set(tainted))}}})
     for name in PUBLICATION_EXCLUSIONS:
         entry = actual.get(name, {})
         if ('error' in entry or entry.get('type') != stat.S_IFREG or

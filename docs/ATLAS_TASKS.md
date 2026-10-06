@@ -132,3 +132,10 @@ of scope; prevention is tracked in ARC-1339. Metadata-only observations with
 identical bytes fail the observing stage but allow retry without permanent taint.
 Incomplete integrity observations also fail that stage; only positive evidence of
 content or namespace changes creates permanent taint (owner decision, 2026-10-06).
+
+During execution, the independent publication store also binds every direct and
+transitive published dependency to the observing attempt. Shared readers retain
+positive content evidence against those bindings. An attempt-specific refusal
+record keeps a caught read error from becoming a passing result; it does not
+poison the upstream dependency or a new attempt. The worker dispatch checks its
+in-memory refusals as well, including when writing the refusal record fails.
