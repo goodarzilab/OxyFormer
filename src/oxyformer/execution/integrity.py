@@ -203,6 +203,21 @@ def _content_metadata(metadata):
         metadata.st_size if stat.S_ISREG(metadata.st_mode) else None)
 
 
+
+def _unstable_input(path, message, before, *after):
+    content_changed = any(_content_metadata(item) != _content_metadata(before) for item in after)
+    binding = _acquisition_binding(path)
+    if not content_changed and binding is not None:
+        # A timestamp alone is not content evidence. If bytes are still changed,
+        # retain that positive observation before the caller can restore them.
+        # Incomplete reads contribute only the fields actually observed.
+        root, name, entries = binding
+        current = fingerprint_tree(path)
+        content_changed = bool(acquisition_changed_paths(
+            {'.': entries[name]} if name in entries else {}, current))
+    return InputChanged(path, message, content_changed=content_changed)
+
+
 def _stable(metadata):
     return (metadata.st_dev, metadata.st_ino, metadata.st_mode, metadata.st_size,
         metadata.st_mtime_ns, metadata.st_ctime_ns)
@@ -251,8 +266,7 @@ def open_regular(path):
         with os.fdopen(fd, 'rb') as stream:
             opened = os.fstat(stream.fileno())
             if not stat.S_ISREG(opened.st_mode) or _stable(opened) != _stable(before):
-                raise InputChanged(path, 'input changed before reading',
-                    content_changed=_content_metadata(opened) != _content_metadata(before))
+                raise _unstable_input(path, 'input changed before reading', before, opened)
             yield stream
             try:
                 after = regular_file_stat(path)
@@ -262,9 +276,8 @@ def open_regular(path):
                 raise InputChanged(path, 'input removed while reading') from exc
             if (_stable(os.fstat(stream.fileno())) != _stable(before)
                     or _stable(after) != _stable(before)):
-                raise InputChanged(path, 'input changed while reading',
-                    content_changed=any(_content_metadata(item) != _content_metadata(before)
-                        for item in (os.fstat(stream.fileno()), after)))
+                raise _unstable_input(path, 'input changed while reading',
+                    before, os.fstat(stream.fileno()), after)
 
 
 def read_regular(path):
