@@ -36,7 +36,7 @@ def dispatch(case, tmp_path, monkeypatch):
     monkeypatch.setenv("OXYFORMER_PUBLICATION_STORE", str(tmp_path / "publications"))
 
     def invoke(name, *, defect=None, task_authority=None, config_authority=False,
-               inline=None):
+               inline=None, nested_repository=False):
         bundle, manifest, receipts = case
         manifest = replace(manifest, stage=STAGES[name])
         if defect == "missing-receipt":
@@ -52,7 +52,7 @@ def dispatch(case, tmp_path, monkeypatch):
             receipts = publish_coverage(receipts, scenario)
             bundle = replace(bundle, coverage=(scenario,))
 
-        repo = tmp_path / "repository"
+        repo = tmp_path / "reporting/src" if nested_repository else tmp_path / "repository"
         shutil.copytree(ROOT / "src", repo / "src", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         (repo / "configs/execution").mkdir(parents=True)
         shutil.copy2(ROOT / "configs/execution/stages.yaml", repo / "configs/execution/stages.yaml")
@@ -77,7 +77,7 @@ def dispatch(case, tmp_path, monkeypatch):
 
         def attempt(label):
             out = tmp_path / label
-            out.mkdir()
+            out.mkdir(exist_ok=True)
             (out / "code_commit.txt").write_text(head + "\n")
             return out
 
@@ -91,7 +91,7 @@ def dispatch(case, tmp_path, monkeypatch):
                 write_artifact(upstream / filename, record)
             (upstream / "recipe_lock.json").write_text(json.dumps({
                 "scientific_fingerprint": scientific_fingerprint(repository)}))
-            return StageResult(request_hash=request.content_hash, status="pass", artifacts=tuple(
+            return StageResult(request_hash=request.content_hash, status="pass", message="synthetic evidence published", artifacts=tuple(
                 ArtifactRecord(path=p, sha256=file_hash(upstream / p), lineage=bundle.estimates[0].lineage,
                                kind="synthetic_reporting_input") for p in names))
 
@@ -122,6 +122,7 @@ def dispatch(case, tmp_path, monkeypatch):
                      approvals=alternate if config_authority else None, execute=inline)
         request = StageRequest.from_json((out / "_execution/request.json").read_text())
         result.verify(request)
+        assert (out / "report.json").is_file(), result.message
         report = json.loads((out / "report.json").read_text())
         envelope = json.loads((out / "_execution/config.json").read_text())
         assert envelope["yaml_timestamp_policy"] == "preserve_scalar_text"
@@ -132,8 +133,9 @@ def dispatch(case, tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("name", STAGES)
-def test_dispatch_complete_approved_request(dispatch, name):
-    result, report, envelope, repo, out = dispatch(name)
+@pytest.mark.parametrize("nested_repository", [False, True])
+def test_dispatch_complete_approved_request(dispatch, name, nested_repository):
+    result, report, envelope, repo, out = dispatch(name, nested_repository=nested_repository)
     assert result.status == "pass", result.message
     assert report["state"] == ("released" if name == "tract-release" else "exploratory")
     assert report["releasable"] == (name == "tract-release")

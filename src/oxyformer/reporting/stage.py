@@ -220,9 +220,16 @@ def _write_report(request, report, bundle, authority, controls):
     root = _realpath(request.output_dir)
     repository = authority.repository
     protected_paths = tuple(_realpath(repository / name) for name in ("outputs", "report", "src", "configs"))
+    # run_stage.sh places the verified clone at output_dir/src. Dispatcher
+    # reports write only these three leaves beside the clone, never into it.
+    destinations = (root,)
+    if controls:
+        require(not root.is_relative_to(repository), "report output overlaps repository")
+        destinations = tuple(_realpath(root / name) for name in
+                             ("report.json", "report.html", "estimators.svg"))
     for protected in protected_paths:
-        require(not root.is_relative_to(protected) and not protected.is_relative_to(root),
-                "report output overlaps protected repository path")
+        require(all(not path.is_relative_to(protected) and not protected.is_relative_to(path)
+                    for path in destinations), "report output overlaps protected repository path")
     require(not any(_realpath(p).is_relative_to(root) and _realpath(p) not in controls for p in
                     (request.config_path, request.task_path) + request.dependency_paths),
             "report output must be isolated from inputs")
