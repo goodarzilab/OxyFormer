@@ -245,7 +245,7 @@ def design_configuration(request):
     available for existing callers and the synthetic design tests.
     """
     from oxyformer.execution.runner import read_mapping
-    from oxyformer.data.tract_inputs import tract_decisions
+    from oxyformer.data.tract_inputs import tract_decisions, validate_dispatch_approvals
     tract_decisions()
     canonical = read_mapping(DESIGN_CONFIG)
     require(canonical.get("schema_version") == 1 and canonical.get("stage") == "tract_design",
@@ -258,10 +258,7 @@ def design_configuration(request):
             "invalid design stage configuration")
     require(submitted.get("settings", {}).get("module") == "oxyformer.design.gate",
             "invalid registered design module")
-    require(submitted.get("approvals") == read_mapping(OWNER_APPROVALS),
-            "dispatcher approvals differ from repository owner file")
-    require(submitted.get("input_sources", {}).get(str(OWNER_APPROVALS)) == file_hash(OWNER_APPROVALS),
-            "dispatcher owner file is not hash-bound")
+    validate_dispatch_approvals(submitted)
     return canonical
 
 

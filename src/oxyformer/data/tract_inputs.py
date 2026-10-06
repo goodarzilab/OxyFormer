@@ -218,6 +218,19 @@ def tract_decisions():
     return decision
 
 
+def validate_dispatch_approvals(envelope):
+    """The repository owns the science; the runner may bind an identical copy."""
+    from oxyformer.execution.runner import read_mapping
+    approvals = ROOT / 'configs/approvals.yaml'
+    require(envelope.get('approvals') == read_mapping(approvals),
+            'dispatcher approvals differ from repository owner file')
+    digest = file_hash(approvals)
+    copies = [path for path, bound in envelope.get('input_sources', {}).items() if bound == digest]
+    require(bool(copies), 'dispatcher owner file is not hash-bound')
+    for path in copies:
+        verify_input_hash(path, digest)
+
+
 def dispatch_inputs(request):
     """Validate the committed task/envelope and resolve named, hash-bound files."""
     from oxyformer.execution.runner import read_mapping
@@ -226,10 +239,7 @@ def dispatch_inputs(request):
     task = json.loads(Path(request.task_path).read_text())
     expected = next((t for t in read_mapping(ROOT / TASK_FILE)['tasks'] if t['stage'] == request.stage), None)
     require(task == expected and envelope['stage'] == request.stage, 'tract task differs from repository')
-    approvals = ROOT / 'configs/approvals.yaml'
-    require(envelope['approvals'] == read_mapping(approvals)
-            and envelope['input_sources'].get(str(approvals)) == file_hash(approvals),
-            'dispatcher approvals differ from repository owner file')
+    validate_dispatch_approvals(envelope)
     tract_decisions()
     hashes = dict(zip(request.dependency_paths, request.dependency_hashes))
     paths = {}

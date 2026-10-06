@@ -419,3 +419,52 @@ def test_census_acquisition_streams_sf1_and_accepts_null_optional_pins(tmp_path)
             source=source, states={'AL': '01'})
         assert coordinates == {IDS[0]: (35., -87.)}
         assert not list(scratch.iterdir())
+
+
+from test_execution import runtime, acquisition, publication_authority
+
+
+def test_runner_accepts_identical_approval_copy_for_tract_inputs(runtime, acquisition, tmp_path, monkeypatch):
+    import shutil
+    from test_execution import commit
+    from oxyformer.execution.runner import run
+    from oxyformer.contracts import StageResult
+    repo, out = runtime
+    for name in ('configs/approvals.yaml', 'configs/execution/stages.yaml', tract_inputs.TASK_FILE):
+        target = repo / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((ROOT / name).read_bytes())
+    (out / 'code_commit.txt').write_text(commit(repo))
+    owner_copy = tmp_path / 'owner-copy.yaml'
+    owner_copy.write_bytes((repo / 'configs/approvals.yaml').read_bytes())
+    census = tmp_path / 'census-acquisition'
+    shutil.copytree(acquisition, census)
+    monkeypatch.setenv('SWARM_DEP_FETCH_US', str(acquisition))
+    monkeypatch.setenv('SWARM_DEP_FETCH_CENSUS', str(census))
+    monkeypatch.setattr(tract_inputs, 'ROOT', repo)
+    def admit(request, module, checkout):
+        paths = tract_inputs.dispatch_inputs(request)
+        assert set(paths) == {(unit, name) for unit in ('fetch-us', 'fetch-census')
+                              for name in ('payload.tar', 'receipts.json')}
+        return StageResult(request_hash=request.content_hash, status='blocked', artifacts=(),
+                           message='fixture admitted before source parsing')
+    result = run('tract-inputs', out, repo, deps_env=True, task_file=repo / tract_inputs.TASK_FILE,
+                 task_id='tract-inputs', approvals=owner_copy, execute=admit)
+    assert (result.status, result.message) == ('blocked', 'fixture admitted before source parsing')
+
+
+def test_gate_accepts_identical_approval_copy_but_refuses_changed_bytes(tmp_path):
+    from dataclasses import replace
+    from oxyformer.design.gate import OWNER_APPROVALS, DESIGN_CONFIG, design_configuration
+    from oxyformer.execution.runner import read_mapping
+    owner_copy = tmp_path / 'owner-copy.yaml'
+    owner_copy.write_bytes(OWNER_APPROVALS.read_bytes())
+    request = request_fixture(tmp_path)
+    envelope = dict(stage='tract-support-gate', settings={'module':'oxyformer.design.gate'},
+        approvals=read_mapping(OWNER_APPROVALS), input_sources={str(owner_copy):file_hash(owner_copy)})
+    Path(request.config_path).write_text(canonical_json(envelope))
+    request = replace(request, stage='tract-support-gate', config_hash=file_hash(request.config_path))
+    assert design_configuration(request) == read_mapping(DESIGN_CONFIG)
+    owner_copy.write_text('modified owner document')
+    with pytest.raises(ContractError):
+        design_configuration(request)
