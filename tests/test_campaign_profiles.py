@@ -9,6 +9,7 @@ import pytest
 
 from oxyformer.data.entity_graph import EntityGraph
 from oxyformer.execution.runner import read_mapping
+from oxyformer.design.splits import dependence_groups
 from oxyformer.provenance import ContractError, file_hash
 from oxyformer.training import nested_cv
 from oxyformer.validation import campaign, campaign_estimate, coverage, real_frame, smoke_inputs
@@ -58,7 +59,7 @@ def test_real_frame_preserves_x_geography_missingness_and_whole_clusters(built):
     rows = {r.original_id: r for r in v['geography'].rows}
     assert frame.coordinates == tuple((rows[i].latitude, rows[i].longitude) for i in frame.original_ids)
     assert frame.geography_ids == tuple(rows[i].assignment_geography for i in frame.original_ids)
-    for group in __import__('oxyformer.design.splits', fromlist=['dependence_groups']).dependence_groups(
+    for group in dependence_groups(
             v['geography'].rows, v['entity_graph']):
         present = set(group).intersection(frame.original_ids)
         assert not present or present == set(group)
@@ -76,7 +77,12 @@ def test_real_frame_can_bind_generated_observations_and_all_production_settings(
     # Synthetic observations, no truth computation required for adapter checks.
     sample = ObservedRecords(frame=frame, a=(5.,) * len(frame.original_ids),
         y=(50.,) * len(frame.original_ids), measured_columns=(),
-        measured_x=((),) * len(frame.original_ids), registered_events=None, observed_denominator=None)
+        measured_x=((),) * len(frame.original_ids),
+        flag_available=(True,) * len(frame.original_ids),
+        survey_included=(True,) * len(frame.original_ids),
+        biomarker_available=(True,) * len(frame.original_ids),
+        registered_events=(None,) * len(frame.original_ids),
+        observed_denominator=(None,) * len(frame.original_ids))
     rebound = coverage.bind_observations(endpoint, sample)
     for fold in range(5):
         config = rebound.configuration(fold, tmp_path / str(fold),
