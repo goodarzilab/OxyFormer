@@ -158,7 +158,12 @@ def build_inputs(values, design):
 
 
 def profile_tasks(endpoint, frame):
-    """Concrete hash-bound tasks, generated once after real inputs exist."""
+    """Concrete hash-bound tasks, generated once after real inputs exist.
+
+    ``resources`` is the scheduler request consumed by coordinator plan wiring;
+    the merged stage runner executes inside that allocation and submits no job.
+    Profile and projection resources share one declaration.
+    """
     locations = {}
     for county in sorted(set(frame.region_ids)):
         points = [p for c, p in zip(frame.region_ids, frame.coordinates) if c == county]
@@ -170,22 +175,25 @@ def profile_tasks(endpoint, frame):
     common = {'endpoint_input': {'dependency': 'real-frame-inputs', 'path': 'endpoint.json'},
               'frame_input': {'dependency': 'real-frame-inputs', 'path': 'frame.json'}, 'recipe': recipe}
     inputs = {'real-frame-inputs': ['endpoint.json', 'frame.json', 'artifact_manifest.json']}
+    resources = {'cpus_per_task': 8, 'gpus': 0, 'wall_seconds': 14400}
     tasks, profiles = [], {}
     for row in campaign._registry()['scenarios']:
         scenario = SCMConfig(**row).to_dict()['payload']
         task_id = 'profile-' + scenario['name'].replace('_', '-')
         tasks.append({'id': task_id, 'stage': 'simulation-smoke', 'needs': inputs,
+            'resources': dict(resources),
             'outputs': ['result.json', 'timing.json', 'profile_receipt.json', 'artifact_manifest.json'],
             'parameters': {**common, 'mode': 'profile', 'scenario': scenario,
                 'draws': repetition_plan(digest(['real-frame-profile-v1', recipe]), scenario['name'], 1),
-                'wall_seconds': 14400}})
+                'wall_seconds': resources['wall_seconds']}})
         profiles[scenario['name']] = {'dependency': task_id, 'path': 'result.json'}
     tasks.append({'id': 'campaign-estimate', 'stage': 'campaign-estimate',
+        'resources': dict(resources),
         'needs': {**inputs, **{ref['dependency']: ['result.json', 'timing.json', 'artifact_manifest.json']
                              for ref in profiles.values()}},
         'outputs': ['budget_estimate.json', 'artifact_manifest.json'],
         'parameters': {**common, 'profiles': profiles, 'final_repetitions': 1000,
-            'wall_seconds': 14400, 'cpus_per_task': 8, 'gpus': 0, 'profile_safety_factor': 2.}})
+            **resources, 'profile_safety_factor': 2.}})
     return {'schema_version': 1, 'tasks': tasks}
 
 

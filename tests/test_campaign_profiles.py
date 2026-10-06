@@ -236,3 +236,13 @@ def test_estimate_cannot_lower_minimum(estimate_request):
     req = update_task(estimate_request, lambda p: p.update(final_repetitions=999))
     with pytest.raises(ContractError, match='final repetitions'):
         campaign_estimate.estimate_budget(req)
+
+
+def test_profile_resources_are_explicit_and_match_estimate():
+    tasks = real_frame.profile_tasks(*smoke_inputs.build_inputs())['tasks']
+    estimate = tasks[-1]['parameters']
+    expected = {k: estimate[k] for k in ('cpus_per_task', 'gpus', 'wall_seconds')}
+    assert expected == {'cpus_per_task': 8, 'gpus': 0, 'wall_seconds': 14400}
+    for task in tasks:
+        assert task.get('resources') == expected
+        assert task['parameters']['wall_seconds'] == task['resources']['wall_seconds']
