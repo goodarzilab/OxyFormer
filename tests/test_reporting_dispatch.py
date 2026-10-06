@@ -28,7 +28,7 @@ def dispatch(case, tmp_path, monkeypatch):
     """Commit a synthetic repository, publish evidence, then use the real worker.
 
     Only the evidence producer is a callback. Reporting uses the imported copy
-    of the current implementation, unchanged registrations and a real recipe
+    of the current implementation, unchanged reporting registrations and a real recipe
     fingerprint. No production approval or dependency check is monkeypatched.
     Ignoring bytecode while copying permits both ordinary pytest and -B runs.
     """
@@ -55,7 +55,13 @@ def dispatch(case, tmp_path, monkeypatch):
         repo = tmp_path / "reporting/src" if nested_repository else tmp_path / "repository"
         shutil.copytree(ROOT / "src", repo / "src", ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         (repo / "configs/execution").mkdir(parents=True)
-        shutil.copy2(ROOT / "configs/execution/stages.yaml", repo / "configs/execution/stages.yaml")
+        names = ["bundle.json", "manifest.json", "receipts.json", "recipe_lock.json"]
+        registry = yaml.safe_load((ROOT / "configs/execution/stages.yaml").read_text())
+        # The callback publisher owns its contract; unrelated production stages
+        # may require different inputs or outputs as their adapters evolve.
+        registry["stages"]["synthetic-reporting-inputs"] = {
+            "module": "oxyformer.reporting", "needs": {}, "outputs": names}
+        (repo / "configs/execution/stages.yaml").write_text(yaml.safe_dump(registry))
         shutil.copy2(CONFIG, repo / "configs/reporting.yaml")
         approvals = repo / "configs/approvals.yaml"
         if defect == "owner-unapproved":
@@ -82,9 +88,8 @@ def dispatch(case, tmp_path, monkeypatch):
             return out
 
         upstream = attempt("evidence")
-        names = ["bundle.json", "manifest.json", "receipts.json", "recipe_lock.json"]
         source_task = tmp_path / "source-task.json"
-        source_task.write_text(json.dumps({"id": "evidence", "stage": "legacy-reproduction", "outputs": names}))
+        source_task.write_text(json.dumps({"id": "evidence", "stage": "synthetic-reporting-inputs", "outputs": names}))
 
         def publish(request, module_name, repository):
             for filename, record in zip(names, (bundle, manifest, receipts)):
@@ -95,7 +100,7 @@ def dispatch(case, tmp_path, monkeypatch):
                 ArtifactRecord(path=p, sha256=file_hash(upstream / p), lineage=bundle.estimates[0].lineage,
                                kind="synthetic_reporting_input") for p in names))
 
-        source = run("legacy-reproduction", upstream, repo, task_file=source_task, execute=publish)
+        source = run("synthetic-reporting-inputs", upstream, repo, task_file=source_task, execute=publish)
         assert source.status == "pass", source.message
         monkeypatch.setenv(dependency_variable("evidence"), str(upstream))
         out = attempt("reporting")
