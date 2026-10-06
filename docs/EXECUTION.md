@@ -38,12 +38,12 @@ batches complete repetitions and has no cross-leaf interrupted-repetition
 continuation. Neither limitation authorizes shortened tuning or assumed GPU
 performance.
 
-The design refusal cannot be corrected through this unit's seven allowed
-files: it requires its owning implementation/registration to accept the merged
-runner contract and bind the real typed inputs. Bypassing the runner in a test
-cannot establish an executable coordinator path. Stop integration admission and
-report the complete boundary inventory; retain the early atlas/support path's
-independence from this integration unit. Reassess after merged corrections.
+Production admission requires the design implementation/registration to accept
+the merged runner contract and bind the real typed inputs. Direct API tests do
+not establish an executable coordinator path. Continue offline verification of
+the scientific APIs and plan-integrity checks while retaining these production
+blocks. Reassess admission after merged corrections; the early atlas/support
+path must remain independent of this documentation/integration unit.
 
 ## Coordinator contract
 

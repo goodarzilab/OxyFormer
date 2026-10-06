@@ -37,8 +37,7 @@ srun --partition=standard --account=root --nodes=1 --ntasks=1 \
 Repeat with `/mnt/weka/home/hgoodarzi/oxyformer-swarm/envs/ci-cpu/bin/python`
 before every review; also run the two integration/integrity test files without
 `-B` in both environments. The full-suite timeout is one hour. Never run suites,
-probes, mutations or acquisition reads
-on the login node. A passing suite verifies implementation behavior; scientific
+probes, mutations or acquisition reads on the login node. A passing suite verifies implementation behavior; scientific
 release still requires every gate and scoped owner approval.
 
 Historical phase scripts and assets remain for explicit legacy reproduction.
