@@ -1,0 +1,43 @@
+schema_version: 1
+# Artificial execution smoke only, not the fixed-real-covariate Suite A of
+# plan section 6.2. Content hashes pin smoke_inputs.build_inputs() exactly.
+# The plan reserves one GPU for smoke; the merged nested estimator runs on CPU.
+# No runnable campaign-lock task is supplied: smoke has mode=smoke, not profile.
+# Lock needs complete production profiles for every selected registered final
+# scenario with one matching production recipe and environment, measured feasible
+# batching, and an explicit owner final-coverage allocation. Real Suite A also
+# needs a reviewed adapter preserving real X/geography/missingness/cluster sizes
+# in a PreparedEndpoint and matching CovariateFrame. Do not invent these inputs.
+tasks:
+  - id: simulation-inputs
+    stage: simulation-inputs
+    needs: {}
+    outputs: [endpoint.json, frame.json, artifact_manifest.json]
+    parameters:
+      fixture: suite-a-smoke-v1
+  - id: simulation-smoke
+    stage: simulation-smoke
+    needs:
+      simulation-inputs: [endpoint.json, frame.json, artifact_manifest.json]
+    outputs: [result.json, timing.json, artifact_manifest.json, runtime.json]
+    parameters:
+      mode: smoke
+      endpoint_input: {dependency: simulation-inputs, path: endpoint.json}
+      frame_input: {dependency: simulation-inputs, path: frame.json}
+      recipe:
+        endpoint_hash: 7fd7fa4b97d8478f12d0e6ce1e84ed760da1c73d3980bb46e1a1d46f36450506
+        frame_hash: a4f7f3441706871ccbd306d23e1544e60bc5899b46732fb3a8706113f9a1d8b9
+        nested_cv: {ssl_epochs: 1, frozen_epochs: 1, synthetic: true}
+        inference:
+          primary_bandwidth_km: 100
+          county_locations: {c: [0.7, 0.0], d: [2.2, 0.0]}
+      scenario:
+        name: null_effect
+        effect: 'null'
+        active_mechanisms: ['null']
+      draws:
+        - repetition_id: 4dec19d1ecd1eee54cc67d4155bda661c45bbc4278fc9a0a14a21ba134a8cef1
+          seed: 5614891224836206309
+          scenario: null_effect
+          index: 0
+      wall_seconds: 3600
