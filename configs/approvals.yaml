@@ -139,6 +139,20 @@ owner_decisions:
     min_bin_tracts: 2                   # distinct design-set tracts required in every bin along the shift path
     raw_x_radius_iqr: 1.0               # comparison neighbors: same county, within 25 km, within 1 IQR on every approved covariate
     revisit_rule: "The outcome-blind tract gate will show the supported tract count before any outcome is used. If support is too thin, these values can still be widened then."
+  # Approved by the owner on 2026-10-06 ("Let's go with your recommendations") after tract-tasks found that the tract support
+  # gate's geography and atlas-to-design inputs were not defined by the frozen plan (sections 3.1 and 4.1) or by this file.
+  tract_design:
+    placement_scenario: distributed     # the gate's exposure and inhabited elevation use the distributed allocation; centroid stays a sensitivity
+    exposure_field: oxygen_deficit_mmhg # tract A_t (section 3.1) under the distributed scenario
+    inhabited_elevation: p50            # tract median of population-allocated elevation under the distributed scenario; county relief = P90 - P10 across its tracts' values
+    allocation_qualified: complete_distributed_exposure   # a tract qualifies only if its distributed-scenario exposure is complete; never imputed
+    coordinates: population_weighted_2010_block_centroid  # 2010 Census block populations and block internal points from the census acquisition
+    subblock:                           # (county, grid cell containing the tract coordinate)
+      scheme: county_x_grid_cell
+      crs: EPSG:5070
+      cell_size_m: 10000.0
+      origin_m: [0.0, 0.0]
+    assignment_geography: tract         # each tract is its own exposure-assignment geography (section 4.1)
   # Approved by the owner on 2026-10-04 ("Approved on both") from the sign-off page https://claude.ai/artifact/1FxDYK6hp2C2A2j5wd2rYz.
   birth_anchor_recipe:
     exposure:
