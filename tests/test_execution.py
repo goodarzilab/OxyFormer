@@ -3303,3 +3303,135 @@ def test_reader_evidence_survives_later_binding_io(runtime, acquisition, tmp_pat
     assert read_json(marker) == ['receipts.json']
     with raises(ContractError, match='tainted'):
         runner.verify_dependency_result(producer)
+
+
+@mark.parametrize('already_admitted', [False, True])
+def test_restored_acquisition_write_refuses_publication(runtime, acquisition, tmp_path, monkeypatch, already_admitted):
+    from oxyformer.execution.integrity import publication_receipt
+    repo, out = runtime
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']}
+    if already_admitted:
+        assert_pass(run_task(repo, out, needs=needs))
+        out = new_attempt(repo, tmp_path / 'later')
+    victim = acquisition / 'payload.tar'
+    original, metadata = victim.read_bytes(), victim.stat()
+    before = fingerprint_tree(acquisition)
+    consumed = []
+    def faulty(request):
+        result = dummy(request)
+        try:
+            victim.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+            consumed.append(victim.read_bytes())
+        finally:
+            victim.write_bytes(original)
+            os.utime(victim, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+        target = Path(request.output_dir) / 'value.json'
+        target.write_text(json.dumps({'consumed': consumed[0].hex()}))
+        return replace(result, artifacts=(replace(result.artifacts[0], sha256=file_hash(target)),))
+    install_stage(monkeypatch, repo, faulty)
+    result = run_task(repo, out, needs=needs)
+    assert consumed[0] != original
+    assert read_json(out / 'value.json') == {'consumed': consumed[0].hex()}
+    assert fingerprint_tree(acquisition) == before
+    assert victim.stat().st_mtime_ns == metadata.st_mtime_ns
+    assert_failed(result, victim)
+    assert read_check(out)['attempts'][str(acquisition)]['changed_paths'] == ['payload.tar']
+    assert read_json(Path(str(publication_receipt(acquisition)) + '.tainted')) == ['payload.tar']
+    with raises(ContractError, match='did not pass'):
+        verify_dependency_result(out)
+    with raises(ContractError, match='tainted'):
+        run_task(repo, new_attempt(repo, tmp_path / 'retry'), needs=needs)
+
+
+@mark.parametrize('transitive', [False, True])
+def test_restored_stage_write_refuses_publication(runtime, source, tmp_path, monkeypatch, transitive):
+    from oxyformer.execution.integrity import publication_receipt
+    repo, out = runtime
+    needs = SOURCE_NEEDS
+    if transitive:
+        assert_pass(run_task(repo, out, id='middle', needs=needs))
+        monkeypatch.setenv('SWARM_DEP_MIDDLE', str(out))
+        out = new_attempt(repo, tmp_path / 'consumer')
+        needs = {'middle': ['value.json']}
+    victim = source / 'data.json'
+    original, metadata = victim.read_bytes(), victim.stat()
+    before = fingerprint_tree(source)
+    def faulty(request):
+        result = dummy(request)
+        victim.write_bytes(b'changed upstream data')
+        assert victim.read_bytes() != original
+        victim.write_bytes(original)
+        os.utime(victim, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+        return result
+    install_stage(monkeypatch, repo, faulty)
+    result = run_task(repo, out, needs=needs)
+    assert fingerprint_tree(source) == before
+    assert_failed(result, victim)
+    assert read_check(out)['attempts'][str(source)]['changed_paths'] == ['data.json']
+    assert read_json(Path(str(publication_receipt(source)) + '.tainted')) == ['data.json']
+    with raises(ContractError, match='tainted'):
+        verify_dependency_result(source)
+
+
+def test_restored_write_during_publication_is_refused(runtime, acquisition, monkeypatch):
+    from oxyformer.execution import runner, integrity
+    repo, out = runtime
+    victim = acquisition / 'payload.tar'
+    saved = victim.read_bytes()
+    original = runner.publish_result
+    def publish(*args, **kwargs):
+        victim.write_bytes(b'changed bytes')
+        victim.write_bytes(saved)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(runner, 'publish_result', publish)
+    result = run_task(repo, out, needs={'fetch-data': ['payload.tar', 'receipts.json']})
+    assert_failed(result, victim)
+    assert not integrity.publication_receipt(out).exists()
+    assert read_json(Path(str(integrity.publication_receipt(acquisition)) + '.tainted')) == ['payload.tar']
+
+
+@mark.parametrize('changed', [False, True])
+def test_file_identity_io_failure_preserves_only_positive_changes(runtime, acquisition, tmp_path, monkeypatch, changed):
+    from oxyformer.execution import integrity
+    import errno
+    repo, out = runtime
+    victim, receipt = acquisition / 'payload.tar', acquisition / 'receipts.json'
+    saved, original_stat = victim.read_bytes(), Path.lstat
+    enabled = False
+    def failing_stat(path, *args, **kwargs):
+        if enabled and path == receipt:
+            raise OSError(errno.EIO, 'identity transport failure', str(path))
+        return original_stat(path, *args, **kwargs)
+    def worker(request):
+        nonlocal enabled
+        result = dummy(request)
+        if changed:
+            victim.write_bytes(b'changed')
+            victim.write_bytes(saved)
+        enabled = True
+        return result
+    monkeypatch.setattr(Path, 'lstat', failing_stat)
+    install_stage(monkeypatch, repo, worker)
+    result = run_task(repo, out, needs={'fetch-data': ['payload.tar', 'receipts.json']})
+    enabled = False
+    marker = Path(str(integrity.publication_receipt(acquisition)) + '.tainted')
+    assert result.status == 'fail'
+    assert marker.exists() == changed
+    if changed:
+        assert str(victim) in result.message
+        assert read_json(marker) == ['payload.tar']
+    else:
+        install_stage(monkeypatch, repo, dummy)
+        assert_pass(run_task(repo, new_attempt(repo, tmp_path / 'retry'),
+            needs={'fetch-data': ['payload.tar', 'receipts.json']}))
+
+
+def test_directory_timestamp_change_does_not_taint_unchanged_files(runtime, acquisition, monkeypatch):
+    repo, out = runtime
+    def worker(request):
+        result = dummy(request)
+        metadata = acquisition.stat()
+        os.utime(acquisition, ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 1000000000))
+        return result
+    install_stage(monkeypatch, repo, worker)
+    assert_pass(run_task(repo, out, needs={'fetch-data': ['payload.tar', 'receipts.json']}))

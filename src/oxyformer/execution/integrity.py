@@ -1,5 +1,5 @@
 """Fingerprint entries, types, modes, sizes, bytes and symlink targets.
-Ignore timestamps/inodes across snapshots; retain observed acquisition changes.
+Content baselines are portable; per-run regular-file identities detect restored writes.
 """
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -59,8 +59,12 @@ def publication_lock(receipt):
         os.close(fd)
 
 
-def record_publication(root, result, *, dependency_roots=()):
+def record_publication(root, result, *, dependency_roots=(), dependency_identities=None):
     receipt = publication_receipt(root, create=True)
+    identities = check_file_identities(dependency_identities or {})
+    refused = [str(Path(parent) / name) for parent, detail in identities.items()
+        for name in detail['changed_paths'] + detail['unreadable_paths']]
+    require(not refused, 'upstream file identity changed or unreadable: ' + ', '.join(refused))
     with publication_lock(receipt):
         # The authoritative release and permanent taints share one ordering.
         # A recorded upstream taint cannot slip between this check and commit.
@@ -388,19 +392,61 @@ def acquisition_changed_paths(before, after):
     return sorted(changed)
 
 
-def post_execution_check(before, *, observed_changes=None):
+def _file_identity(metadata):
+    return (metadata.st_dev, metadata.st_ino, metadata.st_ctime_ns)
+
+
+def snapshot_file_identities(trees):
+    """Capture only regular files, once per run, outside portable content baselines."""
+    return {root: {name: _file_identity(regular_file_stat(Path(root) / name))
+        for name, entry in entries.items() if entry.get('type') == stat.S_IFREG}
+        for root, entries in trees.items()}
+
+
+def check_file_identities(identities, *, observed_changes=None):
+    """Retain each kernel-observed change before checking another path.
+
+    atime is changed by reads, and Weka directory timestamps may lag. Neither
+    participates. Restoring bytes or mtime cannot restore regular-file ctime.
+    Unknown I/O failures refuse without creating a permanent mutation marker.
+    """
+    attempts = {}
+    for root, files in identities.items():
+        detail = attempts[root] = {'changed_paths': [], 'unreadable_paths': []}
+        for name, expected in files.items():
+            path = Path(root) / name
+            try:
+                metadata = path.lstat()
+            except OSError as exc:
+                changed = exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP)
+                if not changed:
+                    detail['unreadable_paths'].append(name)
+            else:
+                changed = not stat.S_ISREG(metadata.st_mode) or _file_identity(metadata) != tuple(expected)
+            if changed:
+                detail['changed_paths'].append(name)
+                if observed_changes is not None:
+                    observed_changes.append(str(path))
+                record_taints({'attempts': {root: {'changed_paths': detail['changed_paths']}}})
+    return attempts
+
+
+def post_execution_check(before, *, observed_changes=None, identities=None):
     """Persist each dependency's evidence before checking the next dependency.
 
     The optional diagnostic list retains absolute witness paths even if later
     authority reads or marker writes fail before the check can be returned.
     """
+    identities = check_file_identities(identities or {}, observed_changes=observed_changes)
     attempts = {}
     for root, expected in before.items():
         # Prepare the comparison authority before observing this tree.
         acquisition = _acquisition_binding(root) is not None
         actual = fingerprint_tree(root)
         changed = (acquisition_changed_paths if acquisition else changed_paths)(expected, actual)
-        unreadable = any('error' in entry for entry in actual.values())
+        identity = identities.get(root, {})
+        changed = sorted(set(changed) | set(identity.get('changed_paths', [])))
+        unreadable = any('error' in entry for entry in actual.values()) or bool(identity.get('unreadable_paths'))
         attempts[root] = {'status': 'tainted' if changed else 'unreadable' if unreadable else 'unchanged',
             'changed_paths': changed, 'fingerprint': actual}
         if changed:
@@ -507,7 +553,7 @@ def _replace_control(root, relative, text):
             os.unlink(temporary)
 
 
-def publish_result(root, result, *, owned_controls=False, dependency_roots=()):
+def publish_result(root, result, *, owned_controls=False, dependency_roots=(), dependency_identities=None):
     """Seal a producer's own completed tree; a consumer never calls this."""
     root = directory_path(root)
     collisions = [str(root / name) for name in PUBLICATION_EXCLUSIONS
@@ -542,7 +588,8 @@ def publish_result(root, result, *, owned_controls=False, dependency_roots=()):
         published = replace(result, artifacts=(*result.artifacts, fingerprint))
         _replace_control(root, RESULT, published.to_json())
         require(_settled_publication_tree(root) == entries, 'attempt changed during result publication')
-        record_publication(root, published, dependency_roots=dependency_roots)
+        record_publication(root, published, dependency_roots=dependency_roots,
+            dependency_identities=dependency_identities)
         return published
     except BaseException as exc:
         failed = replace(result, status='fail', artifacts=(),
