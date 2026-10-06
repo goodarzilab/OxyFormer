@@ -111,7 +111,7 @@ def _verify_acquisition(root, receipt_name, *, expected_tree, observed_tree):
         'acquisition changed during fingerprinting (tainted)')
 
     if observed_tree is not None:
-        compare(observed_tree, 'acquisition fingerprint differs from observation binding (tainted)')
+        compare(observed_tree, 'acquisition fingerprint mismatch against observation binding (tainted)')
     if expected_tree is not None:
         compare(expected_tree, 'acquisition fingerprint differs from consumer baseline (tainted)')
     if authority_exists(baseline):
