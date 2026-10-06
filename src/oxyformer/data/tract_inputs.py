@@ -117,7 +117,7 @@ def load_us_inputs(payload, receipt_path, scratch, *, source=None, mapping=None,
                   for state in states for seq in sequences for kind in ('e', 'm')}
         seen = set()
         with archive.extractfile(members[declared['acs_tracts']['destination']]) as stream:
-            with tarfile.open(fileobj=stream, mode='r|gz') as inner:
+            with tarfile.open(fileobj=stream, mode='r|gz', bufsize=1024 * 1024) as inner:
                 for member in inner:
                     name = Path(member.name).name
                     if name not in wanted:
