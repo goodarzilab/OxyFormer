@@ -217,6 +217,16 @@ def _taint_observation(binding):
     record_taints({'attempts': {str(root): {'changed_paths': [relative]}}})
 
 
+@contextmanager
+def integrity_observation(path):
+    """Retain a failed compound observation without attributing an I/O error."""
+    try:
+        yield
+    except (OSError, ContractError) as exc:
+        _record_refusal(path, exc)
+        raise
+
+
 def observe_acquisition(path, *, metadata=None, digest=None):
     """Compare known fields from a successful read with its durable binding."""
     binding = _acquisition_binding(path)
@@ -257,7 +267,7 @@ def acquisition_read(path, *, kind=stat.S_IFREG):
         if binding is not None:
             token = _ACQUISITION_READS.set((*_ACQUISITION_READS.get(), (binding[0], binding[2])))
         yield
-    except (OSError, InputTypeError, InputChanged) as exc:
+    except (OSError, ContractError) as exc:
         try:
             if (isinstance(exc, InputTypeError)
                     or isinstance(exc, InputChanged) and exc.content_changed
@@ -349,6 +359,70 @@ def _open_observed_regular(path):
         raise  # Transport/resource failures alone do not establish a mutation.
 
 
+class _ObservedStream:
+    """Retain the digest of bytes actually delivered by a complete stream read.
+
+    Seeking remains supported without retaining file contents in memory. Only
+    contiguous reads from offset zero establish a digest of the entire file.
+    """
+
+    def __init__(self, stream, path, size):
+        self.stream, self.path, self.size = stream, path, size
+        self.digest, self.offset = sha256(), 0
+
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+
+    def _read(self, method, *args, into=False):
+        with acquisition_read(self.path):
+            start = self.stream.tell()
+            result = getattr(self.stream, method)(*args)
+            raw = memoryview(args[0]).cast('B')[:result] if into else result
+            if start == 0:
+                self.digest, self.offset = sha256(), 0
+            if start != self.offset:
+                self.digest = None
+            if self.digest is not None:
+                self.digest.update(raw)
+                self.offset += len(raw)
+                if self.offset == self.size:
+                    observe_acquisition(self.path, digest=self.digest.hexdigest())
+            return result
+
+    def read(self, size=-1):
+        return self._read('read', size)
+
+    def read1(self, size=-1):
+        return self._read('read1', size)
+
+    def readinto(self, buffer):
+        return self._read('readinto', buffer, into=True)
+
+    def readinto1(self, buffer):
+        return self._read('readinto1', buffer, into=True)
+
+    def readline(self, size=-1):
+        return self._read('readline', size)
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        line = self.readline()
+        if not line:
+            raise StopIteration
+        return line
+
+    def readlines(self, hint=-1):
+        lines, size = [], 0
+        for line in self:
+            lines.append(line)
+            size += len(line)
+            if hint > 0 and size >= hint:
+                break
+        return lines
+
+
 @contextmanager
 def open_regular(path):
     """Open one stable regular file without following links or blocking on FIFOs."""
@@ -360,7 +434,7 @@ def open_regular(path):
             opened = os.fstat(stream.fileno())
             if not stat.S_ISREG(opened.st_mode) or _stable(opened) != _stable(before):
                 raise _unstable_input(path, 'input changed before reading', before, opened)
-            yield stream
+            yield _ObservedStream(stream, path, before.st_size)
             try:
                 after = regular_file_stat(path)
             except InputTypeError as exc:

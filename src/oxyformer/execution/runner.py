@@ -16,7 +16,8 @@ from oxyformer.provenance import ContractError, canonical_json, relative_artifac
 from .integrity import (DEPENDENCY_CHECK, FINGERPRINT, RESULT, _replace_control, _repair_control_directory,
     post_execution_check, publish_result, record_taints, snapshot_dependency_identities, observe_dependencies,
     directory_path, read_regular, regular_file_stat, regular_file_hash as file_hash,
-    fingerprint_tree, publication_receipt, InputChanged, acquisition_read,
+    fingerprint_tree, publication_receipt, InputChanged, acquisition_read, _acquisition_binding,
+    integrity_observation,
     acquisition_changed_paths, verify_input_hash, authority_exists,
     verify_inputs, verify_result, verify_published_tree)
 from .identity import git_bytes, code_identity, environment_record, scientific_fingerprint, verify_recipe
@@ -77,6 +78,13 @@ def dependency_file(root, relative):
 
 
 def verify_acquisition(root, receipt_name, *, expected_tree=None):
+    with integrity_observation(root):
+        binding = _acquisition_binding(root)
+        return _verify_acquisition(root, receipt_name, expected_tree=expected_tree,
+            observed_tree=None if binding is None else binding[2])
+
+
+def _verify_acquisition(root, receipt_name, *, expected_tree, observed_tree):
     """Bind a complete acquisition to a create-once external tree baseline.
 
     Acquisition producers predate StageResult. Never write into their attempts;
@@ -102,6 +110,8 @@ def verify_acquisition(root, receipt_name, *, expected_tree=None):
     refuse_changes([name for name, entry in tree.items() if entry.get('changed')],
         'acquisition changed during fingerprinting (tainted)')
 
+    if observed_tree is not None:
+        compare(observed_tree, 'acquisition fingerprint differs from observation binding (tainted)')
     if expected_tree is not None:
         compare(expected_tree, 'acquisition fingerprint differs from consumer baseline (tainted)')
     if authority_exists(baseline):

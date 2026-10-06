@@ -3698,3 +3698,89 @@ def run_stage(request):
     assert not Path(str(integrity.publication_receipt(out)) + '.refused').exists()
     install_stage(monkeypatch, repo, dummy)
     assert_pass(run_task(repo, new_attempt(repo, tmp_path / 'clean-retry'), needs=SOURCE_NEEDS))
+
+
+@mark.parametrize('kind', ['acquisition', 'stage'])
+def test_stream_content_observation_survives_restore(runtime, acquisition, source, tmp_path, monkeypatch, kind):
+    from oxyformer.execution import integrity
+    repo, out = runtime
+    root = acquisition if kind == 'acquisition' else source
+    victim = root / ('payload.tar' if kind == 'acquisition' else 'data.json')
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']} if kind == 'acquisition' else SOURCE_NEEDS
+    saved = victim.read_bytes()
+    changed = bytes([saved[0] ^ 1]) + saved[1:]
+    def faulty(request):
+        try:
+            with integrity.open_regular(victim) as stream:
+                victim.write_bytes(changed)
+                try:
+                    stream.read()
+                finally:
+                    victim.write_bytes(saved)
+        except ContractError:
+            pass
+        return dummy(request)
+    install_stage(monkeypatch, repo, faulty)
+    result = run_task(repo, out, needs=needs)
+    assert_failed(result, victim)
+    assert victim.read_bytes() == saved
+    marker = Path(str(integrity.publication_receipt(root)) + '.tainted')
+    assert read_json(marker) == [victim.name]
+    with raises(ContractError, match='tainted'):
+        run_task(repo, new_attempt(repo, tmp_path / 'future'), needs=needs)
+
+
+def test_caught_acquisition_enumeration_io_allows_only_clean_retry(runtime, acquisition, tmp_path, monkeypatch):
+    import errno
+    from oxyformer.execution import integrity, runner
+    repo, out = runtime
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']}
+    original = os.scandir
+    def faulty(request):
+        def unavailable(path):
+            if Path(path) == acquisition:
+                raise OSError(errno.EIO, 'transient acquisition enumeration failure', str(path))
+            return original(path)
+        with monkeypatch.context() as patch:
+            patch.setattr(os, 'scandir', unavailable)
+            with raises(ContractError, match='unreadable'):
+                runner.verify_acquisition(acquisition, 'receipts.json')
+        return dummy(request)
+    install_stage(monkeypatch, repo, faulty)
+    result = run_task(repo, out, needs=needs)
+    assert_failed(result, acquisition)
+    assert not integrity.publication_receipt(out).exists()
+    assert not Path(str(integrity.publication_receipt(acquisition)) + '.tainted').exists()
+    install_stage(monkeypatch, repo, dummy)
+    assert_pass(run_task(repo, new_attempt(repo, tmp_path / 'retry'), needs=needs))
+
+
+def test_acquisition_scan_evidence_precedes_authority_io(runtime, acquisition, tmp_path, monkeypatch):
+    import errno
+    from oxyformer.execution import integrity, runner
+    repo, out = runtime
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']}
+    added = acquisition / 'new-unlisted-file'
+    baseline = Path(str(integrity.publication_receipt(acquisition, create=True)) + '.acquisition')
+    original_read = runner.read_mapping
+    def faulty(request):
+        added.write_bytes(b'observed addition')
+        def unavailable(path, **kwargs):
+            if Path(path) == baseline:
+                raise OSError(errno.EIO, 'transient acquisition authority failure', str(path))
+            return original_read(path, **kwargs)
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(runner, 'read_mapping', unavailable)
+                with raises((ContractError, OSError)):
+                    runner.verify_acquisition(acquisition, 'receipts.json')
+        finally:
+            added.unlink()
+        return dummy(request)
+    install_stage(monkeypatch, repo, faulty)
+    result = run_task(repo, out, needs=needs)
+    assert_failed(result, added)
+    marker = Path(str(integrity.publication_receipt(acquisition)) + '.tainted')
+    assert added.name in read_json(marker)
+    with raises(ContractError, match='tainted'):
+        run_task(repo, new_attempt(repo, tmp_path / 'future'), needs=needs)
