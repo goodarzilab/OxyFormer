@@ -3730,27 +3730,34 @@ def test_stream_content_observation_survives_restore(runtime, acquisition, sourc
         run_task(repo, new_attempt(repo, tmp_path / 'future'), needs=needs)
 
 
-def test_caught_acquisition_enumeration_io_allows_only_clean_retry(runtime, acquisition, tmp_path, monkeypatch):
+@mark.parametrize('kind', ['acquisition', 'stage', 'published-tree'])
+def test_caught_dependency_enumeration_io_allows_only_clean_retry(runtime, acquisition, source, tmp_path, monkeypatch, kind):
     import errno
     from oxyformer.execution import integrity, runner
     repo, out = runtime
-    needs = {'fetch-data': ['payload.tar', 'receipts.json']}
+    root = acquisition if kind == 'acquisition' else source
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']} if kind == 'acquisition' else SOURCE_NEEDS
     original = os.scandir
     def faulty(request):
         def unavailable(path):
-            if Path(path) == acquisition:
-                raise OSError(errno.EIO, 'transient acquisition enumeration failure', str(path))
+            if Path(path) == root:
+                raise OSError(errno.EIO, 'transient dependency enumeration failure', str(path))
             return original(path)
         with monkeypatch.context() as patch:
             patch.setattr(os, 'scandir', unavailable)
-            with raises(ContractError, match='unreadable'):
-                runner.verify_acquisition(acquisition, 'receipts.json')
+            with raises(ContractError):
+                if kind == 'acquisition':
+                    runner.verify_acquisition(root, 'receipts.json')
+                elif kind == 'stage':
+                    runner.verify_dependency_result(root)
+                else:
+                    integrity.verify_published_tree(root, read_result(root))
         return dummy(request)
     install_stage(monkeypatch, repo, faulty)
     result = run_task(repo, out, needs=needs)
-    assert_failed(result, acquisition)
+    assert_failed(result, root)
     assert not integrity.publication_receipt(out).exists()
-    assert not Path(str(integrity.publication_receipt(acquisition)) + '.tainted').exists()
+    assert not Path(str(integrity.publication_receipt(root)) + '.tainted').exists()
     install_stage(monkeypatch, repo, dummy)
     assert_pass(run_task(repo, new_attempt(repo, tmp_path / 'retry'), needs=needs))
 

@@ -830,6 +830,11 @@ def publish_result(root, result, *, owned_controls=False, dependency_roots=(), d
 
 def verify_published_tree(root, result, expected_hash=None):
     """Read the recorded baseline, hash-check it, then compare current entries."""
+    with integrity_observation(root):
+        return _verify_published_tree(root, result, expected_hash)
+
+
+def _verify_published_tree(root, result, expected_hash):
     root = directory_path(root)
     verify_publication(root, result)
     records = [record for record in result.artifacts if record.path == FINGERPRINT]

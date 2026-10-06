@@ -165,6 +165,12 @@ def _verify_acquisition(root, receipt_name, *, expected_tree, observed_tree):
 
 def verify_dependency_result(root, *, expected_hash=None, trees=None, active=None, verified=None,
     output_dir=None):
+    with integrity_observation(root):
+        return _verify_dependency_result(root, expected_hash=expected_hash, trees=trees,
+            active=active, verified=verified, output_dir=output_dir)
+
+
+def _verify_dependency_result(root, *, expected_hash, trees, active, verified, output_dir):
     """Verify the complete lineage with an explicit postorder traversal."""
     root = directory_path(root)
     active = set() if active is None else active
