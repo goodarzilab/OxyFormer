@@ -14,7 +14,7 @@ import yaml
 from oxyformer.contracts import StageRequest, StageResult
 from oxyformer.provenance import ContractError, canonical_json, relative_artifact_path, require
 from .integrity import (DEPENDENCY_CHECK, FINGERPRINT, RESULT, _replace_control, _repair_control_directory,
-    post_execution_check, publish_result, record_taints, snapshot_file_identities,
+    post_execution_check, publish_result, record_taints, snapshot_dependency_identities,
     directory_path, read_regular, regular_file_stat, regular_file_hash as file_hash,
     fingerprint_tree, publication_receipt, InputChanged, acquisition_read,
     acquisition_changed_paths, verify_input_hash, authority_exists,
@@ -400,7 +400,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     atomic_json(out, '_execution/identity.json', {'head': head, 'scientific_fingerprint': scientific_fingerprint(repo)})
     immutable_controls = {str(out / ('_execution/' + name)): file_hash(out / ('_execution/' + name))
         for name in ('request.json', 'environment.json', 'identity.json')}
-    dependency_identities = snapshot_file_identities(dependency_trees)
+    dependency_identities = snapshot_dependency_identities(dependency_trees)
     try:
         verify_inputs(request)
         module_name = settings.get('module')

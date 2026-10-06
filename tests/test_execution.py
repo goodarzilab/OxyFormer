@@ -3433,7 +3433,7 @@ def test_file_identity_io_failure_preserves_only_positive_changes(runtime, acqui
             needs={'fetch-data': ['payload.tar', 'receipts.json']}))
 
 
-def test_directory_timestamp_change_does_not_taint_unchanged_files(runtime, acquisition, monkeypatch):
+def test_directory_timestamp_write_taints_dependency(runtime, acquisition, monkeypatch):
     repo, out = runtime
     def worker(request):
         result = dummy(request)
@@ -3441,4 +3441,70 @@ def test_directory_timestamp_change_does_not_taint_unchanged_files(runtime, acqu
         os.utime(acquisition, ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 1000000000))
         return result
     install_stage(monkeypatch, repo, worker)
-    assert_pass(run_task(repo, out, needs={'fetch-data': ['payload.tar', 'receipts.json']}))
+    assert_failed(run_task(repo, out, needs={'fetch-data': ['payload.tar', 'receipts.json']}), acquisition)
+
+
+@mark.parametrize('kind', ['acquisition', 'stage'])
+def test_restored_directory_swap_refuses_publication(runtime, acquisition, source, tmp_path, monkeypatch, kind):
+    from oxyformer.execution.integrity import publication_receipt
+    repo, out = runtime
+    root = acquisition if kind == 'acquisition' else source
+    victim = root / ('payload.tar' if kind == 'acquisition' else 'data.json')
+    needs = {'fetch-data': ['payload.tar', 'receipts.json']} if kind == 'acquisition' else SOURCE_NEEDS
+    original, metadata = victim.read_bytes(), victim.stat()
+    before = fingerprint_tree(root)
+    parked = root.with_name(root.name + '-parked')
+    consumed = []
+    def faulty(request):
+        result = dummy(request)
+        root.rename(parked)
+        try:
+            shutil.copytree(parked, root)
+            victim.write_bytes(b'changed replacement bytes')
+            consumed.append(victim.read_bytes())
+        finally:
+            shutil.rmtree(root)
+            parked.rename(root)
+        target = Path(request.output_dir) / 'value.json'
+        target.write_text(json.dumps({'consumed': consumed[0].hex()}))
+        return replace(result, artifacts=(replace(result.artifacts[0], sha256=file_hash(target)),))
+    install_stage(monkeypatch, repo, faulty)
+    result = run_task(repo, out, needs=needs)
+    now = victim.stat()
+    marker = Path(str(publication_receipt(root)) + '.tainted')
+    record = dict(kind=kind, status=result.status, message=result.message,
+        consumed_changed_bytes=consumed[0] != original, content_restored=before == fingerprint_tree(root),
+        original_file_identity_restored=(metadata.st_dev,metadata.st_ino,metadata.st_ctime_ns)==(now.st_dev,now.st_ino,now.st_ctime_ns),
+        marker_exists=marker.exists(), output=read_json(out/'value.json'))
+    assert record['consumed_changed_bytes'] and record['content_restored'] and record['original_file_identity_restored']
+    assert_failed(result, root)
+    assert read_json(marker) == ['.']
+
+    with raises(ContractError, match='tainted'):
+        run_task(repo, new_attempt(repo, tmp_path / 'retry'), needs=needs)
+
+
+def test_published_dependency_io_failure_does_not_taint(runtime, source, tmp_path, monkeypatch):
+    from oxyformer.execution.integrity import publication_receipt
+    import errno
+    repo,out=runtime
+    victim=source/'data.json'
+    original=Path.lstat
+    enabled=False
+    def failing(path,*args,**kwargs):
+        if enabled and path==victim:
+            raise OSError(errno.EIO,'transport failure',str(path))
+        return original(path,*args,**kwargs)
+    def worker(request):
+        nonlocal enabled
+        result=dummy(request)
+        enabled=True
+        return result
+    monkeypatch.setattr(Path,'lstat',failing)
+    install_stage(monkeypatch,repo,worker)
+    result=run_task(repo,out,needs=SOURCE_NEEDS)
+    enabled=False
+    marker=Path(str(publication_receipt(source))+'.tainted')
+    assert result.status=='fail'
+    assert not marker.exists()
+    assert_pass(verify_dependency_result(source))
