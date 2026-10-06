@@ -8,7 +8,7 @@ import sys
 import urllib.request
 
 from oxyformer.execution.paths import output_path, safe_extract
-from oxyformer.provenance import file_hash, require
+from oxyformer.provenance import file_hash, relative_artifact_path, require
 
 
 class PrerequisiteMissing(RuntimeError):
@@ -18,7 +18,19 @@ class PrerequisiteMissing(RuntimeError):
 
 
 def dependency(request, name):
-    path = Path(name).resolve(strict=True)
+    # Stable references let a committed task bind the actual upstream attempt.
+    # Absolute paths remain supported for existing callers.
+    if isinstance(name, dict):
+        require(set(name) == {'dependency', 'path'}, 'invalid legacy dependency reference')
+        relative_artifact_path(name['path'])
+        config = json.loads(Path(request.config_path).read_text())
+        roots = config.get('dependencies', {})
+        require(name['dependency'] in roots, 'legacy dependency unit is not declared')
+        root = Path(roots[name['dependency']]).resolve(strict=True)
+        path = (root / name['path']).resolve(strict=True)
+        require(path.is_relative_to(root), 'legacy dependency escapes upstream attempt')
+    else:
+        path = Path(name).resolve(strict=True)
     approved = {Path(p).resolve(strict=True) for p in request.dependency_paths}
     require(path in approved, f"input must be a hashed StageRequest dependency: {name}")
     return path
