@@ -61,10 +61,10 @@ def publication_lock(receipt):
 
 def record_publication(root, result, *, dependency_roots=(), dependency_identities=None):
     receipt = publication_receipt(root, create=True)
-    identities = check_file_identities(dependency_identities or {})
+    identities = check_dependency_identities(dependency_identities or {})
     refused = [str(Path(parent) / name) for parent, detail in identities.items()
         for name in detail['changed_paths'] + detail['unreadable_paths']]
-    require(not refused, 'upstream file identity changed or unreadable: ' + ', '.join(refused))
+    require(not refused, 'upstream path identity changed or unreadable: ' + ', '.join(refused))
     with publication_lock(receipt):
         # The authoritative release and permanent taints share one ordering.
         # A recorded upstream taint cannot slip between this check and commit.
@@ -392,22 +392,23 @@ def acquisition_changed_paths(before, after):
     return sorted(changed)
 
 
-def _file_identity(metadata):
-    return (metadata.st_dev, metadata.st_ino, metadata.st_ctime_ns)
+def _dependency_identity(metadata):
+    return (metadata.st_dev, metadata.st_ino, stat.S_IFMT(metadata.st_mode), metadata.st_ctime_ns)
 
 
-def snapshot_file_identities(trees):
-    """Capture only regular files, once per run, outside portable content baselines."""
-    return {root: {name: _file_identity(regular_file_stat(Path(root) / name))
-        for name, entry in entries.items() if entry.get('type') == stat.S_IFREG}
+def snapshot_dependency_identities(trees):
+    """Capture file and directory identity outside portable content baselines."""
+    return {root: {name: _dependency_identity((Path(root) / name).lstat())
+        for name, entry in entries.items() if entry.get('type') in (stat.S_IFREG, stat.S_IFDIR)}
         for root, entries in trees.items()}
 
 
-def check_file_identities(identities, *, observed_changes=None):
+def check_dependency_identities(identities, *, observed_changes=None):
     """Retain each kernel-observed change before checking another path.
 
-    atime is changed by reads, and Weka directory timestamps may lag. Neither
-    participates. Restoring bytes or mtime cannot restore regular-file ctime.
+    Reads may change atime; it and mtime are excluded. Directory ctime retains
+    rename/restore evidence even when the original regular files are untouched.
+    Restoring bytes or mtime cannot restore kernel-maintained ctime.
     Unknown I/O failures refuse without creating a permanent mutation marker.
     """
     attempts = {}
@@ -422,7 +423,7 @@ def check_file_identities(identities, *, observed_changes=None):
                 if not changed:
                     detail['unreadable_paths'].append(name)
             else:
-                changed = not stat.S_ISREG(metadata.st_mode) or _file_identity(metadata) != tuple(expected)
+                changed = _dependency_identity(metadata) != tuple(expected)
             if changed:
                 detail['changed_paths'].append(name)
                 if observed_changes is not None:
@@ -437,13 +438,14 @@ def post_execution_check(before, *, observed_changes=None, identities=None):
     The optional diagnostic list retains absolute witness paths even if later
     authority reads or marker writes fail before the check can be returned.
     """
-    identities = check_file_identities(identities or {}, observed_changes=observed_changes)
+    identities = check_dependency_identities(identities or {}, observed_changes=observed_changes)
     attempts = {}
     for root, expected in before.items():
-        # Prepare the comparison authority before observing this tree.
-        acquisition = _acquisition_binding(root) is not None
+        # Validate any acquisition authority before observing this tree.
+        _acquisition_binding(root)
         actual = fingerprint_tree(root)
-        changed = (acquisition_changed_paths if acquisition else changed_paths)(expected, actual)
+        # Unrelated I/O is not mutation evidence for either dependency kind.
+        changed = acquisition_changed_paths(expected, actual)
         identity = identities.get(root, {})
         changed = sorted(set(changed) | set(identity.get('changed_paths', [])))
         unreadable = any('error' in entry for entry in actual.values()) or bool(identity.get('unreadable_paths'))
