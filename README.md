@@ -29,13 +29,15 @@ CPU execution and no network. Run from the checkout on a Slurm compute node:
 
 ```sh
 srun --partition=standard --account=root --nodes=1 --ntasks=1 \
-  --cpus-per-task=8 --mem=16G --time=00:15:00 \
-  timeout 600s env CUDA_VISIBLE_DEVICES='' PYTHONPATH=src \
-  /mnt/weka/home/hgoodarzi/envs/oxyformer/bin/python -m pytest -q tests
+  --cpus-per-task=8 --mem=32G --time=01:30:00 \
+  timeout 3600s env CUDA_VISIBLE_DEVICES='' PYTHONPATH=src \
+  /mnt/weka/home/hgoodarzi/envs/oxyformer/bin/python -B -m pytest -q tests
 ```
 
 Repeat with `/mnt/weka/home/hgoodarzi/oxyformer-swarm/envs/ci-cpu/bin/python`
-before every review. Never run suites, probes, mutations or acquisition reads
+before every review; also run the two integration/integrity test files without
+`-B` in both environments. The full-suite timeout is one hour. Never run suites,
+probes, mutations or acquisition reads
 on the login node. A passing suite verifies implementation behavior; scientific
 release still requires every gate and scoped owner approval.
 

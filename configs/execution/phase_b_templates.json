@@ -27,10 +27,12 @@
     "required_gates": ["legacy_reproduction", "analytic", "coverage", "physiology_anchor", "birth_anchor", "support", "refit_audit", "spatial_sensitivity", "estimator_agreement", "geography_isolation", "overlap"],
     "resolution": "bind every role to all concrete collector IDs and every expected task request hash before admission"
   },
-  "early_path": {"stages": ["exposure-atlas", "atlas-collect", "tract-support-gate"], "must_not_depend_on": ["release-docs", "campaign-lock", "tract-release"]},
+  "early_path": {"stages": ["atlas-inputs", "exposure-atlas", "atlas-collect", "tract-support-gate"], "must_not_depend_on": ["release-docs", "release-docs-r2", "campaign-lock", "tract-release"]},
   "current_capability_blocks": [
-    "dispatcher approval-date JSON serialization",
-    "dispatcher versus reporting and design task/config contracts",
+    "design stage name/config/typed-input binding differs from the merged runner",
+    "generic expansion omits nested execution limits and per-slice terminal output contracts",
+    "generic report collectors omit bundle/manifest/receipts/approval bindings",
+    "coverage collection does not publish reporting CoverageScenario artifacts",
     "nested runner is CPU-only; GPU timing cannot be assumed",
     "A5-A7 and F0-F1 require resumable signed-correction/foundation adapters",
     "coverage batching requires complete repetitions; interrupted repetitions lack cross-leaf continuation",

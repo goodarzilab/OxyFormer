@@ -7,26 +7,43 @@ clinical release, a compute allocation, or permission to access a source.
 
 ## Current admission status
 
-Production campaign admission is **blocked** at base
-`7eeef3f1b50fb49e2a9cdb9e21785199fa74e6aa`. Direct scientific APIs can be tested
-offline; the common dispatcher is not yet an executable route through every
-stage. The integration tests exercise those direct APIs, without a replacement
-dispatcher or a fabricated production adapter.
+Production campaign admission is **blocked** at the audited merge base
+`00c340adcf961068257d3f17749f2623683d533f`. The runner's owner-approval YAML date
+serialization and reporting task/config handoff have been corrected upstream.
+They must not be carried forward as current defects. Reporting accepts the
+registered hyphenated stage names and binds the clone's reporting config and
+owner registry; missing scientific evidence or scoped approvals still blocks it.
 
-The first three boundaries below were reproduced on Slurm in both the oxyformer
-and CI CPU environments. The final row records source inspection:
+The remaining boundaries below must be resolved before admitting an executable
+campaign. The integration fixture's direct scientific APIs do not certify the
+registered runner route. Reproductions use synthetic inputs only; their
+receipts, script and exact results belong in the attempt's `SUMMARY.md` and
+`pytest.log`, outside Git.
 
-| Boundary | Reproduction / required owning-unit correction |
+| Boundary | Current contract and reproduction |
 | --- | --- |
-| Dispatcher configuration | `execution.runner.read_mapping` loads the actual `approved_on` value as a date. `runner.run` includes approvals in `atomic_json`, which raises `TypeError: Object of type date is not JSON serializable` before publishing the request. Reconcile serialization without editing owner decisions. |
-| Reporting task | Dispatcher requires `stage` and supplies `needs`/`outputs`; reporting accepts exactly `bundle`, `manifest`, `receipts`, `approvals`. Adding the required dispatcher field to a valid direct reporting request produces `invalid reporting task fields`. |
-| Reporting configuration | Dispatcher passes `_execution/config.json`; reporting requires schema version 1 and the repository's `configs/reporting.yaml`. The dispatcher mapping produces `unsupported reporting config`; changing the version alone cannot satisfy its path requirement. |
-| Stage names and design configuration | Registry names `tract-support-gate`, `anchor-review`, `audit-collect`, `tract-release` differ from direct APIs `tract_design`, `anchor_review`, `audit_collection`, `tract_release`. Design also requires its own config and dependency task shape. A name translation alone does not reconcile the schemas. |
+| Runner → design | The unchanged `tract-support-gate` registration reaches `design.gate.run_stage` with an execution envelope. It returns `invalid design stage configuration`: design requires `config.schema_version == 1` and `config.stage == request.stage == "tract_design"`. The direct design control passes; translating only the name still fails. |
+| Design input roles and config | The registered needs supply raw acquisition and atlas files. Design requires canonical `DataManifest`, `CovariateView`, `GeographyTable`, `CollectedAtlas`, `EntityGraph` and a hash-bound owner file in `task.dependencies`. Isolated probes return `task must bind approvals...`, `task dependency is not hash-bound by StageRequest`, and, after adding just the direct schema/name, `missing or contradictory fixed approval: support_design_fraction`. No approval is actually missing from the owner registry; the adapter does not read the runner envelope. |
+| Generic expansion → nested slices | `expand_campaign` emits scheduler resources but no `task.slice` execution limit. A 120-second leaf therefore reaches a stage whose default is 14,400 seconds with a 120-second checkpoint margin. Extra per-slice limits/outputs in the spec are ignored; all slices share `work.outputs`. Declaring terminal nuisances on a partial slice produces `stage omitted declared outputs`. Common checkpoint-only outputs require a separate terminal-completeness check. |
+| Registered comparisons → nested stage | A5, A6, A7, F0 and F1 each return `blocked`: the density-ratio checkpoint interface cannot represent their signed corrections or foundation state. Their direct model interfaces do not provide an exact campaign continuation path. |
+| Generic expansion → report collector | The generated `audit-collect` task has `expected_leaves`, but lacks `bundle`, `manifest`, `receipts` and `approvals`. The registered reporting worker returns `invalid reporting task fields`. A separately constructed complete reporting task is supported; the generic expander does not construct it. |
+| Coverage collector → reporting evidence | `validation.campaign` publishes `result.json`, `gate.json` and an artifact manifest. Reporting requires canonical artifacts of kind `coverage_scenario`. A passing synthetic final collection still yields `coverage task has no CoverageScenario artifact` at that boundary. Copying metric values into a report cannot replace verified producer evidence. |
 
-The owning implementation units must reconcile these prerequisites and provide
-merged receipts before production dispatch. Do not patch these files from a
-documentation/integration unit. Admission must be reassessed on that merged
-commit; this document does not certify subsequent commits.
+Source inspection also finds no registered producer of the typed design inputs
+or `PreparedEndpoint`, and no registered score/targeting/covariance stage that
+assembles a `ReportBundle`. These APIs remain callable directly; the synthetic
+fixture explicitly assembles their records. That fixture is not a reviewed
+production adapter. The nested and coverage runners are CPU-only; coverage
+batches complete repetitions and has no cross-leaf interrupted-repetition
+continuation. Neither limitation authorizes shortened tuning or assumed GPU
+performance.
+
+The design refusal cannot be corrected through this unit's seven allowed
+files: it requires its owning implementation/registration to accept the merged
+runner contract and bind the real typed inputs. Bypassing the runner in a test
+cannot establish an executable coordinator path. Stop integration admission and
+report the complete boundary inventory; retain the early atlas/support path's
+independence from this integration unit. Reassess after merged corrections.
 
 ## Coordinator contract
 
@@ -107,23 +124,20 @@ reads belong there. This command preserves the required inner test command:
 
 ```sh
 srun --partition=standard --account=root --nodes=1 --ntasks=1 \
-  --cpus-per-task=8 --mem=16G --time=00:15:00 \
-  timeout 600s env CUDA_VISIBLE_DEVICES='' PYTHONPATH=src \
-  /mnt/weka/home/hgoodarzi/envs/oxyformer/bin/python -m pytest -q tests
+  --cpus-per-task=8 --mem=32G --time=01:30:00 \
+  timeout 3600s env CUDA_VISIBLE_DEVICES='' PYTHONPATH=src \
+  /mnt/weka/home/hgoodarzi/envs/oxyformer/bin/python -B -m pytest -q tests
 ```
 
-Before every review round repeat with
-`/mnt/weka/home/hgoodarzi/oxyformer-swarm/envs/ci-cpu/bin/python`. Keep each
-complete suite below ten minutes. Record failures and build-specific skips;
-do not relax tolerances to hide CPU float32 differences. The focused files are
-`tests/test_end_to_end.py` and `tests/test_plan_integrity.py`.
-
-The ten-minute bound is currently unsatisfied. On 2026-10-05, the unchanged
-recorded base above timed out at 600 seconds with 41% of the suite completed
-in the oxyformer environment; the integration attempt also timed out in both
-environments. Focused checks do not replace full-suite validation. Resolve the
-baseline runtime or obtain an explicit runtime exception before review; no
-scientific settings or required tests may be dropped to meet the deadline.
+Before every review round repeat the complete suite with
+`/mnt/weka/home/hgoodarzi/oxyformer-swarm/envs/ci-cpu/bin/python`. The owner
+replaced the obsolete ten-minute complete-suite limit with a 3,600-second
+timeout; eight-CPU full runs take approximately 25–30 minutes. Record failures
+and build-specific skips; do not relax tolerances to hide CPU float32 differences.
+Also run `tests/test_end_to_end.py tests/test_plan_integrity.py` **without `-B`**
+in both environments before review, matching CI's ordinary interpreter mode.
+Do not make tests depend on bytecode flags. The integration additions must add
+well under a minute; shortened synthetic timing cannot admit production work.
 
 For the required mutation, use an isolated copy of
 `test_final_coverage_collector_dependencies` with its repository root preserved.

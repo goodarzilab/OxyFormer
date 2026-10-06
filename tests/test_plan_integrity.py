@@ -177,7 +177,11 @@ def test_early_registry_path_has_no_integration_barrier():
     rule = catalog()["early_path"]
     for name in rule["stages"]:
         assert not set(stages[name].get("needs", {})).intersection(rule["must_not_depend_on"])
-    assert len(stages["atlas-collect"]["needs"]) == 9
+    needs = stages["atlas-collect"]["needs"]
+    assert set(needs) == {"atlas-inputs", "atlas-new-england", "atlas-mid-atlantic",
+        "atlas-east-north", "atlas-west-north", "atlas-south-atlantic",
+        "atlas-east-south", "atlas-west-south", "atlas-mountain", "atlas-pacific"}
+    assert needs["atlas-inputs"] == ["atlas_shards.json", "raster_metadata.json"]
     # The coordinator's external DAG must also be checked at admission; this
     # repository registry is not evidence of that external state.
 
