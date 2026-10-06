@@ -24,6 +24,70 @@ from .identity import git_bytes, code_identity, environment_record, scientific_f
 from .paths import atomic_json, atomic_write, output_path
 
 
+def allocation_threads(*, cgroup_root=Path('/sys/fs/cgroup'), membership=Path('/proc/self/cgroup')):
+    """Slurm's per-task allocation, otherwise affinity limited by cgroup quotas.
+
+    Affinity includes cpuset restrictions. Walk quota ancestors as well: a
+    container can expose many CPUs while its parent permits only two CPU-seconds
+    per second. Fractional quotas use at least one thread, rounded down.
+    """
+    allocated = os.environ.get('SLURM_CPUS_PER_TASK')
+    if allocated is not None:
+        require(allocated.isdecimal() and int(allocated) > 0,
+            'SLURM_CPUS_PER_TASK must be a positive integer')
+        return int(allocated)
+    count = len(os.sched_getaffinity(0))
+    for line in membership.read_text().splitlines():
+        _, controllers, relative = line.split(':', 2)
+        if controllers == '':
+            roots, quota_name = [cgroup_root], 'cpu.max'
+        elif 'cpu' in controllers.split(','):
+            roots = [cgroup_root / name for name in ('cpu', 'cpu,cpuacct', 'cpuacct,cpu')]
+            quota_name = 'cpu.cfs_quota_us'
+        else:
+            continue
+        for root in roots:
+            # Some namespaces expose only the cgroup root, others its full path.
+            # In either case inspect the root and every visible ancestor.
+            path = root.joinpath(*[p for p in relative.split('/') if p not in ('', '.', '..')])
+            for directory in (path, *path.parents):
+                if directory != root and root not in directory.parents:
+                    break
+                quota = directory / quota_name
+                if not quota.is_file():
+                    continue
+                if quota_name == 'cpu.max':
+                    value, period = quota.read_text().split()
+                    if value == 'max':
+                        continue
+                else:
+                    value = quota.read_text().strip()
+                    if int(value) < 0:
+                        continue
+                    period = (directory / 'cpu.cfs_period_us').read_text().strip()
+                require(int(value) > 0 and int(period) > 0, 'invalid cgroup CPU quota')
+                count = min(count, max(1, int(value) // int(period)))
+    return max(1, count)
+
+
+def configure_threads():
+    """Bind native libraries and Torch to the same allocation in this process.
+
+    The launcher exports these before Python starts. Setting them here also
+    covers direct CLI calls and makes the worker subprocess inherit the limit.
+    """
+    count = allocation_threads()
+    os.environ['OMP_NUM_THREADS'] = str(count)
+    os.environ['MKL_NUM_THREADS'] = str(count)
+    import torch
+    torch.set_num_threads(count)
+    return {'source': 'SLURM_CPUS_PER_TASK' if 'SLURM_CPUS_PER_TASK' in os.environ else 'cgroup',
+        'allocated_cpus': count, 'torch': torch.get_num_threads(),
+        'torch_interop': torch.get_num_interop_threads(),
+        'OMP_NUM_THREADS': os.environ['OMP_NUM_THREADS'],
+        'MKL_NUM_THREADS': os.environ['MKL_NUM_THREADS']}
+
+
 def dependency_variable(unit_id):
     require(isinstance(unit_id, str) and bool(unit_id), 'empty dependency ID')
     return 'SWARM_DEP_' + re.sub('[^A-Z0-9]', '_', unit_id.upper())
@@ -294,6 +358,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
             '--out must equal SWARM_UNIT_DIR')
     repo = Path(repo).resolve(strict=True)
     require(not out.is_relative_to(repo), 'output may not be inside repository')
+    thread_environment = configure_threads()
     head = code_identity(repo, out)
     registry_file = repo / 'configs/execution/stages.yaml'
     registry = read_mapping(registry_file)
@@ -413,6 +478,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         output_dir=str(out), code_identity=head)
     atomic_write(out, '_execution/request.json', request.to_json())
     environment = environment_record()
+    environment['threads'] = thread_environment
     atomic_json(out, '_execution/environment.json', environment)
     atomic_json(out, '_execution/identity.json', {'head': head, 'scientific_fingerprint': scientific_fingerprint(repo)})
     immutable_controls = {str(out / ('_execution/' + name)): file_hash(out / ('_execution/' + name))

@@ -636,13 +636,13 @@ def _science_identity(config, split, manifest, seed, allowed):
 
 
 def resolve_device(device="auto"):
-    """Explicit runtime choice, then OXYFORMER_DEVICE, then visible CUDA/CPU.
+    """Explicit runtime choice, then OXYFORMER_DEVICE, defaulting to CPU.
 
-    Slurm controls visibility through CUDA_VISIBLE_DEVICES. An explicit CUDA
+    Set OXYFORMER_DEVICE=auto to opt into visible CUDA detection. An explicit CUDA
     request must succeed; it never silently becomes a CPU measurement.
     """
     if device == "auto":
-        device = os.environ.get("OXYFORMER_DEVICE", "auto")
+        device = os.environ.get("OXYFORMER_DEVICE", "cpu")
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)

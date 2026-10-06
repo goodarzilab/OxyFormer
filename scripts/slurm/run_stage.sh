@@ -12,6 +12,12 @@ export PYTHONDONTWRITEBYTECODE=1
 export PYTHONPATH="$SWARM_UNIT_DIR/src/src"
 if [[ -n "${TASK_MANIFEST:-}" && "$TASK_MANIFEST" != /* ]]; then TASK_MANIFEST="$PWD/$TASK_MANIFEST"; fi
 cd "$SWARM_UNIT_DIR/src"
+# Export before importing numerical libraries; compute nodes expose more CPUs
+# than a task owns. The runner records and applies the same count to Torch.
+stage_threads=$(/mnt/weka/home/hgoodarzi/envs/oxyformer/bin/python -B -c \
+    'from oxyformer.execution.runner import allocation_threads; print(allocation_threads())')
+export OMP_NUM_THREADS="$stage_threads"
+export MKL_NUM_THREADS="$stage_threads"
 args=(--stage "$STAGE" --repo "$SWARM_UNIT_DIR/src" --out "$SWARM_UNIT_DIR" --deps-env
       --approvals "$SWARM_UNIT_DIR/src/configs/approvals.yaml")
 if [[ -n "${TASK_MANIFEST:-}" ]]; then args+=(--task "$TASK_MANIFEST"); fi
