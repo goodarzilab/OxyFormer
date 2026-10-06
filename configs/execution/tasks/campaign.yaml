@@ -1,7 +1,8 @@
 schema_version: 1
 # Artificial execution smoke only, not the fixed-real-covariate Suite A of
 # plan section 6.2. Content hashes pin smoke_inputs.build_inputs() exactly.
-# The plan reserves one GPU for smoke; the merged nested estimator runs on CPU.
+# Eight allocated CPU threads measured about 254 s through the stage launcher.
+# CPU is the nested-fit default; 1800 s leaves over six times measured headroom.
 # No runnable campaign-lock task is supplied: smoke has mode=smoke, not profile.
 # Lock needs complete production profiles for every selected registered final
 # scenario with one matching production recipe and environment, measured feasible
@@ -40,4 +41,4 @@ tasks:
           seed: 5614891224836206309
           scenario: null_effect
           index: 0
-      wall_seconds: 3600
+      wall_seconds: 1800
