@@ -1,0 +1,12 @@
+schema_version: 1
+# The real-frame stage emits profile_tasks.json with concrete artifact hashes,
+# county representatives, the four registered scenarios and an estimate task.
+# Consumers use that published manifest, never guessed hashes or an allocation.
+tasks:
+  - id: real-frame-inputs
+    stage: real-frame-inputs
+    needs:
+      tract-inputs: [data_manifest.json, covariates.json, geography.json, entity_graph.json]
+      atlas-collect: [atlas.parquet, quality.json, artifact_manifest.json]
+    outputs: [endpoint.json, frame.json, support.json, input_audit.json, profile_tasks.json, artifact_manifest.json]
+    parameters: {}

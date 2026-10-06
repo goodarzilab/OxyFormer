@@ -86,14 +86,24 @@ stages:
     needs:
       legacy-inputs: [elevcan_source.tar.gz]
     outputs: [results.json, reproduction_bundle.tar, artifact_manifest.json]
+  real-frame-inputs:
+    module: oxyformer.validation.real_frame
+    needs:
+      tract-inputs: [data_manifest.json, covariates.json, geography.json, entity_graph.json]
+      atlas-collect: [atlas.parquet, quality.json, artifact_manifest.json]
+    outputs: [endpoint.json, frame.json, support.json, input_audit.json, profile_tasks.json, artifact_manifest.json]
+  campaign-estimate:
+    module: oxyformer.validation.campaign_estimate
+    needs: {}
+    outputs: [budget_estimate.json, artifact_manifest.json]
   simulation-inputs:
     module: oxyformer.validation.smoke_inputs
     needs: {}
     outputs: [endpoint.json, frame.json, artifact_manifest.json]
   simulation-smoke:
     module: oxyformer.validation.coverage
-    needs:
-      simulation-inputs: [endpoint.json, frame.json, artifact_manifest.json]
+    # Each task declares its typed input producer: artificial smoke or real frame.
+    needs: {}
     outputs: [result.json, timing.json, artifact_manifest.json]
   # No runnable lock task until complete production profiles, measured batching
   # and an owner final-coverage allocation exist. Smoke cannot supply these.
