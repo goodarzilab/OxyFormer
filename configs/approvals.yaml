@@ -147,7 +147,11 @@ owner_decisions:
     inhabited_elevation: p50            # tract median of population-allocated elevation under the distributed scenario; county relief = P90 - P10 across its tracts' values
     allocation_qualified: complete_distributed_exposure   # a tract qualifies only if its distributed-scenario exposure is complete; never imputed
     coordinates: population_weighted_2010_block_centroid  # 2010 Census block populations and block internal points from the census acquisition
-    subblock: county_x_10km_grid_epsg5070                 # (county, 10 km EPSG:5070 grid cell, origin (0, 0), containing the tract coordinate)
+    subblock:                           # (county, grid cell containing the tract coordinate)
+      scheme: county_x_grid_cell
+      crs: EPSG:5070
+      cell_size_m: 10000.0
+      origin_m: [0.0, 0.0]
     assignment_geography: tract         # each tract is its own exposure-assignment geography (section 4.1)
   # Approved by the owner on 2026-10-04 ("Approved on both") from the sign-off page https://claude.ai/artifact/1FxDYK6hp2C2A2j5wd2rYz.
   birth_anchor_recipe:
