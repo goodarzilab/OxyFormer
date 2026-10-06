@@ -75,15 +75,19 @@ def configure_threads():
 
     The launcher exports these before Python starts. Setting them here also
     covers direct CLI calls and makes the worker subprocess inherit the limit.
+    Fresh Torch imports honor these native limits. Do not load Torch solely for
+    bookkeeping in a non-training stage; fit identities record observed counts.
     """
     count = allocation_threads()
     os.environ['OMP_NUM_THREADS'] = str(count)
     os.environ['MKL_NUM_THREADS'] = str(count)
-    import torch
-    torch.set_num_threads(count)
+    torch = sys.modules.get('torch')
+    if torch is not None:
+        torch.set_num_threads(count)
     return {'source': 'SLURM_CPUS_PER_TASK' if 'SLURM_CPUS_PER_TASK' in os.environ else 'cgroup',
-        'allocated_cpus': count, 'torch': torch.get_num_threads(),
-        'torch_interop': torch.get_num_interop_threads(),
+        'allocated_cpus': count, 'torch_intraop_limit': count,
+        'torch': torch.get_num_threads() if torch is not None else None,
+        'torch_interop': torch.get_num_interop_threads() if torch is not None else None,
         'OMP_NUM_THREADS': os.environ['OMP_NUM_THREADS'],
         'MKL_NUM_THREADS': os.environ['MKL_NUM_THREADS']}
 

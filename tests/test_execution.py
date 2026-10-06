@@ -4080,7 +4080,7 @@ def test_allocation_threads_cgroup_ancestors(monkeypatch, tmp_path, version, quo
 def test_stage_launcher_bounds_threads_and_records_identity(runtime, monkeypatch):
     repo, out = runtime
     stage = '''
-_reference = run_stage
+_reference = dummy
 
 def run_stage(request):
     import torch
@@ -4093,8 +4093,6 @@ def run_stage(request):
     assert identity['env_OMP_NUM_THREADS'] == identity['env_MKL_NUM_THREADS'] == '"8"'
     return _reference(request)
 '''
-    # dummy is the fixture's real stage entry point.
-    stage = stage.replace('_reference = run_stage', '_reference = dummy')
     prepare_cli_fixture(repo, out, stage)
     prepared = out / 'src'
     shutil.move(repo, prepared)
@@ -4109,5 +4107,20 @@ def run_stage(request):
     assert process.returncode == 0, process.stderr + (out / 'run.log').read_text()
     threads = read_json(out / '_execution/environment.json')['threads']
     assert threads['source'] == 'SLURM_CPUS_PER_TASK'
-    assert threads['allocated_cpus'] == threads['torch'] == 8
+    assert threads['allocated_cpus'] == threads['torch_intraop_limit'] == 8
+    assert threads['torch'] is None  # The parent has no numerical work.
     assert threads['OMP_NUM_THREADS'] == threads['MKL_NUM_THREADS'] == '8'
+
+
+def test_thread_configuration_keeps_nontraining_startup_lightweight(monkeypatch):
+    monkeypatch.setenv('SLURM_CPUS_PER_TASK', '8')
+    code = """import sys
+from oxyformer.execution.runner import configure_threads
+assert 'torch' not in sys.modules
+record = configure_threads()
+assert 'torch' not in sys.modules
+assert record['torch'] is None and record['torch_intraop_limit'] == 8
+"""
+    process = subprocess.run([sys.executable, '-B', '-c', code], env=fixture_env(),
+        capture_output=True, text=True, timeout=10)
+    assert_exit(process, 0)
