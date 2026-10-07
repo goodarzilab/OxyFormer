@@ -4107,7 +4107,11 @@ def run_stage(request):
         SLURM_CPUS_PER_TASK='8', OMP_NUM_THREADS='224', MKL_NUM_THREADS='224', OXYFORMER_DEVICE='cpu')
     process = subprocess.run(['bash', str(launcher), '--prepared'], env=environment,
         cwd=prepared, capture_output=True, text=True, timeout=90)
-    assert process.returncode == 0, process.stderr + (out / 'run.log').read_text()
+    diagnostics = [f'launcher exit={process.returncode}', process.stdout, process.stderr]
+    for relative in ('run.log', '_execution/result.json', '_execution/worker-result.json'):
+        path = out / relative
+        diagnostics.append(f'{relative}:\n' + (path.read_text() if path.is_file() else '<missing>'))
+    assert process.returncode == 0, '\n'.join(diagnostics)
     threads = read_json(out / '_execution/environment.json')['threads']
     assert threads['source'] == 'SLURM_CPUS_PER_TASK'
     assert threads['allocated_cpus'] == threads['torch_intraop_limit'] == 8
