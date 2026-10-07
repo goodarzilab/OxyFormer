@@ -4074,7 +4074,10 @@ def test_allocation_threads_cgroup_ancestors(monkeypatch, tmp_path, version, quo
     else:
         (parent / 'cpu.cfs_quota_us').write_text(str(quota))
         (parent / 'cpu.cfs_period_us').write_text('100000')
-    assert allocation_threads(cgroup_root=root, membership=membership) == expected
+    mountinfo = tmp_path / 'mountinfo'
+    filesystem = 'cgroup2 cgroup rw' if version == 2 else 'cgroup cgroup rw,cpu,cpuacct'
+    mountinfo.write_text(f'30 20 0:27 / {parent} rw - {filesystem}\n')
+    assert allocation_threads(membership=membership, mountinfo=mountinfo) == expected
 
 
 def test_stage_launcher_bounds_threads_and_records_identity(runtime, monkeypatch):
@@ -4155,4 +4158,42 @@ def test_allocation_threads_rebases_cgroup_subtree_mount(monkeypatch, tmp_path, 
             return f'30 20 0:27 /{hierarchy_root} {mount_point} rw - {filesystem}\n'
         return original_read(path, *args, **kwargs)
     monkeypatch.setattr(Path, 'read_text', read_text)
-    assert allocation_threads(cgroup_root=root, membership=membership) == 2
+    assert allocation_threads(membership=membership) == 2
+
+
+@mark.parametrize('version', [1, 2])
+def test_allocation_threads_discovers_nonstandard_mount(monkeypatch, tmp_path, version):
+    from oxyformer.execution.runner import allocation_threads
+    monkeypatch.delenv('SLURM_CPUS_PER_TASK', raising=False)
+    monkeypatch.setattr(os, 'sched_getaffinity', lambda pid: set(range(224)))
+    mounted = tmp_path / 'custom-cg'
+    (mounted / 'job/step').mkdir(parents=True)
+    membership = tmp_path / 'membership'
+    controllers = '' if version == 2 else 'cpu,cpuacct'
+    membership.write_text(f'0:{controllers}:/job/step\n')
+    if version == 2:
+        (mounted / 'cpu.max').write_text('max 100000\n')
+        (mounted / 'job/cpu.max').write_text('200000 100000\n')
+        filesystem = 'cgroup2 cgroup rw'
+    else:
+        (mounted / 'cpu.cfs_quota_us').write_text('-1')
+        (mounted / 'job/cpu.cfs_quota_us').write_text('200000')
+        (mounted / 'job/cpu.cfs_period_us').write_text('100000')
+        filesystem = 'cgroup cgroup rw,cpu,cpuacct'
+    # Another visible subtree belongs to a different cgroup.
+    unrelated = tmp_path / 'sibling'
+    unrelated.mkdir()
+    (unrelated / 'cpu.max').write_text('100000 100000\n')
+    original_read, original_is_file = Path.read_text, Path.is_file
+    def read_text(path, *args, **kwargs):
+        if path == Path('/proc/self/mountinfo'):
+            return (f'30 20 0:27 / {mounted} rw - {filesystem}\n'
+                    f'31 20 0:27 /other {unrelated} rw - cgroup2 cgroup rw\n')
+        return original_read(path, *args, **kwargs)
+    def is_file(path):
+        if path.is_relative_to('/sys/fs/cgroup'):
+            return False
+        return original_is_file(path)
+    monkeypatch.setattr(Path, 'read_text', read_text)
+    monkeypatch.setattr(Path, 'is_file', is_file)
+    assert allocation_threads(membership=membership) == 2

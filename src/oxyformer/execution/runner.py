@@ -24,12 +24,12 @@ from .identity import git_bytes, code_identity, environment_record, scientific_f
 from .paths import atomic_json, atomic_write, output_path
 
 
-def allocation_threads(*, cgroup_root=Path('/sys/fs/cgroup'), membership=Path('/proc/self/cgroup')):
-    """Slurm's per-task allocation, otherwise affinity limited by cgroup quotas.
+def allocation_threads(*, membership=Path('/proc/self/cgroup'), mountinfo=Path('/proc/self/mountinfo')):
+    """Slurm's allocation, otherwise affinity limited by visible cgroup quotas.
 
-    Affinity includes cpuset restrictions. Walk quota ancestors as well: a
-    container can expose many CPUs while its parent permits only two CPU-seconds
-    per second. Fractional quotas use at least one thread, rounded down.
+    Discover both the mount point and its hierarchy root from mountinfo. This
+    handles nonstandard locations and bind-mounted subtrees without assuming
+    controller directory names. Fractional quotas round down to at least one.
     """
     allocated = os.environ.get('SLURM_CPUS_PER_TASK')
     if allocated is not None:
@@ -37,52 +37,47 @@ def allocation_threads(*, cgroup_root=Path('/sys/fs/cgroup'), membership=Path('/
             'SLURM_CPUS_PER_TASK must be a positive integer')
         return int(allocated)
     count = len(os.sched_getaffinity(0))
-    # Membership is hierarchy-relative, but a bind mount can expose only a
-    # subtree. mountinfo's root and mount point provide the coordinate change.
-    mount_roots = {}
-    for line in Path('/proc/self/mountinfo').read_text().splitlines():
-        mount, filesystem = line.split(' - ', 1)
-        if filesystem.split()[0] not in ('cgroup', 'cgroup2'):
-            continue
-        fields = mount.split()
-        def unescape(value):
-            return re.sub(r'\\([0-7]{3})', lambda match: chr(int(match[1], 8)), value)
-        mount_roots[Path(unescape(fields[4]))] = Path(unescape(fields[3]))
+    locations = {}
     for line in membership.read_text().splitlines():
         _, controllers, relative = line.split(':', 2)
         if controllers == '':
-            roots, quota_name = [cgroup_root], 'cpu.max'
+            locations['cgroup2'] = relative
         elif 'cpu' in controllers.split(','):
-            roots = [cgroup_root / name for name in ('cpu', 'cpu,cpuacct', 'cpuacct,cpu')]
-            quota_name = 'cpu.cfs_quota_us'
-        else:
+            locations['cgroup'] = relative
+
+    def unescape(value):
+        return re.sub(r'\\([0-7]{3})', lambda match: chr(int(match[1], 8)), value)
+
+    for line in mountinfo.read_text().splitlines():
+        mount, filesystem = line.split(' - ', 1)
+        kind, _, options = filesystem.split()
+        if kind not in locations or (kind == 'cgroup' and 'cpu' not in options.split(',')):
             continue
-        for root in roots:
-            location = Path('/').joinpath(*[p for p in relative.split('/') if p not in ('', '.', '..')])
-            hierarchy_root = mount_roots.get(root, Path('/'))
-            if location.is_relative_to(hierarchy_root):
-                location = location.relative_to(hierarchy_root)
-            else:
-                # A cgroup namespace can already have rebased membership.
-                location = location.relative_to('/')
-            path = root / location
-            for directory in (path, *path.parents):
-                if directory != root and root not in directory.parents:
-                    break
-                quota = directory / quota_name
-                if not quota.is_file():
+        fields = mount.split()
+        hierarchy_root, root = Path(unescape(fields[3])), Path(unescape(fields[4]))
+        location = Path('/').joinpath(*[p for p in locations[kind].split('/') if p not in ('', '.', '..')])
+        if not location.is_relative_to(hierarchy_root):
+            # A visible mount of a sibling cgroup does not constrain this task.
+            continue
+        path = root / location.relative_to(hierarchy_root)
+        quota_name = 'cpu.max' if kind == 'cgroup2' else 'cpu.cfs_quota_us'
+        for directory in (path, *path.parents):
+            if directory != root and root not in directory.parents:
+                break
+            quota = directory / quota_name
+            if not quota.is_file():
+                continue
+            if kind == 'cgroup2':
+                value, period = quota.read_text().split()
+                if value == 'max':
                     continue
-                if quota_name == 'cpu.max':
-                    value, period = quota.read_text().split()
-                    if value == 'max':
-                        continue
-                else:
-                    value = quota.read_text().strip()
-                    if int(value) < 0:
-                        continue
-                    period = (directory / 'cpu.cfs_period_us').read_text().strip()
-                require(int(value) > 0 and int(period) > 0, 'invalid cgroup CPU quota')
-                count = min(count, max(1, int(value) // int(period)))
+            else:
+                value = quota.read_text().strip()
+                if int(value) < 0:
+                    continue
+                period = (directory / 'cpu.cfs_period_us').read_text().strip()
+            require(int(value) > 0 and int(period) > 0, 'invalid cgroup CPU quota')
+            count = min(count, max(1, int(value) // int(period)))
     return max(1, count)
 
 
