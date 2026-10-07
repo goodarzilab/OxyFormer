@@ -4080,7 +4080,8 @@ def test_allocation_threads_cgroup_ancestors(monkeypatch, tmp_path, version, quo
     assert allocation_threads(membership=membership, mountinfo=mountinfo) == expected
 
 
-def test_stage_launcher_bounds_threads_and_records_identity(runtime, monkeypatch):
+@mark.parametrize('allocated', [8, 2 * (os.cpu_count() or 1)], ids=['eight', 'above-host-cpus'])
+def test_stage_launcher_bounds_threads_and_records_identity(runtime, allocated):
     repo, out = runtime
     stage = '''
 _reference = dummy
@@ -4088,12 +4089,17 @@ _reference = dummy
 def run_stage(request):
     import torch
     from oxyformer.training.fit import fit_environment
-    assert os.environ['OMP_NUM_THREADS'] == os.environ['MKL_NUM_THREADS'] == '8'
-    assert torch.get_num_threads() == 8
+    allocated = int(os.environ['SLURM_CPUS_PER_TASK'])
+    native = {name: os.environ[name] for name in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS')}
+    assert native == dict.fromkeys(native, str(allocated)), native
+    observed = torch.get_num_threads()
+    # MKL dynamic threading may cap a fresh Torch import at physical cores.
+    # The allocation is a bound; the fit identity must record the actual count.
+    assert 1 <= observed <= allocated, (observed, allocated)
     identity = dict(fit_environment())
-    assert identity['device'] == 'cpu'
-    assert identity['threads'] == '8'
-    assert identity['env_OMP_NUM_THREADS'] == identity['env_MKL_NUM_THREADS'] == '"8"'
+    assert identity['device'] == 'cpu', identity
+    assert identity['threads'] == str(observed), identity
+    assert identity['env_OMP_NUM_THREADS'] == identity['env_MKL_NUM_THREADS'] == json.dumps(str(allocated)), identity
     return _reference(request)
 '''
     prepare_cli_fixture(repo, out, stage)
@@ -4104,7 +4110,8 @@ def run_stage(request):
         '/mnt/weka/home/hgoodarzi/envs/oxyformer/bin/python', sys.executable))
     environment = fixture_env(prepared)
     environment.update(SWARM_UNIT_DIR=str(out), STAGE='dummy', TASK_MANIFEST=str(task_file(out)),
-        SLURM_CPUS_PER_TASK='8', OMP_NUM_THREADS='224', MKL_NUM_THREADS='224', OXYFORMER_DEVICE='cpu')
+        SLURM_CPUS_PER_TASK=str(allocated), OMP_NUM_THREADS=str(allocated * 2),
+        MKL_NUM_THREADS=str(allocated * 2), MKL_DYNAMIC='TRUE', OXYFORMER_DEVICE='cpu')
     process = subprocess.run(['bash', str(launcher), '--prepared'], env=environment,
         cwd=prepared, capture_output=True, text=True, timeout=90)
     diagnostics = [f'launcher exit={process.returncode}', process.stdout, process.stderr]
@@ -4114,9 +4121,9 @@ def run_stage(request):
     assert process.returncode == 0, '\n'.join(diagnostics)
     threads = read_json(out / '_execution/environment.json')['threads']
     assert threads['source'] == 'SLURM_CPUS_PER_TASK'
-    assert threads['allocated_cpus'] == threads['torch_intraop_limit'] == 8
+    assert threads['allocated_cpus'] == threads['torch_intraop_limit'] == allocated
     assert threads['torch'] is None  # The parent has no numerical work.
-    assert threads['OMP_NUM_THREADS'] == threads['MKL_NUM_THREADS'] == '8'
+    assert threads['OMP_NUM_THREADS'] == threads['MKL_NUM_THREADS'] == str(allocated)
 
 
 def test_thread_configuration_keeps_nontraining_startup_lightweight(monkeypatch):
