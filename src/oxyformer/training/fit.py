@@ -24,12 +24,13 @@ float outputs preserve prediction precision for downstream FP64 arithmetic.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from fractions import Fraction
 import math
+import os
 from pathlib import Path
 import statistics
 import time
@@ -37,6 +38,7 @@ from typing import Literal
 
 import torch
 from torch.nn import functional as F
+from torch.utils._python_dispatch import TorchDispatchMode
 
 from oxyformer.contracts import CovariateView, DataManifest, EstimandSpec, OOFNuisances, SplitManifest
 from oxyformer.data.entity_graph import EntityGraph
@@ -160,6 +162,7 @@ class FitConfig:
     max_batches: int | None = None
     slice_seconds: float = 14400.
     checkpoint_margin_seconds: float = 120.
+    device: str = "auto"
 
     def __post_init__(self):
         require(type(self.data) is LoadedData and type(self.inner) is InnerSplit,
@@ -279,11 +282,11 @@ def _predict(model, view, inputs, policy, *, outcome_mean=False, base_only=False
     require(type(view) is CovariateView and view.use == "nuisance", "label-free nuisance CovariateView required")
     require(view.original_ids == inputs.original_ids, "prediction alignment mismatch")
     result = policy.apply(inputs.a_mmhg, inputs.policy_covariates)
-    query = torch.tensor(tuple(zip(result.a_mmhg, result.d_mmhg)), dtype=torch.float32).unsqueeze(-1)
+    query = torch.tensor(tuple(zip(result.a_mmhg, result.d_mmhg)), dtype=torch.float32, device=next(model.parameters()).device).unsqueeze(-1)
     batch = model.encoder.tokenizer.prepare(view)
     raw = _raw(batch, model.encoder.tokenizer.features)
     context = model.county_context(inputs.original_ids, inputs.counties)
-    offset = torch.zeros(len(view.original_ids)) if base_only else model.group_offsets(inputs.counties)
+    offset = query.new_zeros(len(view.original_ids)) if base_only else model.group_offsets(inputs.counties)
     if isinstance(model, OutcomeTransformer):
         method = model.mean if outcome_mean else model.linear_predictor
     else:
@@ -416,11 +419,11 @@ def _outcome_loss(config, prediction, ids, *, reduction="sum", weight_unit=1.):
     # Accumulate target-weighted losses before normalization in FP64. Model
     # predictions and target validity remain governed by their FP32 contract.
     prediction = prediction.double()
-    weights = torch.tensor(_inputs(config, ids).origin_weights, dtype=torch.float64)
+    weights = torch.tensor(_inputs(config, ids).origin_weights, dtype=torch.float64, device=prediction.device)
     if reduction == "mean":
         weight_unit = _weight_unit(weights.tolist())
-    target = torch.tensor(_values(config, config.data.manifest.outcome_field, ids), dtype=torch.float32)
-    population = (torch.tensor(_values(config, config.population_field, ids), dtype=torch.float32)
+    target = torch.tensor(_values(config, config.data.manifest.outcome_field, ids), dtype=torch.float32, device=prediction.device)
+    population = (torch.tensor(_values(config, config.population_field, ids), dtype=torch.float32, device=prediction.device)
                   if config.population_field else None)
     return _loss_in_units(prediction, weights, weight_unit,
         lambda p, w, r: endpoint_loss(p, target, w, family=config.family,
@@ -428,7 +431,7 @@ def _outcome_loss(config, prediction, ids, *, reduction="sum", weight_unit=1.):
 
 
 def _origin_loss(prediction, pairs, weight_unit):
-    weights = torch.tensor(pairs.origin_weights, dtype=torch.float64)
+    weights = torch.tensor(pairs.origin_weights, dtype=torch.float64, device=prediction.device)
     scaled = weights / weight_unit
     if bool(((weights > 0) & (scaled < torch.finfo(weights.dtype).tiny)).any()):
         # PolicyPairs order is all observed, then all shifted. Preserve raw
@@ -448,7 +451,7 @@ def _profile(model, config, view, inputs):
         with torch.no_grad():
             base = _predict(model, view, inputs, config.policy, base_only=True)[:, 0]
             target = torch.tensor(_values(config, config.data.manifest.outcome_field, view.original_ids),
-                                  dtype=torch.float32)
+                                  dtype=torch.float32, device=base.device)
             # Each offset profiles its own weighted mean. Use units local to
             # that county so a different county's mass cannot erase its support.
             by_county = {}
@@ -456,7 +459,7 @@ def _profile(model, config, view, inputs):
                 by_county.setdefault(county, []).append(weight)
             units = {county: _weight_unit(weights) for county, weights in by_county.items()}
             weights = torch.tensor([w / units[c] for c, w in
-                                    zip(inputs.counties, inputs.origin_weights)], dtype=torch.float64)
+                                    zip(inputs.counties, inputs.origin_weights)], dtype=torch.float64, device=base.device)
             model.group_offsets.update_identity(view.original_ids, target.double(), base.double(), weights)
 
 
@@ -476,8 +479,9 @@ class _Budget:
 
 def _train_one(config, bundle, encoder_state, view, stopping, epochs, seed, budget, saved=None):
     """One transaction per original-record minibatch, including both copies."""
+    config = replace(config, device=str(resolve_device(config.device)))
     torch.manual_seed(seed)
-    model = _build(bundle, encoder_state=encoder_state)
+    model = _build(bundle, encoder_state=encoder_state).to(config.device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=bundle["learning_rate"],
                                  weight_decay=config.settings.weight_decay)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=1.)
@@ -494,7 +498,7 @@ def _train_one(config, bundle, encoder_state, view, stopping, epochs, seed, budg
         scheduler.load_state_dict(saved["scheduler"])
         sampler.load_state_dict(saved["sampler"])
         progress, best = saved["progress"], saved["best"]
-        restore_rng(saved["rng"])
+        restore_rng(saved["rng"], config.device)
     complete, reason = False, None
     while not complete:
         reason = budget.reason()
@@ -572,7 +576,7 @@ def _train_one(config, bundle, encoder_state, view, stopping, epochs, seed, budg
             sampler.finish_epoch()
             progress["phase"] = "start"
     state = dict(model=deepcopy(model.state_dict()), optimizer=optimizer.state_dict(),
-        scheduler=scheduler.state_dict(), sampler=sampler.state_dict(), rng=capture_rng(),
+        scheduler=scheduler.state_dict(), sampler=sampler.state_dict(), rng=capture_rng(config.device),
         progress=progress, best=best)
     if complete:
         model.load_state_dict(best, strict=True)
@@ -628,20 +632,113 @@ def _science_identity(config, split, manifest, seed, allowed):
                   for path in sorted(package.rglob("*.py"))])
     return CheckpointIdentity(training_ids=allowed, data_hash=data_hash, split_hash=split.content_hash,
         config_hash=_hash(science), preprocessing_hash=_hash([config.feature_kinds, config.families]),
-        seed=seed, scientific_code_hash=code, environment=environment_identity(torch.device("cpu")))
+        seed=seed, scientific_code_hash=code, environment=environment_identity(torch.device(config.device)))
+
+
+def resolve_device(device="auto"):
+    """Explicit runtime choice, then OXYFORMER_DEVICE, defaulting to CPU.
+
+    Set OXYFORMER_DEVICE=auto to opt into visible CUDA detection. An explicit CUDA
+    request must succeed; it never silently becomes a CPU measurement.
+    """
+    if device == "auto":
+        device = os.environ.get("OXYFORMER_DEVICE", "cpu")
+    if device == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = torch.device(device)
+    require(device.type in ("cpu", "cuda"), "unsupported fit device")
+    if device.type == "cuda":
+        require(torch.cuda.is_available(), "requested CUDA device is unavailable")
+        device = torch.device("cuda", torch.cuda.current_device() if device.index is None else device.index)
+        require(device.index < torch.cuda.device_count(), "requested CUDA index is unavailable")
+    return device
+
+
+class _ReferenceDropout(TorchDispatchMode):
+    """Draw CUDA dropout masks from the reference CPU generator.
+
+    The CPU dropout path draws Bernoulli masks, while CUDA native_dropout uses
+    Philox. Matching only integer seeds therefore changes fitted calibration
+    grids. Transfer just the mask, preserving the reference random draw order;
+    activations, their gradients and the optimizer remain on CUDA. Math SDPA
+    exposes its dropout through these same ATen operations.
+    """
+    def __torch_dispatch__(self, operation, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        if operation == torch.ops.aten.native_dropout.default and args[0].is_cuda:
+            values, probability, training = args
+            if training and 0 < probability < 1:
+                mask = torch.empty_like(values, device="cpu").bernoulli_(1 - probability)
+                selected = mask.to(device=values.device, dtype=torch.bool)
+                scaled = mask.div_(1 - probability).to(values.device)
+                return values * scaled, selected
+        if operation == torch.ops.aten.bernoulli_.float and args[0].is_cuda:
+            target, *rest = args
+            reference = torch.empty_like(target, device="cpu")
+            reference = operation(reference, *rest, **kwargs)
+            return target.copy_(reference)
+        return operation(*args, **kwargs)
 
 
 @contextmanager
-def _numerics():
-    caller = capture_rng()
-    dtype = torch.get_default_dtype()
-    try:
-        torch.set_default_dtype(torch.float32)
-        with torch.device("cpu"), torch.inference_mode(False), torch.enable_grad(), torch.autocast("cpu", enabled=False):
-            yield
-    finally:
-        torch.set_default_dtype(dtype)
-        restore_rng(caller)
+def _numerics(device="cpu"):
+    """CPU reference factories and full precision, with strict CUDA determinism.
+
+    CUDA uses math attention, IEEE FP32, deterministic kernels and a configured
+    cuBLAS workspace. Unsupported deterministic operations raise. CPU/CUDA
+    dropout masks retain the CPU random stream; matrix/reduction kernels can
+    still differ by floating-point roundoff. Within-device checkpoint continuation includes
+    that device's RNG. Initialization and the sampler retain their CPU streams.
+    """
+    device = resolve_device(device)
+    with ExitStack() as stack:
+        if device.type == "cuda":
+            require(os.environ.get("TORCH_ALLOW_TF32_CUBLAS_OVERRIDE") != "1",
+                    "forced TF32 is incompatible with full-precision fitting")
+            workspace = os.environ.get("CUBLAS_WORKSPACE_CONFIG")
+            if workspace is None:
+                os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+                stack.callback(os.environ.pop, "CUBLAS_WORKSPACE_CONFIG", None)
+            require(os.environ["CUBLAS_WORKSPACE_CONFIG"] in (":4096:8", ":16:8"),
+                    "CUDA determinism requires CUBLAS_WORKSPACE_CONFIG=:4096:8 or :16:8")
+            stack.enter_context(torch.cuda.device(device))
+            deterministic = torch.are_deterministic_algorithms_enabled()
+            warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+            stack.callback(torch.use_deterministic_algorithms, deterministic, warn_only=warn_only)
+            torch.use_deterministic_algorithms(True)
+            settings = (
+                (torch.backends, "fp32_precision", "ieee"),
+                (torch.backends.cuda.matmul, "fp32_precision", "ieee"),
+                (torch.backends.cudnn, "fp32_precision", "ieee"),
+                (torch.backends.cudnn, "deterministic", True),
+                (torch.backends.cudnn, "benchmark", False),
+            )
+            # Snapshot all values before setting a parent precision policy:
+            # parent settings also change the effective child getters.
+            previous = [(owner, name, getattr(owner, name)) for owner, name, _ in settings]
+            for owner, name, old in previous:
+                stack.callback(setattr, owner, name, old)
+            for owner, name, value in settings:
+                setattr(owner, name, value)
+            from torch.nn.attention import SDPBackend, sdpa_kernel
+            stack.enter_context(sdpa_kernel(SDPBackend.MATH))
+            stack.enter_context(_ReferenceDropout())
+            stack.enter_context(torch.autocast("cuda", enabled=False))
+        caller = capture_rng(device)
+        dtype = torch.get_default_dtype()
+        try:
+            torch.set_default_dtype(torch.float32)
+            with torch.device("cpu"), torch.inference_mode(False), torch.enable_grad(), torch.autocast("cpu", enabled=False):
+                yield device
+        finally:
+            torch.set_default_dtype(dtype)
+            restore_rng(caller, device)
+
+
+def fit_environment(device="auto"):
+    """Identity under the same numerical policy used by the executed fit."""
+    with _numerics(device) as selected:
+        return environment_identity(selected)
 
 
 def _ssl(config, split, fitting, view, root, seed, budget, predecessor):
@@ -653,7 +750,7 @@ def _ssl(config, split, fitting, view, root, seed, budget, predecessor):
                           max_epochs=config.ssl_epochs, stopping_ids=stop)
     remaining = (None if config.max_batches is None else config.max_batches - budget.batches)
     seconds = max(.01, config.slice_seconds - (time.monotonic() - budget.started))
-    ssl_config = PretrainConfig(settings=settings, output_dir=str(root),
+    ssl_config = PretrainConfig(settings=settings, output_dir=str(root), device=str(resolve_device(config.device)),
         predecessor=predecessor, stop_request=budget.request, max_batches=remaining,
         slice_seconds=seconds, checkpoint_margin_seconds=min(config.checkpoint_margin_seconds, seconds / 2))
     artifact = pretrain(subset(view, fitting, use="ssl"), split, ssl_config, seed)
@@ -719,7 +816,8 @@ def fit_fold(spec, split, data_manifest, model_config, seed) -> FoldArtifacts:
     """Fit or continue one fold, using only outer-training labels and covariates."""
     config = model_config
     allowed = _validate(spec, split, data_manifest, config, seed)
-    with _numerics():
+    config = replace(config, device=str(resolve_device(config.device)))
+    with _numerics(config.device):
         identity = _science_identity(config, split, data_manifest, seed, allowed)
         controller = dict(position=0, initializations={}, ssl_pending=None, active=None,
                           results=[], final={}, selection=None, calibration=None)
@@ -866,13 +964,13 @@ def _fit_controller(config, outer, manifest, identity, controller, root, budget)
                 controller["results"].append(result)
         controller["position"] += 1
     calibration = AffineCalibration.from_json(controller["calibration"])
-    model = _build(controller["final"]["origin"]).eval()
+    model = _build(controller["final"]["origin"]).to(resolve_device(config.device)).eval()
     metadata = _inputs(config, calibration.original_ids)
     with torch.no_grad():
         refit = _predict(model, subset(all_view, calibration.original_ids), metadata, config.policy)
     positive_refit, _, _ = paired_tensors(refit, metadata.origin_weights)
     calibration.ratios(positive_refit)
-    diagnostics = transfer_diagnostics(calibration, controller["oof_logits"], refit,
+    diagnostics = transfer_diagnostics(calibration, controller["oof_logits"], refit.cpu(),
         metadata.origin_weights, lineage=_lineage(manifest, identity, calibration.original_ids,
             (calibration.content_hash, model_state_hash(_tensor_state(controller)))))
     controller["transfer_diagnostics"] = diagnostics.to_json()
@@ -883,7 +981,7 @@ def _fit_controller(config, outer, manifest, identity, controller, root, budget)
     return controller, True, "max_epochs"
 
 
-def predict_fold(artifacts, covariate_view, policy) -> OOFNuisances:
+def predict_fold(artifacts, covariate_view, policy, *, device=None) -> OOFNuisances:
     """Only immutable, label-free X reaches a reconstructed frozen model."""
     require(type(artifacts) is FoldArtifacts and artifacts.complete, "unfinished fold cannot predict")
     require(type(covariate_view) is CovariateView and covariate_view.use == "nuisance",
@@ -893,9 +991,10 @@ def predict_fold(artifacts, covariate_view, policy) -> OOFNuisances:
     require(set(covariate_view.original_ids) == set(artifacts.prediction_inputs.original_ids),
             "prediction view must contain exactly this outer held-out fold")
     inputs = _take_inputs(artifacts.prediction_inputs, covariate_view.original_ids)
-    with _numerics(), torch.no_grad():
+    selected = resolve_device(device or dict(artifacts.checkpoint.identity.environment)["device"])
+    with _numerics(selected), torch.no_grad():
         controller = load_checkpoint(artifacts.checkpoint, artifacts.checkpoint.identity)["controller"]
-        outcome = _build(controller["final"]["outcome"]).eval()
+        outcome = _build(controller["final"]["outcome"]).to(selected).eval()
         mu = _predict(outcome, covariate_view, inputs, policy, outcome_mean=True).double()
         calibration = AffineCalibration.from_json(controller["calibration"])
         # Apply the known identity before evaluating an unnecessary classifier
@@ -903,11 +1002,11 @@ def predict_fold(artifacts, covariate_view, policy) -> OOFNuisances:
         if policy.is_identity:
             ratio = torch.ones_like(mu)
         else:
-            origin = _build(controller["final"]["origin"]).eval()
+            origin = _build(controller["final"]["origin"]).to(selected).eval()
             logits = _predict(origin, covariate_view, inputs, policy)
             ratio = calibration.ratios(logits).double()
         ids = covariate_view.original_ids
-        lineage = replace(artifacts.checkpoint.lineage, unit_ids=ids,
+        lineage = replace(artifacts.checkpoint.lineage, unit_ids=ids, environment=environment_identity(selected),
             parent_hashes=(artifacts.data_manifest.content_hash, artifacts.checkpoint.content_hash,
                            covariate_view.content_hash, calibration.content_hash))
         return OOFNuisances(spec=artifacts.spec, original_ids=ids, fold_ids=(artifacts.fold,) * len(ids),

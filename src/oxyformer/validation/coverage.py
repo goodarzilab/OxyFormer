@@ -432,7 +432,15 @@ def _run_batch(request: StageRequest, started: float) -> StageResult:
             "lock_hash": digest(lock) if lock else None, "batch_id": parameters.get("batch_id"),
             "scenario": scenario.to_dict()["payload"], "draws": draws, "records": records, "summary": summary,
             "certifies_production_coverage": False}
-        timing = {"wall_seconds": time.monotonic() - started, "gpu_seconds": 0., "device": "cpu",
+        from oxyformer.training.fit import resolve_device, fit_environment
+        device = resolve_device()
+        if device.type == "cuda":
+            import torch
+            torch.cuda.synchronize(device)
+        elapsed = time.monotonic() - started
+        timing = {"wall_seconds": elapsed, "gpu_seconds": elapsed if device.type == "cuda" else 0.,
+            "device": str(device), "environment": dict(fit_environment(device)),
+            "gpu_seconds_scope": "single_device_elapsed_not_kernel_utilization",
             "measurement_scope": "before_final_publication", "setup_seconds": setup_seconds,
             "admitted_budget_seconds": seconds,
             "production_equivalent": production, "recipe_hash": digest(recipe),
@@ -506,6 +514,7 @@ def run_stage(request: StageRequest) -> StageResult:
         result = read_json(destination / "result.json")
         timing = read_json(destination / "timing.json")
         timing.update(wall_seconds=elapsed,
+                      gpu_seconds=elapsed if timing["device"].startswith("cuda") else 0.,
                       publication_verification_seconds=elapsed - timing["setup_seconds"] - math.fsum(timing["complete_repetition_seconds"]),
                       measurement_scope="complete_stage_return",
                       profiled_request_hash=profiled_request.content_hash)

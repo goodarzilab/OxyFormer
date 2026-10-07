@@ -4044,3 +4044,167 @@ def test_remote_restored_directory_swap_without_kernel_events(runtime, acquisiti
     monkeypatch.setattr(integrity, '_NamespaceWatch', SilentWatch, raising=False)
     test_restored_directory_swap_refuses_publication(
         runtime, acquisition, source, tmp_path, monkeypatch, 'stage')
+
+
+def test_allocation_threads_prefers_slurm(monkeypatch, tmp_path):
+    from oxyformer.execution.runner import allocation_threads
+    monkeypatch.setenv('SLURM_CPUS_PER_TASK', '8')
+    monkeypatch.setattr(os, 'sched_getaffinity', lambda pid: set(range(224)))
+    assert allocation_threads(membership=tmp_path / 'absent') == 8
+    for value in ('0', '-1', '8(x2)', ''):
+        monkeypatch.setenv('SLURM_CPUS_PER_TASK', value)
+        with raises(ContractError, match='positive integer'):
+            allocation_threads()
+
+
+@mark.parametrize('version', [1, 2])
+@mark.parametrize('quota,affinity,expected', [(250000, 224, 2), (800000, 4, 4), (50000, 8, 1), (-1, 8, 8)])
+def test_allocation_threads_cgroup_ancestors(monkeypatch, tmp_path, version, quota, affinity, expected):
+    from oxyformer.execution.runner import allocation_threads
+    monkeypatch.delenv('SLURM_CPUS_PER_TASK', raising=False)
+    monkeypatch.setattr(os, 'sched_getaffinity', lambda pid: set(range(affinity)))
+    root = tmp_path / 'cgroup'
+    parent = root if version == 2 else root / 'cpu,cpuacct'
+    (parent / 'job/step').mkdir(parents=True)
+    membership = tmp_path / 'membership'
+    membership.write_text('0::/job/step\n' if version == 2 else '2:cpu,cpuacct:/job/step\n')
+    if version == 2:
+        (parent / 'cpu.max').write_text(f'{quota if quota > 0 else "max"} 100000\n')
+        (parent / 'job/step/cpu.max').write_text('max 100000\n')
+    else:
+        (parent / 'cpu.cfs_quota_us').write_text(str(quota))
+        (parent / 'cpu.cfs_period_us').write_text('100000')
+    mountinfo = tmp_path / 'mountinfo'
+    filesystem = 'cgroup2 cgroup rw' if version == 2 else 'cgroup cgroup rw,cpu,cpuacct'
+    mountinfo.write_text(f'30 20 0:27 / {parent} rw - {filesystem}\n')
+    assert allocation_threads(membership=membership, mountinfo=mountinfo) == expected
+
+
+@mark.parametrize('allocated', [8, 2 * (os.cpu_count() or 1)], ids=['eight', 'above-host-cpus'])
+def test_stage_launcher_bounds_threads_and_records_identity(runtime, allocated):
+    repo, out = runtime
+    stage = '''
+_reference = dummy
+
+def run_stage(request):
+    import torch
+    from oxyformer.training.fit import fit_environment
+    allocated = int(os.environ['SLURM_CPUS_PER_TASK'])
+    native = {name: os.environ[name] for name in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS')}
+    assert native == dict.fromkeys(native, str(allocated)), native
+    observed = torch.get_num_threads()
+    # MKL dynamic threading may cap a fresh Torch import at physical cores.
+    # The allocation is a bound; the fit identity must record the actual count.
+    assert 1 <= observed <= allocated, (observed, allocated)
+    identity = dict(fit_environment())
+    assert identity['device'] == 'cpu', identity
+    assert identity['threads'] == str(observed), identity
+    assert identity['env_OMP_NUM_THREADS'] == identity['env_MKL_NUM_THREADS'] == json.dumps(str(allocated)), identity
+    return _reference(request)
+'''
+    prepare_cli_fixture(repo, out, stage)
+    prepared = out / 'src'
+    shutil.move(repo, prepared)
+    launcher = out / 'launcher.sh'
+    launcher.write_text((ROOT / 'scripts/slurm/run_stage.sh').read_text().replace(
+        '/mnt/weka/home/hgoodarzi/envs/oxyformer/bin/python', sys.executable))
+    environment = fixture_env(prepared)
+    environment.update(SWARM_UNIT_DIR=str(out), STAGE='dummy', TASK_MANIFEST=str(task_file(out)),
+        SLURM_CPUS_PER_TASK=str(allocated), OMP_NUM_THREADS=str(allocated * 2),
+        MKL_NUM_THREADS=str(allocated * 2), MKL_DYNAMIC='TRUE', OXYFORMER_DEVICE='cpu')
+    process = subprocess.run(['bash', str(launcher), '--prepared'], env=environment,
+        cwd=prepared, capture_output=True, text=True, timeout=90)
+    diagnostics = [f'launcher exit={process.returncode}', process.stdout, process.stderr]
+    for relative in ('run.log', '_execution/result.json', '_execution/worker-result.json'):
+        path = out / relative
+        diagnostics.append(f'{relative}:\n' + (path.read_text() if path.is_file() else '<missing>'))
+    assert process.returncode == 0, '\n'.join(diagnostics)
+    threads = read_json(out / '_execution/environment.json')['threads']
+    assert threads['source'] == 'SLURM_CPUS_PER_TASK'
+    assert threads['allocated_cpus'] == threads['torch_intraop_limit'] == allocated
+    assert threads['torch'] is None  # The parent has no numerical work.
+    assert threads['OMP_NUM_THREADS'] == threads['MKL_NUM_THREADS'] == str(allocated)
+
+
+def test_thread_configuration_keeps_nontraining_startup_lightweight(monkeypatch):
+    monkeypatch.setenv('SLURM_CPUS_PER_TASK', '8')
+    code = """import sys
+from oxyformer.execution.runner import configure_threads
+assert 'torch' not in sys.modules
+record = configure_threads()
+assert 'torch' not in sys.modules
+assert record['torch'] is None and record['torch_intraop_limit'] == 8
+"""
+    process = subprocess.run([sys.executable, '-B', '-c', code], env=fixture_env(),
+        capture_output=True, text=True, timeout=10)
+    assert_exit(process, 0)
+
+
+@mark.parametrize('version', [1, 2])
+@mark.parametrize('tenant', ['tenant', 'tenant space'])
+def test_allocation_threads_rebases_cgroup_subtree_mount(monkeypatch, tmp_path, version, tenant):
+    from oxyformer.execution.runner import allocation_threads
+    monkeypatch.delenv('SLURM_CPUS_PER_TASK', raising=False)
+    monkeypatch.setattr(os, 'sched_getaffinity', lambda pid: set(range(224)))
+    root = tmp_path / 'cgroup mount'
+    mounted = root if version == 2 else root / 'cpu,cpuacct'
+    (mounted / 'job/step').mkdir(parents=True)
+    membership = tmp_path / 'membership'
+    controllers = '' if version == 2 else 'cpu,cpuacct'
+    membership.write_text(f'0:{controllers}:/{tenant}/job/step\n')
+    if version == 2:
+        (mounted / 'cpu.max').write_text('max 100000\n')
+        (mounted / 'job/cpu.max').write_text('200000 100000\n')
+        filesystem = 'cgroup2 cgroup rw'
+    else:
+        (mounted / 'cpu.cfs_quota_us').write_text('-1')
+        (mounted / 'job/cpu.cfs_quota_us').write_text('200000')
+        (mounted / 'job/cpu.cfs_period_us').write_text('100000')
+        filesystem = 'cgroup cgroup rw,cpu,cpuacct'
+    original_read = Path.read_text
+    def read_text(path, *args, **kwargs):
+        if path == Path('/proc/self/mountinfo'):
+            hierarchy_root = tenant.replace(' ', r'\040')
+            mount_point = str(mounted).replace(' ', r'\040')
+            return f'30 20 0:27 /{hierarchy_root} {mount_point} rw - {filesystem}\n'
+        return original_read(path, *args, **kwargs)
+    monkeypatch.setattr(Path, 'read_text', read_text)
+    assert allocation_threads(membership=membership) == 2
+
+
+@mark.parametrize('version', [1, 2])
+def test_allocation_threads_discovers_nonstandard_mount(monkeypatch, tmp_path, version):
+    from oxyformer.execution.runner import allocation_threads
+    monkeypatch.delenv('SLURM_CPUS_PER_TASK', raising=False)
+    monkeypatch.setattr(os, 'sched_getaffinity', lambda pid: set(range(224)))
+    mounted = tmp_path / 'custom-cg'
+    (mounted / 'job/step').mkdir(parents=True)
+    membership = tmp_path / 'membership'
+    controllers = '' if version == 2 else 'cpu,cpuacct'
+    membership.write_text(f'0:{controllers}:/job/step\n')
+    if version == 2:
+        (mounted / 'cpu.max').write_text('max 100000\n')
+        (mounted / 'job/cpu.max').write_text('200000 100000\n')
+        filesystem = 'cgroup2 cgroup rw'
+    else:
+        (mounted / 'cpu.cfs_quota_us').write_text('-1')
+        (mounted / 'job/cpu.cfs_quota_us').write_text('200000')
+        (mounted / 'job/cpu.cfs_period_us').write_text('100000')
+        filesystem = 'cgroup cgroup rw,cpu,cpuacct'
+    # Another visible subtree belongs to a different cgroup.
+    unrelated = tmp_path / 'sibling'
+    unrelated.mkdir()
+    (unrelated / 'cpu.max').write_text('100000 100000\n')
+    original_read, original_is_file = Path.read_text, Path.is_file
+    def read_text(path, *args, **kwargs):
+        if path == Path('/proc/self/mountinfo'):
+            return (f'30 20 0:27 / {mounted} rw - {filesystem}\n'
+                    f'31 20 0:27 /other {unrelated} rw - cgroup2 cgroup rw\n')
+        return original_read(path, *args, **kwargs)
+    def is_file(path):
+        if path.is_relative_to('/sys/fs/cgroup'):
+            return False
+        return original_is_file(path)
+    monkeypatch.setattr(Path, 'read_text', read_text)
+    monkeypatch.setattr(Path, 'is_file', is_file)
+    assert allocation_threads(membership=membership) == 2

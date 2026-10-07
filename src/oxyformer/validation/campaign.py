@@ -12,7 +12,7 @@ import time
 import yaml
 import torch
 
-from oxyformer.training.pretrain import environment_identity
+from oxyformer.training.fit import fit_environment, resolve_device
 from oxyformer.training.nested_cv import PreparedEndpoint
 
 from oxyformer.contracts import StageRequest, StageResult
@@ -58,7 +58,7 @@ def validate_recipe(recipe, *, production=True):
 
 def fingerprint():
     return {"scientific_fingerprint": identity.scientific_fingerprint(REPOSITORY),
-            "environment_hash": digest([identity.environment_record(), environment_identity(torch.device("cpu"))])}
+            "environment_hash": digest([identity.environment_record(), fit_environment()])}
 
 
 def load_lock(request, config, task):
@@ -95,7 +95,11 @@ def _profile(request, config, reference, scenario, recipe, stamps):
             "profiling must include final publication and verification")
     require(timing["production_equivalent"] is True and timing["complete"] is True
             and timing["all_successful"] is True, "complete production profiling required")
-    require(timing["device"] == "cpu" and timing["gpu_seconds"] == 0, "merged nested runner supports CPU only")
+    selected = resolve_device()
+    require(timing["device"] == str(selected), "profile device differs from selected runtime")
+    gpu_seconds = finite(timing["gpu_seconds"], "profile GPU seconds")
+    require((selected.type == "cpu" and gpu_seconds == 0) or
+            (selected.type == "cuda" and gpu_seconds > 0), "profile GPU accounting mismatch")
     require(all(timing.get(k) == v for k, v in stamps.items()), "profile scientific/environment drift")
     declared, records = result["draws"], result["records"]
     summary = summarize(records, declared, production_equivalent=True, null_scenario=scenario["effect"] == "null")
@@ -202,8 +206,12 @@ def build_lock(request, config, task):
     for repetitions in (screen_count, count):
         leaves = len(scenarios) * ((repetitions + batch_size - 1) // batch_size)
         require(leaves <= 40, "campaign instance exceeds forty leaves; profile a feasible batching plan")
-    require(parameters["gpus"] == 0, "merged nested_cv runner has no GPU device interface; GPU profile cannot be assumed")
+    gpus = parameters["gpus"]
+    require(type(gpus) is int and gpus in (0, 1), "nested fitting supports zero or one GPU")
+    require(gpus == int(resolve_device().type == "cuda"),
+            "requested GPU count has no GPU device interface in the selected runtime")
     wall_seconds = integer(parameters["wall_seconds"], "leaf wall seconds", 1)
+    require(gpus * math.ceil(wall_seconds / 60) * 60 <= 14400, "leaf exceeds four GPU-hours")
     factor = finite(parameters["profile_safety_factor"], "profile safety factor")
     require(factor >= 1, "profiling safety factor must be at least one")
     namespace = parameters["evaluation_namespace"]
@@ -238,13 +246,13 @@ def build_lock(request, config, task):
             for start in range(0, repetitions, batch_size):
                 concrete = draws[start:start + batch_size]
                 batches.append({"batch_id": digest([campaign_id, namespace, mode, scenario["name"], start])[:24],
-                    "mode": mode, "scenario": scenario, "draws": concrete, "wall_seconds": wall_seconds})
+                    "mode": mode, "scenario": scenario, "draws": concrete, "wall_seconds": wall_seconds, "gpus": gpus})
                 mode_leaves += 1
         require(mode_leaves <= 40, "campaign instance exceeds forty leaves; profile a feasible batching plan")
     draws = [d for batch in batches for d in batch["draws"]]
     validate_draws(draws)
     require(not prior_seeds.intersection(d["seed"] for d in draws), "evaluation draws overlap prior lock or profiling")
-    budget = {"gpu_hours": 0., "gpu_hours_per_leaf_max": 4., "leaves_per_instance_max": 40,
+    budget = {"gpu_hours": gpus * len(batches) * math.ceil(wall_seconds / 60) / 60, "gpu_hours_per_leaf_max": 4., "leaves_per_instance_max": 40,
               "cpu_wall_hours_ceiling": (len(batches) * math.ceil(wall_seconds / 60) + 20) / 60,
               "profile_safety_factor": factor, "profiles": profiles,
               "admission_model": "measure locked setup at each leaf size; scale complete profile finalization by repetition count",
@@ -282,7 +290,7 @@ def build_lock(request, config, task):
             if screening_gate:
                 parameters_for_leaf["screening_gate"] = screening_gate
             work.append({"id": batch["batch_id"], "stage": "coverage", "parameters": parameters_for_leaf,
-                "outputs": LEAF_OUTPUTS, "slices": [{"gpus": 0, "wall_seconds": wall_seconds}]})
+                "outputs": LEAF_OUTPUTS, "slices": [{"gpus": gpus, "wall_seconds": wall_seconds}]})
         spec = {"schema_version": 1, "id": lock["instances"][mode],
             "kind": "screening" if mode == "screening" else "final-coverage",
             "prerequisites": [], "inputs": stage_inputs, "recipe_lock": lock_ref, "work": work,
@@ -310,7 +318,7 @@ def _plan_for_task(request, config, task, lock):
             require(batch["batch_id"] in by_batch, "locked batch missing")
             actual = by_batch[batch["batch_id"]]
             require(all(actual["parameters"].get(k) == v for k, v in batch.items()), "locked batch drift")
-            require(actual["slices"] == [{"gpus": 0, "wall_seconds": batch["wall_seconds"]}], "locked resources drift")
+            require(actual["slices"] == [{"gpus": batch.get("gpus", 0), "wall_seconds": batch["wall_seconds"]}], "locked resources drift")
         if plan["spec"]["id"] == task["campaign"]:
             require(task in plan["tasks"], "task is not the prospectively expanded task")
             selected = plan

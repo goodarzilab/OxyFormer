@@ -24,6 +24,85 @@ from .identity import git_bytes, code_identity, environment_record, scientific_f
 from .paths import atomic_json, atomic_write, output_path
 
 
+def allocation_threads(*, membership=Path('/proc/self/cgroup'), mountinfo=Path('/proc/self/mountinfo')):
+    """Slurm's allocation, otherwise affinity limited by visible cgroup quotas.
+
+    Discover both the mount point and its hierarchy root from mountinfo. This
+    handles nonstandard locations and bind-mounted subtrees without assuming
+    controller directory names. Fractional quotas round down to at least one.
+    """
+    allocated = os.environ.get('SLURM_CPUS_PER_TASK')
+    if allocated is not None:
+        require(allocated.isdecimal() and int(allocated) > 0,
+            'SLURM_CPUS_PER_TASK must be a positive integer')
+        return int(allocated)
+    count = len(os.sched_getaffinity(0))
+    locations = {}
+    for line in membership.read_text().splitlines():
+        _, controllers, relative = line.split(':', 2)
+        if controllers == '':
+            locations['cgroup2'] = relative
+        elif 'cpu' in controllers.split(','):
+            locations['cgroup'] = relative
+
+    def unescape(value):
+        return re.sub(r'\\([0-7]{3})', lambda match: chr(int(match[1], 8)), value)
+
+    for line in mountinfo.read_text().splitlines():
+        mount, filesystem = line.split(' - ', 1)
+        kind, _, options = filesystem.split()
+        if kind not in locations or (kind == 'cgroup' and 'cpu' not in options.split(',')):
+            continue
+        fields = mount.split()
+        hierarchy_root, root = Path(unescape(fields[3])), Path(unescape(fields[4]))
+        location = Path('/').joinpath(*[p for p in locations[kind].split('/') if p not in ('', '.', '..')])
+        if not location.is_relative_to(hierarchy_root):
+            # A visible mount of a sibling cgroup does not constrain this task.
+            continue
+        path = root / location.relative_to(hierarchy_root)
+        quota_name = 'cpu.max' if kind == 'cgroup2' else 'cpu.cfs_quota_us'
+        for directory in (path, *path.parents):
+            if directory != root and root not in directory.parents:
+                break
+            quota = directory / quota_name
+            if not quota.is_file():
+                continue
+            if kind == 'cgroup2':
+                value, period = quota.read_text().split()
+                if value == 'max':
+                    continue
+            else:
+                value = quota.read_text().strip()
+                if int(value) < 0:
+                    continue
+                period = (directory / 'cpu.cfs_period_us').read_text().strip()
+            require(int(value) > 0 and int(period) > 0, 'invalid cgroup CPU quota')
+            count = min(count, max(1, int(value) // int(period)))
+    return max(1, count)
+
+
+def configure_threads():
+    """Bind native libraries and Torch to the same allocation in this process.
+
+    The launcher exports these before Python starts. Setting them here also
+    covers direct CLI calls and makes the worker subprocess inherit the limit.
+    Fresh Torch imports honor these native limits. Do not load Torch solely for
+    bookkeeping in a non-training stage; fit identities record observed counts.
+    """
+    count = allocation_threads()
+    os.environ['OMP_NUM_THREADS'] = str(count)
+    os.environ['MKL_NUM_THREADS'] = str(count)
+    torch = sys.modules.get('torch')
+    if torch is not None:
+        torch.set_num_threads(count)
+    return {'source': 'SLURM_CPUS_PER_TASK' if 'SLURM_CPUS_PER_TASK' in os.environ else 'cgroup',
+        'allocated_cpus': count, 'torch_intraop_limit': count,
+        'torch': torch.get_num_threads() if torch is not None else None,
+        'torch_interop': torch.get_num_interop_threads() if torch is not None else None,
+        'OMP_NUM_THREADS': os.environ['OMP_NUM_THREADS'],
+        'MKL_NUM_THREADS': os.environ['MKL_NUM_THREADS']}
+
+
 def dependency_variable(unit_id):
     require(isinstance(unit_id, str) and bool(unit_id), 'empty dependency ID')
     return 'SWARM_DEP_' + re.sub('[^A-Z0-9]', '_', unit_id.upper())
@@ -294,6 +373,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
             '--out must equal SWARM_UNIT_DIR')
     repo = Path(repo).resolve(strict=True)
     require(not out.is_relative_to(repo), 'output may not be inside repository')
+    thread_environment = configure_threads()
     head = code_identity(repo, out)
     registry_file = repo / 'configs/execution/stages.yaml'
     registry = read_mapping(registry_file)
@@ -413,6 +493,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         output_dir=str(out), code_identity=head)
     atomic_write(out, '_execution/request.json', request.to_json())
     environment = environment_record()
+    environment['threads'] = thread_environment
     atomic_json(out, '_execution/environment.json', environment)
     atomic_json(out, '_execution/identity.json', {'head': head, 'scientific_fingerprint': scientific_fingerprint(repo)})
     immutable_controls = {str(out / ('_execution/' + name)): file_hash(out / ('_execution/' + name))

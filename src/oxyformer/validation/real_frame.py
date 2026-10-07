@@ -175,7 +175,9 @@ def profile_tasks(endpoint, frame):
     common = {'endpoint_input': {'dependency': 'real-frame-inputs', 'path': 'endpoint.json'},
               'frame_input': {'dependency': 'real-frame-inputs', 'path': 'frame.json'}, 'recipe': recipe}
     inputs = {'real-frame-inputs': ['endpoint.json', 'frame.json', 'artifact_manifest.json']}
-    resources = {'cpus_per_task': 8, 'gpus': 0, 'wall_seconds': 14400}
+    # CPU leaves: 11.5 h of work within the 12 h scheduler limit. The four
+    # GPU-hour mandate applies only to leaves that request GPUs.
+    resources = {'cpus_per_task': 8, 'gpus': 0, 'wall_seconds': 41400}
     tasks, profiles = [], {}
     for row in campaign._registry()['scenarios']:
         scenario = SCMConfig(**row).to_dict()['payload']

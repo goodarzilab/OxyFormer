@@ -123,7 +123,7 @@ def test_generated_tasks_use_all_registered_scenarios_and_no_lock(built):
         hashes.add(coverage.digest(p['recipe']))
         assert p['recipe']['endpoint_hash'] == endpoint.content_hash
         assert p['recipe']['frame_hash'] == frame.content_hash
-        assert len(p['draws']) == 1 and p['wall_seconds'] == 14400
+        assert len(p['draws']) == 1 and p['wall_seconds'] == 41400
     assert len(hashes) == 1
     assert estimate['parameters']['gpus'] == 0
     assert set(estimate['needs']) == {'real-frame-inputs', *(p['id'] for p in profiles)}
@@ -171,6 +171,8 @@ def test_estimate_never_expands_locks_admits_or_requires_allocation(estimate_req
         pytest.fail('estimate invoked an allocation-gated campaign operation')
     for name in ('build_lock', 'expand_campaign', '_admit_locked_leaves'):
         monkeypatch.setattr(campaign, name, forbidden)
+    # Keep the partial-batch arithmetic fixture at its original four-hour proposal.
+    estimate_request = update_task(estimate_request, lambda p: p.update(wall_seconds=14400))
     result = campaign_estimate.run_stage(estimate_request)
     assert result.status == 'pass', result.message
     result.verify(estimate_request)
@@ -242,7 +244,7 @@ def test_profile_resources_are_explicit_and_match_estimate():
     tasks = real_frame.profile_tasks(*smoke_inputs.build_inputs())['tasks']
     estimate = tasks[-1]['parameters']
     expected = {k: estimate[k] for k in ('cpus_per_task', 'gpus', 'wall_seconds')}
-    assert expected == {'cpus_per_task': 8, 'gpus': 0, 'wall_seconds': 14400}
+    assert expected == {'cpus_per_task': 8, 'gpus': 0, 'wall_seconds': 41400}
     for task in tasks:
         assert task.get('resources') == expected
         assert task['parameters']['wall_seconds'] == task['resources']['wall_seconds']

@@ -31,7 +31,10 @@ def estimate_budget(request):
     count = integer(p['final_repetitions'], 'final repetitions', 1000)
     wall = integer(p['wall_seconds'], 'leaf wall seconds', 1)
     cpus = integer(p['cpus_per_task'], 'CPUs per task', 1)
-    require(type(p['gpus']) is int and p['gpus'] == 0, 'merged nested estimator requires zero GPUs')
+    gpus = p['gpus']
+    require(type(gpus) is int and gpus in (0, 1), 'nested estimator supports zero or one GPU')
+    require(gpus == int(campaign.resolve_device().type == 'cuda'), 'estimate device/resource mismatch')
+    require(gpus * math.ceil(wall / 60) * 60 <= 14400, 'leaf exceeds four GPU-hours')
     factor = finite(p['profile_safety_factor'], 'profile safety factor')
     require(factor >= 1, 'profile safety factor must be at least one')
     stamps = campaign.fingerprint()
@@ -72,6 +75,7 @@ def estimate_budget(request):
         rows[name] = {**profile, 'feasible_repetitions_per_leaf': capacities[name],
             'projected_leaf_count': leaves, 'projected_cpu_wall_hours': cost / 3600,
             'projected_cpu_core_hours': cpus * cost / 3600,
+            'projected_gpu_hours': gpus * cost / 3600,
             'projected_max_leaf_seconds': seconds(profile, min(count, estimate_batch))}
     feasible = common >= minimum_batch
     return {'schema_version': 1, 'estimate_only': True, 'admitted': False,
@@ -80,7 +84,7 @@ def estimate_budget(request):
         'recipe': recipe, **stamps, 'profiles': rows,
         'final_repetitions_per_scenario': count, 'total_repetitions': count * len(scenarios),
         'requested_leaf_wall_seconds': wall, 'profile_safety_factor': factor,
-        'cpus_per_task': cpus, 'gpus': 0,
+        'cpus_per_task': cpus, 'gpus': gpus,
         'common_feasible_repetitions_per_leaf': common,
         'leaf_count_at_requested_wall': len(scenarios) * math.ceil(count / common) if common else None,
         'feasible_under_requested_wall_and_leaf_cap': feasible,
@@ -88,7 +92,7 @@ def estimate_budget(request):
         'projected_required_leaf_wall_seconds': max(r['projected_max_leaf_seconds'] for r in rows.values()),
         'final_coverage_cpu_wall_hours': total_seconds / 3600,
         'final_coverage_cpu_core_hours': cpus * total_seconds / 3600,
-        'final_coverage_gpu_hours': 0.,
+        'final_coverage_gpu_hours': gpus * total_seconds / 3600,
         'limits': {'gpu_hours_per_leaf': 4, 'leaves_per_instance': 40, 'run_gpu_hours': 2500,
                    'concurrent_gpu_units': 8, 'concurrent_cpu_units': 6},
         'limitations': ['Planning estimate, not a campaign allocation or admission.',
