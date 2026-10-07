@@ -37,6 +37,17 @@ def allocation_threads(*, cgroup_root=Path('/sys/fs/cgroup'), membership=Path('/
             'SLURM_CPUS_PER_TASK must be a positive integer')
         return int(allocated)
     count = len(os.sched_getaffinity(0))
+    # Membership is hierarchy-relative, but a bind mount can expose only a
+    # subtree. mountinfo's root and mount point provide the coordinate change.
+    mount_roots = {}
+    for line in Path('/proc/self/mountinfo').read_text().splitlines():
+        mount, filesystem = line.split(' - ', 1)
+        if filesystem.split()[0] not in ('cgroup', 'cgroup2'):
+            continue
+        fields = mount.split()
+        def unescape(value):
+            return re.sub(r'\\([0-7]{3})', lambda match: chr(int(match[1], 8)), value)
+        mount_roots[Path(unescape(fields[4]))] = Path(unescape(fields[3]))
     for line in membership.read_text().splitlines():
         _, controllers, relative = line.split(':', 2)
         if controllers == '':
@@ -47,9 +58,14 @@ def allocation_threads(*, cgroup_root=Path('/sys/fs/cgroup'), membership=Path('/
         else:
             continue
         for root in roots:
-            # Some namespaces expose only the cgroup root, others its full path.
-            # In either case inspect the root and every visible ancestor.
-            path = root.joinpath(*[p for p in relative.split('/') if p not in ('', '.', '..')])
+            location = Path('/').joinpath(*[p for p in relative.split('/') if p not in ('', '.', '..')])
+            hierarchy_root = mount_roots.get(root, Path('/'))
+            if location.is_relative_to(hierarchy_root):
+                location = location.relative_to(hierarchy_root)
+            else:
+                # A cgroup namespace can already have rebased membership.
+                location = location.relative_to('/')
+            path = root / location
             for directory in (path, *path.parents):
                 if directory != root and root not in directory.parents:
                     break

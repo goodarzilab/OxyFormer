@@ -4124,3 +4124,35 @@ assert record['torch'] is None and record['torch_intraop_limit'] == 8
     process = subprocess.run([sys.executable, '-B', '-c', code], env=fixture_env(),
         capture_output=True, text=True, timeout=10)
     assert_exit(process, 0)
+
+
+@mark.parametrize('version', [1, 2])
+@mark.parametrize('tenant', ['tenant', 'tenant space'])
+def test_allocation_threads_rebases_cgroup_subtree_mount(monkeypatch, tmp_path, version, tenant):
+    from oxyformer.execution.runner import allocation_threads
+    monkeypatch.delenv('SLURM_CPUS_PER_TASK', raising=False)
+    monkeypatch.setattr(os, 'sched_getaffinity', lambda pid: set(range(224)))
+    root = tmp_path / 'cgroup mount'
+    mounted = root if version == 2 else root / 'cpu,cpuacct'
+    (mounted / 'job/step').mkdir(parents=True)
+    membership = tmp_path / 'membership'
+    controllers = '' if version == 2 else 'cpu,cpuacct'
+    membership.write_text(f'0:{controllers}:/{tenant}/job/step\n')
+    if version == 2:
+        (mounted / 'cpu.max').write_text('max 100000\n')
+        (mounted / 'job/cpu.max').write_text('200000 100000\n')
+        filesystem = 'cgroup2 cgroup rw'
+    else:
+        (mounted / 'cpu.cfs_quota_us').write_text('-1')
+        (mounted / 'job/cpu.cfs_quota_us').write_text('200000')
+        (mounted / 'job/cpu.cfs_period_us').write_text('100000')
+        filesystem = 'cgroup cgroup rw,cpu,cpuacct'
+    original_read = Path.read_text
+    def read_text(path, *args, **kwargs):
+        if path == Path('/proc/self/mountinfo'):
+            hierarchy_root = tenant.replace(' ', r'\040')
+            mount_point = str(mounted).replace(' ', r'\040')
+            return f'30 20 0:27 /{hierarchy_root} {mount_point} rw - {filesystem}\n'
+        return original_read(path, *args, **kwargs)
+    monkeypatch.setattr(Path, 'read_text', read_text)
+    assert allocation_threads(cgroup_root=root, membership=membership) == 2
