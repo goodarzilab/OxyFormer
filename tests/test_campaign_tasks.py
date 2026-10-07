@@ -122,7 +122,7 @@ def test_runner_admits_published_inputs_and_stops_before_compute(runtime, tmp_pa
         assert module_name == 'oxyformer.validation.coverage'
         request.verify_inputs()
         _, recipe, lock, endpoint, frame, scenario, seconds, _ = coverage.prepare_batch(request)
-        assert lock is None and seconds == 3600
+        assert lock is None and seconds == 1800
         assert recipe['nested_cv']['synthetic'] is True
         assert endpoint.content_hash == recipe['endpoint_hash']
         assert frame.content_hash == recipe['frame_hash']
