@@ -161,10 +161,15 @@ def test_cuda_profile_probe_task_path_on_registered_smoke_inputs(tmp_path, monke
     """
     import json
     from pathlib import Path
-    from oxyformer.validation import coverage, real_frame, smoke_inputs
+    from oxyformer.validation import campaign, coverage, real_frame, smoke_inputs
     from oxyformer.execution.runner import read_mapping
-    from test_campaign import request, write
+    from test_campaign import STAMPS, request, write
 
+    # Repository attestation is a separate runner contract. Keep this synthetic
+    # stage test independent of pytest caches and -B; measure the real CUDA fit
+    # environment and environment hash through the unchanged fingerprint path.
+    monkeypatch.setattr(campaign.identity, 'scientific_fingerprint',
+                        lambda repo: STAMPS['scientific_fingerprint'])
     monkeypatch.setenv('OXYFORMER_DEVICE', 'cuda')
     prepared, frame = smoke_inputs.build_inputs()
     root = Path(__file__).parents[1]
