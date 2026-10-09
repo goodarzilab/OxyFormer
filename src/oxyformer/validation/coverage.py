@@ -366,6 +366,10 @@ def prepare_batch(request: StageRequest):
     require(task["stage"] == request.stage, "stage mismatch")
     parameters = task["parameters"]
     mode = parameters["mode"]
+    if "device" in parameters:
+        from oxyformer.training.fit import resolve_device
+        require(resolve_device() == resolve_device(parameters["device"]),
+                "runtime differs from task required device")
     require(mode in ("smoke", "profile", "screening", "final"), "unknown repetition mode")
     require((request.stage == "simulation-smoke") == (mode in ("smoke", "profile")), "stage/mode mismatch")
     if mode in ("screening", "final"):
@@ -409,6 +413,9 @@ def _run_batch(request: StageRequest, started: float) -> StageResult:
         parameters = task["parameters"]
         mode, draws = parameters["mode"], parameters["draws"]
         production = mode != "smoke"
+        from oxyformer.training.fit import resolve_device, fit_environment
+        device = resolve_device()
+        bounded_profile = mode == "profile" and device.type == "cuda"
         root = Path(request.output_dir)
         setup_seconds = time.monotonic() - started
         records, repetition_seconds = [], []
@@ -417,9 +424,9 @@ def _run_batch(request: StageRequest, started: float) -> StageResult:
             destination = output_path(root, "repetitions/" + draw["repetition_id"])
             require(not destination.exists(), "repetition was already attempted; use declared continuation, never redraw")
             destination.mkdir(parents=True)
-            # Production profiling and locked leaves use planning estimates.
-            # Slurm owns the hard limit; late complete draws remain counted.
-            deadline = started + seconds if mode == "smoke" else math.inf
+            # CPU profiles and locked leaves retain planning-only budgets.
+            # CUDA probes must finish within their bounded GPU allocation.
+            deadline = started + seconds if mode == "smoke" or bounded_profile else math.inf
             record = execute_draw(draw, frame, scenario, template, recipe, destination, deadline)
             atomic_json(destination, "result.json", record)
             repetition_seconds.append(time.monotonic() - draw_started)
@@ -432,8 +439,6 @@ def _run_batch(request: StageRequest, started: float) -> StageResult:
             "lock_hash": digest(lock) if lock else None, "batch_id": parameters.get("batch_id"),
             "scenario": scenario.to_dict()["payload"], "draws": draws, "records": records, "summary": summary,
             "certifies_production_coverage": False}
-        from oxyformer.training.fit import resolve_device, fit_environment
-        device = resolve_device()
         if device.type == "cuda":
             import torch
             torch.cuda.synchronize(device)
@@ -518,6 +523,14 @@ def run_stage(request: StageRequest) -> StageResult:
                       publication_verification_seconds=elapsed - timing["setup_seconds"] - math.fsum(timing["complete_repetition_seconds"]),
                       measurement_scope="complete_stage_return",
                       profiled_request_hash=profiled_request.content_hash)
+        if timing["device"].startswith("cuda"):
+            exceeded = elapsed > timing["admitted_budget_seconds"]
+            timing.update(budget_exceeded=exceeded,
+                          overrun_seconds=max(0., elapsed - timing["admitted_budget_seconds"]))
+            timing["complete"] = timing["complete"] and timing["all_successful"] and not exceeded
+            if not timing["complete"]:
+                completed = replace(completed, status="fail",
+                    message="CUDA profile incomplete, unsuccessful or over budget; no usable profile")
         result["profiled_request_hash"] = profiled_request.content_hash
         extra = tuple(replace(a, path="_profiled/" + a.path) for a in completed.artifacts)
         return publish(request, {"result.json": result, "timing.json": timing,

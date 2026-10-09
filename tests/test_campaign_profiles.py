@@ -110,7 +110,7 @@ def test_real_frame_refuses_missing_atlas_and_failed_primary_gate():
 def test_generated_tasks_use_all_registered_scenarios_and_no_lock(built):
     _, (endpoint, frame, _, _) = built
     tasks = real_frame.profile_tasks(endpoint, frame)['tasks']
-    profiles, estimate = tasks[:-1], tasks[-1]
+    profiles, estimate = tasks[:4], tasks[4]
     assert len(profiles) == 4
     assert {p['parameters']['scenario']['name'] for p in profiles} == {
         r['name'] for r in campaign._registry()['scenarios']}
@@ -138,7 +138,7 @@ def estimate_request(tmp_path, monkeypatch):
     deps = {'real-frame-inputs': tmp_path / 'inputs'}
     write(deps['real-frame-inputs'] / 'endpoint.json', endpoint.to_dict())
     write(deps['real-frame-inputs'] / 'frame.json', frame.to_dict())
-    for task in tasks[:-1]:
+    for task in tasks[:4]:
         p = task['parameters']
         _, records = successful_records(1)
         records[0]['draw'] = p['draws'][0]
@@ -151,7 +151,7 @@ def estimate_request(tmp_path, monkeypatch):
             'recipe_hash': coverage.digest(p['recipe']), 'device': 'cpu', 'gpu_seconds': 0,
             'complete_repetition_seconds': [10.], 'wall_seconds': 13., 'setup_seconds': 2.,
             'measurement_scope': 'complete_stage_return', **STAMPS})
-    req = request(tmp_path / 'estimate', tasks[-1], deps)
+    req = request(tmp_path / 'estimate', tasks[4], deps)
     # There is deliberately no approvals or allocation key at all.
     config = json.loads(Path(req.config_path).read_text())
     del config['approvals']
@@ -242,9 +242,108 @@ def test_estimate_cannot_lower_minimum(estimate_request):
 
 def test_profile_resources_are_explicit_and_match_estimate():
     tasks = real_frame.profile_tasks(*smoke_inputs.build_inputs())['tasks']
-    estimate = tasks[-1]['parameters']
+    estimate = tasks[4]['parameters']
     expected = {k: estimate[k] for k in ('cpus_per_task', 'gpus', 'wall_seconds')}
     assert expected == {'cpus_per_task': 8, 'gpus': 0, 'wall_seconds': 41400}
-    for task in tasks:
+    for task in tasks[:5]:
         assert task.get('resources') == expected
         assert task['parameters']['wall_seconds'] == task['resources']['wall_seconds']
+
+
+@pytest.mark.parametrize('fixture_name', ['smoke', 'real_fixture'])
+def test_existing_profile_task_bytes_match_launch_base(fixture_name, built):
+    # SHA256 of canonical bytes at dev/launch base a778a7c; excludes only the
+    # appended probe. This pins every CPU/estimate field, including draw seeds.
+    pair = smoke_inputs.build_inputs() if fixture_name == 'smoke' else built[1][:2]
+    expected = {
+        'smoke': '1fb64eaf6987e8fb62c6df3c95b53f0482e2fe7cfcc07e5db214a20fd35e7377',
+        'real_fixture': '3c6f161d31f47ffe9a04e13c9fd264dcc8d1acdc84f200cb71608738c2ac6490',
+    }
+    assert coverage.digest(real_frame.profile_tasks(*pair)['tasks'][:5]) == expected[fixture_name]
+
+
+def test_gpu_probe_appends_identical_work_with_explicit_cuda_and_bounded_resources(built):
+    tasks = real_frame.profile_tasks(*built[1][:2])['tasks']
+    assert len(tasks) == 6
+    cpu, estimate, gpu = tasks[0], tasks[4], tasks[5]
+    assert gpu['id'] == 'profile-null-effect-gpu'
+    assert gpu['stage'] == 'simulation-smoke'
+    assert gpu['needs'] == cpu['needs'] and gpu['outputs'] == cpu['outputs']
+    assert gpu['resources'] == {'cpus_per_task': 8, 'gpus': 1, 'wall_seconds': 13500}
+    assert gpu['resources']['gpus'] * (gpu['resources']['wall_seconds'] + 900) <= 4 * 3600
+    expected = {**cpu['parameters'], 'wall_seconds': 13500, 'device': 'cuda'}
+    assert gpu['parameters'] == expected
+    assert gpu['id'] not in estimate['needs']
+    assert gpu['id'] not in str(estimate['parameters'])
+    # Editing execution metadata on the appended task cannot alter the CPU task.
+    gpu['parameters']['draws'][0]['seed'] += 1
+    assert gpu['parameters']['draws'] != cpu['parameters']['draws']
+
+
+@pytest.fixture
+def gpu_profile_request(tmp_path, monkeypatch):
+    monkeypatch.setattr(campaign, 'fingerprint', lambda: deepcopy(STAMPS))
+    endpoint, frame = smoke_inputs.build_inputs()
+    task = real_frame.profile_tasks(endpoint, frame)['tasks'][-1]
+    inputs = tmp_path / 'inputs'
+    write(inputs / 'endpoint.json', endpoint.to_dict())
+    write(inputs / 'frame.json', frame.to_dict())
+    return request(tmp_path / 'probe', task, {'real-frame-inputs': inputs})
+
+
+def test_gpu_probe_refuses_unavailable_cuda_before_fitting(gpu_profile_request, monkeypatch):
+    import torch
+    monkeypatch.setenv('OXYFORMER_DEVICE', 'cuda')
+    monkeypatch.setattr(torch.cuda, 'is_available', lambda: False)
+    monkeypatch.setattr(coverage, 'execute_draw', lambda *args: pytest.fail('started draw without CUDA'))
+    result = coverage.run_stage(gpu_profile_request)
+    assert result.status == 'blocked' and 'unavailable' in result.message
+    assert not result.artifacts
+
+
+def test_gpu_probe_refuses_cpu_runtime_before_fitting(gpu_profile_request, monkeypatch):
+    from oxyformer.training import fit
+    import torch
+    monkeypatch.setattr(fit, 'resolve_device', lambda device='auto':
+                        torch.device('cuda:0' if device == 'cuda' else 'cpu'))
+    monkeypatch.setattr(coverage, 'execute_draw', lambda *args: pytest.fail('started CPU draw'))
+    result = coverage.run_stage(gpu_profile_request)
+    assert result.status == 'blocked' and 'required device' in result.message
+    assert not result.artifacts
+
+
+@pytest.mark.parametrize('outcome', ['success', 'incomplete', 'numerical_failure', 'late_fit', 'late_publication'])
+def test_gpu_profile_timing_and_budget_are_honest(gpu_profile_request, monkeypatch, outcome):
+    from oxyformer.training import fit
+    import torch
+    clock = [0.]
+    monkeypatch.setattr(coverage.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(fit, 'resolve_device', lambda device='auto': torch.device('cuda:0'))
+    environment = {'device': 'cuda:0', 'cuda_runtime': 'test-runtime', 'gpu': 'synthetic-device'}
+    monkeypatch.setattr(fit, 'fit_environment', lambda device='auto': tuple(environment.items()))
+    monkeypatch.setattr(torch.cuda, 'synchronize', lambda device: None)
+    def execute(draw, frame, scenario, template, recipe, root, deadline):
+        assert deadline == 13500
+        clock[0] += 13501 if outcome == 'late_fit' else 10
+        _, records = successful_records(1)
+        record = {**records[0], 'draw': draw, 'wall_seconds': clock[0]}
+        if outcome in ('incomplete', 'numerical_failure'):
+            record.update(status=outcome, estimates={}, reason='budget exhausted or numerical failure')
+        return record
+    original_publish = coverage.publish
+    def publish(*args, **kwargs):
+        result = original_publish(*args, **kwargs)
+        if outcome == 'late_publication':
+            clock[0] += 13501
+        return result
+    monkeypatch.setattr(coverage, 'execute_draw', execute)
+    monkeypatch.setattr(coverage, 'publish', publish)
+    result = coverage.run_stage(gpu_profile_request)
+    assert result.status == ('pass' if outcome == 'success' else 'fail'), result.message
+    result.verify(gpu_profile_request)
+    timing = coverage.read_json(Path(gpu_profile_request.output_dir) / 'timing.json')
+    assert timing['device'] == 'cuda:0' and timing['environment'] == environment
+    assert timing['gpu_seconds'] == timing['wall_seconds'] > 0
+    assert timing['complete'] == (outcome == 'success')
+    assert timing['budget_exceeded'] == outcome.startswith('late_')
+    assert len(timing['complete_repetition_seconds']) == (0 if outcome in ('incomplete', 'numerical_failure') else 1)
