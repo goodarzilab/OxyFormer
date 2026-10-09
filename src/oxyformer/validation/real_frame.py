@@ -5,6 +5,7 @@ endpoint: placeholder labels are never fitted, and only the SCM supplies A/Y.
 The independent tract gate remains a prerequisite of any later campaign lock.
 """
 from collections import Counter
+from copy import deepcopy
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -196,6 +197,13 @@ def profile_tasks(endpoint, frame):
         'outputs': ['budget_estimate.json', 'artifact_manifest.json'],
         'parameters': {**common, 'profiles': profiles, 'final_repetitions': 1000,
             **resources, 'profile_safety_factor': 2.}})
+    # A paired hardware probe, deliberately outside the CPU estimate fan-in.
+    # Copy the already-declared draw, rather than assigning a new seed namespace.
+    probe = deepcopy(next(task for task in tasks if task['id'] == 'profile-null-effect'))
+    probe['id'] = 'profile-null-effect-gpu'
+    probe['resources'] = {'cpus_per_task': 8, 'gpus': 1, 'wall_seconds': 13500}
+    probe['parameters'].update(device='cuda', wall_seconds=13500)
+    tasks.append(probe)
     return {'schema_version': 1, 'tasks': tasks}
 
 

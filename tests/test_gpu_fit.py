@@ -149,3 +149,69 @@ def test_visible_gpu_does_not_change_default(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     assert fit.resolve_device().type == "cpu"
     assert fit.resolve_device(fit.FitConfig.__dataclass_fields__["device"].default).type == "cpu"
+
+
+@GPU
+def test_cuda_profile_probe_task_path_on_registered_smoke_inputs(tmp_path, monkeypatch):
+    """Exercise the probe wrapper and all fits with the registered smoke workload.
+
+    The task keeps its production recipe; only this test's fitting boundary uses
+    the registered synthetic one-epoch settings. This is execution coverage,
+    not a production timing measurement or an alteration of the probe recipe.
+    """
+    import json
+    from pathlib import Path
+    from oxyformer.validation import campaign, coverage, real_frame, smoke_inputs
+    from oxyformer.execution.runner import read_mapping
+    from test_campaign import STAMPS, request, write
+
+    # Repository attestation is a separate runner contract. Keep this synthetic
+    # stage test independent of pytest caches and -B; measure the real CUDA fit
+    # environment and environment hash through the unchanged fingerprint path.
+    monkeypatch.setattr(campaign.identity, 'scientific_fingerprint',
+                        lambda repo: STAMPS['scientific_fingerprint'])
+    monkeypatch.setenv('OXYFORMER_DEVICE', 'cuda')
+    prepared, frame = smoke_inputs.build_inputs()
+    root = Path(__file__).parents[1]
+    smoke = read_mapping(root / 'configs/execution/tasks/campaign.yaml')['tasks'][1]['parameters']
+    assert prepared.content_hash == smoke['recipe']['endpoint_hash']
+    assert frame.content_hash == smoke['recipe']['frame_hash']
+    task = real_frame.profile_tasks(prepared, frame)['tasks'][-1]
+    assert task['id'] == 'profile-null-effect-gpu'
+    inputs = tmp_path / 'inputs'
+    write(inputs / 'endpoint.json', prepared.to_dict())
+    write(inputs / 'frame.json', frame.to_dict())
+    req = request(tmp_path / 'probe', task, {'real-frame-inputs': inputs})
+    settings = nested_cv._settings
+    monkeypatch.setattr(nested_cv, '_settings', lambda recipe, endpoint:
+                        settings(smoke['recipe'], endpoint))
+    run_fold = nested_cv.run_fold
+    seen, environments = [], []
+    def observed_fold(config, outer, seed, **kwargs):
+        artifact = run_fold(config, outer, seed, **kwargs)
+        assert artifact.complete
+        environment = dict(artifact.checkpoint.identity.environment)
+        assert environment['device'].startswith('cuda:')
+        environments.append(environment)
+        seen.append((config.fold, seed))
+        return artifact
+    monkeypatch.setattr(nested_cv, 'run_fold', observed_fold)
+    old = torch.get_num_threads()
+    torch.set_num_threads(8)
+    try:
+        result = coverage.run_stage(req)
+    finally:
+        torch.set_num_threads(old)
+    assert result.status == 'pass', result.message
+    result.verify(req)
+    assert seen == [(fold, seed) for fold in range(5) for seed in nested_cv.SEEDS]
+    timing = json.loads((Path(req.output_dir) / 'timing.json').read_text())
+    assert timing['device'].startswith('cuda:')
+    assert timing['gpu_seconds'] == timing['wall_seconds'] > 0
+    assert timing['complete'] and timing['all_successful'] and not timing['budget_exceeded']
+    assert all(timing['environment'] == environment for environment in environments)
+    assert len(timing['complete_repetition_seconds']) == 1
+    aggregate = json.loads((Path(req.output_dir) / 'result.json').read_text())
+    assert aggregate['draws'] == task['parameters']['draws']
+    assert aggregate['mode'] == 'profile'
+    assert not aggregate['certifies_production_coverage']
