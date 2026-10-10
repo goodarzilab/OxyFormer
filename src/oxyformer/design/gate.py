@@ -119,6 +119,11 @@ def _inputs(request, task):
 
 
 def collected_atlas(paths, tract_ids=None):
+    """Return physical atlas coverage; gating also uses its accounted omissions."""
+    return collected_atlas_inputs(paths, tract_ids)['atlas']
+
+
+def collected_atlas_inputs(paths, tract_ids=None):
     """Map the collected product using the pinned owner decision, without imputation.
 
     Zero-population/incomplete rows are absent from the usable atlas and remain
@@ -150,21 +155,60 @@ def collected_atlas(paths, tract_ids=None):
     # tracts outside that frame do not become missing endpoint observations.
     expected = tuple(sorted(selected.tract_id if tract_ids is None else tract_ids))
     selected = selected[selected.tract_id.isin(expected)]
-    rows, missing = [], sorted(set(expected) - set(selected.tract_id))
+    rows, missing_dem = [], set()
+    missing = sorted(set(expected) - set(selected.tract_id))
     for record in selected.sort_values('tract_id').to_dict('records'):
         complete = record['population'] > 0 and record['missing_population'] == 0
         require(record['status'] == ('complete' if complete else
                 'zero_population' if record['population'] == 0 else 'missing_dem'), 'inconsistent atlas status')
         if not complete:
             missing.append(record['tract_id'])
+            if record['status'] == 'missing_dem':
+                missing_dem.add(record['tract_id'])
             continue
         rows.append(AtlasRow(tract_id=record['tract_id'], exposure_mmhg=float(record[decision['exposure_field']]),
             inhabited_elevation_m=float(record['elevation_' + decision['inhabited_elevation'] + '_m']),
             population=float(record['population']), allocation_qualified=True))
     owner = read_mapping(OWNER_APPROVALS)['owner_decisions']
-    return CollectedAtlas(rows=tuple(rows), source_hashes=tuple(sorted(set(publication['source_identities'].values()))),
+    atlas = CollectedAtlas(rows=tuple(rows), source_hashes=tuple(sorted(set(publication['source_identities'].values()))),
         footprint=owner['exposure_atlas_footprint'], expected_tract_ids=expected, missing_tract_ids=tuple(sorted(missing)),
         coverage_complete=not missing, mapping_review_id='configs/approvals.yaml#owner_decisions.tract_design')
+    # The passing collector copies this validated quality.json summary verbatim
+    # into its manifest (exposure.build.run_stage). Its file binding was checked
+    # above; use the compact copy without loading the nationwide block ledger.
+    accounted = publication.get('missing_dem_tracts', [])
+    require(isinstance(accounted, list) and all(isinstance(t, str) for t in accounted),
+            'invalid collected missing-DEM summary')
+    # The quality summary spans placement scenarios. Only a selected-scenario
+    # missing_dem row explains that scenario's omission; an absent or empty row
+    # cannot borrow an explanation from another scenario.
+    return {'atlas': atlas, 'atlas_missing_dem_tract_ids': tuple(sorted(missing_dem & set(accounted)))}
+
+
+def atlas_coverage(values):
+    """Keep physical coverage explicit while accounting for approved exclusions."""
+    atlas = values['atlas']
+    accounted = set(values.get('atlas_missing_dem_tract_ids', ()))
+    require(accounted <= set(atlas.missing_tract_ids), 'accounted DEM omissions must be missing atlas tracts')
+    if accounted:
+        decision = values['approvals'].get('owner_decisions', {}).get('atlas_coverage', {})
+        if decision.get('missing_dem_tracts') != 'exclude_as_not_allocation_qualified':
+            raise MissingPrerequisite('missing owner approval for accounted DEM exclusions')
+    unaccounted = set(atlas.missing_tract_ids) - accounted
+    return {'complete': not unaccounted, 'physical_coverage_complete': atlas.coverage_complete,
+            'footprint': atlas.footprint, 'expected_tracts': len(atlas.expected_tract_ids),
+            'covered_tracts': len(atlas.rows), 'missing_tract_ids': atlas.missing_tract_ids,
+            'accounted_missing_dem_tracts': len(accounted),
+            'accounted_missing_dem_tract_ids': tuple(sorted(accounted)),
+            'unaccounted_missing_tract_ids': tuple(sorted(unaccounted))}
+
+
+def allocation_exclusions(rows, coverage, design_ids):
+    """Disclose DEM exclusions even when their labels are in the sealed reserve."""
+    missing = set(coverage['accounted_missing_dem_tract_ids'])
+    return [{'original_id': r.original_id, 'tract_id': r.tract_id,
+             'reason': 'atlas_missing_dem_coverage', 'sealed_design': r.original_id in design_ids}
+            for r in rows if r.tract_id in missing]
 
 
 def dispatched_values(request):
@@ -177,7 +221,7 @@ def dispatched_values(request):
                       ('geography', GeographyTable), ('entity_graph', EntityGraph)]:
         path = paths['tract-inputs', role + '.json']
         values[role] = read_artifact(path, cls, hashes[str(path)])
-    values['atlas'] = collected_atlas(paths, values['data_manifest'].original_ids)
+    values.update(collected_atlas_inputs(paths, values['data_manifest'].original_ids))
     values['approvals'] = read_mapping(OWNER_APPROVALS)
     return values
 
@@ -288,9 +332,10 @@ def run_stage(request: StageRequest) -> StageResult:
         a = {r.tract_id: r for r in atlas.rows}
         reservation = reserve_design(rows, graph)
         screens = county_screen(rows, a)
-        report = {"coverage": {"complete": atlas.coverage_complete, "footprint": atlas.footprint,
-                               "expected_tracts": len(atlas.expected_tract_ids), "covered_tracts": len(atlas.rows),
-                               "missing_tract_ids": atlas.missing_tract_ids},
+        coverage = atlas_coverage(values)
+        accounted_missing = set(coverage["accounted_missing_dem_tract_ids"])
+        report = {"coverage": coverage,
+                  "allocation_exclusions": allocation_exclusions(rows, coverage, set(reservation.design_ids)),
                   "initial_county_screens": screens, "inference_frame": INFERENCE_FRAME,
                   "reservation": {"requested_fraction": .2, "rounding": "ceil per county then lineage closure",
                                   "total_subblocks": reservation.total_subblocks,
@@ -312,7 +357,9 @@ def run_stage(request: StageRequest) -> StageResult:
         for row in rows:
             if row.original_id in design_ids:
                 continue
-            if not usable(row, a):
+            if row.tract_id in accounted_missing:
+                reasons[row.original_id] = "atlas_missing_dem_coverage"
+            elif not usable(row, a):
                 reasons[row.original_id] = "flag_label_or_allocation_unusable"
             elif screens[row.county]["reasons"]:
                 reasons[row.original_id] = "initial_county_screen"
@@ -347,7 +394,7 @@ def run_stage(request: StageRequest) -> StageResult:
         report["scenarios"] = diagnostics
         report["support_method"] = "replicated interior bins in raw-X neighborhoods; empirical screen, not a positivity guarantee"
         report["frozen_policy_id"] = frozen.policy.policy_id
-        if not atlas.coverage_complete:
+        if not coverage["complete"]:
             status, message = "blocked", "incomplete atlas coverage; target accounting recorded"
         elif scenarios[0].status != "pass":
             status, message = "fail", "no tract target passes primary geographic, support and split minima"

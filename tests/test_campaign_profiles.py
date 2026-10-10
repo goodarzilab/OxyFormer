@@ -347,3 +347,50 @@ def test_gpu_profile_timing_and_budget_are_honest(gpu_profile_request, monkeypat
     assert timing['complete'] == (outcome == 'success')
     assert timing['budget_exceeded'] == outcome.startswith('late_')
     assert len(timing['complete_repetition_seconds']) == (0 if outcome in ('incomplete', 'numerical_failure') else 1)
+
+
+@pytest.mark.parametrize('unaccounted', [False, True])
+def test_real_frame_dispatch_excludes_accounted_dem_and_preserves_reservation(tmp_path, monkeypatch, unaccounted):
+    from oxyformer.design.splits import reserve_design
+    from test_tract_tasks import collected_design_request, install_coverage_approval
+    install_coverage_approval(tmp_path, monkeypatch)
+    values = real_fixture()
+    reservation = reserve_design(values['geography'].rows, values['entity_graph'])
+    sealed = set(reservation.design_ids)
+    missing = (reservation.design_ids[0], next(r.original_id for r in values['geography'].rows
+                                               if r.original_id not in sealed))
+    unknown = next(r.original_id for r in values['geography'].rows if r.original_id not in {*missing, *sealed})
+    req = collected_design_request(tmp_path, values, missing=missing, accounted=missing,
+        absent=(unknown,) if unaccounted else (), stage='real-frame-inputs')
+    prepared, config = real_frame.prepare_inputs(req)
+    if unaccounted:
+        result = real_frame.run_stage(req)
+        assert result.status == 'blocked' and 'incomplete atlas coverage' in result.message
+        assert not result.artifacts
+        return
+    endpoint, frame, support, audit = real_frame.build_inputs(prepared, config)
+    assert not set(missing).intersection(frame.original_ids)
+    assert set(endpoint.outer.design_ids) == sealed
+    assert set(support.design_ids) == sealed
+    assert audit['coverage']['complete'] and audit['coverage']['accounted_missing_dem_tracts'] == 2
+    assert dict(audit['exclusions'])[missing[1]] == 'atlas_missing_dem_coverage'
+    assert {r['original_id'] for r in audit['allocation_exclusions']} == set(missing)
+    assert audit['input_rows'] == audit['evaluation_rows'] + len(audit['design_ids']) + len(audit['exclusions'])
+    exposures = dict(zip(endpoint.data.manifest.original_ids, endpoint.data.column('a')))
+    assert all(exposures[oid] is None for oid in missing)
+    retained = [r.exposure_mmhg for r in prepared['atlas'].rows if r.tract_id in sealed]
+    assert endpoint.treatment_design.center == pytest.approx(sum(retained) / len(retained))
+    for fold in range(5):
+        endpoint.validate(fold)
+        assert not set(missing).intersection(endpoint.outer.training_ids(fold))
+    from oxyformer.validation.generators import ObservedRecords
+    n = len(frame.original_ids)
+    sample = ObservedRecords(frame=frame, a=(5.,) * n, y=(50.,) * n, measured_columns=(),
+        measured_x=((),) * n, flag_available=(True,) * n, survey_included=(True,) * n,
+        biomarker_available=(True,) * n, registered_events=(None,) * n, observed_denominator=(None,) * n)
+    rebound = coverage.bind_observations(endpoint, sample)
+    for fold in range(5):
+        rebound.configuration(fold, tmp_path / str(fold), **nested_cv._settings({'nested_cv': {}}, rebound))
+    result = real_frame.run_stage(req)
+    assert result.status == 'pass', result.message
+    result.verify(req)

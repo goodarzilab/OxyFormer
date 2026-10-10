@@ -379,3 +379,82 @@ def test_missing_all_sealed_atlas_records_is_blocked_not_failed(tmp_path):
     assert result.status == "blocked", result.message
     coverage = json.loads((Path(request.output_dir) / "support_report.json").read_text())["coverage"]
     assert set(coverage["missing_tract_ids"]) == missing
+
+
+@pytest.mark.parametrize('unaccounted', [False, True])
+def test_accounted_dem_exclusions_are_reported_and_unaccounted_omission_blocks(tmp_path, monkeypatch, unaccounted):
+    from oxyformer.design import gate
+    from test_tract_tasks import collected_design_request, install_coverage_approval
+    install_coverage_approval(tmp_path, monkeypatch)
+    values = make_inputs()
+    reservation = reserve_design(values['geography'].rows, values['entity_graph'])
+    sealed = set(reservation.design_ids)
+    missing = (reservation.design_ids[0], next(r.original_id for r in values['geography'].rows
+                                               if r.original_id not in sealed))
+    unknown = next(r.original_id for r in values['geography'].rows if r.original_id not in {*missing, *sealed})
+    request = collected_design_request(tmp_path, values, missing=missing, accounted=(*missing, 'outside-endpoint'),
+                                       absent=(unknown,) if unaccounted else ())
+    result = gate.run_stage(request)
+    assert result.status == ('blocked' if unaccounted else 'pass'), result.message
+    result.verify(request)
+    out = Path(request.output_dir)
+    report = json.loads((out / 'support_report.json').read_text())
+    coverage = report['coverage']
+    assert coverage['complete'] is not unaccounted
+    assert not coverage['physical_coverage_complete']
+    assert coverage['accounted_missing_dem_tract_ids'] == sorted(missing)
+    assert coverage['unaccounted_missing_tract_ids'] == ([unknown] if unaccounted else [])
+    assert (coverage['covered_tracts'] + coverage['accounted_missing_dem_tracts']
+            + len(coverage['unaccounted_missing_tract_ids'])) == coverage['expected_tracts']
+    assert {r['original_id']: r['sealed_design'] for r in report['allocation_exclusions']} == {
+        missing[0]: True, missing[1]: False}
+    assert {r['reason'] for r in report['allocation_exclusions']} == {'atlas_missing_dem_coverage'}
+    design = FrozenDesign.from_json((out / 'design.json').read_text())
+    assert design.reservation == reservation
+    scenarios = json.loads((out / 'splits.json').read_text())['scenarios']
+    for scenario, counts in zip(scenarios, report['scenarios']):
+        scenario = scenario['payload']
+        assert dict(scenario['exclusions'])[missing[1]] == 'atlas_missing_dem_coverage'
+        assert counts['evaluation_count'] + counts['sealed_design_count'] + counts['excluded_count'] == len(values['geography'].rows)
+        if scenario['outer']:
+            assert not set(missing).intersection(scenario['outer']['original_ids'])
+    assert not json.loads((out / 'gate.json').read_text())['effect_release_authorized']
+
+
+@pytest.mark.parametrize('approval', ['missing', 'wrong', 'legacy'])
+def test_accounted_dem_exclusion_requires_owner_decision(approval):
+    from oxyformer.design.gate import atlas_coverage
+    values = make_inputs()
+    atlas = values['atlas']
+    missing = atlas.rows[0].tract_id
+    values['atlas'] = replace(atlas, rows=atlas.rows[1:], missing_tract_ids=(missing,), coverage_complete=False)
+    values['atlas_missing_dem_tract_ids'] = (missing,)
+    values['approvals'] = yaml.safe_load(OWNER_APPROVALS.read_text())
+    owner = values['approvals']['owner_decisions']
+    owner.pop('atlas_coverage', None)
+    if approval == 'wrong':
+        owner['atlas_coverage'] = {'missing_dem_tracts': 'block'}
+    elif approval == 'legacy':
+        owner['tract_design']['atlas_missing_dem_tracts'] = 'exclude_as_not_allocation_qualified'
+    with pytest.raises(MissingPrerequisite, match='owner approval'):
+        atlas_coverage(values)
+
+
+def test_accounted_dem_omissions_of_all_sealed_records_remain_blocked(tmp_path, monkeypatch):
+    from test_tract_tasks import collected_design_request, install_coverage_approval
+    install_coverage_approval(tmp_path, monkeypatch)
+    values = make_inputs()
+    reservation = reserve_design(values['geography'].rows, values['entity_graph'])
+    missing = reservation.design_ids
+    request = collected_design_request(tmp_path, values, missing=missing, accounted=missing)
+    result = run_stage(request)
+    assert result.status == 'blocked', result.message
+    result.verify(request)
+    out = Path(request.output_dir)
+    report = json.loads((out / 'support_report.json').read_text())
+    assert report['coverage']['complete'] and not report['coverage']['physical_coverage_complete']
+    assert {r['original_id'] for r in report['allocation_exclusions']} == set(missing)
+    assert all(r['sealed_design'] for r in report['allocation_exclusions'])
+    assert not json.loads((out / 'design.json').read_text())['available']
+    assert json.loads((out / 'splits.json').read_text())['scenarios'] == []
+    assert not json.loads((out / 'gate.json').read_text())['effect_release_authorized']
