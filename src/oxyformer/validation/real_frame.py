@@ -50,7 +50,7 @@ def prepare_inputs(request):
                       ('geography', GeographyTable), ('entity_graph', EntityGraph)]:
         path = paths['tract-inputs', role + '.json']
         values[role] = read_artifact(path, cls, hashes[str(path)])
-    values['atlas'] = gate.collected_atlas(paths, values['data_manifest'].original_ids)
+    values.update(gate.collected_atlas_inputs(paths, values['data_manifest'].original_ids))
     values['approvals'] = read_mapping(gate.OWNER_APPROVALS)
     design = read_mapping(gate.DESIGN_CONFIG)
     gate._validate_data(values['data_manifest'], values['covariates'], values['geography'],
@@ -66,7 +66,9 @@ def build_inputs(values, design):
     geography, atlas, graph = values['geography'], values['atlas'], values['entity_graph']
     gate._validate_data(manifest, covariates, geography, atlas, graph)
     gate.validate_approvals(design, values['approvals'], manifest, covariates, geography, atlas)
-    require(atlas.coverage_complete, 'incomplete atlas coverage')
+    atlas_coverage = gate.atlas_coverage(values)
+    require(atlas_coverage['complete'], 'incomplete atlas coverage')
+    accounted_missing = set(atlas_coverage['accounted_missing_dem_tract_ids'])
     rows, a = geography.rows, {r.tract_id: r for r in atlas.rows}
     reservation = reserve_design(rows, graph)
     screens = county_screen(rows, a)
@@ -77,7 +79,9 @@ def build_inputs(values, design):
     for row in rows:
         if row.original_id in design_ids:
             continue
-        if not usable(row, a):
+        if row.tract_id in accounted_missing:
+            reasons[row.original_id] = 'atlas_missing_dem_coverage'
+        elif not usable(row, a):
             reasons[row.original_id] = 'flag_label_or_allocation_unusable'
         elif screens[row.county]['reasons']:
             reasons[row.original_id] = 'initial_county_screen'
@@ -94,12 +98,17 @@ def build_inputs(values, design):
         endpoints=tuple(dict.fromkeys((*rule.endpoints, ENDPOINT)))) for rule in manifest.registry.rules))
     spec = replace(scenario.data_manifest.spec, endpoint=ENDPOINT,
                    adjustment_schema_hash=registry.content_hash)
-    template_manifest = replace(scenario.data_manifest, spec=spec, registry=registry)
+    # Excluded/reserved rows remain in the lineage frame, but have no invented A.
+    # Only the outer inference target is simulated or fitted.
+    schema = tuple(replace(col, nullable=True)
+                   if accounted_missing and col.name == manifest.exposure_field else col
+                   for col in scenario.data_manifest.schema)
+    template_manifest = replace(scenario.data_manifest, spec=spec, registry=registry, schema=schema)
     outer = replace(scenario.outer, spec=spec, lineage=replace(scenario.outer.lineage,
                     parent_hashes=(template_manifest.content_hash,)))
     inners = []
     for inner in scenario.inner:
-        local = replace(inner.data_manifest, spec=spec, registry=registry,
+        local = replace(inner.data_manifest, spec=spec, registry=registry, schema=schema,
             lineage=replace(inner.data_manifest.lineage, parent_hashes=(template_manifest.content_hash,)))
         split = replace(inner.split, spec=spec,
             lineage=replace(inner.split.lineage, parent_hashes=(local.content_hash,)))
@@ -110,7 +119,8 @@ def build_inputs(values, design):
     for oid in template_manifest.original_ids:
         record = dict(zip(covariates.columns, x[oid]))
         record.update({manifest.id_field: oid, manifest.outcome_field: None,
-            manifest.exposure_field: a[by_id[oid].tract_id].exposure_mmhg,
+            manifest.exposure_field: (None if by_id[oid].tract_id in accounted_missing
+                                      else a[by_id[oid].tract_id].exposure_mmhg),
             geography.county_field: by_id[oid].county})
         records.append(record)
     data = load_records(records, template_manifest, spec, template_manifest.schema_hash)
@@ -129,7 +139,8 @@ def build_inputs(values, design):
     for row in campaign._registry()['scenarios']:
         SCMConfig(**row).validate_policy(frozen.policy, frame)
     knots = frozen.spline_knots
-    sealed_a = [a[r.tract_id].exposure_mmhg for r in rows if r.original_id in design_ids]
+    sealed_a = [a[r.tract_id].exposure_mmhg for r in rows
+                if r.original_id in design_ids and r.tract_id not in accounted_missing]
     center = sum(sealed_a) / len(sealed_a)
     scale = (sum((v - center) ** 2 for v in sealed_a) / len(sealed_a)) ** .5
     families = values['approvals']['owner_decisions']['endpoint_covariates'][manifest.spec.endpoint]['masking_families']
@@ -147,6 +158,8 @@ def build_inputs(values, design):
     for fold in range(5):
         endpoint.validate(fold)
     audit = {'input_rows': len(rows), 'evaluation_rows': len(selected),
+        'coverage': atlas_coverage,
+        'allocation_exclusions': gate.allocation_exclusions(rows, atlas_coverage, design_ids),
         'design_ids': list(reservation.design_ids), 'exclusions': list(scenario.exclusions),
         'cluster_sizes': dict(Counter(frame.cluster_ids)),
         'missing_covariates': sum(v is None for row in frame.x for v in row),

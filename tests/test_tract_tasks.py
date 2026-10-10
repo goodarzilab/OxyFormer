@@ -468,3 +468,84 @@ def test_gate_accepts_identical_approval_copy_but_refuses_changed_bytes(tmp_path
     owner_copy.write_text('modified owner document')
     with pytest.raises(ContractError):
         design_configuration(request)
+
+
+def collected_design_request(tmp_path, values, *, missing, accounted, absent=(), stage='tract-support-gate'):
+    """Synthetic collected publication and typed endpoint, through real dispatch."""
+    from dataclasses import replace
+    import pandas as pd
+    from oxyformer.provenance import write_artifact
+    inputs, atlas_dir = tmp_path / 'inputs', tmp_path / 'atlas'
+    inputs.mkdir(parents=True)
+    atlas_dir.mkdir()
+    for role in ('data_manifest', 'covariates', 'geography', 'entity_graph'):
+        write_artifact(inputs / (role + '.json'), values[role])
+    (inputs / 'acs_pool.parquet').write_bytes(b'unused synthetic SSL pool binding')
+    (inputs / 'input_audit.json').write_text('{}')
+    records = []
+    for row in values['atlas'].rows:
+        if row.tract_id in absent:
+            continue
+        omitted = row.tract_id in missing
+        records.append(dict(tract_id=row.tract_id, scenario='distributed', population=row.population,
+            missing_population=row.population if omitted else 0., status='missing_dem' if omitted else 'complete',
+            oxygen_deficit_mmhg=float('nan') if omitted else row.exposure_mmhg,
+            elevation_p50_m=float('nan') if omitted else row.inhabited_elevation_m))
+    pd.DataFrame(records).to_parquet(atlas_dir / 'atlas.parquet', index=False)
+    # The collector writes the same validated omission summary into both files.
+    quality = {'missing_dem_tracts': sorted(accounted)}
+    (atlas_dir / 'quality.json').write_text(canonical_json(quality))
+    publication = dict(kind='atlas-collect', status='pass', **quality,
+        source_identities={'synthetic': values['atlas'].source_hashes[0]},
+        files={n: file_hash(atlas_dir / n) for n in ('atlas.parquet', 'quality.json')})
+    (atlas_dir / 'artifact_manifest.json').write_text(canonical_json(publication))
+    req = envelope_request(tmp_path / 'request', 'tract-support-gate',
+                           {'tract-inputs': inputs, 'atlas-collect': atlas_dir})
+    if stage == 'real-frame-inputs':
+        task = yaml.safe_load((ROOT / 'configs/execution/tasks/campaign_profiles.yaml').read_text())['tasks'][0]
+        config = json.loads(Path(req.config_path).read_text())
+        config['stage'] = stage
+        Path(req.config_path).write_text(canonical_json(config))
+        Path(req.task_path).write_text(canonical_json(task))
+        req = replace(req, stage=stage, config_hash=file_hash(req.config_path), task_hash=file_hash(req.task_path))
+    return req
+
+
+def test_collector_quality_summary_accounts_only_missing_endpoint_tracts(tmp_path):
+    from oxyformer.design import gate
+    from oxyformer.exposure.build import _coverage_summary
+    import pandas as pd
+    paths = collected_fixture(tmp_path, incomplete=True)
+    quality_path = paths['atlas-collect', 'quality.json']
+    quality = json.loads(quality_path.read_text())
+    summary = _coverage_summary(pd.read_parquet(paths['atlas-collect', 'atlas.parquet']), quality)
+    quality.update(summary)
+    quality_path.write_text(canonical_json(quality))
+    publication_path = paths['atlas-collect', 'artifact_manifest.json']
+    publication = json.loads(publication_path.read_text())
+    publication.update(summary)
+    publication['files']['quality.json'] = file_hash(quality_path)
+    publication_path.write_text(canonical_json(publication))
+    expected = (IDS[0], IDS[1])
+    values = gate.collected_atlas_inputs(paths, expected)
+    values['approvals'] = yaml.safe_load(gate.OWNER_APPROVALS.read_text())
+    audit = gate.atlas_coverage(values)
+    assert audit['accounted_missing_dem_tract_ids'] == (IDS[0],)
+    assert audit['unaccounted_missing_tract_ids'] == (IDS[1],)
+    assert not audit['complete']
+    assert not values['atlas'].rows  # No missing exposure was filled in.
+    quality_path.write_text(quality_path.read_text() + ' ')
+    with pytest.raises(ContractError, match='binding mismatch'):
+        gate.collected_atlas_inputs(paths, expected)
+
+
+def test_collected_complete_tract_is_not_excluded_for_other_scenario_omission(tmp_path):
+    from oxyformer.design import gate
+    paths = collected_fixture(tmp_path)
+    publication_path = paths['atlas-collect', 'artifact_manifest.json']
+    publication = json.loads(publication_path.read_text())
+    publication['missing_dem_tracts'] = [IDS[0]]  # e.g. centroid-only missing coverage.
+    publication_path.write_text(canonical_json(publication))
+    values = gate.collected_atlas_inputs(paths, (IDS[0],))
+    assert values['atlas'].coverage_complete
+    assert values['atlas_missing_dem_tract_ids'] == ()
