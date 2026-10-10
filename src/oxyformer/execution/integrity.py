@@ -126,8 +126,14 @@ def _cached_digest(path):
                     # Writeback reprotects already-dirty shared mmap pages.
                     # Do this AFTER closing the timestamp quantum: any later
                     # store must fault and acquire a newer ctime before reuse.
-                    with open_regular(path) as stream:
-                        os.fsync(stream.fileno())
+                    fd = _open_observed_regular(path)
+                    try:
+                        opened = os.fstat(fd)
+                        if _stable(opened) != _stable(before):
+                            raise _unstable_input(path, 'input changed before writeback', before, opened)
+                        os.fsync(fd)
+                    finally:
+                        os.close(fd)
                 yield value
                 after = Path(path).lstat()
                 if _stable(after) != _stable(before):
