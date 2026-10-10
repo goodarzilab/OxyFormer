@@ -35,7 +35,8 @@ def primary_outcome_flags(approvals=None):
         return _primary_flags_from_text(OWNER_APPROVALS.read_text())
     owner = approvals.get("owner_decisions") if isinstance(approvals, dict) else None
     decision = owner.get("outcome_flags") if isinstance(owner, dict) else None
-    valid = isinstance(decision, dict)
+    valid = isinstance(decision, dict) and set(decision) == {
+        "primary", "excluded", "county_minimum_counts", "sensitivity"}
     if valid:
         for key, expected in (("primary", [1, 3]), ("excluded", [2])):
             values = decision.get(key)
@@ -61,7 +62,10 @@ def _reject_duplicate_approval_keys(text):
             continue
         visited.add(id(node))
         if isinstance(node, yaml.MappingNode):
-            keys = [(key.tag, key.value) for key, _ in node.value
+            # SafeLoader treats the YAML !!value tag as a string for mapping
+            # keys. Compare that same normalized identity before construction.
+            keys = [("tag:yaml.org,2002:str" if key.tag == "tag:yaml.org,2002:value"
+                     else key.tag, key.value) for key, _ in node.value
                     if isinstance(key, yaml.ScalarNode)]
             _require(len(keys) == len(set(keys)),
                      "duplicate YAML key in owner_decisions.outcome_flags approval document")

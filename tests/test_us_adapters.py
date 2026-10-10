@@ -456,3 +456,37 @@ copy_of_defaults: *defaults
 """)
     monkeypatch.setattr(usaleep, "OWNER_APPROVALS", owner_file)
     assert usaleep.primary_outcome_flags() == (1, 3)
+
+
+@pytest.mark.parametrize("field", ["allow_flag_2", "unknown"])
+def test_unrecognized_owner_outcome_fields_refused(tmp_path, mapping, monkeypatch, field):
+    from oxyformer.data.adapters import usaleep
+    approvals = yaml.safe_load(usaleep.OWNER_APPROVALS.read_text())
+    approvals["owner_decisions"]["outcome_flags"][field] = True
+    owner_file = tmp_path / "owner.yaml"
+    owner_file.write_text(yaml.safe_dump(approvals))
+    monkeypatch.setattr(usaleep, "OWNER_APPROVALS", owner_file)
+    with pytest.raises(ValueError, match="malformed owner_decisions.outcome_flags"):
+        load_usaleep(us_bundle(tmp_path, mapping), mapping)
+
+
+@pytest.mark.parametrize("duplicate", ["primary", "outcome_flags", "owner_decisions"])
+def test_tagged_duplicate_owner_keys_refused(tmp_path, mapping, monkeypatch, duplicate):
+    from oxyformer.data.adapters import usaleep
+    valid = ("  outcome_flags:\n"
+             "    primary: [1, 3]\n"
+             "    excluded: [2]\n"
+             "    county_minimum_counts: primary\n"
+             "    sensitivity: flag1_only\n")
+    if duplicate == "primary":
+        text = "owner_decisions:\n" + valid.replace(
+            "    primary: [1, 3]\n", "    !!value primary: [1, 2, 3]\n    primary: [1, 3]\n")
+    elif duplicate == "outcome_flags":
+        text = "owner_decisions:\n  !!value outcome_flags: {primary: [1, 2, 3]}\n" + valid
+    else:
+        text = "!!value owner_decisions: {outcome_flags: {primary: [1, 2, 3]}}\nowner_decisions:\n" + valid
+    owner_file = tmp_path / "owner.yaml"
+    owner_file.write_text(text)
+    monkeypatch.setattr(usaleep, "OWNER_APPROVALS", owner_file)
+    with pytest.raises(ValueError, match="duplicate.*owner_decisions.outcome_flags"):
+        load_usaleep(us_bundle(tmp_path, mapping), mapping)
