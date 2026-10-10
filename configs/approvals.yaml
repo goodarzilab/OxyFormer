@@ -214,7 +214,7 @@ owner_decisions:
   # section 4.1 target is recorded as infeasible as specified. Full text: the orchestrator's amendment A2 (plan review REVIEW_PASS,
   # round 2, Sol and Kimi). owner_decisions.tract_design above is pinned by the tract task file and is unchanged.
   tract_design_amendment:
-    new_estimand: "the first application gets a new estimand ID and a locked analysis; the current estimand ID is recorded as infeasible as specified and kept in the registry; no identifier label is approved here"   # amendment item 6, verbatim in substance
+    new_estimand: "the first application gets a new estimand ID and a locked analysis; the current estimand ID is recorded as infeasible as specified and kept in the registry"   # amendment item 6
     supersedes: "frozen section 4.1 target, recorded as infeasible as specified (tract-gate-r2, 2026-10-10)"
     eligibility_closure: tract            # a failing tract leaves the target by itself; dependence groups (lineage, assignment geography, county x 10 km subblock) stay intact for fold atomicity and buffers only
     non_target_frame_rows: "primary-eligible labelled rows are training rows for the outcome regression and SSL; all others are inert; the density-ratio classifier fits on target-distribution rows only (section 4.2)"
