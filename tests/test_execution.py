@@ -4208,3 +4208,245 @@ def test_allocation_threads_discovers_nonstandard_mount(monkeypatch, tmp_path, v
     monkeypatch.setattr(Path, 'read_text', read_text)
     monkeypatch.setattr(Path, 'is_file', is_file)
     assert allocation_threads(membership=membership) == 2
+
+
+@mark.parametrize('producers', [1, 3])
+def test_acquisition_hash_once_per_stage_chain(runtime, acquisition, tmp_path, monkeypatch, producers):
+    """Count full digest reads, by admission/worker/post-exit call path."""
+    from collections import Counter
+    from oxyformer.execution import integrity, runner
+    repo, _ = runtime
+    payload = acquisition / 'payload.tar'
+    payload.write_bytes(b'synthetic payload block\n' * (2 ** 19))
+    (acquisition / 'receipts.json').write_text(json.dumps({'status': 'complete',
+        'payload_sha256': file_hash(payload), 'payload_bytes': payload.stat().st_size}))
+    counts = Counter()
+    original_fdopen, original_path_open = os.fdopen, Path.open
+    phase = 'admission'
+
+    class CountedStream:
+        def __init__(self, stream):
+            self.stream, self.counted = stream, False
+        def __getattr__(self, name):
+            return getattr(self.stream, name)
+        def __enter__(self):
+            self.stream.__enter__()
+            return self
+        def __exit__(self, *args):
+            return self.stream.__exit__(*args)
+        def read(self, *args):
+            if not self.counted:
+                counts[phase] += 1
+                self.counted = True
+            return self.stream.read(*args)
+
+    def wrap(stream):
+        observed, expected = os.fstat(stream.fileno()), payload.stat()
+        if (observed.st_dev, observed.st_ino) == (expected.st_dev, expected.st_ino):
+            callers = {frame.function for frame in inspect.stack()}
+            if callers & {'regular_file_hash', 'file_hash', 'visit'}:
+                return CountedStream(stream)
+        return stream
+
+    def fdopen(*args, **kwargs):
+        return wrap(original_fdopen(*args, **kwargs))
+
+    def path_open(*args, **kwargs):
+        return wrap(original_path_open(*args, **kwargs))
+
+    original_post = runner.post_execution_check
+    def post(*args, **kwargs):
+        nonlocal phase
+        phase = 'post-exit'
+        return original_post(*args, **kwargs)
+
+    def worker(request):
+        nonlocal phase
+        phase = 'worker'
+        return dummy(request)
+
+    monkeypatch.setattr(os, 'fdopen', fdopen)
+    monkeypatch.setattr(Path, 'open', path_open)
+    monkeypatch.setattr(runner, 'post_execution_check', post)
+    install_stage(monkeypatch, repo, worker)
+    records = []
+    needs = {}
+    for index in range(producers):
+        counts.clear()
+        phase = 'admission'
+        unit = f'producer-{index}'
+        out = new_attempt(repo, tmp_path / unit)
+        assert_pass(run_task(repo, out, id=unit, needs={'fetch-data': ['payload.tar', 'receipts.json']}))
+        records.append(dict(counts))
+        monkeypatch.setenv(dependency_variable(unit), str(out))
+        needs[unit] = ['value.json']
+    counts.clear()
+    phase = 'admission'
+    consumer = new_attempt(repo, tmp_path / 'consumer')
+    assert_pass(run_task(repo, consumer, needs=needs))
+    records.append(dict(counts))
+    print(f'acquisition full-hash counts ({producers} producers + consumer): {records}')
+    assert records == [{'admission': 1}] * (producers + 1)
+
+
+def count_regular_digest_reads(monkeypatch, paths):
+    from oxyformer.execution import integrity
+    calls = []
+    original = integrity._ObservedStream._read
+    def read(stream, *args, **kwargs):
+        if stream.path in paths and stream.stream.tell() == 0:
+            calls.append(stream.path)
+        return original(stream, *args, **kwargs)
+    monkeypatch.setattr(integrity._ObservedStream, '_read', read)
+    return calls
+
+
+@mark.parametrize('change', ['inode', 'size', 'mtime', 'ctime', 'path', 'stat-error'])
+def test_run_hash_cache_invalidates_identity_and_failed_stat(tmp_path, monkeypatch, change):
+    from oxyformer.execution import integrity
+    import errno
+    payload = tmp_path / 'payload.tar'
+    payload.write_bytes(b'synthetic data')
+    expected = file_hash(payload)
+    calls = count_regular_digest_reads(monkeypatch, {payload, tmp_path / 'alias'})
+    with integrity.stage_hash_cache():
+        for _ in range(2):
+            integrity.verify_input_hash(payload, expected)
+        assert len(calls) == 1
+        if change == 'inode':
+            replacement = tmp_path / 'replacement'
+            replacement.write_bytes(payload.read_bytes())
+            replacement.replace(payload)
+        elif change == 'size':
+            payload.write_bytes(b'longer synthetic data')
+            expected = file_hash(payload)
+        elif change == 'mtime':
+            old = payload.stat()
+            os.utime(payload, ns=(old.st_atime_ns, old.st_mtime_ns + 1_000_000_000))
+        elif change in ('ctime', 'path'):
+            alias = tmp_path / 'alias'
+            os.link(payload, alias)
+            # Admit the new ctime first, then test a different hard-link path.
+            if change == 'path':
+                integrity.verify_input_hash(payload, expected)
+                calls.clear()
+                payload = alias
+        else:
+            original = Path.lstat
+            def unreadable(path, *args, **kwargs):
+                if path == payload:
+                    raise OSError(errno.EIO, 'synthetic stat failure')
+                return original(path, *args, **kwargs)
+            with monkeypatch.context() as patch:
+                patch.setattr(Path, 'lstat', unreadable)
+                with raises(OSError, match='synthetic stat failure'):
+                    integrity.verify_input_hash(payload, expected)
+        integrity.verify_input_hash(payload, expected)
+        assert len(calls) == (1 if change == 'path' else 2)
+    # Another invocation must read the bytes again, including in one interpreter.
+    count = len(calls)
+    with integrity.stage_hash_cache():
+        integrity.verify_input_hash(payload, expected)
+    assert len(calls) == count + 1
+
+
+def test_hash_once_cache_rejects_inflight_write(tmp_path):
+    from oxyformer.execution import integrity
+    payload = tmp_path / 'payload.tar'
+    payload.write_bytes(b'original')
+    expected = file_hash(payload)
+    def racing_hash(path):
+        digest = file_hash(path)
+        Path(path).write_bytes(b'new data with a different size')
+        return digest
+    with integrity.stage_hash_cache():
+        with raises(ContractError, match='changed while hashing'):
+            integrity.verify_input_hash(payload, expected, hash_file=racing_hash)
+        # The failed digest must never become a cache hit.
+        with raises(ContractError, match='input hash mismatch'):
+            integrity.verify_input_hash(payload, expected)
+
+
+def test_acquisition_hash_once_across_cli_process_tree(runtime, acquisition, tmp_path, monkeypatch):
+    repo, out = runtime
+    payload = acquisition / 'payload.tar'
+    events = tmp_path / 'hash-events.jsonl'
+    monkeypatch.setenv('HASH_TEST_PAYLOAD', str(payload))
+    monkeypatch.setenv('HASH_TEST_EVENTS', str(events))
+    prepare_cli_fixture(repo, out, 'run_stage = dummy\n')
+    # Python loads this instrumentation in the runner, supervisor and worker.
+    # Count complete digest streams without altering the hashing implementation.
+    (repo / 'src/sitecustomize.py').write_text('''import io
+import os
+from pathlib import Path
+original_fdopen, original_open = os.fdopen, io.open
+payload = os.environ['HASH_TEST_PAYLOAD']
+class CountedStream:
+    def __init__(self, stream):
+        self.stream, self.counted = stream, False
+    def __getattr__(self, name):
+        return getattr(self.stream, name)
+    def __enter__(self):
+        self.stream.__enter__()
+        return self
+    def __exit__(self, *args):
+        return self.stream.__exit__(*args)
+    def read(self, *args):
+        if not self.counted:
+            import inspect, json
+            callers = {frame.function for frame in inspect.stack()}
+            if callers & {'file_hash', 'regular_file_hash', 'visit'}:
+                with original_open(os.environ['HASH_TEST_EVENTS'], 'a') as log:
+                    log.write(json.dumps({'pid': os.getpid(), 'callers': sorted(callers)}) + '\\n')
+            self.counted = True
+        return self.stream.read(*args)
+def wrap(stream):
+    if isinstance(stream, CountedStream):
+        return stream
+    observed, expected = os.fstat(stream.fileno()), os.stat(payload)
+    if (observed.st_dev, observed.st_ino) == (expected.st_dev, expected.st_ino):
+        return CountedStream(stream)
+    return stream
+def fdopen(*args, **kwargs):
+    return wrap(original_fdopen(*args, **kwargs))
+def io_open(*args, **kwargs):
+    return wrap(original_open(*args, **kwargs))
+os.fdopen, io.open = fdopen, io_open
+''')
+    (out / 'code_commit.txt').write_text(commit(repo))
+    command = [sys.executable, '-m', 'oxyformer.cli', 'run-stage', '--stage', 'dummy',
+        '--repo', str(repo), '--out', str(out), '--deps-env', '--task',
+        str(task_file(out, needs={'fetch-data': ['payload.tar', 'receipts.json']}))]
+    process = subprocess.run(command, cwd=repo, env=fixture_env(repo), capture_output=True,
+        text=True, timeout=60)
+    assert_exit(process, 0)
+    records = [json.loads(line) for line in events.read_text().splitlines()]
+    print('CLI process-tree full-hash calls:', records)
+    assert len(records) == 1
+    assert_pass(read_result(out))
+
+
+@mark.parametrize('reader', ['fingerprint', 'stream'])
+def test_failed_stat_outside_hash_invalidates_digest(tmp_path, monkeypatch, reader):
+    from oxyformer.execution import integrity
+    import errno
+    payload = tmp_path / 'payload.tar'
+    payload.write_bytes(b'synthetic data')
+    expected = file_hash(payload)
+    calls = count_regular_digest_reads(monkeypatch, {payload})
+    original = Path.lstat
+    def unreadable(path, *args, **kwargs):
+        if path == payload:
+            raise OSError(errno.EIO, 'synthetic stat failure')
+        return original(path, *args, **kwargs)
+    with integrity.stage_hash_cache():
+        integrity.verify_input_hash(payload, expected)
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, 'lstat', unreadable)
+            if reader == 'fingerprint':
+                assert 'error' in integrity.fingerprint_tree(payload)['.']
+            else:
+                with raises(OSError, match='synthetic stat failure'):
+                    integrity.read_regular(payload)
+        integrity.verify_input_hash(payload, expected)
+        assert len(calls) == 2

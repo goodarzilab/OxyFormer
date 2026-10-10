@@ -14,7 +14,7 @@ import stat
 import tempfile
 
 from oxyformer.contracts import StageResult
-from oxyformer.provenance import ArtifactRecord, ContractError, canonical_json, require
+from oxyformer.provenance import ArtifactRecord, ContractError, canonical_json, require, file_hash as provenance_file_hash
 from .paths import atomic_json, atomic_write, output_path, temporary_path
 
 FINGERPRINT = "_execution/fingerprint.json"
@@ -26,6 +26,93 @@ _OBSERVATION_STATES = {}
 _RECORDING_REFUSAL = ContextVar('recording_refusal', default=False)
 _OBSERVATION_ENV = 'OXYFORMER_OBSERVATION_ATTEMPT'
 
+
+
+_HASH_CACHE_ENV = 'OXYFORMER_RUN_HASH_CACHE'
+_HASHING_PATHS = ContextVar('hashing_paths', default=())
+
+
+@contextmanager
+def stage_hash_cache():
+    """One private cache for admission, workers and post-exit observation.
+
+    Each invocation owns a fresh directory, even when nested in another run.
+    Children inherit only its location. The runner reaps them before removing
+    it; nothing is reused by a later stage or stored in acquisition attempts.
+    """
+    previous = os.environ.get(_HASH_CACHE_ENV)
+    directory = tempfile.mkdtemp(prefix='oxyformer-run-hashes-')
+    os.environ[_HASH_CACHE_ENV] = directory
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(_HASH_CACHE_ENV, None)
+        else:
+            os.environ[_HASH_CACHE_ENV] = previous
+        # Cache records are flat; no recursive traversal or worker cache paths.
+        for name in os.listdir(directory):
+            os.unlink(Path(directory) / name)
+        os.rmdir(directory)
+
+
+def _invalidate_digest(path):
+    directory = os.environ.get(_HASH_CACHE_ENV)
+    key = os.fspath(path)
+    if directory is None or key in _HASHING_PATHS.get():
+        return  # An enclosing cache transaction invalidates its own failure.
+    cache = Path(directory) / sha256(key.encode()).hexdigest()
+    with cache.open('a+b') as record:
+        fcntl.flock(record.fileno(), fcntl.LOCK_EX)
+        record.truncate(0)
+
+
+@contextmanager
+def _cached_digest(path):
+    """Reuse only a digest bracketed by identical kernel identities.
+
+    The per-path lock covers the complete hash, so simultaneous descendants
+    cannot each scan the same file. Exceptions invalidate the entry, including
+    failed stats. A different path never shares an entry, even for hard links.
+    The ordinary reader still owns namespace, content and refusal observations.
+    """
+    directory = os.environ.get(_HASH_CACHE_ENV)
+    key = os.fspath(path)
+    if directory is None or key in _HASHING_PATHS.get():
+        yield [None]
+        return
+    token = _HASHING_PATHS.set((*_HASHING_PATHS.get(), key))
+    try:
+        cache = Path(directory) / sha256(key.encode()).hexdigest()
+        with cache.open('a+b') as record:
+            fcntl.flock(record.fileno(), fcntl.LOCK_EX)
+            try:
+                before = Path(path).lstat()
+                if not stat.S_ISREG(before.st_mode):
+                    raise InputChanged(path, 'input is not a regular file')
+                identity = list(_stable(before))
+                record.seek(0)
+                raw = record.read()
+                saved = json.loads(raw) if raw else None
+                value = [saved['digest'] if saved is not None and saved['path'] == key
+                    and saved['identity'] == identity else None]
+                yield value
+                after = Path(path).lstat()
+                if _stable(after) != _stable(before):
+                    raise _unstable_input(path, 'input changed while hashing', before, after)
+                if value[0] is not None:
+                    record.seek(0)
+                    record.truncate()
+                    record.write(canonical_json({'path': key, 'identity': identity,
+                        'digest': value[0]}).encode())
+                    record.flush()
+            except BaseException:
+                record.seek(0)
+                record.truncate()
+                record.flush()
+                raise
+    finally:
+        _HASHING_PATHS.reset(token)
 
 
 def _observation_state():
@@ -275,6 +362,7 @@ def acquisition_read(path, *, kind=stat.S_IFREG):
         yield
     except (OSError, ContractError) as exc:
         try:
+            _invalidate_digest(path)
             if (isinstance(exc, InputTypeError)
                     or isinstance(exc, InputChanged) and exc.content_changed
                     or isinstance(exc, OSError) and exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.EISDIR)):
@@ -291,7 +379,17 @@ def acquisition_read(path, *, kind=stat.S_IFREG):
 def verify_input_hash(path, expected, *, hash_file=None):
     """A wrong request digest is not evidence that the acquisition changed."""
     with acquisition_read(path):
-        actual = (regular_file_hash if hash_file is None else hash_file)(path)
+        with _cached_digest(path) as cached:
+            standard_reader = hash_file in (None, regular_file_hash, provenance_file_hash)
+            # Custom readers retain their call semantics, including observations
+            # they make around the read. Only the built-in digest adapters reuse.
+            if cached[0] is None or not standard_reader:
+                cached[0] = (regular_file_hash if hash_file is None else hash_file)(path)
+            else:
+                # Reuse bytes, never namespace/type/readability observations.
+                with open_regular(path):
+                    pass
+            actual = cached[0]
         observe_acquisition(path, digest=actual)
         require(actual == expected, f'input hash mismatch: {path}')
     return actual
@@ -461,12 +559,15 @@ def read_regular(path):
 
 
 def regular_file_hash(path):
-    digest = sha256()
-    with open_regular(path) as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
-            digest.update(chunk)
-        value = digest.hexdigest()
-        observe_acquisition(path, digest=value)
+    with acquisition_read(path), _cached_digest(path) as cached:
+        with open_regular(path) as stream:
+            if cached[0] is None:
+                digest = sha256()
+                for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                    digest.update(chunk)
+                cached[0] = digest.hexdigest()
+            value = cached[0]
+            observe_acquisition(path, digest=value)
     return value
 
 
@@ -524,20 +625,23 @@ def fingerprint_tree(root, *, exclude=(), include=None):
             if stat.S_ISLNK(kind):
                 entry['target'] = os.readlink(path)
             elif stat.S_ISREG(kind):
-                digest = sha256()
-                fd = _open_observed_regular(path)
-                with os.fdopen(fd, 'rb') as stream:
-                    opened = os.fstat(stream.fileno())
-                    if _stable(opened) != _stable(before):
-                        raise InputChanged(path, 'entry changed before hashing',
-                            content_changed=_content_metadata(opened) != _content_metadata(before))
-                    for chunk in iter(lambda: stream.read(1024 * 1024), b''):
-                        digest.update(chunk)
-                    entry['sha256'] = digest.hexdigest()
-                    after = os.fstat(stream.fileno())
-                    if _stable(after) != _stable(before):
-                        raise InputChanged(path, 'entry changed while hashing',
-                            content_changed=_content_metadata(after) != _content_metadata(before))
+                with _cached_digest(path) as cached:
+                    digest = sha256()
+                    fd = _open_observed_regular(path)
+                    with os.fdopen(fd, 'rb') as stream:
+                        opened = os.fstat(stream.fileno())
+                        if _stable(opened) != _stable(before):
+                            raise InputChanged(path, 'entry changed before hashing',
+                                content_changed=_content_metadata(opened) != _content_metadata(before))
+                        if cached[0] is None:
+                            for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                                digest.update(chunk)
+                            cached[0] = digest.hexdigest()
+                        entry['sha256'] = cached[0]
+                        after = os.fstat(stream.fileno())
+                        if _stable(after) != _stable(before):
+                            raise InputChanged(path, 'entry changed while hashing',
+                                content_changed=_content_metadata(after) != _content_metadata(before))
             elif stat.S_ISDIR(kind):
                 if partial(relative):
                     # Only traverse selected children; never open or enumerate
@@ -568,6 +672,7 @@ def fingerprint_tree(root, *, exclude=(), include=None):
                 raise InputChanged(path, 'entry changed while fingerprinting',
                     content_changed=_content_metadata(after) != _content_metadata(before))
         except (OSError, InputChanged) as exc:
+            _invalidate_digest(path)
             if isinstance(exc, InputChanged) and exc.content_changed:
                 entry['changed'] = True
             if isinstance(exc, OSError) and exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
@@ -664,6 +769,7 @@ def check_dependency_identities(identities, *, observed_changes=None):
             try:
                 metadata = path.lstat()
             except OSError as exc:
+                _invalidate_digest(path)
                 changed = tainted = exc.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP)
                 if not changed:
                     detail['unreadable_paths'].append(name)

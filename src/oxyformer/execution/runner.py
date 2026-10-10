@@ -17,7 +17,7 @@ from .integrity import (DEPENDENCY_CHECK, FINGERPRINT, RESULT, _replace_control,
     post_execution_check, publish_result, record_taints, snapshot_dependency_identities, observe_dependencies,
     directory_path, read_regular, regular_file_stat, regular_file_hash as file_hash,
     fingerprint_tree, publication_receipt, InputChanged, acquisition_read, _acquisition_binding,
-    integrity_observation,
+    integrity_observation, stage_hash_cache,
     acquisition_changed_paths, verify_input_hash, authority_exists,
     verify_inputs, verify_result, verify_published_tree)
 from .identity import git_bytes, code_identity, environment_record, scientific_fingerprint, verify_recipe
@@ -364,6 +364,7 @@ def verify_continuation(task, deps):
     verify_dependency_result(deps[predecessor])
 
 
+@stage_hash_cache()
 def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, approvals=None, execute=None):
     out = Path(out).absolute()
     require(out.is_dir() and not out.is_symlink(), 'output must be an existing attempt directory')
