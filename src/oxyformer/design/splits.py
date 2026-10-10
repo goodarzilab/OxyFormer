@@ -16,6 +16,7 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from oxyformer.contracts import DataManifest, SplitManifest
+from oxyformer.data.adapters.usaleep import primary_outcome_flags
 from oxyformer.data.entity_graph import EntityGraph
 from oxyformer.data.loaders import validate_split
 from oxyformer.design.eligibility import county_screen
@@ -132,8 +133,9 @@ def buffer_exclusions(rows, folds, groups, radius_km):
 
 
 def tract_count(rows, county):
+    flags = primary_outcome_flags()
     return len({r.tract_id for r in rows if r.county == county
-                and r.outcome_flag == 1 and r.label_available})
+                and r.outcome_flag in flags and r.label_available})
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

@@ -25,6 +25,7 @@ import torch
 import yaml
 
 from oxyformer.contracts import CovariateView, OOFNuisances, SplitManifest, StageRequest, StageResult
+from oxyformer.data.adapters.usaleep import primary_outcome_flags
 from oxyformer.data.entity_graph import EntityGraph
 from oxyformer.data.loaders import LoadedData, validate_split
 from oxyformer.design.eligibility import GeographyTable
@@ -144,8 +145,9 @@ def _validate_geography(data, graph, outer, inner, geography, county_field, fold
     require(set(rows) == set(manifest.original_ids), "geographic coverage mismatch")
     routes = dict(zip(manifest.original_ids, data.county_routing(county_field)))
     require(all(rows[i].county == routes[i] for i in rows), "county route mismatch")
-    require(all(rows[i].outcome_flag == 1 and rows[i].label_available for i in outer.original_ids),
-            "modeled or unavailable labels forbidden")
+    flags = primary_outcome_flags()
+    require(all(rows[i].outcome_flag in flags and rows[i].label_available for i in outer.original_ids),
+            "non-primary or unavailable labels forbidden")
     groups = dependence_groups(geography.rows, graph)
     _whole_groups(groups, _split_assignments(outer))
     _whole_groups(groups, _split_assignments(inner.split))
