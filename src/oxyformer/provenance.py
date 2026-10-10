@@ -71,7 +71,10 @@ def _coerce(value, annotation):
 
 def _plain(value):
     if is_dataclass(value):
-        return {f.name: _plain(getattr(value, f.name)) for f in fields(value)}
+        # Opt-in omission preserves canonical bytes when a contract gains empty
+        # optional fields. Nonempty values are always content-addressed.
+        return {f.name: _plain(getattr(value, f.name)) for f in fields(value)
+                if not (f.metadata.get("omit_empty") and getattr(value, f.name) == ())}
     if isinstance(value, tuple):
         return [_plain(x) for x in value]
     return value

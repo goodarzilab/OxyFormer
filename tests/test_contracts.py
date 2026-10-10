@@ -401,3 +401,22 @@ def test_split_roles_preserve_frame_but_limit_training_and_oof(fixture):
     nuisance = replace(nuisance, **{key: tuple(getattr(nuisance, key)[j] for j in ix) for key in vectors},
                        lineage=replace(nuisance.lineage, unit_ids=split.target_ids))
     validate_oof(nuisance, data, split)
+
+
+def test_legacy_split_canonical_bytes_omit_only_empty_role_extensions(fixture):
+    from dataclasses import dataclass
+    from oxyformer.provenance import Immutable, canonical_json
+    _, _, split, _, _ = fixture
+    extension_fields = {"frame_ids", "frame_fold_ids", "membership_roles", "training_exclusions"}
+    legacy = split.to_dict()
+    assert not extension_fields.intersection(legacy["payload"])
+    assert SplitManifest.from_json(canonical_json(legacy)) == split
+    @dataclass(frozen=True, slots=True, kw_only=True)
+    class WrappedSplit(Immutable):
+        split: SplitManifest
+    assert WrappedSplit(split=split).to_dict()["payload"]["split"] == legacy["payload"]
+    explicit = replace(split, frame_ids=split.original_ids, frame_fold_ids=split.fold_ids,
+                       membership_roles=("target",) * len(split.original_ids))
+    assert explicit.content_hash != split.content_hash
+    assert set(extension_fields - {"training_exclusions"}) <= set(explicit.to_dict()["payload"])
+    assert SplitManifest.from_json(explicit.to_json()) == explicit

@@ -109,6 +109,10 @@ only `data.covariates(columns, use=...)`. `county_routing(name)` is separate.
 construction and deserialization also reject them. Opaque lineage hashes may
 change with upstream labels, but covariate values contain no label channel.
 
+Empty A2 extension fields are omitted from canonical split serialization,
+including embedded splits, so legacy all-target artifacts retain their hashes.
+Nonempty roles, frame fields and exclusions are always serialized and hashed.
+
 A2 split `membership_roles` align with `frame_ids`: `target` means an
 eligible evaluation tract (also usable in other folds' training), `training`
 means an eligible labelled non-target tract, and `inert` grants no evaluation
@@ -177,16 +181,8 @@ Checkpoint writers own atomic publication and format-specific validation. No
 universal tensor/checkpoint schema or runtime stage is fabricated here.
 
 
-The A2 gate publishes `SplitScenarioDesign` records in `splits.json`. These are
-outcome-blind decisions, including `SplitMembership` and `InnerMembership`,
-without outcome-bearing source or parent hashes. The existing stage receipt
-(`artifact_manifest.json`) binds the exact request, sources and output bytes.
-After verifying that receipt, consumers call
-`SplitScenarioDesign.from_json(...).bind(input_manifest, entity_graph)` using
-the verified request's inputs. Binding checks frame/schema/registry/graph and
-scientific metadata, then constructs the full `SplitScenario`, `DataManifest`
-and `SplitManifest` provenance for fitting. No source hashes are dropped from
-those bound contracts. A Y-only source change therefore preserves design,
-split-decision and support-report bytes, while changing the receipt and bound
-fitting provenance. The previous embedded `SplitScenario` gate serialization
-is superseded; low-level in-memory scenario contracts remain available.
+The A2 gate continues to publish source-bound `SplitScenario` records in
+`splits.json`. Consumers verify the stage receipt and deserialize these records
+with the existing contract. Source and parent hashes remain authoritative;
+outcome-blindness compares decisions while allowing only the documented
+provenance paths to change when an upstream Y payload changes.

@@ -102,7 +102,9 @@ def test_real_frame_refuses_missing_atlas_and_failed_primary_gate():
                               coverage_complete=False)
     with pytest.raises(ContractError, match='incomplete atlas'):
         real_frame.build_inputs(values, config)
-    values['atlas'] = replace(atlas, rows=tuple(replace(r, inhabited_elevation_m=1.) for r in atlas.rows))
+    values['atlas'] = atlas
+    values['geography'] = replace(values['geography'], rows=tuple(
+        replace(r, label_available=False) for r in values['geography'].rows))
     with pytest.raises(ContractError, match='no tract target'):
         real_frame.build_inputs(values, config)
 

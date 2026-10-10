@@ -150,6 +150,18 @@ and `plan_fixed.min_inhabited_relief_m: 300` remain recorded in approvals.
 County P90–P10 inhabited relief is now a diagnostic. The four-tract minimum and
 local comparison within 25 km still screen counties.
 
+The Y-perturbation acceptance criterion concerns decisions, not serialized
+provenance (orchestrator clarification, 2026-10-10). Under a Y-only change,
+`design.json`, `support_report.json`, target hashes, estimand IDs, fold
+assignments, exclusions, buffers, policy IDs and support hashes are identical.
+`splits.json` retains the existing source-bound `SplitScenario` interface and
+may differ only in honest provenance. The canonical regression comparison
+strips exactly `spec.source_lineage_hash`, `lineage.source_hashes`, and
+`lineage.parent_hashes` from each outer/inner split and data manifest, plus
+`DataManifest.sources[*].payload_hash`. It retains every other field, including
+source schema/review metadata, graph/config hashes and all scientific decisions.
+No production provenance is removed, rewritten or weakened by this comparison.
+
 A joint outcome-blind feasibility census is required before approval of any new
 gate design or wider threshold. Reports retain counts per layer and county,
 flags, target hashes, maximum county share, effective counties

@@ -1,4 +1,5 @@
 """Synthetic CPU-only design tests. No production payloads or network calls."""
+from copy import deepcopy
 from dataclasses import FrozenInstanceError, replace
 from hashlib import sha256
 import json
@@ -13,7 +14,7 @@ from oxyformer.data.feature_roles import FeatureRegistry, FeatureRule
 from oxyformer.design.eligibility import AtlasRow, CollectedAtlas, GeographyRow, GeographyTable, county_screen
 from oxyformer.design.gate import FrozenDesign, OWNER_APPROVALS, run_stage, validate_approvals, MissingPrerequisite
 from oxyformer.design.policies import PolicyCovariates
-from oxyformer.design.splits import reserve_design, SplitScenarioDesign
+from oxyformer.design.splits import reserve_design, SplitScenario
 from oxyformer.design.support import SupportRecipe, connected_components, freeze_support, policy_for
 from oxyformer.provenance import ArtifactLineage, ContractError, canonical_json, file_hash, write_artifact
 
@@ -195,15 +196,38 @@ def test_stage_outputs_frozen_exclusions_and_buffer_target_changes(tmp_path):
     assert (output / "design.json").read_bytes() == before
 
 
+def split_decisions(payload):
+    """Strip only the exact outcome-bearing provenance paths, never decisions."""
+    value = deepcopy(payload)
+    def strip(record, *, manifest=False):
+        record["spec"].pop("source_lineage_hash")
+        record["lineage"].pop("source_hashes")
+        record["lineage"].pop("parent_hashes")
+        if manifest:
+            for source in record["sources"]:
+                source.pop("payload_hash")
+    for envelope in value["scenarios"]:
+        scenario = envelope["payload"]
+        strip(scenario["data_manifest"], manifest=True)
+        if scenario["outer"] is not None:
+            strip(scenario["outer"])
+        for inner in scenario["inner"]:
+            strip(inner["data_manifest"], manifest=True)
+            strip(inner["split"])
+    return canonical_json(value).encode()
+
+
 def test_y_perturbation_leaves_design_and_split_decisions_identical(tmp_path):
     left, right = make_request(tmp_path / "a", make_inputs(label_offset=0)), make_request(tmp_path / "b", make_inputs(label_offset=9999))
     a, b = run_stage(left), run_stage(right)
     assert a.status == b.status == "pass"
     assert (Path(left.output_dir) / "design.json").read_bytes() == (Path(right.output_dir) / "design.json").read_bytes()
-    for name in ("splits.json", "support_report.json"):
+    for name in ("support_report.json",):
         assert (Path(left.output_dir) / name).read_bytes() == (Path(right.output_dir) / name).read_bytes()
     l = json.loads((Path(left.output_dir) / "splits.json").read_text())
     r = json.loads((Path(right.output_dir) / "splits.json").read_text())
+    assert l != r  # honest upstream provenance changes
+    assert split_decisions(l) == split_decisions(r)
     for ls, rs in zip(l["scenarios"], r["scenarios"]):
         for key in ("target_id", "exclusions", "count_audit"):
             assert ls["payload"][key] == rs["payload"][key]
@@ -288,7 +312,7 @@ def test_primary_flag_exclusions_are_explicit(tmp_path):
     assert report["scenarios"][0]["evaluation_flag_counts"]["2"] == 0
     assert all(report["mortality_input_flag"][oid] == 2 for oid in bad)
     from oxyformer.design.splits import SplitScenario
-    split = SplitScenarioDesign.from_json(canonical_json({"type": "SplitScenarioDesign", "schema_version": 1, "payload": primary})).bind(v["data_manifest"], v["entity_graph"]).outer
+    split = SplitScenario.from_json(canonical_json({"type": "SplitScenario", "schema_version": 1, "payload": primary})).outer
     assert bad <= set(split.frame_original_ids)
     assert not bad.intersection(split.target_ids)
     for fold in range(5):
@@ -578,7 +602,7 @@ def test_a2_census_relief_registry_and_fallback(tmp_path):
     out = Path(request.output_dir)
     report = json.loads((out / "support_report.json").read_text())
     splits = json.loads((out / "splits.json").read_text())
-    scenario = SplitScenarioDesign.from_json(canonical_json(splits["scenarios"][0])).bind(v["data_manifest"], v["entity_graph"])
+    scenario = SplitScenario.from_json(canonical_json(splits["scenarios"][0]))
     assert report["declared_fallback"] == {"raw_x_radius_iqr": 3.0, "run": False}
     assert report["estimand_registry"][0]["estimand_id"] == FROZEN_TARGET_ID
     assert report["estimand_registry"][0]["status"] == "infeasible as specified"
@@ -594,7 +618,7 @@ def test_a2_census_relief_registry_and_fallback(tmp_path):
     assert all(sum(layer["per_county"].values()) == layer["tracts"] for layer in report["layers"].values())
 
 
-def test_split_decision_binding_retains_honest_sources_and_rejects_wrong_frame(tmp_path):
+def test_published_splits_retain_honest_sources(tmp_path):
     from oxyformer.data.loaders import validate_split
     inputs = make_inputs()
     request = make_request(tmp_path, inputs)
@@ -602,18 +626,11 @@ def test_split_decision_binding_retains_honest_sources_and_rejects_wrong_frame(t
     assert result.status == "pass"
     result.verify(request)
     record = json.loads((Path(request.output_dir) / "splits.json").read_text())["scenarios"][0]
-    decision = SplitScenarioDesign.from_json(canonical_json(record))
-    bound = decision.bind(inputs["data_manifest"], inputs["entity_graph"])
+    bound = SplitScenario.from_json(canonical_json(record))
     validate_split(bound.outer, bound.data_manifest, inputs["entity_graph"])
     assert bound.data_manifest.sources == inputs["data_manifest"].sources
     assert inputs["data_manifest"].content_hash in bound.data_manifest.lineage.parent_hashes
-    changed = make_inputs(label_offset=9999)
-    rebound = decision.bind(changed["data_manifest"], changed["entity_graph"])
-    assert rebound.outer.lineage.source_hashes != bound.outer.lineage.source_hashes
-    assert rebound.target_hash == bound.target_hash
-    wrong = replace(inputs["data_manifest"], spec=replace(inputs["data_manifest"].spec, weight_id="wrong-weight"))
-    with pytest.raises(ContractError, match="split design/data binding mismatch"):
-        decision.bind(wrong, inputs["entity_graph"])
+
 
 
 def test_support_caliper_keeps_the_thirtieth_covariate():

@@ -1,7 +1,7 @@
 """Proposed internal APIs. These contracts do not assert scientific eligibility."""
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from hashlib import sha256
 from pathlib import Path
 import re
@@ -166,10 +166,10 @@ class SplitManifest(Immutable):
     lineage: ArtifactLineage
     # Empty roles preserve existing all-target manifests. Explicit roles retain
     # inert frame rows in geographic folds without granting fitting permission.
-    frame_ids: tuple[str, ...] = ()
-    frame_fold_ids: tuple[int, ...] = ()
-    membership_roles: tuple[Literal["target", "training", "inert"], ...] = ()
-    training_exclusions: tuple[tuple[int, tuple[str, ...]], ...] = ()
+    frame_ids: tuple[str, ...] = field(default=(), metadata={"omit_empty": True})
+    frame_fold_ids: tuple[int, ...] = field(default=(), metadata={"omit_empty": True})
+    membership_roles: tuple[Literal["target", "training", "inert"], ...] = field(default=(), metadata={"omit_empty": True})
+    training_exclusions: tuple[tuple[int, tuple[str, ...]], ...] = field(default=(), metadata={"omit_empty": True})
 
     def __post_init__(self):
         Immutable.__post_init__(self)
