@@ -191,8 +191,8 @@ def atlas_coverage(values):
     accounted = set(values.get('atlas_missing_dem_tract_ids', ()))
     require(accounted <= set(atlas.missing_tract_ids), 'accounted DEM omissions must be missing atlas tracts')
     if accounted:
-        decision = values['approvals'].get('owner_decisions', {}).get('tract_design', {})
-        if decision.get('atlas_missing_dem_tracts') != 'exclude_as_not_allocation_qualified':
+        decision = values['approvals'].get('owner_decisions', {}).get('atlas_coverage', {})
+        if decision.get('missing_dem_tracts') != 'exclude_as_not_allocation_qualified':
             raise MissingPrerequisite('missing owner approval for accounted DEM exclusions')
     unaccounted = set(atlas.missing_tract_ids) - accounted
     return {'complete': not unaccounted, 'physical_coverage_complete': atlas.coverage_complete,

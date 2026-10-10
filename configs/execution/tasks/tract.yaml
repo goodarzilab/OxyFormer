@@ -1,6 +1,6 @@
 # Owner decision content identity: values are read only from approvals.yaml.
 schema_version: 1
-tract_design_sha256: 77200919f3fed9db56075e65b2ccbf48c1222e40ff5791bafefbd5d440a3ab52
+tract_design_sha256: 51b64d264dd084c5944cd6281b827d969e7a0ce6a37fdf749275fbc9bb8b91b7
 tasks:
 - id: tract-inputs
   stage: tract-inputs

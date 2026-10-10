@@ -315,12 +315,13 @@ def test_registry_and_tasks_declare_census_and_typed_handoff():
 
 
 def envelope_request(tmp_path, stage, roots):
+    from oxyformer.design.gate import OWNER_APPROVALS
     from dataclasses import replace
     from oxyformer.execution.runner import read_mapping
     task = next(t for t in yaml.safe_load((ROOT / tract_inputs.TASK_FILE).read_text())['tasks'] if t['stage'] == stage)
     settings = read_mapping(ROOT / 'configs/execution/stages.yaml')['stages'][stage]
-    config = dict(stage=stage, settings=settings, approvals=read_mapping(ROOT / 'configs/approvals.yaml'),
-        input_sources={str(ROOT / 'configs/approvals.yaml'):file_hash(ROOT / 'configs/approvals.yaml')},
+    config = dict(stage=stage, settings=settings, approvals=read_mapping(OWNER_APPROVALS),
+        input_sources={str(OWNER_APPROVALS):file_hash(OWNER_APPROVALS)},
         dependencies={k:str(v) for k,v in roots.items()})
     tmp_path.mkdir(parents=True, exist_ok=True)
     request = request_fixture(tmp_path)
@@ -470,6 +471,24 @@ def test_gate_accepts_identical_approval_copy_but_refuses_changed_bytes(tmp_path
         design_configuration(request)
 
 
+def install_coverage_approval(tmp_path, monkeypatch, *, approved=True):
+    """Synthetic owner snapshot; repository owner files and review pin stay untouched."""
+    from oxyformer.design import gate
+    owner_root = tmp_path / 'owner-checkout'
+    (owner_root / 'configs/execution/tasks').mkdir(parents=True)
+    owner_path = owner_root / 'configs/approvals.yaml'
+    approvals = yaml.safe_load((ROOT / 'configs/approvals.yaml').read_text())
+    approvals['owner_decisions'].pop('atlas_coverage', None)
+    if approved:
+        approvals['owner_decisions']['atlas_coverage'] = {
+            'missing_dem_tracts': 'exclude_as_not_allocation_qualified'}
+    owner_path.write_text(yaml.safe_dump(approvals))
+    (owner_root / tract_inputs.TASK_FILE).write_bytes((ROOT / tract_inputs.TASK_FILE).read_bytes())
+    monkeypatch.setattr(tract_inputs, 'ROOT', owner_root)
+    monkeypatch.setattr(gate, 'OWNER_APPROVALS', owner_path)
+    return approvals
+
+
 def collected_design_request(tmp_path, values, *, missing, accounted, absent=(), stage='tract-support-gate'):
     """Synthetic collected publication and typed endpoint, through real dispatch."""
     from dataclasses import replace
@@ -511,7 +530,8 @@ def collected_design_request(tmp_path, values, *, missing, accounted, absent=(),
     return req
 
 
-def test_collector_quality_summary_accounts_only_missing_endpoint_tracts(tmp_path):
+def test_collector_quality_summary_accounts_only_missing_endpoint_tracts(tmp_path, monkeypatch):
+    install_coverage_approval(tmp_path, monkeypatch)
     from oxyformer.design import gate
     from oxyformer.exposure.build import _coverage_summary
     import pandas as pd
@@ -553,7 +573,8 @@ def test_collected_complete_tract_is_not_excluded_for_other_scenario_omission(tm
 
 @pytest.mark.parametrize('selected_status', ['absent', 'zero_population'])
 @pytest.mark.parametrize('stage', ['tract-support-gate', 'real-frame-inputs'])
-def test_other_scenario_dem_does_not_account_for_unexplained_selected_omission(tmp_path, selected_status, stage):
+def test_other_scenario_dem_does_not_account_for_unexplained_selected_omission(tmp_path, monkeypatch, selected_status, stage):
+    install_coverage_approval(tmp_path, monkeypatch)
     from dataclasses import replace
     import pandas as pd
     from oxyformer.design import gate
@@ -586,3 +607,17 @@ def test_other_scenario_dem_does_not_account_for_unexplained_selected_omission(t
     result = (gate if stage == 'tract-support-gate' else real_frame).run_stage(req)
     assert result.status == 'blocked', result.message
     assert 'incomplete atlas coverage' in result.message
+
+
+@pytest.mark.parametrize('stage', ['tract-support-gate', 'real-frame-inputs'])
+def test_dispatched_dem_exception_refuses_absent_owner_coverage_approval(tmp_path, monkeypatch, stage):
+    from oxyformer.design import gate
+    from oxyformer.validation import real_frame
+    from test_campaign_profiles import real_fixture
+    install_coverage_approval(tmp_path, monkeypatch, approved=False)
+    values = real_fixture()
+    missing = values['atlas'].rows[0].tract_id
+    req = collected_design_request(tmp_path, values, missing=(missing,), accounted=(missing,), stage=stage)
+    result = (gate if stage == 'tract-support-gate' else real_frame).run_stage(req)
+    assert result.status == 'blocked'
+    assert 'missing owner approval for accounted DEM exclusions' in result.message

@@ -382,9 +382,10 @@ def test_missing_all_sealed_atlas_records_is_blocked_not_failed(tmp_path):
 
 
 @pytest.mark.parametrize('unaccounted', [False, True])
-def test_accounted_dem_exclusions_are_reported_and_unaccounted_omission_blocks(tmp_path, unaccounted):
+def test_accounted_dem_exclusions_are_reported_and_unaccounted_omission_blocks(tmp_path, monkeypatch, unaccounted):
     from oxyformer.design import gate
-    from test_tract_tasks import collected_design_request
+    from test_tract_tasks import collected_design_request, install_coverage_approval
+    install_coverage_approval(tmp_path, monkeypatch)
     values = make_inputs()
     reservation = reserve_design(values['geography'].rows, values['entity_graph'])
     sealed = set(reservation.design_ids)
@@ -420,7 +421,8 @@ def test_accounted_dem_exclusions_are_reported_and_unaccounted_omission_blocks(t
     assert not json.loads((out / 'gate.json').read_text())['effect_release_authorized']
 
 
-def test_accounted_dem_exclusion_requires_owner_decision():
+@pytest.mark.parametrize('approval', ['missing', 'wrong', 'legacy'])
+def test_accounted_dem_exclusion_requires_owner_decision(approval):
     from oxyformer.design.gate import atlas_coverage
     values = make_inputs()
     atlas = values['atlas']
@@ -428,13 +430,19 @@ def test_accounted_dem_exclusion_requires_owner_decision():
     values['atlas'] = replace(atlas, rows=atlas.rows[1:], missing_tract_ids=(missing,), coverage_complete=False)
     values['atlas_missing_dem_tract_ids'] = (missing,)
     values['approvals'] = yaml.safe_load(OWNER_APPROVALS.read_text())
-    del values['approvals']['owner_decisions']['tract_design']['atlas_missing_dem_tracts']
+    owner = values['approvals']['owner_decisions']
+    owner.pop('atlas_coverage', None)
+    if approval == 'wrong':
+        owner['atlas_coverage'] = {'missing_dem_tracts': 'block'}
+    elif approval == 'legacy':
+        owner['tract_design']['atlas_missing_dem_tracts'] = 'exclude_as_not_allocation_qualified'
     with pytest.raises(MissingPrerequisite, match='owner approval'):
         atlas_coverage(values)
 
 
-def test_accounted_dem_omissions_of_all_sealed_records_remain_blocked(tmp_path):
-    from test_tract_tasks import collected_design_request
+def test_accounted_dem_omissions_of_all_sealed_records_remain_blocked(tmp_path, monkeypatch):
+    from test_tract_tasks import collected_design_request, install_coverage_approval
+    install_coverage_approval(tmp_path, monkeypatch)
     values = make_inputs()
     reservation = reserve_design(values['geography'].rows, values['entity_graph'])
     missing = reservation.design_ids

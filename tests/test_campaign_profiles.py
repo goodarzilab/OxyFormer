@@ -350,9 +350,10 @@ def test_gpu_profile_timing_and_budget_are_honest(gpu_profile_request, monkeypat
 
 
 @pytest.mark.parametrize('unaccounted', [False, True])
-def test_real_frame_dispatch_excludes_accounted_dem_and_preserves_reservation(tmp_path, unaccounted):
+def test_real_frame_dispatch_excludes_accounted_dem_and_preserves_reservation(tmp_path, monkeypatch, unaccounted):
     from oxyformer.design.splits import reserve_design
-    from test_tract_tasks import collected_design_request
+    from test_tract_tasks import collected_design_request, install_coverage_approval
+    install_coverage_approval(tmp_path, monkeypatch)
     values = real_fixture()
     reservation = reserve_design(values['geography'].rows, values['entity_graph'])
     sealed = set(reservation.design_ids)
