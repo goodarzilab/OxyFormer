@@ -173,7 +173,7 @@ def test_official_usaleep_numeric_identifier_format_is_losslessly_normalized(tmp
             for column in range(4):
                 row[column] = str(int(row[column]))
     frame, audit = load_usaleep(us_bundle(tmp_path, mapping, edit=numeric_identifiers), mapping, numeric_identifiers=True)
-    assert frame.original_id.tolist() == [IDS[0]]
+    assert frame.original_id.tolist() == [IDS[0], IDS[2]]
     assert audit['metadata'].original_id.tolist() == IDS
     assert audit['metadata'].state_fips.tolist() == ['01'] * 3
     assert audit['metadata'].county_fips.tolist() == ['001'] * 3
