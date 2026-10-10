@@ -210,4 +210,4 @@ owner_decisions:
 
 # Not yet approved. A unit that needs one of these must stop and report; the orchestrator brings it to the owner.
 pending_owner_approval:
-  - any relief, flag or distance sensitivity analyses beyond plan_fixed (except the flag-1-only sensitivity in owner_decisions.outcome_flags, approved 2026-10-10)
+  - any relief, flag or distance sensitivity analyses beyond plan_fixed
