@@ -209,10 +209,10 @@ owner_decisions:
     sensitivity: flag1_only               # a reported sensitivity analysis restricted to flag-1 tracts
   # Approved by the owner on 2026-10-10 ("Approve A2 (Recommended)") after tract-gate-r2, run with the two decisions above, returned
   # zero evaluable tracts, and outcome-blind replays with the gate's own functions showed that no relief or radius setting alone
-  # produces one. A step-back committee routed the redesign to the owner, who directed a count-informed redesign ("Don't worry about
-  # having seen things. Just find a solution that works") with the engine audit kept tied to a passing tract target. The frozen
-  # section 4.1 target is recorded as infeasible as specified. Full text: the orchestrator's amendment A2 (plan review REVIEW_PASS,
-  # round 2, Sol and Kimi). owner_decisions.tract_design above is pinned by the tract task file and is unchanged.
+  # produces one. The owner directed a count-informed redesign ("Don't worry about having seen things. Just find a solution that
+  # works") with the engine audit kept tied to a passing tract target. The frozen section 4.1 target is recorded as infeasible as
+  # specified. Full text: the orchestrator's amendment A2 of 2026-10-10. owner_decisions.tract_design above is pinned by the tract
+  # task file and is unchanged.
   tract_design_amendment:
     new_estimand: "the first application gets a new estimand ID and a locked analysis; the current estimand ID is recorded as infeasible as specified and kept in the registry"   # amendment item 6
     supersedes: "frozen section 4.1 target, recorded as infeasible as specified (tract-gate-r2, 2026-10-10)"
