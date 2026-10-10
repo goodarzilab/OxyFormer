@@ -122,6 +122,12 @@ def _cached_digest(path):
                 value = [saved['digest'] if saved is not None and saved['path'] == key
                     and saved['identity'] == identity else None]
                 cacheable = value[0] is not None or _hash_clock_barrier(record, path, before)
+                if cacheable and value[0] is None:
+                    # Writeback reprotects already-dirty shared mmap pages.
+                    # Do this AFTER closing the timestamp quantum: any later
+                    # store must fault and acquire a newer ctime before reuse.
+                    with open_regular(path) as stream:
+                        os.fsync(stream.fileno())
                 yield value
                 after = Path(path).lstat()
                 if _stable(after) != _stable(before):
@@ -409,13 +415,14 @@ def acquisition_read(path, *, kind=stat.S_IFREG):
 def verify_input_hash(path, expected, *, hash_file=None):
     """A wrong request digest is not evidence that the acquisition changed."""
     with acquisition_read(path):
-        with _cached_digest(path) as cached:
-            standard_reader = hash_file in (None, regular_file_hash, provenance_file_hash)
-            # Custom readers retain their call semantics, including observations
-            # they make around the read. Only the built-in digest adapters reuse.
-            if not standard_reader:
+        standard_reader = hash_file in (None, regular_file_hash, provenance_file_hash)
+        if not standard_reader:
+            # A callback may synchronously delegate to a child using the cache.
+            # Retain descriptor/path checks without holding that child's lock.
+            with open_regular(path):
                 actual = hash_file(path)
-            else:
+        else:
+            with _cached_digest(path) as cached:
                 if cached[0] is None:
                     cached[0] = (regular_file_hash if hash_file is None else hash_file)(path)
                 else:

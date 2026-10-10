@@ -4360,7 +4360,7 @@ def test_hash_once_cache_rejects_inflight_write(tmp_path):
         Path(path).write_bytes(b'new data with a different size')
         return digest
     with integrity.stage_hash_cache():
-        with raises(ContractError, match='changed while hashing'):
+        with raises(ContractError, match='input changed while'):
             integrity.verify_input_hash(payload, expected, hash_file=racing_hash)
         # The failed digest must never become a cache hit.
         with raises(ContractError, match='input hash mismatch'):
@@ -4488,3 +4488,37 @@ def test_timestamp_quantum_overwrite_cannot_reuse_digest(tmp_path):
             with raises(ContractError, match='input hash mismatch'):
                 integrity.verify_input_hash(payload, expected)
     print('real filesystem timestamp collisions:', collisions)
+
+
+def test_writable_mmap_cannot_reuse_obsolete_digest(tmp_path):
+    import mmap
+    from oxyformer.execution import integrity
+    payload = tmp_path / 'payload.tar'
+    payload.write_bytes(b'AAAA')
+    expected = file_hash(payload)
+    with payload.open('r+b') as stream, mmap.mmap(stream.fileno(), 0) as mapped:
+        mapped[:] = b'AAAA'  # Fault and dirty the writable page before admission.
+        with integrity.stage_hash_cache():
+            assert integrity.fingerprint_tree(payload)['.']['sha256'] == expected
+            before = payload.stat()
+            mapped[:] = b'BBBB'
+            after = payload.stat()
+            print('mmap identity unchanged:', integrity._stable(before) == integrity._stable(after))
+            with raises(ContractError, match='input hash mismatch'):
+                integrity.verify_input_hash(payload, expected)
+            assert integrity.fingerprint_tree(payload)['.']['sha256'] != expected
+
+
+def test_custom_digest_child_does_not_deadlock(tmp_path):
+    from oxyformer.execution import integrity
+    payload = tmp_path / 'payload.tar'
+    payload.write_bytes(b'synthetic unchanged acquisition')
+    expected = file_hash(payload)
+    def child_digest(path):
+        return subprocess.check_output([sys.executable, '-c',
+            'import sys; from oxyformer.execution.integrity import regular_file_hash; '
+            'print(regular_file_hash(sys.argv[1]))', str(path)],
+            env=fixture_env(), text=True, timeout=5).strip()
+    with integrity.stage_hash_cache():
+        assert integrity.verify_input_hash(payload, expected, hash_file=child_digest) == expected
+        assert integrity.regular_file_hash(payload) == expected

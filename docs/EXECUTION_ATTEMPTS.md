@@ -35,7 +35,9 @@ The cache also covers repeated integrity hashes of small request/control files;
 it never replaces actual reads of content needed by scientific computations.
 No digests are reused between runs or written into upstream acquisitions.
 Custom hash callbacks still execute and are checked against their requested
-digests, but their return values never enter the shared SHA-256 cache.
+digests, but their return values never enter the shared SHA-256 cache. They run
+outside the cache lock so callbacks may delegate to child readers without
+deadlocking; descriptor and pathname comparisons still bracket the callback.
 
 Matching stat tuples alone do not close a filesystem timestamp quantum: two
 same-size writes can retain identical ctime and restored mtime. Before hashing
@@ -46,6 +48,16 @@ comparing a remote filesystem clock with the client clock. It never writes to
 the input. The original pre-read identity remains the comparison baseline
 through this barrier and the subsequent hash. See the
 [Linux timestamp ordering documentation](https://cdn.kernel.org/doc/html/latest/filesystems/multigrain-ts.html).
+
+After establishing that clock boundary and before hashing, the reader calls
+`fsync` on the input's read descriptor. Linux writeback cleans and write-protects
+previously dirty shared mappings; a later mapped store must fault and update the
+file's timestamps. Without this step, an already-writable mmap page could change
+bytes without another ctime update. The ordering matters: reprotection follows
+the timestamp barrier, so a subsequent write cannot share the admitted ctime
+quantum. The reader does not write input bytes. A writeback error refuses the
+observation and invalidates the digest. See the
+[Linux writeback implementation](https://kernel.googlesource.com/pub/scm/linux/kernel/git/stable/linux-stable.git/+/refs/tags/v5.4.51/mm/page-writeback.c).
 
 The witness must be on the same device as the input. Registered acquisitions and
 their independent publication store share the run's state filesystem. Files on
@@ -92,3 +104,6 @@ mtime and equal-length contents; it does not mock ctime. It demonstrated changed
 bytes accepted with an identical stat tuple before the ordering barrier. The
 custom-digest regression demonstrated a non-SHA callback value returned by a
 subsequent built-in SHA-256 read before callback values were separated.
+
+Shared-mapping and child-callback regressions reproduce unchanged-stat mmap
+corruption and a parent/child lock deadlock before their respective repairs.
