@@ -253,13 +253,14 @@ def test_profile_resources_are_explicit_and_match_estimate():
 
 
 @pytest.mark.parametrize('fixture_name', ['smoke', 'real_fixture'])
-def test_existing_profile_task_bytes_match_launch_base(fixture_name, built):
-    # SHA256 of canonical bytes at dev/launch base a778a7c; excludes only the
-    # appended probe. This pins every CPU/estimate field, including draw seeds.
+def test_profile_task_bytes_pin_smoke_and_amended_real_frame(fixture_name, built):
+    # Smoke retains the dev/launch-base a778a7c bytes. The real fixture binds
+    # A2 support/target/split identities. Both pins cover every CPU/estimate
+    # field, including draw seeds, and exclude only the appended GPU probe.
     pair = smoke_inputs.build_inputs() if fixture_name == 'smoke' else built[1][:2]
     expected = {
         'smoke': '1fb64eaf6987e8fb62c6df3c95b53f0482e2fe7cfcc07e5db214a20fd35e7377',
-        'real_fixture': '3c6f161d31f47ffe9a04e13c9fd264dcc8d1acdc84f200cb71608738c2ac6490',
+        'real_fixture': 'c4cd73f1df68b3fbe4a9a29502a4c1c729e27f62e7c041834bc793363f4075c4',
     }
     assert coverage.digest(real_frame.profile_tasks(*pair)['tasks'][:5]) == expected[fixture_name]
 
