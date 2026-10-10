@@ -19,7 +19,7 @@ from .integrity import (DEPENDENCY_CHECK, FINGERPRINT, RESULT, _replace_control,
     fingerprint_tree, publication_receipt, InputChanged, acquisition_read, _acquisition_binding,
     integrity_observation,
     acquisition_changed_paths, verify_input_hash, authority_exists,
-    verify_inputs, verify_result, verify_published_tree)
+    verify_inputs, verify_result, verify_published_tree, verify_publication)
 from .identity import git_bytes, code_identity, environment_record, scientific_fingerprint, verify_recipe
 from .paths import atomic_json, atomic_write, output_path
 
@@ -242,6 +242,60 @@ def _verify_acquisition(root, receipt_name, *, expected_tree, observed_tree):
     return tree
 
 
+def _recorded_acquisition_inputs(current, parent, receipt, hashes):
+    """Check a producer's sealed evidence, without observing the acquisition.
+
+    The publication fingerprint authenticates both control files. The request
+    binds the admission snapshot; the successful post-exit check binds the same
+    snapshot to the bytes the producer used. Paths here are lexical: an archived
+    acquisition (even its entire directory) need not exist for a consumer.
+    """
+    baseline = current / '_execution/dependencies.json'
+    require(str(baseline) in hashes, 'acquisition baseline not bound to published request')
+    snapshots = read_mapping(baseline)
+    require(str(parent) in snapshots, 'acquisition baseline absent from published request')
+    entries = snapshots[str(parent)]
+    check = read_mapping(current / DEPENDENCY_CHECK)
+    observed = check.get('attempts', {}).get(str(parent), {})
+    require(check.get('status') == 'pass' and observed.get('status') == 'unchanged'
+        and observed.get('changed_paths') == [] and observed.get('tainted_paths') == []
+        and observed.get('fingerprint') == entries,
+        'acquisition dependency check differs from admitted baseline')
+    recorded = {}
+    for path, digest in hashes.items():
+        path = Path(path)
+        if path.is_relative_to(parent):
+            entry = entries.get(str(path.relative_to(parent)), {})
+            require(entry.get('sha256') == digest,
+                f'acquisition input not bound to admitted baseline: {path}')
+            recorded[str(path)] = digest
+    relative_artifact_path(receipt)
+    require(all(str(parent / name) in recorded for name in ('payload.tar', receipt)),
+        'acquisition payload and receipt must be bound to published request')
+    return recorded
+
+
+def _verify_publication_result(result, request, recorded_inputs):
+    """Verify a historical result, substituting sealed evidence only for acquisitions.
+
+    Live stages still use verify_result, including full input verification.
+    Publication artifacts and every other request input keep their live checks.
+    """
+    require(result.request_hash == request.content_hash, 'stage request mismatch')
+    for path, digest in zip((request.config_path, request.task_path) + request.dependency_paths,
+            (request.config_hash, request.task_hash) + request.dependency_hashes):
+        if path in recorded_inputs:
+            require(recorded_inputs[path] == digest, 'acquisition baseline hash mismatch')
+        else:
+            verify_input_hash(path, digest)
+    root = directory_path(request.output_dir)
+    for artifact in result.artifacts:
+        path = (root / artifact.path).resolve(strict=True)
+        require(path.is_relative_to(root), 'artifact escapes output directory')
+        require(file_hash(root / artifact.path) == artifact.sha256,
+            f'artifact hash mismatch: {artifact.path}')
+
+
 def verify_dependency_result(root, *, expected_hash=None, trees=None, active=None, verified=None,
     output_dir=None):
     with integrity_observation(root):
@@ -250,7 +304,7 @@ def verify_dependency_result(root, *, expected_hash=None, trees=None, active=Non
 
 
 def _verify_dependency_result(root, *, expected_hash, trees, active, verified, output_dir):
-    """Verify the complete lineage with an explicit postorder traversal."""
+    """Verify all lineage publications; only live stages observe acquisitions."""
     root = directory_path(root)
     active = set() if active is None else active
     verified = {} if verified is None else verified
@@ -288,27 +342,23 @@ def _verify_dependency_result(root, *, expected_hash, trees, active, verified, o
                     config = read_mapping(request.config_path)
                     hashes = dict(zip(request.dependency_paths, request.dependency_hashes))
                     parents = []
+                    recorded_inputs = {}
                     for parent_unit, parent in config.get('dependencies', {}).items():
                         parent = Path(parent)
                         require(parent.is_absolute(), 'dependency publication path must be absolute')
-                        parent = directory_path(parent)
                         acquisition = config.get('acquisitions', {}).get(parent_unit)
                         if acquisition is not None:
                             if output_dir is not None:
                                 require(not output_dir.is_relative_to(parent) and not parent.is_relative_to(output_dir),
                                     f'output overlaps an upstream attempt: {parent}')
-                            snapshots = read_mapping(current / '_execution/dependencies.json')
-                            require(str(parent) in snapshots, 'acquisition baseline absent from published request')
-                            require(str(current / '_execution/dependencies.json') in hashes,
-                                'acquisition baseline not bound to published request')
-                            acquisition_tree = verify_acquisition(parent, acquisition, expected_tree=snapshots[str(parent)])
-                            if trees is not None:
-                                trees[str(parent)] = acquisition_tree
+                            recorded_inputs.update(_recorded_acquisition_inputs(
+                                current, parent, acquisition, hashes))
                         else:
+                            parent = directory_path(parent)
                             digest = hashes.get(str(parent / FINGERPRINT))
                             require(digest is not None, 'dependency fingerprint absent from published request')
                             parents.append((parent, digest, parent_unit, False))
-                    verify_result(result, request)
+                    _verify_publication_result(result, request, recorded_inputs)
                     pending[current] = (result, tree)
                     stack.append((current, expected, unit, True))
                     stack.extend(reversed(parents))
@@ -548,6 +598,10 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
                     require(not collisions, 'reserved execution control collision: ' + ', '.join(collisions))
                     for path, digest in immutable_controls.items():
                         require(file_hash(path) == digest, f'execution control changed: {path}')
+                    # Trees cover publication bytes; their independent release
+                    # receipts must also remain valid after the worker exits.
+                    for root, dependency_result in verified_dependencies.items():
+                        verify_publication(root, dependency_result)
                     verify_result(result, request)
                     require(all(not (out / a.path).resolve().is_relative_to(repo) for a in result.artifacts),
                         'artifact overlaps cloned repository')
