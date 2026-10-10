@@ -549,3 +549,40 @@ def test_collected_complete_tract_is_not_excluded_for_other_scenario_omission(tm
     values = gate.collected_atlas_inputs(paths, (IDS[0],))
     assert values['atlas'].coverage_complete
     assert values['atlas_missing_dem_tract_ids'] == ()
+
+
+@pytest.mark.parametrize('selected_status', ['absent', 'zero_population'])
+@pytest.mark.parametrize('stage', ['tract-support-gate', 'real-frame-inputs'])
+def test_other_scenario_dem_does_not_account_for_unexplained_selected_omission(tmp_path, selected_status, stage):
+    from dataclasses import replace
+    import pandas as pd
+    from oxyformer.design import gate
+    from oxyformer.design.splits import reserve_design
+    from oxyformer.validation import real_frame
+    from test_campaign_profiles import real_fixture
+    values = real_fixture()
+    reserved = set(reserve_design(values['geography'].rows, values['entity_graph']).design_ids)
+    missing = next(r.original_id for r in values['geography'].rows if r.original_id not in reserved)
+    req = collected_design_request(tmp_path, values, missing=(), accounted=(missing,),
+        absent=(missing,) if selected_status == 'absent' else (), stage=stage)
+    atlas_dir = tmp_path / 'atlas'
+    parquet = atlas_dir / 'atlas.parquet'
+    frame = pd.read_parquet(parquet)
+    if selected_status == 'zero_population':
+        mask = frame.tract_id == missing
+        frame.loc[mask, 'population'] = 0.
+        frame.loc[mask, 'status'] = 'zero_population'
+        frame.loc[mask, ['oxygen_deficit_mmhg', 'elevation_p50_m']] = float('nan')
+    # An accurate cross-scenario summary cannot explain why the selected row
+    # is absent/zero-population rather than a distributed missing-DEM record.
+    centroid = dict(tract_id=missing, scenario='centroid', population=100., missing_population=100.,
+                    status='missing_dem', oxygen_deficit_mmhg=float('nan'), elevation_p50_m=float('nan'))
+    pd.concat([frame, pd.DataFrame([centroid])], ignore_index=True).to_parquet(parquet, index=False)
+    publication_path = atlas_dir / 'artifact_manifest.json'
+    publication = json.loads(publication_path.read_text())
+    publication['files']['atlas.parquet'] = file_hash(parquet)
+    publication_path.write_text(canonical_json(publication))
+    req = replace(req, dependency_hashes=tuple(file_hash(path) for path in req.dependency_paths))
+    result = (gate if stage == 'tract-support-gate' else real_frame).run_stage(req)
+    assert result.status == 'blocked', result.message
+    assert 'incomplete atlas coverage' in result.message

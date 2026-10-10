@@ -155,13 +155,16 @@ def collected_atlas_inputs(paths, tract_ids=None):
     # tracts outside that frame do not become missing endpoint observations.
     expected = tuple(sorted(selected.tract_id if tract_ids is None else tract_ids))
     selected = selected[selected.tract_id.isin(expected)]
-    rows, missing = [], sorted(set(expected) - set(selected.tract_id))
+    rows, missing_dem = [], set()
+    missing = sorted(set(expected) - set(selected.tract_id))
     for record in selected.sort_values('tract_id').to_dict('records'):
         complete = record['population'] > 0 and record['missing_population'] == 0
         require(record['status'] == ('complete' if complete else
                 'zero_population' if record['population'] == 0 else 'missing_dem'), 'inconsistent atlas status')
         if not complete:
             missing.append(record['tract_id'])
+            if record['status'] == 'missing_dem':
+                missing_dem.add(record['tract_id'])
             continue
         rows.append(AtlasRow(tract_id=record['tract_id'], exposure_mmhg=float(record[decision['exposure_field']]),
             inhabited_elevation_m=float(record['elevation_' + decision['inhabited_elevation'] + '_m']),
@@ -176,7 +179,10 @@ def collected_atlas_inputs(paths, tract_ids=None):
     accounted = publication.get('missing_dem_tracts', [])
     require(isinstance(accounted, list) and all(isinstance(t, str) for t in accounted),
             'invalid collected missing-DEM summary')
-    return {'atlas': atlas, 'atlas_missing_dem_tract_ids': tuple(sorted(set(missing) & set(accounted)))}
+    # The quality summary spans placement scenarios. Only a selected-scenario
+    # missing_dem row explains that scenario's omission; an absent or empty row
+    # cannot borrow an explanation from another scenario.
+    return {'atlas': atlas, 'atlas_missing_dem_tract_ids': tuple(sorted(missing_dem & set(accounted)))}
 
 
 def atlas_coverage(values):
