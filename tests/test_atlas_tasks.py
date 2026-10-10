@@ -321,7 +321,8 @@ def test_dem_inspection_receipt_observation_survives_restore(runtime, acquisitio
     marker = Path(str(integrity.publication_receipt(acquisition)) + '.tainted')
     assert json.loads(marker.read_text()) == ['receipts.json']
     with pytest.raises(ContractError, match='tainted'):
-        runner.verify_dependency_result(producer)
+        runner.verify_acquisition(acquisition, 'receipts.json')
+    assert_pass(runner.verify_dependency_result(producer))
 
 
 @pytest.mark.parametrize('when', ['before-inspection', 'during-inspection'])
@@ -359,7 +360,8 @@ def test_dem_payload_observation_survives_restore(runtime, acquisition, tmp_path
     marker = Path(str(integrity.publication_receipt(acquisition)) + '.tainted')
     assert json.loads(marker.read_text()) == ['payload.tar']
     with pytest.raises(ContractError, match='tainted'):
-        runner.verify_dependency_result(producer)
+        runner.verify_acquisition(acquisition, 'receipts.json')
+    assert_pass(runner.verify_dependency_result(producer))
 
 
 def test_initial_invalid_dem_member_digest_refuses_without_taint(runtime, acquisition):
