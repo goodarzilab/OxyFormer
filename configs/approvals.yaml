@@ -11,7 +11,7 @@ plan_fixed:
   tract_shift_mmhg: 2.0                  # sections 1 and 4.1
   policy_form: shift_or_stay             # section 4.1; no clipping, jitter or bridging of support gaps
   support_design_fraction: 0.20          # section 4.1: outcome-sealed geographic sub-blocks
-  primary_outcome_flags: [1]             # sections 4.1 and 5.3: flag-1 USALEEP tracts; no flag-2/3 labels in primary training
+  primary_outcome_flags: [1]             # sections 4.1 and 5.3: flag-1 USALEEP tracts; no flag-2/3 labels in primary training. AMENDED by owner_decisions.outcome_flags (2026-10-10)
   min_flag1_tracts_per_county: 4         # section 4.1
   min_inhabited_relief_m: 300            # section 4.1: inhabited P90-P10 tract-elevation contrast
   max_local_comparison_km: 25            # section 4.1
@@ -193,6 +193,21 @@ owner_decisions:
     require: "D > 0 and every contribution finite"
     on_failure: "block confirmatory release; publish the estimate as diagnostic-only with s_max, G_eff and ranked county contributions; never trim counties, cap ratios or reweight post hoc"
 
+  # Approved by the owner on 2026-10-10 ("Approved") after the tract gate found 18 of 66,718 expected tracts absent from the
+  # collected atlas. All 18 are accounted by the atlas as missing DEM coverage, on international borders and the coast where the US
+  # DEM ends (4 people under centroid placement, 0.21 under distributed).
+  atlas_coverage:
+    missing_dem_tracts: exclude_as_not_allocation_qualified   # leave the tract frame with an explicit reason, recorded in target accounting; an unaccounted missing tract still blocks
+  # Approved by the owner on 2026-10-10 ("Let's go with your recommendation") after the tract gate showed that flag-1 tracts alone
+  # (4,421 nationally; 290 counties with at least four) cannot pass the section 4.1 screens: no tract target survived. This amends
+  # plan_fixed.primary_outcome_flags (sections 4.1 and 5.3). USALEEP abridged life table flag: 1 = observed age-specific death rates
+  # for all age groups, 2 = predicted for all age groups, 3 = a combination of observed and predicted.
+  outcome_flags:
+    primary: [1, 3]                       # primary labels, training and evaluation use flag 1 and flag 3 tracts (58,242 nationally)
+    excluded: [2]                         # fully predicted rates stay out of primary labels, training and evaluation
+    county_minimum_counts: primary        # plan_fixed.min_flag1_tracts_per_county counts primary-eligible (flag 1 or 3) tracts
+    sensitivity: flag1_only               # a reported sensitivity analysis restricted to flag-1 tracts
+
 # Not yet approved. A unit that needs one of these must stop and report; the orchestrator brings it to the owner.
 pending_owner_approval:
-  - any relief, flag or distance sensitivity analyses beyond plan_fixed
+  - any relief, flag or distance sensitivity analyses beyond plan_fixed (except the flag-1-only sensitivity in owner_decisions.outcome_flags, approved 2026-10-10)
