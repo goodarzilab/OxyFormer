@@ -86,10 +86,15 @@ def validate_split(split: SplitManifest, manifest: DataManifest, graph: EntityGr
     _validate_split_identity(split, manifest)
     require(manifest.entity_graph_hash == graph.content_hash, "entity graph hash mismatch")
     require(set(manifest.original_ids) == set(graph.original_ids), "entity graph ID mismatch")
-    assignments = dict(zip(split.original_ids, split.fold_ids))
+    assignments = dict(zip(split.frame_original_ids, split.geographic_fold_ids))
     assignments.update({x: "design" for x in split.design_ids})
     assignments.update({x: "excluded" for x in split.excluded_ids})
     graph.assert_partition(assignments)
+    # Buffer removals must exclude every linked frame row on the fitting side.
+    for fold, excluded in split.training_exclusions:
+        fitting = set(split.frame_training_ids(fold)) - set(excluded)
+        graph.assert_partition({i: ("fit" if i in fitting else assignments[i])
+                                for i in graph.original_ids})
 
 
 def validate_oof(nuisances: OOFNuisances, data: LoadedData, split: SplitManifest) -> None:
@@ -99,9 +104,9 @@ def validate_oof(nuisances: OOFNuisances, data: LoadedData, split: SplitManifest
     require(nuisances.lineage.split_hash == split.content_hash, "OOF split mismatch")
     require(manifest.content_hash in nuisances.lineage.parent_hashes, "missing data parent")
     require(set(nuisances.lineage.source_hashes) == set(manifest.lineage.source_hashes), "OOF source mismatch")
-    expected = {(x, seed) for x in split.original_ids for seed in split.seed_ids}
+    expected = {(x, seed) for x in split.target_ids for seed in split.seed_ids}
     require(set(zip(nuisances.original_ids, nuisances.seed_ids)) == expected, "incomplete original ID/seed coverage")
-    folds = dict(zip(split.original_ids, split.fold_ids))
+    folds = dict(zip(split.frame_original_ids, split.geographic_fold_ids))
     for oid, fold in zip(nuisances.original_ids, nuisances.fold_ids):
         require(folds[oid] == fold, "held-out fold mismatch")
     if manifest.weight_field is None:

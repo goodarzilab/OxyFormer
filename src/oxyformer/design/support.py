@@ -3,7 +3,7 @@
 Replicated interior exposure bins in local raw-X neighborhoods provide an
 empirical screen, not a positivity theorem. Holes are never joined by extrema.
 The neighborhood scales, knots, strata and policy are fixed once from design
-A/X; fold-specific support failures exclude targets, never refit the policy.
+frame A/X; fold-specific support failures exclude targets, never refit the policy.
 """
 from dataclasses import dataclass
 from hashlib import sha256
@@ -20,7 +20,7 @@ from oxyformer.provenance import Immutable, canonical_json, require
 class SupportRecipe(Immutable):
     bin_width_mmhg: float = 1.0
     min_bin_tracts: int = 2
-    raw_x_radius: float = 1.0
+    raw_x_radius: float = 2.0
 
     def __post_init__(self):
         Immutable.__post_init__(self)
@@ -38,6 +38,8 @@ class FrozenSupport(Immutable):
     recipe: SupportRecipe
     policy: ShiftOrStayPolicy
     comparison_strata: tuple[tuple[str, str], ...]
+    support_pool: str = "all_allocation_qualified_frame_tracts"
+    pool_ids: tuple[str, ...] = ()
 
 
 def connected_components(exposures, tract_ids, recipe=SupportRecipe()):
@@ -81,18 +83,20 @@ def freeze_support(rows, design_ids, atlas, covariates, *, recipe=SupportRecipe(
     require(all(v is None or (type(v) in (float, int) and np.isfinite(v))
                 for values in x.values() for v in values),
             "support requires finite numeric or missing approved covariates")
-    design_set = set(design_ids)
-    sealed = [r for r in rows if r.original_id in design_set and r.tract_id in atlas
+    pool = [r for r in rows if r.tract_id in atlas
               and atlas[r.tract_id].allocation_qualified and atlas[r.tract_id].population > 0]
-    require(bool(sealed), "no allocation-qualified support-design records")
-    matrix = np.asarray([x[r.original_id] for r in sealed], dtype=float)
+    require(bool(pool), "no allocation-qualified support-frame records")
+    matrix = np.asarray([x[r.original_id] for r in pool], dtype=float)
     # Missingness is an explicit conditioning pattern, never full-frame
-    # imputation. Scales use observed sealed values only; nuisance preprocessing
+    # imputation. Scales use observed allocation-qualified frame values only; nuisance preprocessing
     # remains the responsibility of each fitting partition.
     scales = tuple(float(np.quantile(col[np.isfinite(col)], .75) - np.quantile(col[np.isfinite(col)], .25))
                    if np.isfinite(col).any() else 0.0 for col in matrix.T)
     knots = tuple(float(v) for v in np.quantile(
-        [atlas[r.tract_id].exposure_mmhg for r in sealed], np.linspace(0, 1, 6)))
+        [atlas[r.tract_id].exposure_mmhg for r in pool], np.linspace(0, 1, 6)))
+    by_county = {}
+    for row in pool:
+        by_county.setdefault(row.county, []).append(row)
     groups, exposures, strata = {}, {}, {}
     for row in sorted(rows, key=lambda r: r.original_id):
         if row.tract_id not in atlas:
@@ -100,7 +104,7 @@ def freeze_support(rows, design_ids, atlas, covariates, *, recipe=SupportRecipe(
         key = row.assignment_geography
         value = (row.county, atlas[row.tract_id].exposure_mmhg)
         require(exposures.setdefault(key, value) == value, "inconsistent grouped exposure")
-        nearby = neighbors(row, sealed, x, scales, atlas, recipe, local=True)
+        nearby = neighbors(row, by_county.get(row.county, ()), x, scales, atlas, recipe, local=True)
         components = connected_components([atlas[r.tract_id].exposure_mmhg for r in nearby],
                                           [r.tract_id for r in nearby], recipe)
         if key in groups:
@@ -111,7 +115,9 @@ def freeze_support(rows, design_ids, atlas, covariates, *, recipe=SupportRecipe(
     # Outcome-bearing upstream hashes belong to artifact lineage, not design
     # decisions: a Y-only perturbation must not change this hash or policy.
     support_hash = sha256(canonical_json({
-        "design_ids": sorted(design_ids), "features": covariates.columns,
+        "design_ids": sorted(design_ids),
+        "support_pool": "all_allocation_qualified_frame_tracts",
+        "pool_ids": sorted(r.original_id for r in pool), "features": covariates.columns,
         "registry": covariates.registry.content_hash, "scales": scales,
         "recipe": recipe.to_dict(), "components": sorted(groups.items()),
         "strata": sorted(strata.items()), "knots": knots,
@@ -121,7 +127,8 @@ def freeze_support(rows, design_ids, atlas, covariates, *, recipe=SupportRecipe(
     return FrozenSupport(design_ids=tuple(sorted(design_ids)), feature_names=covariates.columns,
                          feature_registry_hash=covariates.registry.content_hash, scales=scales,
                          spline_knots=knots, recipe=recipe, policy=policy,
-                         comparison_strata=tuple(sorted(strata.items())))
+                         comparison_strata=tuple(sorted(strata.items())),
+                         pool_ids=tuple(sorted(r.original_id for r in pool)))
 
 
 def policy_for(rows, atlas, frozen):
@@ -141,7 +148,7 @@ def supported_ids(rows, atlas, frozen):
 def recheck_support(evaluation, training, atlas, covariates, frozen):
     """Check the frozen action's path using permitted county/raw-X training.
 
-    The 25-km physical support check was frozen on the design set. Applying
+    The 25-km physical support check was frozen on the allocation-qualified frame. Applying
     that distance again across a 25-km holdout buffer would be contradictory.
     Here all traversed bins need conditional training replication, while the
     scenario's remaining geographic target separately repeats its local screen.
@@ -150,9 +157,12 @@ def recheck_support(evaluation, training, atlas, covariates, frozen):
         return ()
     x = dict(zip(covariates.original_ids, covariates.values))
     result = policy_for(evaluation, atlas, frozen)
+    by_county = {}
+    for row in training:
+        by_county.setdefault(row.county, []).append(row)
     failed = []
     for query, a, d in zip(evaluation, result.a_mmhg, result.d_mmhg):
-        nearby = neighbors(query, training, x, frozen.scales, atlas, frozen.recipe, local=False)
+        nearby = neighbors(query, by_county.get(query.county, ()), x, frozen.scales, atlas, frozen.recipe, local=False)
         bins = {}
         for row in nearby:
             b = floor(atlas[row.tract_id].exposure_mmhg / frozen.recipe.bin_width_mmhg)

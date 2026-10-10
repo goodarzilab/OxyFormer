@@ -113,3 +113,58 @@ design set and each buffer's evaluation target. Later sensitivity work can
 select the flag-1 subset without acquiring new inputs. This change registers
 and preserves the subset; it does not run the sensitivity analysis. Flags remain
 diagnostic/selection metadata and never enter nuisance predictors.
+
+## Tract design amendment A2 (2026-10-10)
+
+The owner decision `owner_decisions.tract_design_amendment` in
+[approvals.yaml](../configs/approvals.yaml) amends sections 4.1 and 5.1 for the
+first US tract application. The frozen design was infeasible as specified:
+tract-gate-r2 retained no evaluable tract. Its primary target ID
+`e2999854bbeb2d232ca59b46e058b55e69b9ca6c2ddb0896d805f018350181d5`
+remains in the gate's estimand registry with that status. The new estimand ID
+is `usaleep-a2-2026-10-10`, with an analysis locked to A2. Each buffer scenario
+also has a content-derived target ID. Missing or malformed A2 approvals refuse
+execution. The original `tract_design` decision and execution task pin remain
+unchanged.
+
+Eligibility closes at the tract: an unusable or unsupported tract leaves the
+target without removing its neighbours. Dependence links, assignment geography
+and county by 10 km subblocks remain atomic for folds and buffers across the
+whole non-reserved frame. Buffers exclude both sides of cross-fold boundaries,
+including non-target frame rows. Primary-eligible labelled non-target rows
+remain available for outcome regression and SSL. Flag-2 and other ineligible
+rows are inert. Classifier fitting and calibration use target-distribution
+rows; held-out target rows and their linked rows cannot enter their training
+partition. The eight outer-training and four inner-fitting tract minima, fold
+presence and post-exclusion county screens count labelled training rows. Outer
+training also excludes its inner buffers. Conditional support is rechecked
+against the same permitted labelled rows until target exclusions stabilise.
+
+Support freezes once, before folds, using exposure, county and every approved
+covariate from all allocation-qualified frame tracts. The caliper is 2 IQR on
+every covariate, with 1 mmHg bins and two distinct tracts per bin; tail bins are
+discarded and support gaps remain gaps. Its hash records the pool definition,
+pool IDs, sealed reservation IDs and radius. The 20% geographic reservation
+remains outcome-sealed and never enters estimation. Historical support settings
+and `plan_fixed.min_inhabited_relief_m: 300` remain recorded in approvals.
+County P90–P10 inhabited relief is now a diagnostic. The four-tract minimum and
+local comparison within 25 km still screen counties.
+
+A joint outcome-blind feasibility census is required before approval of any new
+gate design or wider threshold. Reports retain counts per layer and county,
+flags, target hashes, maximum county share, effective counties
+`(sum n)^2 / sum n^2`, county relief quantiles, and target tracts in counties
+below 50, 100 and 300 m relief. A2 is count-informed: the owner and orchestrator
+saw outcome-blind feasibility counts before approval. The approved replay
+retained 1,752 tracts in 158 counties and 33 states, target hash
+`c8ecb139b57de78d`; 1,724 tracts were in counties below 300 m relief and 79 were
+flag 1. This is a different, predominantly low-relief population. Inference is
+conditional on the realised frame because support is no longer estimated on
+an independent reserved sample.
+
+The 10 and 25 km scenarios are reported even when they contain no evaluable
+tract, as in the approved replay. The declared 3-IQR fallback is recorded but
+is not run by this gate. The 2 mmHg shift-or-stay policy, equal-tract weights,
+release criteria and flag-1-only sensitivity remain fixed. Structural county
+counts are proxies, not the fitted influence-concentration release checks;
+ratio p99 and ESS on the moved target portion remain required downstream.

@@ -374,3 +374,30 @@ def test_namespace_subpackages_discovered():
     from setuptools import find_namespace_packages
     root = Path(__file__).resolve().parents[1]
     assert "oxyformer.data" in find_namespace_packages(where=str(root / "src"))
+
+
+def test_split_roles_preserve_frame_but_limit_training_and_oof(fixture):
+    data, _, split, nuisance, graph = fixture
+    split = replace(split, frame_ids=split.original_ids, frame_fold_ids=split.fold_ids,
+                    original_ids=("o1", "o4"), fold_ids=(0, 1),
+                    membership_roles=("target", "training", "inert", "target"),
+                    training_exclusions=((0, ("o2",)),))
+    validate_split(split, data.manifest, graph)
+    assert split.target_ids == ("o1", "o4")
+    assert split.frame_training_ids(0) == ("o2", "o4")
+    assert split.training_ids(0) == ("o4",)
+    assert split.training_ids(1) == ("o1",)
+    assert split.evaluation_ids(0) == ("o1",)
+    assert SplitManifest.from_json(split.to_json()) == split
+    with pytest.raises(ContractError, match="membership role alignment"):
+        replace(split, membership_roles=("target",))
+    with pytest.raises(ContractError, match="outside outer training"):
+        replace(split, training_exclusions=((0, ("o1",)),))
+    nuisance = replace(nuisance, lineage=replace(nuisance.lineage, split_hash=split.content_hash))
+    with pytest.raises(ContractError, match="incomplete original ID/seed"):
+        validate_oof(nuisance, data, split)
+    ix = [j for j, i in enumerate(nuisance.original_ids) if i in split.target_ids]
+    vectors = ("original_ids", "fold_ids", "seed_ids", "mu_a", "mu_d", "r_a", "r_d", "origin_weights")
+    nuisance = replace(nuisance, **{key: tuple(getattr(nuisance, key)[j] for j in ix) for key in vectors},
+                       lineage=replace(nuisance.lineage, unit_ids=split.target_ids))
+    validate_oof(nuisance, data, split)

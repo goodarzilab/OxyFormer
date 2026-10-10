@@ -2,7 +2,7 @@ schema_version: 1
 stage: tract_design
 support_design_fraction: 0.20
 min_observed_tracts: 4
-min_relief_m: 300.0
+min_relief_m: 300.0  # Historical section 4.1 value; A2 reports relief diagnostically.
 max_comparison_km: 25.0
 min_outer_training_tracts: 8
 min_inner_fitting_tracts: 4
@@ -11,11 +11,15 @@ inner_folds: 3
 seeds: [1103, 2207, 3301]
 buffers_km: [0.0, 10.0, 25.0]
 shift_mmhg: 2.0
-# Prespecified conservative empirical estimator, fixed across folds/buffers.
+eligibility_closure: tract
+county_minima_count: labelled_training_tracts
+support_pool: all_allocation_qualified_frame_tracts
+relief_screen: reported_diagnostic
+# A2 conditional support, frozen before folds on every approved covariate.
 support:
   bin_width_mmhg: 1.0
   min_bin_tracts: 2
-  raw_x_radius: 1.0
+  raw_x_radius: 2.0
 # task_path JSON: {"dependencies": {<role>: <absolute dependency path>}}.
 # Every path must occur in StageRequest.dependency_paths/hashes.
 # Roles: approvals (owner YAML), data_manifest (DataManifest),

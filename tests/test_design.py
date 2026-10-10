@@ -107,7 +107,8 @@ def test_county_preliminary_screens_use_allocation_qualified_unique_tracts():
     bad = {key: replace(value, allocation_qualified=False) for key, value in a.items()}
     assert county_screen(rows, bad)["c1"]["tract_count"] == 0
     flat = {key: replace(value, inhabited_elevation_m=10) for key, value in a.items()}
-    assert "inhabited_relief_below_300m" in county_screen(rows, flat)["c1"]["reasons"]
+    assert county_screen(rows, flat)["c1"]["reasons"] == []
+    assert county_screen(rows, flat)["c1"]["p90_p10_m"] == 0
 
 
 def test_disconnected_support_does_not_bridge_extrema_or_singletons():
@@ -120,7 +121,7 @@ def test_disconnected_support_does_not_bridge_extrema_or_singletons():
                                 [f"t{i}" for i in range(len(exposures) + 3)]) == components
 
 
-def test_reserve_twenty_percent_and_freeze_design_only():
+def test_reserve_twenty_percent_and_freeze_all_qualified_frame_support():
     v = make_inputs()
     rows, graph = v["geography"].rows, v["entity_graph"]
     reservation = reserve_design(rows, graph)
@@ -131,7 +132,12 @@ def test_reserve_twenty_percent_and_freeze_design_only():
     sealed = set(reservation.design_ids)
     changed = {key: value if key in sealed else replace(value, exposure_mmhg=9999) for key, value in atlas.items()}
     again = freeze_support(rows, reservation.design_ids, changed, v["covariates"])
-    assert again == frozen  # Evaluation A cannot fit the policy or spline knots.
+    assert again != frozen  # A2 intentionally conditions on the realised frame.
+    assert frozen.design_ids == tuple(sorted(reservation.design_ids))
+    assert frozen.pool_ids == tuple(sorted(r.original_id for r in rows))
+    assert frozen.support_pool == "all_allocation_qualified_frame_tracts"
+    assert frozen.recipe.raw_x_radius == 2.0
+    assert again.policy.support_design_hash != frozen.policy.support_design_hash
     with pytest.raises(FrozenInstanceError):
         frozen.scales = (100,)
     assert FrozenDesign.from_json(FrozenDesign(reservation=reservation, support=frozen,
@@ -279,8 +285,12 @@ def test_primary_flag_exclusions_are_explicit(tmp_path):
     assert report["flag_counts"]["2"] == len(bad)
     assert report["scenarios"][0]["evaluation_flag_counts"]["2"] == 0
     assert all(report["mortality_input_flag"][oid] == 2 for oid in bad)
-    assert bad <= set(primary["outer"]["excluded_ids"])
-    assert not bad.intersection(primary["outer"]["original_ids"])
+    from oxyformer.design.splits import SplitScenario
+    split = SplitScenario.from_json(canonical_json({"type": "SplitScenario", "schema_version": 1, "payload": primary})).outer
+    assert bad <= set(split.frame_original_ids)
+    assert not bad.intersection(split.target_ids)
+    for fold in range(5):
+        assert not bad.intersection(split.training_ids(fold))
     assert report["scenarios"][0]["exclusion_counts"]["flag_label_or_allocation_unusable"] == len(bad)
 
 
@@ -443,7 +453,7 @@ def test_accounted_dem_exclusion_requires_owner_decision(approval):
         atlas_coverage(values)
 
 
-def test_accounted_dem_omissions_of_all_sealed_records_remain_blocked(tmp_path, monkeypatch):
+def test_accounted_dem_omissions_of_all_sealed_records_do_not_supply_the_support_pool(tmp_path, monkeypatch):
     from test_tract_tasks import collected_design_request, install_coverage_approval
     install_coverage_approval(tmp_path, monkeypatch)
     values = make_inputs()
@@ -451,15 +461,16 @@ def test_accounted_dem_omissions_of_all_sealed_records_remain_blocked(tmp_path, 
     missing = reservation.design_ids
     request = collected_design_request(tmp_path, values, missing=missing, accounted=missing)
     result = run_stage(request)
-    assert result.status == 'blocked', result.message
+    assert result.status == 'pass', result.message
     result.verify(request)
     out = Path(request.output_dir)
     report = json.loads((out / 'support_report.json').read_text())
     assert report['coverage']['complete'] and not report['coverage']['physical_coverage_complete']
     assert {r['original_id'] for r in report['allocation_exclusions']} == set(missing)
     assert all(r['sealed_design'] for r in report['allocation_exclusions'])
-    assert not json.loads((out / 'design.json').read_text())['available']
-    assert json.loads((out / 'splits.json').read_text())['scenarios'] == []
+    design = FrozenDesign.from_json((out / 'design.json').read_text())
+    assert set(design.support.pool_ids).isdisjoint(missing)
+    assert set(design.reservation.design_ids) == set(missing)
     assert not json.loads((out / 'gate.json').read_text())['effect_release_authorized']
 
 
@@ -526,3 +537,56 @@ def test_design_eligibility_and_splits_refuse_bad_owner_decision(tmp_path, monke
     config = yaml.safe_load((ROOT / "configs/design.yaml").read_text())
     with pytest.raises(MissingPrerequisite, match="owner_decisions.outcome_flags"):
         validate_approvals(config, approvals, v["data_manifest"], v["covariates"], v["geography"], v["atlas"])
+
+
+@pytest.mark.parametrize("change", ["absent", "empty", "new_estimand", "support_pool", "support_recipe",
+                                    "county_minima_count", "eligibility_closure", "relief_screen"])
+def test_a2_missing_or_malformed_owner_amendment_refuses(change):
+    v = make_inputs()
+    approvals = yaml.safe_load(OWNER_APPROVALS.read_text())
+    owner = approvals["owner_decisions"]
+    if change == "absent":
+        owner.pop("tract_design_amendment")
+    elif change == "empty":
+        owner["tract_design_amendment"] = {}
+    else:
+        owner["tract_design_amendment"][change] = "wrong"
+    config = yaml.safe_load((ROOT / "configs/design.yaml").read_text())
+    with pytest.raises(MissingPrerequisite, match="tract_design_amendment"):
+        validate_approvals(config, approvals, v["data_manifest"], v["covariates"], v["geography"], v["atlas"])
+
+
+@pytest.mark.parametrize("field", ["raw_x_radius", "bin_width_mmhg", "min_bin_tracts"])
+def test_a2_support_config_must_equal_amendment(field):
+    v = make_inputs()
+    config = yaml.safe_load((ROOT / "configs/design.yaml").read_text())
+    config["support"][field] = 999
+    with pytest.raises(MissingPrerequisite, match="support recipe"):
+        validate_approvals(config, yaml.safe_load(OWNER_APPROVALS.read_text()),
+                          v["data_manifest"], v["covariates"], v["geography"], v["atlas"])
+
+
+def test_a2_census_relief_registry_and_fallback(tmp_path):
+    from oxyformer.design.gate import A2_ESTIMAND_ID, FROZEN_TARGET_ID
+    from oxyformer.design.splits import SplitScenario
+    v = make_inputs()
+    v["atlas"] = replace(v["atlas"], rows=tuple(replace(r, inhabited_elevation_m=10.) for r in v["atlas"].rows))
+    request = make_request(tmp_path, v)
+    assert run_stage(request).status == "pass"
+    out = Path(request.output_dir)
+    report = json.loads((out / "support_report.json").read_text())
+    splits = json.loads((out / "splits.json").read_text())
+    scenario = SplitScenario.from_json(canonical_json(splits["scenarios"][0]))
+    assert report["declared_fallback"] == {"raw_x_radius_iqr": 3.0, "run": False}
+    assert report["estimand_registry"][0]["estimand_id"] == FROZEN_TARGET_ID
+    assert report["estimand_registry"][0]["status"] == "infeasible as specified"
+    assert FrozenDesign.from_json((out / "design.json").read_text()).estimand_id == A2_ESTIMAND_ID
+    assert splits["estimand_id"] == scenario.estimand_id == A2_ESTIMAND_ID != FROZEN_TARGET_ID
+    counts = report["scenarios"][0]["census"]
+    assert counts["tracts"] == len(scenario.outer.target_ids)
+    assert counts["target_hash"] == sha256(json.dumps(sorted(scenario.outer.target_ids)).encode()).hexdigest()[:16]
+    assert counts["effective_counties"] == counts["max_county_share"] == 1
+    assert counts["tracts_in_counties_relief_below_m"] == dict.fromkeys(("50", "100", "300"), counts["tracts"])
+    assert set(report["layers"]) == {"eligibility", "reservation", "screens", "support"}
+    assert set(report["scenarios"][0]["layers"]) == {"buffers", "fold_minima", "recheck"}
+    assert all(sum(layer["per_county"].values()) == layer["tracts"] for layer in report["layers"].values())

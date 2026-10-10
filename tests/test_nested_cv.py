@@ -398,3 +398,65 @@ def test_nested_refuses_missing_or_malformed_outcome_decision(tmp_path, monkeypa
     monkeypatch.setattr(usaleep, "OWNER_APPROVALS", owner_file)
     with pytest.raises(ValueError, match="owner_decisions.outcome_flags"):
         prepared.validate(0)
+
+
+def mixed_role_endpoint(root):
+    prepared = endpoint(root)
+    frame = prepared.outer.original_ids
+    roles = {i: "inert" if i == "o29" else "training" if j % 4 == 0 else "target"
+             for j, i in enumerate(frame)}
+    def add_roles(split):
+        targets = [(i, f) for i, f in zip(split.original_ids, split.fold_ids) if roles[i] == "target"]
+        return replace(split, original_ids=tuple(i for i, _ in targets), fold_ids=tuple(f for _, f in targets),
+                       frame_ids=split.original_ids, frame_fold_ids=split.fold_ids,
+                       membership_roles=tuple(roles[i] for i in split.original_ids))
+    return replace(prepared, outer=add_roles(prepared.outer),
+                   inner=tuple(replace(inner, split=add_roles(inner.split)) for inner in prepared.inner),
+                   geography=replace(prepared.geography, rows=tuple(
+                       replace(r, outcome_flag=2) if r.original_id == "o29" else r
+                       for r in prepared.geography.rows)))
+
+
+def test_nested_consumes_roles_and_classifier_only_trains_on_target(tmp_path, monkeypatch):
+    prepared = mixed_role_endpoint(tmp_path)
+    seen = []
+    original = nested._train_transaction
+    def observe(config, bundle, encoder_state, view, stopping, *args, **kwargs):
+        seen.append((bundle["kind"], set(view.original_ids), set(stopping)))
+        return original(config, bundle, encoder_state, view, stopping, *args, **kwargs)
+    monkeypatch.setattr(nested, "_train_transaction", observe)
+    _, artifact = fitted(tmp_path / "fit", prepared)
+    assert artifact.complete
+    assert artifact.prediction_inputs.original_ids == prepared.outer.evaluation_ids(0)
+    allowed = set(prepared.outer.training_ids(0))
+    targets = set(prepared.outer.target_ids)
+    assert all(ids <= allowed and "o29" not in ids for _, ids, _ in seen)
+    assert any(kind == "outcome" and ids - targets for kind, ids, _ in seen)
+    assert all(ids | stops <= targets for kind, ids, stops in seen if kind == "origin")
+    calibration = nested.AffineCalibration.from_json(state(artifact)["calibration"])
+    assert set(calibration.original_ids) <= targets & allowed
+    prediction = predictions(prepared, artifact)
+    assert set(prediction.original_ids) <= targets
+
+
+def test_nested_refuses_held_out_target_in_training_partition(tmp_path):
+    prepared = mixed_role_endpoint(tmp_path)
+    held = prepared.outer.evaluation_ids(0)[0]
+    inner = prepared.inner[0]
+    # Substitute the held-out target for one permitted training row, preserving
+    # internally consistent IDs, source provenance, graph and role fields.
+    removed = inner.split.original_ids[0]
+    def rename(ids):
+        return tuple(held if i == removed else i for i in ids)
+    graph = replace(inner.entity_graph, original_ids=rename(inner.entity_graph.original_ids),
+                    links=tuple(replace(link, observation_id=held) if link.observation_id == removed else link
+                                for link in inner.entity_graph.links))
+    manifest = replace(inner.data_manifest, original_ids=rename(inner.data_manifest.original_ids),
+                       entity_graph_hash=graph.content_hash,
+                       lineage=replace(inner.data_manifest.lineage, unit_ids=rename(inner.data_manifest.original_ids)))
+    split = replace(inner.split, original_ids=rename(inner.split.original_ids), frame_ids=rename(inner.split.frame_ids),
+                    entity_graph_hash=graph.content_hash,
+                    lineage=replace(inner.split.lineage, unit_ids=manifest.original_ids, parent_hashes=(manifest.content_hash,)))
+    bad = replace(prepared, inner=(replace(inner, data_manifest=manifest, entity_graph=graph, split=split),))
+    with pytest.raises(ContractError, match="inner escapes outer training"):
+        bad.validate(0)
