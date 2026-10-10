@@ -47,9 +47,33 @@ def primary_outcome_flags(approvals=None):
     return tuple(decision["primary"])
 
 
+def _reject_duplicate_approval_keys(text):
+    """Inspect explicit keys before construction discards duplicates.
+
+    Composition preserves keys and aliases without applying YAML merges. Valid
+    merge overrides stay valid; visiting an alias twice is not a duplicate key.
+    """
+    pending = [yaml.compose(text, Loader=yaml.SafeLoader)]
+    visited = set()
+    while pending:
+        node = pending.pop()
+        if id(node) in visited:
+            continue
+        visited.add(id(node))
+        if isinstance(node, yaml.MappingNode):
+            keys = [(key.tag, key.value) for key, _ in node.value
+                    if isinstance(key, yaml.ScalarNode)]
+            _require(len(keys) == len(set(keys)),
+                     "duplicate YAML key in owner_decisions.outcome_flags approval document")
+            pending.extend(child for pair in node.value for child in pair)
+        elif isinstance(node, yaml.SequenceNode):
+            pending.extend(node.value)
+
+
 @lru_cache(maxsize=1)
 def _primary_flags_from_text(text):
     try:
+        _reject_duplicate_approval_keys(text)
         approvals = yaml.safe_load(text)
     except yaml.YAMLError as exc:
         raise ValueError("malformed owner_decisions.outcome_flags document") from exc

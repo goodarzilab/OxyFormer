@@ -415,3 +415,44 @@ def test_owner_file_changes_are_not_hidden_by_parse_cache(tmp_path, monkeypatch)
     owner_file.unlink()
     with pytest.raises(FileNotFoundError):
         usaleep.primary_outcome_flags()
+
+
+@pytest.mark.parametrize("duplicate", ["primary", "outcome_flags", "owner_decisions"])
+def test_duplicate_owner_outcome_keys_refused_before_loading(tmp_path, mapping, monkeypatch, duplicate):
+    from oxyformer.data.adapters import usaleep
+    valid = ("  outcome_flags:\n"
+             "    primary: [1, 3]\n"
+             "    excluded: [2]\n"
+             "    county_minimum_counts: primary\n"
+             "    sensitivity: flag1_only\n")
+    if duplicate == "primary":
+        text = "owner_decisions:\n" + valid.replace(
+            "    primary: [1, 3]\n", "    primary: [1, 2, 3]\n    primary: [1, 3]\n")
+    elif duplicate == "outcome_flags":
+        text = "owner_decisions:\n  outcome_flags: {primary: [1, 2, 3]}\n" + valid
+    else:
+        text = "owner_decisions: {outcome_flags: {primary: [1, 2, 3]}}\nowner_decisions:\n" + valid
+    owner_file = tmp_path / "owner.yaml"
+    owner_file.write_text(text)
+    monkeypatch.setattr(usaleep, "OWNER_APPROVALS", owner_file)
+    with pytest.raises(ValueError, match="duplicate.*owner_decisions.outcome_flags"):
+        load_usaleep(us_bundle(tmp_path, mapping), mapping)
+
+
+
+def test_owner_decision_allows_valid_yaml_aliases_and_merge_overrides(tmp_path, monkeypatch):
+    from oxyformer.data.adapters import usaleep
+    owner_file = tmp_path / "owner.yaml"
+    owner_file.write_text("""defaults: &defaults
+  primary: [1]
+  excluded: [2]
+  county_minimum_counts: primary
+  sensitivity: flag1_only
+owner_decisions:
+  outcome_flags:
+    <<: *defaults
+    primary: [1, 3]
+copy_of_defaults: *defaults
+""")
+    monkeypatch.setattr(usaleep, "OWNER_APPROVALS", owner_file)
+    assert usaleep.primary_outcome_flags() == (1, 3)
