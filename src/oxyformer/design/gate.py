@@ -493,6 +493,8 @@ def run_stage(request: StageRequest) -> StageResult:
                                 "target_hash": scenario.target_hash, "census": census(rows, ids, screens),
                                 "layers": {k: census(rows, v, screens) for k, v in scenario.layer_ids},
                                 "uninformative": not bool(ids),
+                                "outer_buffer_excluded_count": len(scenario.outer_buffer_excluded_ids),
+                                "outer_buffer_frame_census": census(rows, scenario.outer_buffer_excluded_ids, screens),
                                 "evaluation_flag_counts": flag_counts(chosen),
                                 "sealed_design_count": len(design_ids), "excluded_count": len(scenario.exclusions),
                                 "exclusion_counts": counts, "removed_from_primary": sorted(primary_ids - ids),

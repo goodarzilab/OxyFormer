@@ -269,3 +269,18 @@ def test_buffer_sees_inert_and_training_only_frame_rows():
     assert dict(scenario.exclusions)[rows[5].original_id] == "outer_buffer"
     if scenario.outer:
         assert not full_buffer.intersection(scenario.outer.frame_original_ids)
+
+
+def test_four_inner_fitting_tract_screen_without_outer_failure():
+    rows, graph, manifest, reservation = split_fixture(13)
+    # Six geographic components. Every outer partition has >=8 labels, but
+    # grouping (3,2,1,1,1,5) leaves only three labels in an inner fitting set.
+    blocks = tuple(f"b{g}" for g, size in enumerate((3, 2, 1, 1, 1, 5)) for _ in range(size))
+    rows = tuple(replace(r, subblock=b) for r, b in zip(rows, blocks))
+    reservation = replace(reservation, groups=dependence_groups(rows, graph))
+    scenario = build_scenario(rows, graph, manifest, reservation, manifest.original_ids, {},
+                              radius_km=0, policy_id=digest("inner-minimum"))
+    assert scenario.status == "fail"
+    assert all(a.outer_training_tracts >= 8 for a in scenario.count_audit)
+    assert any(min(a.inner_fitting_tracts) == 3 for a in scenario.count_audit)
+    assert {reason for _, reason in scenario.exclusions} == {"fewer_than_four_inner_fitting_tracts"}

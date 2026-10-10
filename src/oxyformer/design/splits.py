@@ -170,6 +170,7 @@ class SplitScenario(Immutable):
     target_hash: str = ""
     layer_ids: tuple[tuple[str, tuple[str, ...]], ...] = ()
     estimand_id: str = "usaleep-a2-2026-10-10"
+    outer_buffer_excluded_ids: tuple[str, ...] = ()
 
 
 
@@ -241,6 +242,7 @@ class SplitScenarioDesign(Immutable):
     target_hash: str
     layer_ids: tuple[tuple[str, tuple[str, ...]], ...]
     estimand_id: str
+    outer_buffer_excluded_ids: tuple[str, ...] = ()
 
     @classmethod
     def from_scenario(cls, scenario):
@@ -251,7 +253,8 @@ class SplitScenarioDesign(Immutable):
                    inner=tuple(InnerMembership(outer_fold=i.outer_fold, frame_ids=i.data_manifest.original_ids,
                                split=SplitMembership.from_split(i.split), buffer_excluded_ids=i.buffer_excluded_ids)
                                for i in scenario.inner), exclusions=scenario.exclusions, count_audit=scenario.count_audit,
-                   target_hash=scenario.target_hash, layer_ids=scenario.layer_ids, estimand_id=scenario.estimand_id)
+                   target_hash=scenario.target_hash, layer_ids=scenario.layer_ids, estimand_id=scenario.estimand_id,
+                   outer_buffer_excluded_ids=scenario.outer_buffer_excluded_ids)
 
     def bind(self, manifest, graph):
         require(_binding_hash(manifest) == self.binding_hash, "split design/data binding mismatch")
@@ -273,7 +276,8 @@ class SplitScenarioDesign(Immutable):
         return SplitScenario(buffer_km=self.buffer_km, status=self.status, target_id=self.target_id,
                              data_manifest=final, outer=outer, inner=tuple(inners), exclusions=self.exclusions,
                              count_audit=self.count_audit, target_hash=self.target_hash,
-                             layer_ids=self.layer_ids, estimand_id=self.estimand_id)
+                             layer_ids=self.layer_ids, estimand_id=self.estimand_id,
+                             outer_buffer_excluded_ids=self.outer_buffer_excluded_ids)
 
 def _manifest(manifest, ids, graph):
     return replace(manifest, original_ids=tuple(ids), entity_graph_hash=graph.content_hash,
@@ -322,7 +326,7 @@ def build_scenario(rows, graph, manifest, reservation, candidate_ids, initial_re
                 r.outcome_flag in flags and r.label_available)}
     active = set(candidate_ids) & labelled - buffered
     for oid in buffered:
-        reasons[oid] = "outer_buffer"
+        reasons.setdefault(oid, "outer_buffer")
     for oid in all_ids - design_ids - set(candidate_ids):
         reasons.setdefault(oid, "initial_target_exclusion")
     for oid in set(candidate_ids) - labelled - buffered:
@@ -413,6 +417,7 @@ def build_scenario(rows, graph, manifest, reservation, candidate_ids, initial_re
                          data_manifest=final_manifest, outer=outer_split, inner=tuple(inners),
                          exclusions=tuple(sorted((oid, reasons[oid]) for oid in excluded)),
                          count_audit=tuple(audits), layer_ids=tuple(layers), estimand_id=estimand_id,
+                         outer_buffer_excluded_ids=tuple(sorted(buffered)),
                          target_hash=sha256(json.dumps(sorted(active)).encode()).hexdigest()[:16])
 
 

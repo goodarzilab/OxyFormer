@@ -189,6 +189,7 @@ class SplitManifest(Immutable):
         check_hash(self.entity_graph_hash)
         require(not self.membership_roles or len(self.membership_roles) == len(self.frame_original_ids),
                 "membership role alignment mismatch")
+        require(not self.membership_roles or bool(self.frame_ids), "membership roles require an explicit frame")
         require(len(self.frame_ids) == len(self.frame_fold_ids), "frame fold alignment mismatch")
         require(all(f >= 0 for f in self.frame_fold_ids), "negative frame fold")
         if self.frame_ids:

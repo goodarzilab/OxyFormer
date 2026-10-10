@@ -592,3 +592,36 @@ def test_a2_census_relief_registry_and_fallback(tmp_path):
     assert set(report["layers"]) == {"eligibility", "reservation", "screens", "support"}
     assert set(report["scenarios"][0]["layers"]) == {"buffers", "fold_minima", "recheck"}
     assert all(sum(layer["per_county"].values()) == layer["tracts"] for layer in report["layers"].values())
+
+
+def test_split_decision_binding_retains_honest_sources_and_rejects_wrong_frame(tmp_path):
+    from oxyformer.data.loaders import validate_split
+    inputs = make_inputs()
+    request = make_request(tmp_path, inputs)
+    result = run_stage(request)
+    assert result.status == "pass"
+    result.verify(request)
+    record = json.loads((Path(request.output_dir) / "splits.json").read_text())["scenarios"][0]
+    decision = SplitScenarioDesign.from_json(canonical_json(record))
+    bound = decision.bind(inputs["data_manifest"], inputs["entity_graph"])
+    validate_split(bound.outer, bound.data_manifest, inputs["entity_graph"])
+    assert bound.data_manifest.sources == inputs["data_manifest"].sources
+    assert inputs["data_manifest"].content_hash in bound.data_manifest.lineage.parent_hashes
+    changed = make_inputs(label_offset=9999)
+    rebound = decision.bind(changed["data_manifest"], changed["entity_graph"])
+    assert rebound.outer.lineage.source_hashes != bound.outer.lineage.source_hashes
+    assert rebound.target_hash == bound.target_hash
+    wrong = replace(inputs["data_manifest"], spec=replace(inputs["data_manifest"].spec, weight_id="wrong-weight"))
+    with pytest.raises(ContractError, match="split design/data binding mismatch"):
+        decision.bind(wrong, inputs["entity_graph"])
+
+
+def test_support_caliper_keeps_the_thirtieth_covariate():
+    from oxyformer.design.support import neighbors
+    values = make_inputs()
+    query, comparison = values["geography"].rows[:2]
+    atlas = {r.tract_id: r for r in values["atlas"].rows}
+    x = {query.original_id: (0.,) * 30, comparison.original_id: (0.,) * 29 + (2.01,)}
+    assert neighbors(query, [comparison], x, (1.,) * 30, atlas, SupportRecipe(), local=True) == ()
+    x[comparison.original_id] = (0.,) * 29 + (2.,)
+    assert neighbors(query, [comparison], x, (1.,) * 30, atlas, SupportRecipe(), local=True) == (comparison,)
