@@ -102,14 +102,17 @@ def cell_edit(raw, table, line, value, kind="e", row=0):
     raw[name] = csv_text(rows)
 
 
-def test_only_observed_input_labels_are_primary(tmp_path, mapping):
+def test_owner_primary_flags_include_observed_and_mixed(tmp_path, mapping):
     primary, audit = load_usaleep(us_bundle(tmp_path, mapping), mapping)
-    assert primary.original_id.tolist() == [IDS[0]]
-    assert primary.life_expectancy_years.tolist() == [70]
-    assert audit["excluded_rows"] == 2
+    assert primary.original_id.tolist() == [IDS[0], IDS[2]]
+    assert primary.life_expectancy_years.tolist() == [70, 72]
+    assert audit["excluded_rows"] == 1
+    assert audit["primary_rows"] == 2
+    assert audit["metadata"].mortality_input_flag.tolist() == ["1", "2", "3"]
+    assert audit["metadata"].primary_label_available.tolist() == [True, False, True]
     assert audit["metadata"].mortality_input_kind.tolist() == ["observed", "predicted", "mixed"]
     assert audit["metadata"].standard_error_years.tolist() == [0.5] * 3
-    assert audit["metadata"].exclusion_reason.tolist() == ["", "predicted_mortality_inputs", "mixed_mortality_inputs"]
+    assert audit["metadata"].exclusion_reason.tolist() == ["", "predicted_mortality_inputs", ""]
     for field in audit["metadata"].columns:
         for use in ("ssl", "nuisance", "context"):
             with pytest.raises(ValueError):
@@ -122,8 +125,8 @@ def test_exact_ids_and_separate_frames(tmp_path, mapping):
     before = covariates.copy(deep=True)
     joined, join_audit = join_outcomes(covariates, outcomes)
     assert covariates.original_id.tolist() == IDS
-    assert joined.original_id.tolist() == [IDS[0]]
-    assert join_audit["acs_without_primary_outcome"] == tuple(IDS[1:])
+    assert joined.original_id.tolist() == [IDS[0], IDS[2]]
+    assert join_audit["acs_without_primary_outcome"] == (IDS[1],)
     pd.testing.assert_frame_equal(covariates, before)
     assert len(covariates.columns) == 31
     assert len(audit["excluded_geographies"]) == 1  # no block-group replication
@@ -361,3 +364,54 @@ def test_negative_median_income_refused(tmp_path, mapping, token):
     bundle = acs_bundle(tmp_path, mapping, lambda raw: cell_edit(raw, "B19013", 1, token))
     with pytest.raises(ValueError, match="median"):
         load_acs(bundle, mapping)
+
+
+@pytest.mark.parametrize("decision", [
+    None, {}, [], "primary", {"primary": [1, 3]},
+    {"primary": [1], "excluded": [2], "county_minimum_counts": "primary", "sensitivity": "flag1_only"},
+    {"primary": [1, 2, 3], "excluded": [], "county_minimum_counts": "primary", "sensitivity": "flag1_only"},
+    {"primary": [True, 3], "excluded": [2], "county_minimum_counts": "primary", "sensitivity": "flag1_only"},
+    {"primary": [1.0, 3], "excluded": [2], "county_minimum_counts": "primary", "sensitivity": "flag1_only"},
+    {"primary": ["1", "3"], "excluded": [2], "county_minimum_counts": "primary", "sensitivity": "flag1_only"},
+    {"primary": [1, 3, 3], "excluded": [2], "county_minimum_counts": "primary", "sensitivity": "flag1_only"},
+    {"primary": [1, 3], "excluded": [2, 3], "county_minimum_counts": "primary", "sensitivity": "flag1_only"},
+    {"primary": [1, 3], "excluded": [2.0], "county_minimum_counts": "primary", "sensitivity": "flag1_only"},
+    {"primary": [1, 3], "excluded": [2], "county_minimum_counts": "flag1_only", "sensitivity": "flag1_only"},
+    {"primary": [1, 3], "excluded": [2], "county_minimum_counts": "primary", "sensitivity": None},
+])
+def test_owner_outcome_decision_refuses_missing_or_malformed(tmp_path, mapping, monkeypatch, decision):
+    from oxyformer.data.adapters import usaleep
+    approvals = yaml.safe_load(usaleep.OWNER_APPROVALS.read_text())
+    if decision is None:
+        del approvals["owner_decisions"]["outcome_flags"]
+    else:
+        approvals["owner_decisions"]["outcome_flags"] = decision
+    owner_file = tmp_path / "owner.yaml"
+    owner_file.write_text(yaml.safe_dump(approvals))
+    monkeypatch.setattr(usaleep, "OWNER_APPROVALS", owner_file)
+    with pytest.raises(ValueError, match="owner_decisions.outcome_flags"):
+        load_usaleep(us_bundle(tmp_path, mapping), mapping)
+
+
+@pytest.mark.parametrize("text", ["", "null", "[]", "owner_decisions: null", "owner_decisions: [", "owner_decisions: []"])
+def test_invalid_owner_document_does_not_fall_back(tmp_path, monkeypatch, text):
+    from oxyformer.data.adapters import usaleep
+    owner_file = tmp_path / "owner.yaml"
+    owner_file.write_text(text)
+    monkeypatch.setattr(usaleep, "OWNER_APPROVALS", owner_file)
+    with pytest.raises(ValueError, match="owner_decisions.outcome_flags"):
+        usaleep.primary_outcome_flags()
+
+
+def test_owner_file_changes_are_not_hidden_by_parse_cache(tmp_path, monkeypatch):
+    from oxyformer.data.adapters import usaleep
+    owner_file = tmp_path / "owner.yaml"
+    owner_file.write_bytes(usaleep.OWNER_APPROVALS.read_bytes())
+    monkeypatch.setattr(usaleep, "OWNER_APPROVALS", owner_file)
+    assert usaleep.primary_outcome_flags() == (1, 3)
+    owner_file.write_text("{}")
+    with pytest.raises(ValueError, match="owner_decisions.outcome_flags"):
+        usaleep.primary_outcome_flags()
+    owner_file.unlink()
+    with pytest.raises(FileNotFoundError):
+        usaleep.primary_outcome_flags()

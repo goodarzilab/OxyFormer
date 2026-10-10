@@ -101,7 +101,7 @@ def test_county_preliminary_screens_use_allocation_qualified_unique_tracts():
     values = make_inputs()
     rows = values["geography"].rows[:3]
     a = {r.tract_id: r for r in values["atlas"].rows}
-    assert "fewer_than_four_observed_input_tracts" in county_screen(rows, a)["c1"]["reasons"]
+    assert "fewer_than_four_primary_eligible_tracts" in county_screen(rows, a)["c1"]["reasons"]
     rows = values["geography"].rows
     assert not county_screen(rows, a)["c1"]["reasons"]
     bad = {key: replace(value, allocation_qualified=False) for key, value in a.items()}
@@ -276,6 +276,9 @@ def test_primary_flag_exclusions_are_explicit(tmp_path):
     report = json.loads((Path(request.output_dir) / "support_report.json").read_text())
     bad = {r.original_id for r in rows if r.outcome_flag == 2}
     primary = json.loads((Path(request.output_dir) / "splits.json").read_text())["scenarios"][0]["payload"]
+    assert report["flag_counts"]["2"] == len(bad)
+    assert report["scenarios"][0]["evaluation_flag_counts"]["2"] == 0
+    assert all(report["mortality_input_flag"][oid] == 2 for oid in bad)
     assert bad <= set(primary["outer"]["excluded_ids"])
     assert not bad.intersection(primary["outer"]["original_ids"])
     assert report["scenarios"][0]["exclusion_counts"]["flag_label_or_allocation_unusable"] == len(bad)
@@ -458,3 +461,68 @@ def test_accounted_dem_omissions_of_all_sealed_records_remain_blocked(tmp_path, 
     assert not json.loads((out / 'design.json').read_text())['available']
     assert json.loads((out / 'splits.json').read_text())['scenarios'] == []
     assert not json.loads((out / 'gate.json').read_text())['effect_release_authorized']
+
+
+def test_county_minimum_and_split_counts_include_primary_flags():
+    from oxyformer.design.eligibility import usable
+    from oxyformer.design.splits import tract_count
+    v = make_inputs()
+    # Four distinct tracts meet the same relief/local screens with only one flag 1.
+    rows = tuple(replace(v["geography"].rows[4 * j], outcome_flag=flag)
+                 for j, flag in enumerate((1, 3, 3, 3, 2)))
+    atlas = {r.tract_id: r for r in v["atlas"].rows}
+    assert [usable(r, atlas) for r in rows] == [True, True, True, True, False]
+    assert county_screen(rows, atlas)["c1"]["tract_count"] == 4
+    assert county_screen(rows, atlas)["c1"]["reasons"] == []
+    assert tract_count(rows + (rows[1],), "c1") == 4  # distinct, never repeated labels
+    unavailable = (rows[0], replace(rows[1], label_available=False), *rows[2:])
+    assert tract_count(unavailable, "c1") == 3
+    assert "fewer_than_four_primary_eligible_tracts" in county_screen(unavailable, atlas)["c1"]["reasons"]
+
+
+def test_mixed_primary_gate_preserves_flags_and_subset_accounting(tmp_path):
+    v = make_inputs()
+    # Reclassify one replicate at every dose as flag 3, preserving geography/A/X.
+    rows = tuple(replace(r, outcome_flag=3 if r.original_id.endswith("-1") else 1)
+                 for r in v["geography"].rows)
+    v["geography"] = replace(v["geography"], rows=rows)
+    request = make_request(tmp_path, v)
+    result = run_stage(request)
+    assert result.status == "pass", result.message
+    report = json.loads((Path(request.output_dir) / "support_report.json").read_text())
+    assert report["primary_outcome_flags"] == [1, 3]
+    assert report["registered_sensitivity"] == "flag1_only"
+    assert report["mortality_input_flag"] == {r.original_id: r.outcome_flag for r in rows}
+    assert report["flag_counts"] == {"1": len(rows) // 2, "2": 0, "3": len(rows) // 2}
+    assert report["primary_eligible_flag_counts"] == report["flag_counts"]
+    assert report["sealed_design_flag_counts"] == {"1": 60, "2": 0, "3": 60}
+    assert report["scenarios"][0]["evaluation_flag_counts"] == {"1": 200, "2": 0, "3": 200}
+    scenarios = json.loads((Path(request.output_dir) / "splits.json").read_text())["scenarios"]
+    target = set(scenarios[0]["payload"]["outer"]["original_ids"])
+    flag1_subset = {oid for oid in target if report["mortality_input_flag"][oid] == 1}
+    assert len(flag1_subset) == 200 and flag1_subset < target
+
+
+@pytest.mark.parametrize("decision", [None, {}, {"primary": [1]}])
+def test_design_eligibility_and_splits_refuse_bad_owner_decision(tmp_path, monkeypatch, decision):
+    from oxyformer.data.adapters import usaleep
+    from oxyformer.design.eligibility import usable
+    from oxyformer.design.splits import tract_count
+    approvals = yaml.safe_load(OWNER_APPROVALS.read_text())
+    if decision is None:
+        del approvals["owner_decisions"]["outcome_flags"]
+    else:
+        approvals["owner_decisions"]["outcome_flags"] = decision
+    owner_file = tmp_path / "owner.yaml"
+    owner_file.write_text(yaml.safe_dump(approvals))
+    monkeypatch.setattr(usaleep, "OWNER_APPROVALS", owner_file)
+    v = make_inputs()
+    rows = v["geography"].rows
+    atlas = {r.tract_id: r for r in v["atlas"].rows}
+    for action in (lambda: usable(rows[0], atlas), lambda: county_screen(rows, atlas),
+                   lambda: tract_count(rows, "c1")):
+        with pytest.raises(ValueError, match="owner_decisions.outcome_flags"):
+            action()
+    config = yaml.safe_load((ROOT / "configs/design.yaml").read_text())
+    with pytest.raises(MissingPrerequisite, match="owner_decisions.outcome_flags"):
+        validate_approvals(config, approvals, v["data_manifest"], v["covariates"], v["geography"], v["atlas"])

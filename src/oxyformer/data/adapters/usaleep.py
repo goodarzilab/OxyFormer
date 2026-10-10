@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
+from functools import lru_cache
 from hashlib import sha256
 import io
 import json
@@ -17,9 +18,43 @@ from pathlib import Path
 import re
 
 import pandas as pd
+import yaml
 
 from oxyformer.contracts import SourceManifest
 from oxyformer.data.feature_roles import FeatureRegistry, FeatureRule
+
+
+OWNER_APPROVALS = Path(__file__).resolve().parents[4] / "configs" / "approvals.yaml"
+
+
+def primary_outcome_flags(approvals=None):
+    """Read the owner amendment; a legacy plan/mapping value is never a fallback."""
+    if approvals is None:
+        # Cache parsing, not file contents: changed or missing approvals are
+        # observed on every call, including repeated per-tract eligibility checks.
+        return _primary_flags_from_text(OWNER_APPROVALS.read_text())
+    owner = approvals.get("owner_decisions") if isinstance(approvals, dict) else None
+    decision = owner.get("outcome_flags") if isinstance(owner, dict) else None
+    valid = isinstance(decision, dict)
+    if valid:
+        for key, expected in (("primary", [1, 3]), ("excluded", [2])):
+            values = decision.get(key)
+            valid = valid and isinstance(values, list) and values == expected and all(
+                type(flag) is int for flag in values)
+        valid = (valid and decision.get("county_minimum_counts") == "primary"
+                 and decision.get("sensitivity") == "flag1_only")
+    _require(valid, "missing or malformed owner_decisions.outcome_flags")
+    return tuple(decision["primary"])
+
+
+@lru_cache(maxsize=1)
+def _primary_flags_from_text(text):
+    try:
+        approvals = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise ValueError("malformed owner_decisions.outcome_flags document") from exc
+    _require(isinstance(approvals, dict), "missing or malformed owner_decisions.outcome_flags")
+    return primary_outcome_flags(approvals)
 
 
 @dataclass(frozen=True)
@@ -92,7 +127,7 @@ def join_outcomes(covariates, outcomes):
 
 
 def load_usaleep(bundle, mapping, *, numeric_identifiers=False):
-    """Validate raw File A and retain only flag-1 outcomes in the primary frame.
+    """Validate raw File A and retain owner-approved flags in the primary frame.
 
     numeric_identifiers enables the pinned public CSV's unpadded numeric FIPS
     representation. Existing direct callers keep the strict fixed-width API.
@@ -101,6 +136,7 @@ def load_usaleep(bundle, mapping, *, numeric_identifiers=False):
     release contains only finite estimates/SEs and flags 1/2/3, with no documented
     missing token. Absence of a tract is audited by the later explicit join.
     """
+    primary_flags = primary_outcome_flags()
     section = _mapping(mapping, "usaleep")
     expected_fields = {
         "Tract ID": "original_id", "STATE2KX": "state_fips", "CNTY2KX": "county_fips",
@@ -110,7 +146,9 @@ def load_usaleep(bundle, mapping, *, numeric_identifiers=False):
     _require(section["field_mapping"] == expected_fields, "unresolved USALEEP fields")
     _require(section["flags"] == {"1": "observed", "2": "predicted", "3": "mixed"},
              "mortality flag interpretation differs from inspected CDC layout")
-    _require(section["primary_flags"] == ["1"], "primary labels require observed inputs")
+    # Retain the reviewed mapping/hash, whose original primary declaration is
+    # amended by owner_decisions.outcome_flags, not by rewriting source metadata.
+    _require(section["primary_flags"] == ["1"], "reviewed legacy primary mapping differs")
     _require(section["units"] == "years", "USALEEP units must be years")
     _require(len(bundle) == 1, "exactly one USALEEP File A required")
     reader = csv.DictReader(io.StringIO(_read(bundle[0], section, "usaleep_2010_2015")))
@@ -140,12 +178,13 @@ def load_usaleep(bundle, mapping, *, numeric_identifiers=False):
         _require(frame[column].map(lambda x: float('-inf') < x < float('inf')).all(),
                  f"nonfinite {column}")
     _require((frame.life_expectancy_years > 0).all(), "nonpositive life expectancy")
-    observed = frame.mortality_input_flag == "1"
-    primary = frame.loc[observed, ["original_id", "life_expectancy_years"]].reset_index(drop=True)
+    eligible = frame.mortality_input_flag.isin([str(flag) for flag in primary_flags])
+    primary = frame.loc[eligible, ["original_id", "life_expectancy_years"]].reset_index(drop=True)
     frame["mortality_input_kind"] = frame.mortality_input_flag.map(section["flags"])
-    frame["primary_label_available"] = observed
+    frame["primary_label_available"] = eligible
     frame["exclusion_reason"] = frame.mortality_input_kind.map(
         {"observed": "", "predicted": "predicted_mortality_inputs", "mixed": "mixed_mortality_inputs"})
+    frame.loc[eligible, "exclusion_reason"] = ""
     registry = FeatureRegistry(registry_id="usaleep-observation-metadata", rules=tuple(
         FeatureRule(name=name, role="outcome" if name == "life_expectancy_years" else
                     "identifier" if name == "original_id" else "outcome_metadata",
@@ -157,4 +196,4 @@ def load_usaleep(bundle, mapping, *, numeric_identifiers=False):
     return primary, {"metadata": frame, "registry": registry,
                      "mapping_hash": mapping_hash(section),
                      "source_manifests": tuple(f.manifest for f in bundle),
-                     "primary_rows": len(primary), "excluded_rows": int((~observed).sum())}
+                     "primary_rows": len(primary), "excluded_rows": int((~eligible).sum())}

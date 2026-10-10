@@ -24,7 +24,7 @@ required scientific comparisons cannot be counted as completed by omission.
 2. Freeze the outcome-sealed 20% design reservation, two-mmHg shift-or-stay
    policy and supported target. Use pressure before population aggregation;
    no learned exposure weights, clipping, gap bridging or post hoc trimming.
-   Enforce flag-1 primary outcomes, inhabited relief/local support, five
+   Enforce owner-approved primary outcome flags (1 and 3), inhabited relief/local support, five
    geographic outer folds within counties, three inner folds, at least eight
    outer-training and four inner-fitting tracts per county after exclusions.
 3. Verify fold-nested preprocessing/SSL/tuning/calibration, independent
@@ -85,3 +85,31 @@ or a blocked/failed result. The synthetic integration report intentionally
 lacks coverage, sufficient counties and release approvals: its finite
 estimates must never authorize release. Shared-root promotion is absent from
 this plan and requires the PI if requested later.
+
+## USALEEP outcome-flag amendment (2026-10-10)
+
+The owner decision `owner_decisions.outcome_flags` in
+[approvals.yaml](../configs/approvals.yaml) amends frozen plan sections 4.1 and
+5.3. `plan_fixed.primary_outcome_flags: [1]` remains as the historical value
+with its amendment comment; primary labels, eligibility, training and evaluation
+now use `primary: [1, 3]`. Flag 1 means observed age-specific death rates at all
+ages, flag 2 predicted rates at all ages, and flag 3 a combination of observed
+and predicted rates. Flag 2 has no primary label. Missing or malformed owner
+decisions refuse execution, with no fallback to the historical restriction.
+
+The unchanged `plan_fixed.min_flag1_tracts_per_county: 4` now counts distinct
+primary-eligible tracts, as required by `county_minimum_counts: primary`.
+Relief, distance, reservation, support, buffer and split rules are unchanged.
+The motivating gate report found 4,421 flag-1 tracts among 66,718 nationally,
+290 counties with at least four, and zero evaluable tracts after the screens.
+Flags 1 and 3 provide 58,242 tracts and 2,078 counties with at least four;
+these input counts do not establish support or authorize an effect release.
+
+The registered `sensitivity: flag1_only` is a subset restricted to mortality
+input flag 1. The tract metadata retains `mortality_input_flag` (called
+`outcome_flag` in `GeographyRow`), and the gate support report retains that
+per-ID mapping plus counts for the input frame, primary-eligible frame, sealed
+design set and each buffer's evaluation target. Later sensitivity work can
+select the flag-1 subset without acquiring new inputs. This change registers
+and preserves the subset; it does not run the sensitivity analysis. Flags remain
+diagnostic/selection metadata and never enter nuisance predictors.

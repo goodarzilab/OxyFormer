@@ -10,6 +10,7 @@ from math import asin, cos, radians, sin, sqrt
 
 import numpy as np
 
+from oxyformer.data.adapters.usaleep import primary_outcome_flags
 from oxyformer.provenance import Immutable, check_hash, nonempty, require, unique
 
 
@@ -113,17 +114,22 @@ def distance_km(a, b):
 
 
 def usable(row, atlas):
+    return _usable(row, atlas, primary_outcome_flags())
+
+
+def _usable(row, atlas, flags):
     item = atlas.get(row.tract_id)
-    return (row.outcome_flag == 1 and row.label_available and item is not None
+    return (row.outcome_flag in flags and row.label_available and item is not None
             and item.allocation_qualified and item.population > 0)
 
 
 def county_screen(rows, atlas):
     """Fixed four-tract / 300 m / 25 km screens on allocation-qualified inputs."""
+    flags = primary_outcome_flags()
     counties = {}
     for row in rows:
         counties.setdefault(row.county, {})
-        if usable(row, atlas):
+        if _usable(row, atlas, flags):
             counties[row.county][row.tract_id] = row
     result = {}
     for county, tracts in sorted(counties.items()):
@@ -135,7 +141,7 @@ def county_screen(rows, atlas):
                     for i, a in enumerate(values) for b in values[i + 1:])
         reasons = []
         if len(values) < 4:
-            reasons.append("fewer_than_four_observed_input_tracts")
+            reasons.append("fewer_than_four_primary_eligible_tracts")
         if spread < 300:
             reasons.append("inhabited_relief_below_300m")
         if not local:

@@ -67,7 +67,7 @@ def exposure_design_inputs():
                 geography.append(GeographyRow(original_id=oid, tract_id=oid, county=county,
                     state="s1" if county == "c1" else "s2", subblock=name, assignment_geography=oid,
                     latitude=40. if county == "c1" else 42., longitude=-100 + block * .003,
-                    outcome_flag=1, label_available=True))
+                    outcome_flag=1 if dose % 2 == 0 else 3, label_available=True))
                 atlas.append(AtlasRow(tract_id=oid, exposure_mmhg=a, inhabited_elevation_m=float(z),
                                       population=2, allocation_qualified=True))
     ids = tuple(r.original_id for r in geography)

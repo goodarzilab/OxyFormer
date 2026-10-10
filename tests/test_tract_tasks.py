@@ -92,6 +92,8 @@ def test_real_adapter_fields_stream_into_outcome_free_typed_covariates(tmp_path,
     frame, metadata, sources, registry, audit = load_fixture(tmp_path)
     assert tuple(frame.original_id) == tuple(IDS)
     assert audit['flag_counts'] == {'1': 1, '2': 1, '3': 1}
+    assert metadata.mortality_input_flag.tolist() == ['1', '2', '3']
+    assert metadata.primary_label_available.tolist() == [True, False, True]
     assert 'life_expectancy_years' not in metadata
     manifest, covariates, graph = tract_inputs.typed_covariates(
         frame, metadata, sources, registry, request_fixture(tmp_path))
@@ -240,7 +242,7 @@ def test_geography_uses_owner_grid_and_keeps_flags_out_of_predictors(tmp_path):
     assert {r.subblock for r in geography.rows} == {f'01001:{floor(x / 10000)}:{floor(y / 10000)}'}
     assert [r.assignment_geography for r in geography.rows] == IDS
     assert [r.outcome_flag for r in geography.rows] == [1, 2, 3]
-    assert [r.label_available for r in geography.rows] == [True, False, False]
+    assert [r.label_available for r in geography.rows] == [True, False, True]
     with pytest.raises(ContractError, match='lacks a population'):
         tract_inputs.typed_geography(manifest, metadata, {})
 

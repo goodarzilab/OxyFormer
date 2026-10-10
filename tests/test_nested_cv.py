@@ -30,7 +30,7 @@ def threads():
 def endpoint(root):
     _, split, manifest, config = make_case(root)
     rows = tuple(GeographyRow(original_id=i, tract_id=i, county="c", state="s", subblock=str(j // 2),
-        assignment_geography=i, latitude=float(j), longitude=0., outcome_flag=1,
+        assignment_geography=i, latitude=float(j), longitude=0., outcome_flag=1 if j % 2 == 0 else 3,
         label_available=i != "unlabeled-acs") for j, i in enumerate(manifest.original_ids))
     return nested.PreparedEndpoint(data=config.data, entity_graph=config.entity_graph,
         geography=GeographyTable(rows=rows, data_manifest_hash=manifest.content_hash, county_field="county",
@@ -370,3 +370,31 @@ def test_nuisance_stopping_preserves_geographic_components(tmp_path):
     prepared, stop = geographic_stopping_endpoint(tmp_path)
     with pytest.raises(ContractError, match="geographic component"):
         tiny_config(prepared, tmp_path / "work", stopping_ids=((0, stop),))
+
+
+@pytest.mark.parametrize("partition", ["training", "evaluation"])
+def test_nested_primary_flags_reject_predicted_labels(tmp_path, partition):
+    prepared = endpoint(tmp_path)
+    prepared.validate(0)  # mixed flag-1/3 frame is accepted throughout fitting
+    ids = (prepared.outer.training_ids(0) if partition == "training" else
+           tuple(i for i, fold in zip(prepared.outer.original_ids, prepared.outer.fold_ids) if fold == 0))
+    bad = replace(prepared, geography=replace(prepared.geography, rows=tuple(
+        replace(r, outcome_flag=2) if r.original_id == ids[0] else r for r in prepared.geography.rows)))
+    with pytest.raises(ContractError, match="non-primary or unavailable"):
+        bad.validate(0)
+
+
+@pytest.mark.parametrize("decision", [None, {}, {"primary": [1]}])
+def test_nested_refuses_missing_or_malformed_outcome_decision(tmp_path, monkeypatch, decision):
+    from oxyformer.data.adapters import usaleep
+    prepared = endpoint(tmp_path)
+    approvals = yaml.safe_load(usaleep.OWNER_APPROVALS.read_text())
+    if decision is None:
+        del approvals["owner_decisions"]["outcome_flags"]
+    else:
+        approvals["owner_decisions"]["outcome_flags"] = decision
+    owner_file = tmp_path / "owner.yaml"
+    owner_file.write_text(yaml.safe_dump(approvals))
+    monkeypatch.setattr(usaleep, "OWNER_APPROVALS", owner_file)
+    with pytest.raises(ValueError, match="owner_decisions.outcome_flags"):
+        prepared.validate(0)

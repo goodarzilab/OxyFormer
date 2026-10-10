@@ -9,6 +9,7 @@ Consumers must check StageResult.status before decoding or consuming scientific
 artifacts. A nonpassing stage may publish an unavailable-design marker instead
 of a FrozenDesign; no fitted design is fabricated for missing prerequisites.
 """
+from collections import Counter
 from dataclasses import dataclass
 from hashlib import sha256
 import json
@@ -20,6 +21,7 @@ import tempfile
 import yaml
 
 from oxyformer.contracts import CovariateView, DataManifest, StageRequest, StageResult
+from oxyformer.data.adapters.usaleep import primary_outcome_flags
 from oxyformer.data.entity_graph import EntityGraph
 from oxyformer.data.feature_roles import FeatureRegistry
 from oxyformer.design.eligibility import CollectedAtlas, GeographyTable, county_screen, usable
@@ -36,7 +38,7 @@ DESIGN_CONFIG = ROOT / "configs" / "design.yaml"
 INFERENCE_FRAME = (
     "Equal-tract inference is conditional on the sealed geographic support design, "
     "approved raw-X registry, frozen support policy, atlas coverage and buffer-specific "
-    "eligible flag-1 tract frame. Sealed design outcomes enter neither nuisance fitting "
+    "eligible primary (flag-1/3) tract frame. Sealed design outcomes enter neither nuisance fitting "
     "nor effect evaluation. Uncertainty concerns the declared geographic stochastic "
     "process, not a literal census sampling error. Every changed target has a new ID. "
     "Whole-county/state deletion requires full refitting; no unseen-county offsets."
@@ -57,6 +59,10 @@ class FrozenDesign(Immutable):
 
 
 def validate_approvals(config, approvals, manifest, covariates, geography, atlas):
+    try:
+        primary_outcome_flags(approvals)
+    except ValueError as exc:
+        raise MissingPrerequisite(str(exc)) from exc
     fixed = approvals.get("plan_fixed", {})
     owner = approvals.get("owner_decisions", {})
     pairs = {
@@ -74,7 +80,7 @@ def validate_approvals(config, approvals, manifest, covariates, geography, atlas
     for key, approval_key in pairs.items():
         if key not in config or fixed.get(approval_key) != expected[key] or config[key] != expected[key]:
             raise MissingPrerequisite(f"missing or contradictory fixed approval: {approval_key}")
-    if (config.get("buffers_km") != [0, 10, 25] or fixed.get("primary_outcome_flags") != [1]
+    if (config.get("buffers_km") != [0, 10, 25]
             or fixed.get("policy_form") != "shift_or_stay"
             or fixed.get("county_membership") != "coarse_comparison_stratum"):
         raise MissingPrerequisite("missing or contradictory policy/geography approval")
@@ -201,6 +207,11 @@ def atlas_coverage(values):
             'accounted_missing_dem_tracts': len(accounted),
             'accounted_missing_dem_tract_ids': tuple(sorted(accounted)),
             'unaccounted_missing_tract_ids': tuple(sorted(unaccounted))}
+
+
+def flag_counts(rows):
+    counts = Counter(str(row.outcome_flag) for row in rows)
+    return {str(flag): counts[str(flag)] for flag in (1, 2, 3)}
 
 
 def allocation_exclusions(rows, coverage, design_ids):
@@ -331,10 +342,18 @@ def run_stage(request: StageRequest) -> StageResult:
         rows = geography.rows
         a = {r.tract_id: r for r in atlas.rows}
         reservation = reserve_design(rows, graph)
+        design_ids = set(reservation.design_ids)
         screens = county_screen(rows, a)
         coverage = atlas_coverage(values)
         accounted_missing = set(coverage["accounted_missing_dem_tract_ids"])
         report = {"coverage": coverage,
+                  "primary_outcome_flags": list(primary_outcome_flags(values["approvals"])),
+                  "registered_sensitivity": "flag1_only",
+                  "mortality_input_flag": {r.original_id: r.outcome_flag for r in rows},
+                  "flag_counts": flag_counts(rows),
+                  "primary_eligible_flag_counts": flag_counts(r for r in rows if usable(r, a)),
+                  "sealed_design_flag_counts": flag_counts(
+                      r for r in rows if r.original_id in design_ids),
                   "allocation_exclusions": allocation_exclusions(rows, coverage, set(reservation.design_ids)),
                   "initial_county_screens": screens, "inference_frame": INFERENCE_FRAME,
                   "reservation": {"requested_fraction": .2, "rounding": "ceil per county then lineage closure",
@@ -385,6 +404,7 @@ def run_stage(request: StageRequest) -> StageResult:
                 counts[reason] = counts.get(reason, 0) + 1
             diagnostics.append({"buffer_km": scenario.buffer_km, "status": scenario.status,
                                 "target_id": scenario.target_id, "evaluation_count": len(ids),
+                                "evaluation_flag_counts": flag_counts(chosen),
                                 "sealed_design_count": len(design_ids), "excluded_count": len(scenario.exclusions),
                                 "exclusion_counts": counts, "removed_from_primary": sorted(primary_ids - ids),
                                 "added_to_primary": sorted(ids - primary_ids),
