@@ -344,7 +344,7 @@ def run_stage(request: StageRequest) -> StageResult:
                                   "sealed_fraction": len(reservation.sealed_subblocks) / reservation.total_subblocks,
                                   "excluded_design_labels": len(reservation.design_ids)}}
         design_ids = set(reservation.design_ids)
-        if not coverage["complete"] and not any(
+        if not atlas.coverage_complete and not any(
                 r.original_id in design_ids and r.tract_id in a
                 and a[r.tract_id].allocation_qualified and a[r.tract_id].population > 0 for r in rows):
             raise MissingPrerequisite("incomplete atlas coverage leaves no qualified sealed design records")

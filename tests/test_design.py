@@ -431,3 +431,22 @@ def test_accounted_dem_exclusion_requires_owner_decision():
     del values['approvals']['owner_decisions']['tract_design']['atlas_missing_dem_tracts']
     with pytest.raises(MissingPrerequisite, match='owner approval'):
         atlas_coverage(values)
+
+
+def test_accounted_dem_omissions_of_all_sealed_records_remain_blocked(tmp_path):
+    from test_tract_tasks import collected_design_request
+    values = make_inputs()
+    reservation = reserve_design(values['geography'].rows, values['entity_graph'])
+    missing = reservation.design_ids
+    request = collected_design_request(tmp_path, values, missing=missing, accounted=missing)
+    result = run_stage(request)
+    assert result.status == 'blocked', result.message
+    result.verify(request)
+    out = Path(request.output_dir)
+    report = json.loads((out / 'support_report.json').read_text())
+    assert report['coverage']['complete'] and not report['coverage']['physical_coverage_complete']
+    assert {r['original_id'] for r in report['allocation_exclusions']} == set(missing)
+    assert all(r['sealed_design'] for r in report['allocation_exclusions'])
+    assert not json.loads((out / 'design.json').read_text())['available']
+    assert json.loads((out / 'splits.json').read_text())['scenarios'] == []
+    assert not json.loads((out / 'gate.json').read_text())['effect_release_authorized']
