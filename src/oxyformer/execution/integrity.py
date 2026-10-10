@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import stat
 import tempfile
+import time
 
 from oxyformer.contracts import StageResult
 from oxyformer.provenance import ArtifactRecord, ContractError, canonical_json, require, file_hash as provenance_file_hash
@@ -41,7 +42,11 @@ def stage_hash_cache():
     it; nothing is reused by a later stage or stored in acquisition attempts.
     """
     previous = os.environ.get(_HASH_CACHE_ENV)
-    directory = tempfile.mkdtemp(prefix='oxyformer-run-hashes-')
+    store = Path(os.environ.get('OXYFORMER_PUBLICATION_STORE',
+        Path.home() / 'oxyformer-swarm/state/publications'))
+    require(store.is_absolute(), 'publication store must be absolute')
+    store.mkdir(parents=True, exist_ok=True)
+    directory = tempfile.mkdtemp(prefix='.run-hashes-', dir=directory_path(store))
     os.environ[_HASH_CACHE_ENV] = directory
     try:
         yield
@@ -65,6 +70,26 @@ def _invalidate_digest(path):
     with cache.open('a+b') as record:
         fcntl.flock(record.fileno(), fcntl.LOCK_EX)
         record.truncate(0)
+
+
+def _hash_clock_barrier(record, path, before):
+    """Close the ctime quantum before reading a version we may memoize.
+
+    Stat timestamps are not change counters: two completed writes in one tick
+    can have identical identities. A later timestamp on an independent inode
+    of the SAME filesystem establishes an ordering boundary before our read.
+    Use filesystem time, not the client's wall clock or an assumed tick size.
+    """
+    if os.fstat(record.fileno()).st_dev != before.st_dev:
+        return False  # No same-filesystem witness: retain full verification.
+    deadline = time.monotonic() + 2.0
+    while True:
+        os.fchmod(record.fileno(), 0o600)
+        if os.fstat(record.fileno()).st_ctime_ns > before.st_ctime_ns:
+            return True
+        require(time.monotonic() < deadline,
+            f'filesystem clock cannot order digest observation: {path}')
+        time.sleep(0.001)
 
 
 @contextmanager
@@ -96,15 +121,20 @@ def _cached_digest(path):
                 saved = json.loads(raw) if raw else None
                 value = [saved['digest'] if saved is not None and saved['path'] == key
                     and saved['identity'] == identity else None]
+                cacheable = value[0] is not None or _hash_clock_barrier(record, path, before)
                 yield value
                 after = Path(path).lstat()
                 if _stable(after) != _stable(before):
                     raise _unstable_input(path, 'input changed while hashing', before, after)
-                if value[0] is not None:
+                if cacheable and value[0] is not None:
                     record.seek(0)
                     record.truncate()
                     record.write(canonical_json({'path': key, 'identity': identity,
                         'digest': value[0]}).encode())
+                    record.flush()
+                elif not cacheable:
+                    record.seek(0)
+                    record.truncate()
                     record.flush()
             except BaseException:
                 record.seek(0)
@@ -383,13 +413,16 @@ def verify_input_hash(path, expected, *, hash_file=None):
             standard_reader = hash_file in (None, regular_file_hash, provenance_file_hash)
             # Custom readers retain their call semantics, including observations
             # they make around the read. Only the built-in digest adapters reuse.
-            if cached[0] is None or not standard_reader:
-                cached[0] = (regular_file_hash if hash_file is None else hash_file)(path)
+            if not standard_reader:
+                actual = hash_file(path)
             else:
-                # Reuse bytes, never namespace/type/readability observations.
-                with open_regular(path):
-                    pass
-            actual = cached[0]
+                if cached[0] is None:
+                    cached[0] = (regular_file_hash if hash_file is None else hash_file)(path)
+                else:
+                    # Reuse bytes, never namespace/type/readability observations.
+                    with open_regular(path):
+                        pass
+                actual = cached[0]
         observe_acquisition(path, digest=actual)
         require(actual == expected, f'input hash mismatch: {path}')
     return actual

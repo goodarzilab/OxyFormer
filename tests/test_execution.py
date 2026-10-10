@@ -4450,3 +4450,41 @@ def test_failed_stat_outside_hash_invalidates_digest(tmp_path, monkeypatch, read
                     integrity.read_regular(payload)
         integrity.verify_input_hash(payload, expected)
         assert len(calls) == 2
+
+
+def test_custom_digest_does_not_pollute_builtin_hash_cache(tmp_path):
+    from oxyformer.execution import integrity
+    payload = tmp_path / 'payload.tar'
+    payload.write_bytes(b'synthetic acquisition bytes')
+    expected = file_hash(payload)
+    custom = sha256(b'domain-specific digest').hexdigest()
+    with integrity.stage_hash_cache():
+        integrity.verify_input_hash(payload, custom, hash_file=lambda path: custom)
+        assert integrity.regular_file_hash(payload) == expected
+
+
+def test_timestamp_quantum_overwrite_cannot_reuse_digest(tmp_path):
+    """Exercise real timestamp collisions; never mock ctime or the cache."""
+    from oxyformer.execution import integrity
+    payload = tmp_path / 'payload.tar'
+    original, changed = tmp_path / 'original', tmp_path / 'changed'
+    original.write_bytes(b'AAAA')
+    changed.write_bytes(b'BBBB')
+    for source in (original, changed):
+        os.utime(source, ns=(1_000_000_000, 1_000_000_000))
+    expected = file_hash(original)
+    collisions = 0
+    with integrity.stage_hash_cache():
+        for _ in range(100):
+            shutil.copy2(original, payload)
+            admitted = fingerprint_tree(payload)
+            before = payload.stat()
+            assert admitted['.']['sha256'] == expected
+            shutil.copy2(changed, payload)
+            after = payload.stat()
+            identity = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+            if identity(before) == identity(after):
+                collisions += 1
+            with raises(ContractError, match='input hash mismatch'):
+                integrity.verify_input_hash(payload, expected)
+    print('real filesystem timestamp collisions:', collisions)

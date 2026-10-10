@@ -16,7 +16,8 @@ The same recursively collected roots remain in the consumer's post-exit check.
 
 ## Cost and lifetime
 
-The runner creates one private temporary digest cache before admission. Its
+The runner creates one private temporary digest cache in the independent
+publication store before admission. Its
 worker process tree inherits the cache location. Each path has a lock spanning
 lookup, a possible full read, and the final stat. Concurrent workers therefore
 share the first completed digest. The runner removes the cache after its worker
@@ -33,6 +34,24 @@ incomplete observation refuses the run and invalidates the affected digest.
 The cache also covers repeated integrity hashes of small request/control files;
 it never replaces actual reads of content needed by scientific computations.
 No digests are reused between runs or written into upstream acquisitions.
+Custom hash callbacks still execute and are checked against their requested
+digests, but their return values never enter the shared SHA-256 cache.
+
+Matching stat tuples alone do not close a filesystem timestamp quantum: two
+same-size writes can retain identical ctime and restored mtime. Before hashing
+a version for reuse, the runner changes metadata on its private cache record
+until that independent inode has a strictly later ctime than the input. This
+uses the filesystem's own clock and ordering, without assuming its tick size or
+comparing a remote filesystem clock with the client clock. It never writes to
+the input. The original pre-read identity remains the comparison baseline
+through this barrier and the subsequent hash. See the
+[Linux timestamp ordering documentation](https://cdn.kernel.org/doc/html/latest/filesystems/multigrain-ts.html).
+
+The witness must be on the same device as the input. Registered acquisitions and
+their independent publication store share the run's state filesystem. Files on
+another device retain full verification without digest reuse. An unreadable
+witness, or a filesystem clock that cannot establish ordering within two seconds,
+refuses the observation without claiming that input content changed.
 
 Byte reuse does not skip tree enumeration, namespace checks, acquisition
 baseline comparisons, publication authority/taint checks, or the independent
@@ -67,3 +86,9 @@ runner, supervisor and worker together. Identity changes, failed stats,
 in-flight writes and separate-run lifetime have dedicated regressions;
 existing tests continue to exercise changed/restored content, namespace changes,
 metadata-only refusals and retry behavior.
+
+The timestamp-collision regression uses real `copy2` overwrites with restored
+mtime and equal-length contents; it does not mock ctime. It demonstrated changed
+bytes accepted with an identical stat tuple before the ordering barrier. The
+custom-digest regression demonstrated a non-SHA callback value returned by a
+subsequent built-in SHA-256 read before callback values were separated.
