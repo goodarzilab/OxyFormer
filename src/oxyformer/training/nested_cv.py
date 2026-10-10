@@ -202,7 +202,7 @@ def _validate_fitting(spec, split, manifest, config, seed):
     require(config.inner.outer_fold == config.fold, "wrong inner parent fold")
     validate_split(config.inner.split, config.inner.data_manifest, config.inner.entity_graph)
     spec.assert_compatible(config.inner.split.spec)
-    require(config.inner.split.level == "inner" and set(config.inner.split.fold_ids) == {0, 1, 2},
+    require(config.inner.split.level == "inner" and set(config.inner.split.geographic_fold_ids) == {0, 1, 2},
             "three inner geographic folds required")
     allowed = split.training_ids(config.fold)
     require(set(config.inner.data_manifest.original_ids) == set(split.frame_training_ids(config.fold)), "inner split escapes outer training")
@@ -467,6 +467,10 @@ def _advance(config, outer, manifest, identity, controller, root, budget, varian
     for fold in range(3):
         stopping = tuple(dict(config.stopping_ids).get(fold, ()))
         local, fitting, held = _partition(config, config.inner.split, fold, stopping=stopping)
+        # Fold presence and minima concern labelled frame rows. A fold with
+        # no target observations contributes no tuning or calibration scores.
+        if not held:
+            continue
         audit = CalibrationPartition(fold=fold, evaluation_ids=held, fitting_ids=fitting,
             checkpoint_ids=stopping, frozen_epochs=None if stopping else config.settings.frozen_epochs)
         audit.validate(outer_ids)
@@ -499,7 +503,7 @@ def _advance(config, outer, manifest, identity, controller, root, budget, varian
             origin = [min((r for r in controller["results"]
                            if r["kind"] == "origin" and r["fold"] == fold),
                           key=lambda r: (r["selection_metrics"], r["grid"]))
-                      for fold in range(3)]
+                      for fold in audits]
             selected["origin"]["calibration_grids"] = tuple(r["grid"] for r in origin)
             ids = tuple(oid for r in origin for oid in r["ids"])
             logits = [z for r in origin for z in r["predictions"]]

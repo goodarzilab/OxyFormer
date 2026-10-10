@@ -460,3 +460,24 @@ def test_nested_refuses_held_out_target_in_training_partition(tmp_path):
     bad = replace(prepared, inner=(replace(inner, data_manifest=manifest, entity_graph=graph, split=split),))
     with pytest.raises(ContractError, match="inner escapes outer training"):
         bad.validate(0)
+
+
+def test_nested_accepts_empty_target_fold_with_labelled_frame_presence(tmp_path):
+    prepared = mixed_role_endpoint(tmp_path)
+    inner = prepared.inner[0]
+    demoted = {i for i, fold in zip(inner.split.original_ids, inner.split.fold_ids) if fold == 2}
+    def demote(split):
+        targets = [(i, f) for i, f in zip(split.original_ids, split.fold_ids) if i not in demoted]
+        return replace(split, original_ids=tuple(i for i, _ in targets), fold_ids=tuple(f for _, f in targets),
+                       membership_roles=tuple('training' if i in demoted else role
+                                              for i, role in zip(split.frame_ids, split.membership_roles)))
+    prepared = replace(prepared, outer=demote(prepared.outer),
+                       inner=(replace(inner, split=demote(inner.split)),))
+    assert set(prepared.inner[0].split.fold_ids) == {0, 1}
+    assert set(prepared.inner[0].split.geographic_fold_ids) == {0, 1, 2}
+    _, artifact = fitted(tmp_path / 'fit', prepared)
+    assert artifact.complete
+    calibration = nested.AffineCalibration.from_json(state(artifact)['calibration'])
+    assert {p.fold for p in calibration.partitions} == {0, 1}
+    assert set(calibration.original_ids) == set(prepared.outer.training_ids(0)) & set(prepared.outer.target_ids)
+    assert set(predictions(prepared, artifact).original_ids) == set(prepared.outer.evaluation_ids(0))

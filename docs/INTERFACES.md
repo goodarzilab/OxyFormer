@@ -130,7 +130,9 @@ for labelled training.
 removals. `training_ids(fold)` applies those removals and excludes inert rows.
 An `InnerSplit.data_manifest` describes that outer-training frame; its split
 excludes inner buffers. Nested CV validates frame coverage, matching roles,
-labelled training membership, group atomicity, and the 8/4 minima. Outcome/SSL
+labelled training membership, group atomicity, and the 8/4 minima. An inner
+fold containing no target rows contributes no evaluation/calibration scores;
+its labelled frame membership still counts in every fitting partition. Outcome/SSL
 fits use the labelled rows; origin-classifier gradients, stopping, calibration
 and evaluation use target rows. OOF completeness is target-by-seed, never
 frame-by-seed. Consumers must use these accessors rather than treating all
