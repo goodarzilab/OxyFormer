@@ -26,7 +26,7 @@ from oxyformer.data.adapters.usaleep import primary_outcome_flags
 from oxyformer.data.entity_graph import EntityGraph
 from oxyformer.data.feature_roles import FeatureRegistry
 from oxyformer.design.eligibility import CollectedAtlas, GeographyTable, county_screen, usable, _usable
-from oxyformer.design.splits import Reservation, build_scenario, reserve_design
+from oxyformer.design.splits import Reservation, SplitScenarioDesign, build_scenario, reserve_design
 from oxyformer.design.support import FrozenSupport, SupportRecipe, freeze_support, policy_for, supported_ids
 from oxyformer.provenance import (
     ArtifactLineage, ArtifactRecord, ContractError, Immutable, canonical_json, file_hash,
@@ -476,7 +476,7 @@ def run_stage(request: StageRequest) -> StageResult:
                       declared_fallback={**a2["declared_fallback"], "run": False},
                       support_pool=frozen.support_pool, raw_x_radius_iqr=frozen.recipe.raw_x_radius,
                       layers={key: census(rows, ids, screens) for key, ids in layers})
-        split_payload = {"estimand_id": A2_ESTIMAND_ID, "estimand_registry": registry, "design_hash": design.content_hash, "scenarios": [s.to_dict() for s in scenarios],
+        split_payload = {"estimand_id": A2_ESTIMAND_ID, "estimand_registry": registry, "design_hash": design.content_hash, "scenarios": [SplitScenarioDesign.from_scenario(s).to_dict() for s in scenarios],
                          "buffer_rule": "common target excludes both sides of cross-fold boundaries, whole lineages",
                          "deletion_rule": "full analysis refit after deleting county/state"}
         diagnostics = []

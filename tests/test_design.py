@@ -13,7 +13,7 @@ from oxyformer.data.feature_roles import FeatureRegistry, FeatureRule
 from oxyformer.design.eligibility import AtlasRow, CollectedAtlas, GeographyRow, GeographyTable, county_screen
 from oxyformer.design.gate import FrozenDesign, OWNER_APPROVALS, run_stage, validate_approvals, MissingPrerequisite
 from oxyformer.design.policies import PolicyCovariates
-from oxyformer.design.splits import reserve_design
+from oxyformer.design.splits import reserve_design, SplitScenarioDesign
 from oxyformer.design.support import SupportRecipe, connected_components, freeze_support, policy_for
 from oxyformer.provenance import ArtifactLineage, ContractError, canonical_json, file_hash, write_artifact
 
@@ -200,6 +200,8 @@ def test_y_perturbation_leaves_design_and_split_decisions_identical(tmp_path):
     a, b = run_stage(left), run_stage(right)
     assert a.status == b.status == "pass"
     assert (Path(left.output_dir) / "design.json").read_bytes() == (Path(right.output_dir) / "design.json").read_bytes()
+    for name in ("splits.json", "support_report.json"):
+        assert (Path(left.output_dir) / name).read_bytes() == (Path(right.output_dir) / name).read_bytes()
     l = json.loads((Path(left.output_dir) / "splits.json").read_text())
     r = json.loads((Path(right.output_dir) / "splits.json").read_text())
     for ls, rs in zip(l["scenarios"], r["scenarios"]):
@@ -286,7 +288,7 @@ def test_primary_flag_exclusions_are_explicit(tmp_path):
     assert report["scenarios"][0]["evaluation_flag_counts"]["2"] == 0
     assert all(report["mortality_input_flag"][oid] == 2 for oid in bad)
     from oxyformer.design.splits import SplitScenario
-    split = SplitScenario.from_json(canonical_json({"type": "SplitScenario", "schema_version": 1, "payload": primary})).outer
+    split = SplitScenarioDesign.from_json(canonical_json({"type": "SplitScenarioDesign", "schema_version": 1, "payload": primary})).bind(v["data_manifest"], v["entity_graph"]).outer
     assert bad <= set(split.frame_original_ids)
     assert not bad.intersection(split.target_ids)
     for fold in range(5):
@@ -576,7 +578,7 @@ def test_a2_census_relief_registry_and_fallback(tmp_path):
     out = Path(request.output_dir)
     report = json.loads((out / "support_report.json").read_text())
     splits = json.loads((out / "splits.json").read_text())
-    scenario = SplitScenario.from_json(canonical_json(splits["scenarios"][0]))
+    scenario = SplitScenarioDesign.from_json(canonical_json(splits["scenarios"][0])).bind(v["data_manifest"], v["entity_graph"])
     assert report["declared_fallback"] == {"raw_x_radius_iqr": 3.0, "run": False}
     assert report["estimand_registry"][0]["estimand_id"] == FROZEN_TARGET_ID
     assert report["estimand_registry"][0]["status"] == "infeasible as specified"

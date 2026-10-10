@@ -23,7 +23,7 @@ from oxyformer.data.loaders import load_records, validate_oof
 from oxyformer.design.eligibility import AtlasRow, GeographyRow
 from oxyformer.design.gate import FrozenDesign, run_stage as design_stage
 from oxyformer.design.policies import PolicyCovariates
-from oxyformer.design.splits import SplitScenario
+from oxyformer.design.splits import SplitScenarioDesign
 from oxyformer.estimation.covariance import align_estimates, cluster_covariance, spatial_sensitivities
 from oxyformer.estimation.mtp import one_step
 from oxyformer.estimation.targeting import cv_tmle
@@ -141,7 +141,7 @@ def build_chain(root):
     result.verify(request)
     output = Path(request.output_dir)
     design = FrozenDesign.from_json((output / "design.json").read_text())
-    scenario = SplitScenario.from_json(canonical_json(json.loads((output / "splits.json").read_text())["scenarios"][0]))
+    scenario = SplitScenarioDesign.from_json(canonical_json(json.loads((output / "splits.json").read_text())["scenarios"][0])).bind(inputs["data_manifest"], inputs["entity_graph"])
     manifest = scenario.data_manifest
     by_id = {r.tract_id: r for r in inputs["atlas"].rows}
     geo = inputs["geography"]
