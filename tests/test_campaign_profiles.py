@@ -52,7 +52,12 @@ def built():
 
 def test_real_frame_preserves_x_geography_missingness_and_whole_clusters(built):
     v, (endpoint, frame, support, audit) = built
-    assert frame.original_ids == endpoint.outer.original_ids
+    assert frame.original_ids == tuple(i for i, role in zip(endpoint.outer.frame_original_ids,
+        endpoint.outer.roles) if role != 'inert')
+    assert tuple(i for i, w in zip(frame.original_ids, frame.weights) if w) == endpoint.outer.original_ids
+    assert audit['evaluation_rows'] == len(endpoint.outer.original_ids)
+    assert audit['simulation_rows'] == len(frame.original_ids)
+    assert audit['training_only_rows'] > 0
     assert frame.x == ((None,),) * len(frame.original_ids)
     assert endpoint.data.covariates(frame.columns).values == v['covariates'].values
     assert set(endpoint.data.column('y')) == {None}
@@ -260,7 +265,7 @@ def test_profile_task_bytes_pin_smoke_and_amended_real_frame(fixture_name, built
     pair = smoke_inputs.build_inputs() if fixture_name == 'smoke' else built[1][:2]
     expected = {
         'smoke': '1fb64eaf6987e8fb62c6df3c95b53f0482e2fe7cfcc07e5db214a20fd35e7377',
-        'real_fixture': 'c4cd73f1df68b3fbe4a9a29502a4c1c729e27f62e7c041834bc793363f4075c4',
+        'real_fixture': 'ec44a0c499cfd354bc3a617661514bcd3d96779d284a73f9b7ea158fefbc15d3',
     }
     assert coverage.digest(real_frame.profile_tasks(*pair)['tasks'][:5]) == expected[fixture_name]
 

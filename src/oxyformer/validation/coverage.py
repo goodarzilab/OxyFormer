@@ -210,7 +210,13 @@ def bind_observations(template, observations):
     frame = observations.frame
     require(template.data.manifest.spec.endpoint.startswith("synthetic"), "synthetic endpoint template required")
     require(template.family == "identity", "SCM adapter requires identity likelihood")
-    require(tuple(frame.original_ids) == template.outer.original_ids, "SCM frame must equal frozen inference target")
+    targets = set(template.outer.original_ids)
+    require(tuple(i for i in frame.original_ids if i in targets) == template.outer.original_ids,
+            "SCM frame target rows must equal frozen inference target")
+    training = tuple(i for i, role in zip(template.outer.frame_original_ids, template.outer.roles)
+                     if role == "training")
+    require(tuple(i for i in frame.original_ids if i not in targets) == training,
+            "SCM frame training rows must equal labelled training-only rows")
     require(not observations.measured_columns, "measured confounders require a reviewed endpoint adapter")
     require(all(y is not None for y in observations.y), "selection requires a reviewed endpoint adapter")
     data = template.data
@@ -227,7 +233,8 @@ def bind_observations(template, observations):
         row = values[oid]
         require(tuple(row[n] for n in features) == frame.x[index], "fixed-X template drift")
         require(policy_rows[oid] == (frame.geography_ids[index], frame.support_keys[index]), "SCM policy routing drift")
-        require((1. if manifest.weight_field is None else row[manifest.weight_field]) == frame.weights[index], "SCM weight drift")
+        weight = (1. if manifest.weight_field is None else row[manifest.weight_field]) if oid in targets else 0.
+        require(weight == frame.weights[index], "SCM weight drift")
         require(geography[oid].county == frame.region_ids[index], "SCM region/county mismatch")
         require((geography[oid].latitude, geography[oid].longitude) == frame.coordinates[index], "SCM geography drift")
         row[manifest.exposure_field], row[manifest.outcome_field] = observations.a[index], observations.y[index]

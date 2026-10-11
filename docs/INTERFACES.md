@@ -138,6 +138,16 @@ and evaluation use target rows. OOF completeness is target-by-seed, never
 frame-by-seed. Consumers must use these accessors rather than treating all
 `original_ids` as evaluation or fitting rows.
 
+Suite A's existing `CovariateFrame` covers both target and labelled training-only
+rows from the split frame; inert, sealed and buffer-excluded rows receive no
+simulated outcomes. The adapters separately verify the ordered target membership
+against `outer.original_ids` and the ordered training-only membership against the
+`training` roles. One SCM generates outcomes for both. Training-only rows have
+zero SCM estimand weight; target rows keep their original weights (including any
+legitimate zero target weights). These zero simulation weights do not alter the
+labelled outcome-regression/SSL fitting weights. Truth integration, OOF scores,
+coverage/release statistics and county representatives remain target-only.
+
 Call `validate_split(split, manifest, entity_graph)` before fitting. It binds
 data/source/graph identity and enforces whole-lineage partitions, including the
 sealed design partition. The split producer additionally enforces geography,

@@ -197,6 +197,64 @@ def synthetic_endpoint(tmp_path):
     return replace(prepared, geography=geography), frame
 
 
+
+def frame_subset(frame, ids):
+    positions = [frame.original_ids.index(i) for i in ids]
+    names = ("original_ids", "geography_ids", "region_ids", "cluster_ids", "coordinates",
+             "x", "support_keys", "weights", "outcome_available", "biomarker_available")
+    return replace(frame, **{name: tuple(getattr(frame, name)[j] for j in positions) for name in names})
+
+
+def role_endpoint(tmp_path):
+    endpoint, full = synthetic_endpoint(tmp_path)
+    # Keep dependence pairs atomic; the last pair is inert, the first training-only.
+    roles = ("training",) * 2 + ("target",) * (len(full.original_ids) - 4) + ("inert",) * 2
+    by_id = dict(zip(full.original_ids, roles))
+    def split_roles(split):
+        pairs = [(i, f) for i, f in zip(split.original_ids, split.fold_ids) if by_id[i] == "target"]
+        return replace(split, original_ids=tuple(i for i, _ in pairs), fold_ids=tuple(f for _, f in pairs),
+            frame_ids=split.original_ids, frame_fold_ids=split.fold_ids,
+            membership_roles=tuple(by_id[i] for i in split.original_ids))
+    names = tuple(c.name for c in endpoint.data.manifest.schema)
+    yi = names.index(endpoint.data.manifest.outcome_field)
+    rows = tuple(tuple(None if j == yi else v for j, v in enumerate(row)) for row in endpoint.data.rows)
+    endpoint = replace(endpoint, outer=split_roles(endpoint.outer), data=replace(endpoint.data, rows=rows),
+        inner=tuple(replace(inner, split=split_roles(inner.split)) for inner in endpoint.inner))
+    frame = frame_subset(full, tuple(i for i in full.original_ids if by_id[i] != "inert"))
+    frame = replace(frame, weights=tuple(w if by_id[i] == "target" else 0.
+                                         for i, w in zip(frame.original_ids, frame.weights)))
+    return endpoint, frame
+
+
+@pytest.mark.parametrize("role", ["target", "training"])
+def test_scm_frame_checks_target_and_training_memberships_separately(tmp_path, role):
+    endpoint, frame = role_endpoint(tmp_path)
+    removed = next(i for i, r in zip(endpoint.outer.frame_original_ids, endpoint.outer.roles) if r == role)
+    incomplete = frame_subset(frame, tuple(i for i in frame.original_ids if i != removed))
+    sample = coverage.generate_suite_a(incomplete,
+        SCMConfig(name="null_effect", active_mechanisms=("null",), effect="null"), endpoint.policy)
+    with pytest.raises(ContractError, match="SCM frame " + role + " rows"):
+        coverage.bind_observations(endpoint, sample.observations)
+
+
+def test_scm_training_rows_get_y_and_zero_target_mass_while_inert_rows_get_no_y(tmp_path):
+    endpoint, frame = role_endpoint(tmp_path)
+    config = SCMConfig(name="nonlinear", active_mechanisms=("nonlinear",), effect="nonlinear")
+    sample = coverage.generate_suite_a(frame, config, endpoint.policy)
+    target_only = coverage.generate_suite_a(frame_subset(frame, endpoint.outer.original_ids), config, endpoint.policy)
+    assert sample.observed_law_truth.value == target_only.observed_law_truth.value
+    assert sample.structural_causal_truth.value == target_only.structural_causal_truth.value
+    rebound = coverage.bind_observations(endpoint, sample.observations)
+    y = dict(zip(rebound.data.manifest.original_ids, rebound.data.column(rebound.data.manifest.outcome_field)))
+    for i, role in zip(endpoint.outer.frame_original_ids, endpoint.outer.roles):
+        assert (y[i] is None) == (role == "inert")
+    for fold in range(5):
+        assert all(y[i] is not None for i in rebound.outer.training_ids(fold))
+    # A training-only row cannot accidentally contribute mass to the estimand.
+    wrong = replace(frame, weights=(1.,) + frame.weights[1:])
+    with pytest.raises(ContractError, match="SCM weight drift"):
+        coverage.bind_observations(endpoint, replace(sample.observations, frame=wrong))
+
 def smoke_recipe(endpoint, frame):
     return {"endpoint_hash": endpoint.content_hash, "frame_hash": frame.content_hash,
         "nested_cv": {"ssl_epochs": 1, "frozen_epochs": 1, "synthetic": True},

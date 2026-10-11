@@ -17,7 +17,7 @@ from oxyformer.data.tract_inputs import tract_decisions, validate_dispatch_appro
 from oxyformer.design import gate
 from oxyformer.design.eligibility import GeographyTable, county_screen, usable
 from oxyformer.design.policies import PolicyCovariates
-from oxyformer.design.splits import build_scenario, close_groups, reserve_design
+from oxyformer.design.splits import build_scenario, reserve_design
 from oxyformer.design.support import SupportRecipe, freeze_support, supported_ids
 from oxyformer.execution.runner import read_mapping
 from oxyformer.models.treatment_query import TreatmentDesign
@@ -87,7 +87,7 @@ def build_inputs(values, design):
             reasons[row.original_id] = 'initial_county_screen'
         elif row.original_id not in supported:
             reasons[row.original_id] = 'outside_frozen_conditional_support'
-    excluded = close_groups(reasons, reservation.groups) - design_ids
+    excluded = set(reasons) - design_ids
     scenario = build_scenario(rows, graph, manifest, reservation,
         set(manifest.original_ids) - design_ids - excluded, reasons, radius_km=0,
         policy_id=frozen.policy.policy_id, atlas=a, covariates=covariates, support=frozen)
@@ -99,7 +99,7 @@ def build_inputs(values, design):
     spec = replace(scenario.data_manifest.spec, endpoint=ENDPOINT,
                    adjustment_schema_hash=registry.content_hash)
     # Excluded/reserved rows remain in the lineage frame, but have no invented A.
-    # Only the outer inference target is simulated or fitted.
+    # The SCM supplies labels for target and labelled training rows only.
     schema = tuple(replace(col, nullable=True)
                    if accounted_missing and col.name == manifest.exposure_field else col
                    for col in scenario.data_manifest.schema)
@@ -124,17 +124,20 @@ def build_inputs(values, design):
             geography.county_field: by_id[oid].county})
         records.append(record)
     data = load_records(records, template_manifest, spec, template_manifest.schema_hash)
-    selected = tuple(by_id[oid] for oid in outer.original_ids)
-    # Whole dependence components survive the frozen eligibility and partitions.
+    labelled_ids = tuple(i for i, role in zip(outer.frame_original_ids, outer.roles) if role != 'inert')
+    targets = set(outer.original_ids)
+    selected = tuple(by_id[oid] for oid in labelled_ids)
+    # Dependence components retain their identities across membership roles.
     clusters = {oid: digest(group) for group in reservation.groups for oid in group}
-    frame = CovariateFrame(original_ids=outer.original_ids,
+    frame = CovariateFrame(original_ids=labelled_ids,
         geography_ids=tuple(r.assignment_geography for r in selected),
         region_ids=tuple(r.county for r in selected),
         cluster_ids=tuple(clusters[r.original_id] for r in selected),
         coordinates=tuple((r.latitude, r.longitude) for r in selected),
         columns=covariates.columns, x=tuple(x[r.original_id] for r in selected),
         support_keys=tuple(r.assignment_geography for r in selected),
-        weights=(1.,) * len(selected), outcome_available=tuple(r.label_available for r in selected),
+        weights=tuple(1. if r.original_id in targets else 0. for r in selected),
+        outcome_available=tuple(r.label_available for r in selected),
         biomarker_available=(True,) * len(selected))
     for row in campaign._registry()['scenarios']:
         SCMConfig(**row).validate_policy(frozen.policy, frame)
@@ -157,7 +160,8 @@ def build_inputs(values, design):
         county_field=geography.county_field, exposure_assignment_level='tract')
     for fold in range(5):
         endpoint.validate(fold)
-    audit = {'input_rows': len(rows), 'evaluation_rows': len(selected),
+    audit = {'input_rows': len(rows), 'evaluation_rows': len(targets),
+        'simulation_rows': len(selected), 'training_only_rows': len(selected) - len(targets),
         'coverage': atlas_coverage,
         'allocation_exclusions': gate.allocation_exclusions(rows, atlas_coverage, design_ids),
         'design_ids': list(reservation.design_ids), 'exclusions': list(scenario.exclusions),
@@ -179,8 +183,11 @@ def profile_tasks(endpoint, frame):
     Profile and projection resources share one declaration.
     """
     locations = {}
-    for county in sorted(set(frame.region_ids)):
-        points = [p for c, p in zip(frame.region_ids, frame.coordinates) if c == county]
+    targets = set(endpoint.outer.original_ids)
+    target_locations = [(c, p) for i, c, p in zip(frame.original_ids, frame.region_ids, frame.coordinates)
+                        if i in targets]
+    for county in sorted({c for c, _ in target_locations}):
+        points = [p for c, p in target_locations if c == county]
         locations[county] = [sum(p[j] for p in points) / len(points) for j in range(2)]
     recipe = {'endpoint_hash': endpoint.content_hash, 'frame_hash': frame.content_hash,
         'nested_cv': {'ssl_epochs': 30, 'frozen_epochs': 150, 'batch_size': 256, 'precision': 'fp32'},
