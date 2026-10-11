@@ -18,11 +18,55 @@ from hashlib import sha256
 
 import torch
 from torch import Tensor, nn
+from torch.nn import functional as F
+from torch.utils._python_dispatch import TorchDispatchMode
 
 from oxyformer.contracts import CovariateView, SplitManifest
 from oxyformer.models.encoder import FeatureEncoder
 from oxyformer.models.tokens import FeatureBatch
 from oxyformer.provenance import canonical_json, check_hash, nonempty, require
+
+
+class _DropoutReplay(TorchDispatchMode):
+    """Apply already drawn masks through the unchanged dropout/autograd kernels.
+
+    The masks were drawn query-first, with the original tensor strides. Their
+    batched application is layer-first. This mode does not consume any RNG.
+    """
+
+    def __init__(self, masks):
+        super().__init__()
+        self.masks = iter(masks)
+        self.remaining = len(masks)
+
+    def _take(self, values, probability):
+        require(self.remaining > 0, "unexpected context dropout operation")
+        expected, mask = next(self.masks)
+        self.remaining -= 1
+        require(abs(probability - expected) < 1e-12 and values.shape == mask.shape,
+                "context dropout replay shape/probability mismatch")
+        return mask
+
+    def __torch_dispatch__(self, operation, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        if operation == torch.ops.aten.bernoulli_.float:
+            values = args[0]
+            keep = args[1] if len(args) > 1 else kwargs.get("p", .5)
+            # CPU dropout asks for a Bernoulli tensor and scales it afterward.
+            mask = self._take(values, 1 - keep)
+            return values.copy_(mask.ne(0).to(values.dtype))
+        if operation == torch.ops.aten.native_dropout.default:
+            values, probability, training = args
+            if training and 0 < probability < 1:
+                mask = self._take(values, probability)
+                return values * mask, mask.ne(0)
+        return operation(*args, **kwargs)
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        result = super().__exit__(exc_type, exc_value, traceback)
+        if exc_type is None:
+            require(self.remaining == 0, "unused context dropout masks")
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +236,132 @@ class CountyContext(nn.Module):
         states = states + self.dropout(self.ff(self.ff_norm(states)))
         return self.output_norm(states).squeeze(0)
 
+    def _dropout_masks(self, lengths: tuple[int, ...], width: int):
+        """Draw masks in scalar-path order, including MHA's transposed strides."""
+        tokens = len(self.encoder.tokenizer.features) + 1
+        encoder_masks, pool_masks = [], []
+
+        def draw(module, shape, *, transpose=False):
+            probability = module.dropout if isinstance(module, nn.MultiheadAttention) else module.p
+            if not module.training or probability == 0:
+                return None
+            values = self.seeds.new_ones(shape)
+            if transpose:
+                values = values.transpose(0, 1)
+            # Calling ordinary dropout retains the caller's RNG policy, including
+            # fit._ReferenceDropout's CPU stream when the model lives on CUDA.
+            return probability, F.dropout(values, probability, training=True)
+
+        for count in lengths:
+            enc, pool = [], []
+            for block in self.encoder.blocks:
+                enc.extend((
+                    draw(block.self_attn, (count, block.self_attn.num_heads, tokens, tokens)),
+                    draw(block.dropout1, (tokens, count, 64), transpose=True),
+                    draw(block.dropout, (count, tokens, block.linear1.out_features)),
+                    draw(block.dropout2, (count, tokens, 64))))
+            pool.extend((
+                draw(self.attention, (1, self.attention.num_heads, 4, count)),
+                draw(self.dropout, (4, 1, 64), transpose=True),
+                draw(self.ff[2], (1, 4, self.ff[0].out_features)),
+                draw(self.dropout, (1, 4, 64))))
+            if pool[0] is not None:
+                probability, mask = pool[0]
+                pool[0] = probability, F.pad(mask, (0, width - count))
+            encoder_masks.append([entry for entry in enc if entry is not None])
+            pool_masks.append([entry for entry in pool if entry is not None])
+
+        def combine(rows):
+            return [(column[0][0], torch.cat([entry[1] for entry in column], dim=0))
+                    for column in zip(*rows)]
+        return combine(encoder_masks), combine(pool_masks)
+
+    def _pool_occurrences(self, reference_sets: tuple[tuple[str, ...], ...]) -> Tensor:
+        """One encoder call over stochastic occurrences, with original RNG draws."""
+        active = [i for i, ids in enumerate(reference_sets) if ids]
+        if not active:
+            return self.seeds.new_zeros((len(reference_sets), 4, 64))
+        lengths = tuple(len(reference_sets[i]) for i in active)
+        width = max(lengths)
+        union = tuple(sorted({oid for ids in reference_sets for oid in ids}))
+        raw = self._reference_batch(union)
+        lookup = {oid: i for i, oid in enumerate(union)}
+        occurrences = torch.tensor([lookup[oid] for i in active for oid in reference_sets[i]],
+                                   device=self.seeds.device, dtype=torch.long)
+        batch = FeatureBatch(raw.feature_ids, *(getattr(raw, field).index_select(0, occurrences)
+            for field in ("numeric_values", "categorical_values", "missing", "masked", "padding")))
+        encoder_masks, pool_masks = self._dropout_masks(lengths, width)
+        with _DropoutReplay(encoder_masks):
+            _, encoded = self.encoder(batch)
+        indices, offset = [], 0
+        for count in lengths:
+            indices.append(list(range(offset, offset + count)) + [0] * (width - count))
+            offset += count
+        index = torch.tensor(indices, device=encoded.device, dtype=torch.long)
+        padding = torch.arange(width, device=encoded.device)[None, :] >= torch.tensor(
+            lengths, device=encoded.device)[:, None]
+        memory = self.reference_norm(encoded[index]).masked_fill(padding[:, :, None], 0)
+        seeds = self.seeds.expand(len(active), -1, -1)
+        with _DropoutReplay(pool_masks):
+            attended, _ = self.attention(self.seed_norm(seeds), memory, memory,
+                                         key_padding_mask=padding, need_weights=False)
+            states = seeds + self.dropout(attended)
+            states = states + self.dropout(self.ff(self.ff_norm(states)))
+        pooled = self.output_norm(states)
+        outputs = [self.seeds.new_zeros((4, 64)) for _ in reference_sets]
+        for position, value in zip(active, pooled.unbind()):
+            outputs[position] = value
+        return torch.stack(outputs)
+
+    def _pool_batch(self, reference_sets: tuple[tuple[str, ...], ...]) -> Tensor:
+        """Encode the needed union once, then pool masked sets in tensor batches.
+
+        Bound the padded PMA workspace independently of prediction-pass size;
+        this does not change training minibatches or parameter updates.
+        """
+        if not reference_sets:
+            return self.seeds.new_empty((0, 4, 64))
+        # Stochastic reference occurrences retain independent encoder draws.
+        stochastic = any((isinstance(m, nn.Dropout) and m.training and m.p > 0)
+                         or (isinstance(m, nn.MultiheadAttention) and m.training and m.dropout > 0)
+                         for m in self.modules())
+        if stochastic:
+            return self._pool_occurrences(reference_sets)
+        union = tuple(sorted({oid for ids in reference_sets for oid in ids}))
+        if not union:
+            return self.seeds.new_zeros((len(reference_sets), 4, 64))
+        _, encoded = self.encoder(self._reference_batch(union))
+        lookup = {oid: i for i, oid in enumerate(union)}
+        outputs = [self.seeds.new_zeros((4, 64)) for _ in reference_sets]
+        active = [i for i, ids in enumerate(reference_sets) if ids]
+        # Similar set lengths limit padding, while output order stays unchanged.
+        active.sort(key=lambda i: len(reference_sets[i]))
+        start = 0
+        while start < len(active):
+            end = start + 1
+            while end < len(active) and (end - start + 1) * len(reference_sets[active[end]]) <= 262144:
+                end += 1
+            selected = active[start:end]
+            width = max(len(reference_sets[i]) for i in selected)
+            indices = [[lookup[oid] for oid in reference_sets[i]]
+                       + [0] * (width - len(reference_sets[i])) for i in selected]
+            index = torch.tensor(indices, dtype=torch.long, device=encoded.device)
+            lengths = torch.tensor([len(reference_sets[i]) for i in selected], device=encoded.device)
+            padding = torch.arange(width, device=encoded.device)[None, :] >= lengths[:, None]
+            memory = self.reference_norm(encoded[index])
+            # Padding has no value or gradient channel, even before attention.
+            memory = memory.masked_fill(padding[:, :, None], 0)
+            seeds = self.seeds.expand(len(selected), -1, -1)
+            attended, _ = self.attention(self.seed_norm(seeds), memory, memory,
+                                         key_padding_mask=padding, need_weights=False)
+            states = seeds + self.dropout(attended)
+            states = states + self.dropout(self.ff(self.ff_norm(states)))
+            pooled = self.output_norm(states)
+            for position, value in zip(selected, pooled.unbind()):
+                outputs[position] = value
+            start = end
+        return torch.stack(outputs)
+
     def forward(self, query_ids: tuple[str, ...], query_counties: tuple[str, ...]) -> Tensor:
         ids, counties = tuple(query_ids), tuple(query_counties)
         require(len(ids) == len(counties), "query county alignment mismatch")
@@ -209,16 +379,20 @@ class CountyContext(nn.Module):
             if generation != self._cache_generation:
                 self.clear_cache()
                 self._cache_generation = generation
-        outputs = []
-        for oid, county in zip(ids, counties):
-            reference_ids = self._reference_ids(oid, county)
-            if cacheable:
-                key = ContextCacheKey(generation[0], self._fold, reference_ids, generation[2],
-                                      self.checkpoint_hash, self.parameter_version, generation[5], generation[6])
-                if key not in self._cache:
-                    self._cache[key] = self._pool(reference_ids).detach().clone()
-                outputs.append(self._cache[key])
-            else:
-                outputs.append(self._pool(reference_ids))
+        county_ids = {}
+        for oid, county in sorted(self._routes.items()):
+            county_ids.setdefault(county, []).append(oid)
+        reference_sets = tuple(tuple(ref for ref in county_ids.get(county, ()) if ref != oid)
+                               [:self.reference_cap] for oid, county in zip(ids, counties))
+        if not cacheable:
+            return self._pool_batch(reference_sets)
+        keys = tuple(ContextCacheKey(generation[0], self._fold, refs, generation[2],
+                     self.checkpoint_hash, self.parameter_version, generation[5], generation[6])
+                     for refs in reference_sets)
+        missing = tuple(dict.fromkeys(key for key in keys if key not in self._cache))
+        if missing:
+            pooled = self._pool_batch(tuple(key.reference_ids for key in missing))
+            for key, value in zip(missing, pooled.unbind()):
+                self._cache[key] = value.detach().clone()
         # stack copies: caller mutation never changes a cached tensor.
-        return torch.stack(outputs) if outputs else self.seeds.new_empty((0, 4, 64))
+        return torch.stack([self._cache[key] for key in keys]) if keys else self.seeds.new_empty((0, 4, 64))

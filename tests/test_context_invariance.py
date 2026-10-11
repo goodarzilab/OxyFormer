@@ -303,12 +303,80 @@ def test_study_cap_none_preserves_tensor_bytes_and_caps_actual_pool(setup, monke
     assert a.numpy().tobytes() == b.numpy().tobytes()
     assert canonical_json([k.reference_ids for k in plain.cache_keys]) == canonical_json([k.reference_ids for k in explicit.cache_keys])
     calls = []
-    original = explicit._pool
-    def pool(ids):
-        calls.append(ids)
-        return original(ids)
-    monkeypatch.setattr(explicit, "_pool", pool)
+    original = explicit._pool_batch
+    def pool(sets):
+        calls.extend(sets)
+        return original(sets)
+    monkeypatch.setattr(explicit, "_pool_batch", pool)
     explicit.reference_cap = 1
     with torch.no_grad():
         explicit(("t0", "h0"), ("c", "c"))
     assert calls == [("t1",), ("t0",)]
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("training,dropout", [(False, .1), (True, 0.), (True, .1)])
+def test_batched_context_matches_scalar_outputs_gradients_and_rng(setup, device, training, dropout):
+    from copy import deepcopy
+    from oxyformer.training.fit import _numerics
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    with _numerics(device):
+        torch.manual_seed(1103)
+        context = make_context(setup, dropout=dropout).to(device).train(training)
+        reference = deepcopy(context)
+        queries, routes = ("t0", "h0", "t1", "h1", "t4"), ("c", "c", "c", "d", "singleton")
+        torch.manual_seed(2207)
+        expected = torch.stack([reference._pool(reference._reference_ids(q, c)) for q, c in zip(queries, routes)])
+        expected_rng = torch.get_rng_state().clone()
+        weights = torch.linspace(-1, 1, expected.numel(), device=device).reshape_as(expected)
+        (expected * weights).sum().backward()
+        torch.manual_seed(2207)
+        calls = []
+        hook = context.encoder.register_forward_hook(lambda module, args, result: calls.append(len(args[0].numeric_values)))
+        actual = context(queries, routes)
+        hook.remove()
+        assert len(calls) == 1
+        assert calls[0] == (8 if training and dropout else 4)
+        assert torch.equal(torch.get_rng_state(), expected_rng)
+        torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+        (actual * weights).sum().backward()
+        for left, right in zip(context.parameters(), reference.parameters()):
+            torch.testing.assert_close(left.grad, right.grad, rtol=1e-4, atol=1e-5)
+        torch.manual_seed(2207)
+        repeated = context(queries, routes)
+        assert actual.detach().cpu().numpy().tobytes() == repeated.detach().cpu().numpy().tobytes()
+
+
+def test_batched_context_self_exclusion_and_padding(setup, monkeypatch):
+    from copy import deepcopy
+    context = make_context(setup).eval()
+    altered = make_context(setup, refs=replace(setup[1], values=((10000., "rent"),) + setup[1].values[1:])).eval()
+    altered.load_state_dict(context.state_dict())
+    queries, routes = ("t0", "t1", "h1", "t4"), ("c", "c", "d", "singleton")
+    expected = context(queries, routes)
+    changed = altered(queries, routes)
+    torch.testing.assert_close(expected[0], changed[0], rtol=1e-5, atol=1e-6)
+    assert not torch.allclose(expected[1], changed[1])
+    assert torch.count_nonzero(expected[3]) == 0
+    attention = context.attention.forward
+    def poison_padding(query, key, value, **kwargs):
+        padding = kwargs["key_padding_mask"]
+        assert padding.any(), "fixture must exercise unequal reference lengths"
+        key = key.masked_fill(padding[:, :, None], 1000.)
+        value = value.masked_fill(padding[:, :, None], -1000.)
+        return attention(query, key, value, **kwargs)
+    monkeypatch.setattr(context.attention, "forward", poison_padding)
+    actual = context(queries, routes)
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+
+
+def test_occurrence_masks_are_independent_and_have_correct_marginal(setup):
+    context = make_context(setup, dropout=.1).train()
+    torch.manual_seed(3301)
+    encoder, pooling = context._dropout_masks((1000, 1000), 1000)
+    mask = encoder[0][1].ne(0)
+    assert not torch.equal(mask[:1000], mask[1000:])
+    assert abs(float(mask.float().mean()) - .9) < .01
+    assert not torch.equal(pooling[0][1][0], pooling[0][1][1])
+    assert abs(float(pooling[0][1].ne(0).float().mean()) - .9) < .02
