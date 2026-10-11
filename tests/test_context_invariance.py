@@ -337,7 +337,7 @@ def test_batched_context_matches_scalar_outputs_gradients_and_rng(setup, device,
         actual = context(queries, routes)
         hook.remove()
         assert len(calls) == 1
-        assert calls[0] == (8 if training and dropout else 4)
+        assert calls[0] == 4
         assert torch.equal(torch.get_rng_state(), expected_rng)
         torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
         (actual * weights).sum().backward()
@@ -404,9 +404,14 @@ def test_occurrence_masks_are_independent_and_have_correct_marginal(setup, devic
             first = context(queries, routes)
         hook.remove()
         assert calls == [768], "references must remain separate stochastic occurrences"
-        mask = trace.masks[0].bool().reshape(256, -1)
+        # Replay draws query-first, eight encoder and four PMA masks per query.
+        # Inspect every distinct encoder occurrence, not only query-wide masks.
+        per_query = len(trace.masks) // len(queries)
+        assert per_query == 12
+        mask = torch.stack([trace.masks[i * per_query].bool().reshape(3, -1)
+                            for i in range(len(queries))]).reshape(768, -1)
         # Every occurrence has its own large mask; no query-wide mask is shared.
-        assert len({row.numpy().tobytes() for row in mask}) == 256
+        assert len({row.numpy().tobytes() for row in mask}) == 768
         assert abs(float(mask.float().mean()) - .9) < .01
         weights = torch.linspace(-1, 1, first.numel(), device=device).reshape_as(first)
         (first * weights).mean().backward()

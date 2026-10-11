@@ -280,15 +280,17 @@ set is retained whole); this is an execution workspace limit, not a reference
 cap or a change to the original-record minibatch size.
 
 Training with nonzero dropout instead encodes separate `(query, reference)`
-occurrences in one call. Native encoder and PMA dropout draw independent masks
-for these occurrences with the same Bernoulli keep probabilities. Batching
-changes the random draw order and the stochastic realization. This path is
-**training-path equivalence in distribution, pending owner confirmation** under
-the orchestrator's 2026-10-11 fallback ruling. The exact-mask replay prototype
-preserved the CPU RNG stream, but its CUDA context comparison exceeded the
-forward tolerance at one near-zero element (absolute difference 1.27e-6).
-The tolerance was not loosened. Seed-paired short fits report the resulting
-numerical and decision differences rather than asserting equality.
+occurrences in one call. Masks are drawn independently in the original query
+order, with the original tensor strides, then applied in batched layer order.
+This retains the original RNG stream and Bernoulli keep probabilities. The
+replay comparison on CUDA exceeded the forward tolerance at one near-zero
+context element (absolute difference 1.27e-6); the tolerance was not loosened.
+The nonzero-dropout path therefore remains **training-path equivalence in
+distribution, pending owner confirmation** under the orchestrator's 2026-10-11
+fallback ruling. Seed-paired short fits report the actual numerical and decision
+differences. Native layer-first mask generation was also evaluated, but failed
+the existing extreme-weight invariance regression, so original-order mask
+replay is retained.
 
 The registered CPU random stream on CUDA, FP32 arithmetic, deterministic kernels,
 seeds, grid, epochs, stopping, loss normalization and optimizer remain in force.
