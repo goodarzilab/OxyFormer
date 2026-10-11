@@ -404,11 +404,11 @@ def test_occurrence_masks_are_independent_and_have_correct_marginal(setup, devic
             first = context(queries, routes)
         hook.remove()
         assert calls == [768], "references must remain separate stochastic occurrences"
-        # Replay draws query-first, eight encoder and four PMA masks per query.
+        # Replay draws query-first, four masks per encoder block and for PMA.
         # Inspect every distinct encoder occurrence, not only query-wide masks.
         per_query = len(trace.masks) // len(queries)
-        assert per_query == 12
-        mask = torch.stack([trace.masks[i * per_query].bool().reshape(3, -1)
+        assert per_query == 4 * len(context.encoder.blocks) + 4
+        mask = torch.stack([trace.masks[i * per_query + 1].bool().reshape(3, -1)
                             for i in range(len(queries))]).reshape(768, -1)
         # Every occurrence has its own large mask; no query-wide mask is shared.
         assert len({row.numpy().tobytes() for row in mask}) == 768
