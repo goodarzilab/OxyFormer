@@ -343,6 +343,12 @@ cProfile over that slice and a separate torch.profiler capture of an ordinary
 launch counts and synchronisation separately: asynchronous GPU durations must
 not be added to the host ranges that contain them.
 
+Record the parameter count of the instantiated nuisance model separately from
+the saved SSL descriptor. In these slices the SSL checkpoint reports 110,238
+parameters, while the complete outcome nuisance has 193,143 in both the baseline
+and candidate; adding context, treatment readout and county offsets changes the
+object being counted. A shared initialization does not make these counts equal.
+
 The implementation now creates one fit-local covariate index and parent content
 hash, then uses ordinary validated CovariateView and lineage constructors for
 every sampled subset. A second fit-local object applies the authoritative frozen
