@@ -267,11 +267,12 @@ def _build(bundle, *, encoder_state=None):
     return model.float()
 
 
-def _predict(model, view, inputs, policy, *, outcome_mean=False, base_only=False):
+def _predict(model, view, inputs, policy, *, outcome_mean=False, base_only=False, policy_cache=None):
     require(type(view) is CovariateView and view.use == "nuisance", "label-free nuisance view required")
     require(view.original_ids == inputs.original_ids, "prediction alignment mismatch")
     require(set(inputs.counties) <= set(model.group_offsets.counties), "unseen county prediction requires a transfer experiment")
-    action = policy.apply(inputs.a_mmhg, inputs.policy_covariates)
+    action = (policy.apply(inputs.a_mmhg, inputs.policy_covariates) if policy_cache is None
+              else policy_cache.apply(policy, inputs))
     query = torch.tensor(tuple(zip(action.a_mmhg, action.d_mmhg)), dtype=torch.float32, device=next(model.parameters()).device).unsqueeze(-1)
     batch = model.encoder.tokenizer.prepare(view)
     raw = fitting._raw(batch, model.encoder.tokenizer.features)
@@ -285,11 +286,12 @@ def _predict(model, view, inputs, policy, *, outcome_mean=False, base_only=False
     return result
 
 
-def _profile(model, config, view, inputs):
+def _profile(model, config, view, inputs, *, policy_cache=None):
     if isinstance(model, OutcomeTransformer) and config.family == "identity":
         model.eval()
         with torch.no_grad():
-            base = _predict(model, view, inputs, config.policy, base_only=True)[:, 0]
+            base = _predict(model, view, inputs, config.policy, base_only=True,
+                            policy_cache=policy_cache)[:, 0]
             target = torch.tensor(_values(config, config.data.manifest.outcome_field, view.original_ids),
                                   dtype=torch.float32, device=base.device)
             units = {c: _weight_unit([w for county, w in zip(inputs.counties, inputs.origin_weights)
@@ -329,6 +331,8 @@ def _train_transaction(config, bundle, encoder_state, view, stopping, epochs, se
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=1.)
     inputs = _inputs(config, view.original_ids)
     require(sum(inputs.origin_weights) > 0, "fitting partition has no target mass")
+    subsets = fitting._CovariateSubsets(view)
+    policy_cache = fitting._FitPolicy(config.policy, inputs)
     weight_unit = _weight_unit(inputs.origin_weights)
     original_mass = sum(w / weight_unit for w in inputs.origin_weights)
     sampler = StatefulSampler(len(view.original_ids), seed)
@@ -347,12 +351,12 @@ def _train_transaction(config, bundle, encoder_state, view, stopping, epochs, se
         if reason:
             break
         if progress["phase"] == "start":
-            _profile(model, config, view, inputs)
+            _profile(model, config, view, inputs, policy_cache=policy_cache)
             progress["phase"] = "train"
         if progress["phase"] == "train":
             indices = sampler.indices(config.settings.batch_size)
             ids = tuple(view.original_ids[i] for i in indices)
-            part = subset(view, ids)
+            part = subsets(ids)
             metadata = _inputs(config, ids)
             if sum(metadata.origin_weights) == 0:
                 # A sampled zero-mass group has no objective and no decay update.
@@ -364,12 +368,12 @@ def _train_transaction(config, bundle, encoder_state, view, stopping, epochs, se
                 continue
             model.train()
             optimizer.zero_grad(set_to_none=True)
-            predicted = _predict(model, part, metadata, config.policy)
+            predicted = _predict(model, part, metadata, config.policy, policy_cache=policy_cache)
             if bundle["kind"] == "outcome":
                 loss = _outcome_loss(config, predicted[:, 0], ids, weight_unit=weight_unit)
                 mass = original_mass
             else:
-                pairs = paired_records(config.policy.apply(metadata.a_mmhg, metadata.policy_covariates),
+                pairs = paired_records(policy_cache.apply(config.policy, metadata),
                                        metadata.origin_weights, weight_id=config.data.manifest.spec.weight_id)
                 # The authoritative records retain raw origin weights. Only
                 # the numerical loss receives weights in common arithmetic
@@ -390,7 +394,7 @@ def _train_transaction(config, bundle, encoder_state, view, stopping, epochs, se
             if sampler.cursor == sampler.size:
                 progress["phase"] = "evaluate"
             continue
-        _profile(model, config, view, inputs)
+        _profile(model, config, view, inputs, policy_cache=policy_cache)
         model.eval()
         score = None
         # A zero-mass stopping set has no checkpoint-selection information;
