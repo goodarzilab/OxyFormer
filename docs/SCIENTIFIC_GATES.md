@@ -201,3 +201,14 @@ these are 7,061 sampled (1,752 targets plus 5,309 training-only) and 36,927 fixe
 Truth, coverage and release statistics remain target-only. This ruling addresses
 a validation-harness consequence of A2 and will be disclosed to the owner in the
 orchestrator's hourly report.
+
+The orchestrator's second ruling of 2026-10-11 makes `support_gaps` and
+`heterogeneous_eligibility` declarations of frame facts, checked by
+`validate_policy`. For real-frame scenarios the profile registry declares them
+`from_frame`; profile construction, campaign locking and budget estimation use
+those same derived values. Fully synthetic scenarios retain their explicit
+switches and mismatch checks. On the approved historical frame both declarations
+are true: 282 sampled rows have gaps (34 target, 248 training-only), and 4,226
+have no positive-width shift interval (1,035 target, 3,191 training-only).
+The real-frame report records both values and these membership counts.
+`bridge_support_gaps` remains false; the support, target and estimand are unchanged.

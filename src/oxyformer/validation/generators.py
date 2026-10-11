@@ -26,7 +26,7 @@ from oxyformer.validation.scm import (
     latent_states, observation_probabilities, observation_log_probability, structural_mean, validate_count_rates, count_event_rate,
     sampled_mean, effect_fraction, LocalCoordinates, exact, exact_shift_intervals, wide, observation_transition_points, _count_baseline, _sine_bounds,
     numeric_scalar, binary64_scalar, integer_scalar, normalize_record_numbers,
-    validate_numeric, validate_policy_domain, validate_seed, REGISTERED_NUMERIC_BOX, NUMERIC_DOMAIN, NUMERIC_MARGIN, NUMERIC_ZERO_EXCEPTIONS,
+    validate_numeric, validate_policy_domain, validate_seed, validate_fixed_exposures, REGISTERED_NUMERIC_BOX, NUMERIC_DOMAIN, NUMERIC_MARGIN, NUMERIC_ZERO_EXCEPTIONS,
     MIN_INTEGRATION_TOLERANCE, INTEGRATION_TOLERANCE_DOMAIN, LATENT_DENOMINATOR_DOMAIN,
 )
 
@@ -148,7 +148,7 @@ def write_sample(sample: GeneratedSample, *, observations_dir: Path, truth_dir: 
     write_artifact(truth_dir / "integration_uncertainty.json", sample.integration_uncertainty)
 
 
-def _sample_observations(frame, config, policy, seed):
+def _sample_observations(frame, config, policy, seed, *, fixed_exposures=None):
     seed = validate_seed(seed)
     validate_policy_domain(policy)
     rng = np.random.default_rng(seed)
@@ -156,6 +156,7 @@ def _sample_observations(frame, config, policy, seed):
     count_scenario = config.registration_probability < 1 or config.denominator_error != 0
     a, y, measured, flags, surveys, biomarkers, events, denominators = ([] for _ in range(8))
     support = dict(policy.components_by_key)
+    fixed = validate_fixed_exposures(frame, policy, fixed_exposures)
     for i, (geo, region, cluster) in enumerate(zip(frame.geography_ids, frame.region_ids, frame.cluster_ids)):
         if region not in regions:
             regions[region] = float(rng.choice([-1, 1])) if config.regional_confounding != "none" else 0.
@@ -167,15 +168,21 @@ def _sample_observations(frame, config, policy, seed):
             illness = float(rng.integers(illness_probability.denominator) < illness_probability.numerator) if config.has_illness else 0.
             error = float(rng.choice([-1, 1])) * config.exposure_error
             state = LatentState(local, regions[region], illness, error)
-            law = AssignmentLaw(frame, i, state, config, support[frame.support_keys[i]])
-            # A genuine point mass at the first lower boundary, never jittered.
-            atom = config.assignment == "atoms" and rng.random() < .5
-            if atom:
-                true_dose = exact(law.components[0][0])
-                dose = float(true_dose+law.error)
+            if frame.original_ids[i] in fixed:
+                # Preserve recorded atlas A. The existing measurement-error
+                # model maps it to true dose before the same outcome machinery.
+                dose = fixed[frame.original_ids[i]]
+                true_dose = exact(dose) - exact(state.error)
             else:
-                # Retain true dose for continuous endpoints as well as counts.
-                dose, true_dose = law.sample_count_dose(rng)
+                law = AssignmentLaw(frame, i, state, config, support[frame.support_keys[i]])
+                # A genuine point mass at the first lower boundary, never jittered.
+                atom = config.assignment == "atoms" and rng.random() < .5
+                if atom:
+                    true_dose = exact(law.components[0][0])
+                    dose = float(true_dose+law.error)
+                else:
+                    # Retain true dose for continuous endpoints as well as counts.
+                    dose, true_dose = law.sample_count_dose(rng)
             pflag, psurvey, _ = observation_probabilities(dose, state, config)
             geographies[geo] = (state, dose, true_dose, bool(rng.random() < pflag), bool(rng.random() < psurvey), rng.normal())
         state, dose, true_dose, flag, survey, geo_noise = geographies[geo]
@@ -831,7 +838,8 @@ def _relative_mass_difference(current, previous, precision):
 
 
 def generate_suite_a(frame: CovariateFrame, config: SCMConfig, policy: ShiftOrStayPolicy, *,
-                     seed: int = 0, tolerance: float = 1e-8, max_order: int = 256) -> GeneratedSample:
+                     seed: int = 0, tolerance: float = 1e-8, max_order: int = 256,
+                     fixed_exposures=None) -> GeneratedSample:
     """Generate observations and *population*, not realized-sample, truths.
 
     Integration marginalizes assignment, confounders and observation mechanisms,
@@ -845,9 +853,11 @@ def generate_suite_a(frame: CovariateFrame, config: SCMConfig, policy: ShiftOrSt
     require(tolerance >= MIN_INTEGRATION_TOLERANCE,
             "integration tolerance outside supported numeric domain: at least 1e-5000")
     eligible_by_key = {key:exact_shift_intervals(c,policy.delta_mmhg) for key,c in policy.components_by_key}
-    config.validate_policy(policy, frame, eligible_by_key=eligible_by_key)
-    validate_count_rates(frame, config, policy, eligible_by_key=eligible_by_key)
-    observations = _sample_observations(frame, config, policy, seed)
+    fixed = validate_fixed_exposures(frame, policy, fixed_exposures)
+    config.validate_policy(policy, frame, eligible_by_key=eligible_by_key, fixed_exposures=fixed)
+    validate_count_rates(frame, config, policy, eligible_by_key=eligible_by_key, fixed_exposures=fixed)
+    options = {"fixed_exposures": fixed} if fixed else {}
+    observations = _sample_observations(frame, config, policy, seed, **options)
     common = dict(policy_id=policy.policy_id, config_hash=config.content_hash, generator_configuration=config.to_json(),
                   frame_hash=frame.content_hash, observation_hash=observations.content_hash)
     if config.assignment == "atoms":

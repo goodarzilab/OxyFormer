@@ -209,3 +209,16 @@ The A2 gate continues to publish source-bound `SplitScenario` records in
 with the existing contract. Source and parent hashes remain authoritative;
 outcome-blindness compares decisions while allowing only the documented
 provenance paths to change when an upstream Y payload changes.
+
+Orchestrator ruling of 2026-10-11 (A2 profile consistency):
+`configs/validation/final_scenarios.yaml.real_frame_declarations` declares
+`support_gaps` and `heterogeneous_eligibility` as `from_frame`. For the
+`synthetic-suite-a-real-frame` endpoint, `campaign.registered_scenarios` derives
+these switches from sampled rows' frozen support and includes their enabled
+names in `active_mechanisms`. Profiles, campaign locks and budget estimates use
+the same resolved scenario payloads. Fully synthetic scenarios keep the registry's
+explicit declarations and validation. No policy or support is changed.
+The real-frame audit reports `support_declarations`, their `from_frame` source,
+and `sampled_rows_with_gaps` / `sampled_rows_without_positive_width_shift` counts
+with `total`, `target` and `training_only` membership. Fixed-exposure rows are
+excluded from both declarations; their existing count remains reported separately.

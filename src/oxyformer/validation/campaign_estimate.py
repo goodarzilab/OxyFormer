@@ -9,7 +9,7 @@ from oxyformer.provenance import ContractError, require
 from oxyformer.training.nested_cv import PreparedEndpoint
 from oxyformer.validation import campaign
 from oxyformer.validation.coverage import dependency, digest, finite, integer, publish
-from oxyformer.validation.scm import CovariateFrame, SCMConfig
+from oxyformer.validation.scm import CovariateFrame
 
 
 def estimate_budget(request):
@@ -22,11 +22,13 @@ def estimate_budget(request):
     p = task['parameters']
     recipe = p['recipe']
     campaign.validate_recipe(recipe)
+    inputs = {}
     for key, cls, expected in [('endpoint_input', PreparedEndpoint, recipe['endpoint_hash']),
                                 ('frame_input', CovariateFrame, recipe['frame_hash'])]:
         record = cls.from_json(dependency(request, config, p[key]).read_text())
         require(record.content_hash == expected, 'estimate endpoint/frame hash mismatch')
-    scenarios = [SCMConfig(**row).to_dict()['payload'] for row in campaign._registry()['scenarios']]
+        inputs[key] = record
+    scenarios = campaign.registered_scenarios(inputs['endpoint_input'], inputs['frame_input'])
     require(set(p['profiles']) == {s['name'] for s in scenarios}, 'all registered final profiles required')
     count = integer(p['final_repetitions'], 'final repetitions', 1000)
     wall = integer(p['wall_seconds'], 'leaf wall seconds', 1)

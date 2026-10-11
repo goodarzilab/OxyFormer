@@ -25,7 +25,7 @@ from oxyformer.provenance import ContractError, read_artifact, require
 from oxyformer.training.nested_cv import PreparedEndpoint
 from oxyformer.validation import campaign
 from oxyformer.validation.coverage import dependency, digest, publish, repetition_plan
-from oxyformer.validation.scm import CovariateFrame, SCMConfig
+from oxyformer.validation.scm import CovariateFrame, SCMConfig, sampled_support_facts
 
 ROOT = Path(__file__).parents[3]
 TASK_FILE = ROOT / 'configs/execution/tasks/campaign_profiles.yaml'
@@ -142,8 +142,6 @@ def build_inputs(values, design):
     components = dict(frozen.policy.components_by_key)
     fixed_exposures = {r.original_id: a[r.tract_id].exposure_mmhg for r in selected
                        if not components[r.assignment_geography]}
-    for row in campaign._registry()['scenarios']:
-        SCMConfig(**row).validate_policy(frozen.policy, frame, fixed_exposures=fixed_exposures)
     knots = frozen.spline_knots
     sealed_a = [a[r.tract_id].exposure_mmhg for r in rows
                 if r.original_id in design_ids and r.tract_id not in accounted_missing]
@@ -163,10 +161,20 @@ def build_inputs(values, design):
         county_field=geography.county_field, exposure_assignment_level='tract')
     for fold in range(5):
         endpoint.validate(fold)
+    for scenario_config in campaign.registered_scenarios(endpoint, frame):
+        SCMConfig(**scenario_config).validate_policy(frozen.policy, frame, fixed_exposures=fixed_exposures)
+    facts = sampled_support_facts(frozen.policy, frame, fixed_exposures=fixed_exposures)
+    def membership_counts(ids):
+        return {'total': len(ids), 'target': len(targets.intersection(ids)),
+                'training_only': len(set(ids) - targets)}
     audit = {'input_rows': len(rows), 'evaluation_rows': len(targets),
         'simulation_rows': len(selected), 'training_only_rows': len(selected) - len(targets),
         'sampled_exposure_rows': len(selected) - len(fixed_exposures),
         'fixed_exposure_rows': len(fixed_exposures),
+        'support_declarations': {name: facts[name] for name in ('support_gaps', 'heterogeneous_eligibility')},
+        'support_declarations_source': 'from_frame',
+        'sampled_rows_with_gaps': membership_counts(facts['gap_ids']),
+        'sampled_rows_without_positive_width_shift': membership_counts(facts['no_positive_width_shift_ids']),
         'coverage': atlas_coverage,
         'allocation_exclusions': gate.allocation_exclusions(rows, atlas_coverage, design_ids),
         'design_ids': list(reservation.design_ids), 'exclusions': list(scenario.exclusions),
@@ -205,8 +213,7 @@ def profile_tasks(endpoint, frame):
     # GPU-hour mandate applies only to leaves that request GPUs.
     resources = {'cpus_per_task': 8, 'gpus': 0, 'wall_seconds': 41400}
     tasks, profiles = [], {}
-    for row in campaign._registry()['scenarios']:
-        scenario = SCMConfig(**row).to_dict()['payload']
+    for scenario in campaign.registered_scenarios(endpoint, frame):
         task_id = 'profile-' + scenario['name'].replace('_', '-')
         tasks.append({'id': task_id, 'stage': 'simulation-smoke', 'needs': inputs,
             'resources': dict(resources),

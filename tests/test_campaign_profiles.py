@@ -436,3 +436,85 @@ def test_real_frame_reports_fixed_training_rows_and_binds_their_atlas_exposure(b
     for county, location in locations.items():
         rows = [geo[i] for i in endpoint.outer.original_ids if geo[i].county == county]
         assert location == [sum(r.latitude for r in rows) / len(rows), sum(r.longitude for r in rows) / len(rows)]
+
+
+def derived_support_fixture(built):
+    """Policy-only fixture for registry comparisons, not for fitting."""
+    _, (endpoint, frame, _, _) = built
+    targets = set(endpoint.outer.original_ids)
+    keys = dict(zip(frame.original_ids, frame.support_keys))
+    training = [i for i in frame.original_ids if i not in targets]
+    replacements = {keys[endpoint.outer.original_ids[0]]: ((0., 3.), (7., 10.)),
+                    keys[training[0]]: ((0., 1.),), keys[training[1]]: ()}
+    policy = replace(endpoint.policy, components_by_key=tuple(
+        (key, replacements.get(key, components)) for key, components in endpoint.policy.components_by_key))
+    return replace(endpoint, policy=policy), frame
+
+
+def test_real_frame_declarations_derive_sampled_facts_and_keep_synthetic_explicit(built):
+    from oxyformer.validation.scm import sampled_support_facts
+    endpoint, frame = derived_support_fixture(built)
+    fixed = coverage.fixed_exposures(endpoint, frame)
+    facts = sampled_support_facts(endpoint.policy, frame, fixed_exposures=fixed)
+    assert len(facts['gap_ids']) == len(facts['no_positive_width_shift_ids']) == len(fixed) == 1
+    assert not set(fixed).intersection(facts['sampled_ids'])
+    original_policy = endpoint.policy.to_json()
+    profiles = real_frame.profile_tasks(endpoint, frame)['tasks'][:4]
+    for task, scenario in zip(profiles, campaign.registered_scenarios(endpoint, frame)):
+        assert task['parameters']['scenario'] == scenario
+        assert scenario['support_gaps'] and scenario['heterogeneous_eligibility']
+        SCMConfig(**scenario).validate_policy(endpoint.policy, frame, fixed_exposures=fixed)
+    assert endpoint.policy.to_json() == original_policy
+    gap_key = dict(zip(frame.original_ids, frame.support_keys))[endpoint.outer.original_ids[0]]
+    assert not endpoint.policy.shift_mask([2.], [gap_key])[0]
+    manifest = endpoint.data.manifest
+    synthetic = replace(endpoint, data=replace(endpoint.data, manifest=replace(manifest,
+        spec=replace(manifest.spec, endpoint='synthetic-suite-a'))))
+    for scenario in campaign.registered_scenarios(synthetic, frame):
+        assert not scenario['support_gaps'] and not scenario['heterogeneous_eligibility']
+        with pytest.raises(ContractError, match='support_gaps switch'):
+            SCMConfig(**scenario).validate_policy(synthetic.policy, frame, fixed_exposures=fixed)
+
+
+def test_estimate_and_lock_compare_derived_real_frame_scenarios(built, tmp_path, monkeypatch):
+    from test_campaign import setup_lock
+    endpoint, frame = derived_support_fixture(built)
+    tasks = real_frame.profile_tasks(endpoint, frame)['tasks']
+    deps = {'real-frame-inputs': tmp_path / 'real-inputs'}
+    write(deps['real-frame-inputs'] / 'endpoint.json', endpoint.to_dict())
+    write(deps['real-frame-inputs'] / 'frame.json', frame.to_dict())
+    monkeypatch.setattr(campaign, 'fingerprint', lambda: deepcopy(STAMPS))
+    for task in tasks[:4]:
+        p = task['parameters']
+        _, records = successful_records(1)
+        records[0]['draw'] = p['draws'][0]
+        root = deps[task['id']] = tmp_path / task['id']
+        write(root / 'result.json', {'mode': 'profile', 'scenario': p['scenario'],
+            'recipe_hash': coverage.digest(p['recipe']), 'draws': p['draws'], 'records': records})
+        write(root / 'timing.json', {'production_equivalent': True, 'complete': True, 'all_successful': True,
+            'recipe_hash': coverage.digest(p['recipe']), 'device': 'cpu', 'gpu_seconds': 0,
+            'complete_repetition_seconds': [10.], 'wall_seconds': 13., 'setup_seconds': 2.,
+            'measurement_scope': 'complete_stage_return', **STAMPS})
+    req = request(tmp_path / 'estimate-derived', tasks[4], deps)
+    assert campaign_estimate.estimate_budget(req)['total_repetitions'] == 4000
+    # Exercise registry admission without fitting or timing this policy-only fixture.
+    monkeypatch.setattr(campaign, '_admit_locked_leaves', lambda *args: [])
+    _, lock_task = setup_lock(tmp_path / 'lock-template')
+    p = lock_task['parameters']
+    p.update({key: tasks[4]['parameters'][key] for key in ('endpoint_input', 'frame_input', 'recipe')})
+    scenario = tasks[0]['parameters']['scenario']
+    p.update(scenario_family=[scenario], profiles={'null_effect': tasks[4]['parameters']['profiles']['null_effect']})
+    lock_req = request(tmp_path / 'lock-derived', lock_task, deps)
+    config = coverage.read_json(lock_req.config_path)
+    lock, _, _ = campaign.build_lock(lock_req, config, lock_task)
+    assert lock['scenario_family'] == [scenario]
+    explicit = SCMConfig(name='null_effect', effect='null', active_mechanisms=('null',)).to_dict()['payload']
+    lock_task['parameters']['scenario_family'] = [explicit]
+    with pytest.raises(ContractError, match='unregistered final scenario'):
+        campaign.build_lock(lock_req, config, lock_task)
+    stale = coverage.read_json(deps['profile-null-effect'] / 'result.json')
+    stale['scenario'] = explicit
+    write(deps['profile-null-effect'] / 'result.json', stale)
+    req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    with pytest.raises(ContractError, match='profile scenario mismatch'):
+        campaign_estimate.estimate_budget(req)

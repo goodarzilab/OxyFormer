@@ -2765,3 +2765,51 @@ def test_fixed_exposure_switches_ignore_fixed_rows_but_include_supported_trainin
     with pytest.raises(ContractError, match='support_gaps switch'):
         config().validate_policy(p, f, fixed_exposures=fixed)
     config(support_gaps=True).validate_policy(p, f, fixed_exposures=fixed)
+
+
+def test_fixed_exposure_bypasses_assignment_and_uses_shared_outcome_latents(monkeypatch):
+    from oxyformer.validation import generators
+    f, p, fixed = a2_training_frame()
+    c = config(local_confounding='measured', regional_confounding='measured', noise_sd=0.)
+    assigned = []
+    original = generators.AssignmentLaw
+    def checked(frame, row, *args):
+        oid = frame.original_ids[row]
+        assert oid not in fixed
+        assigned.append(oid)
+        return original(frame, row, *args)
+    monkeypatch.setattr(generators, 'AssignmentLaw', checked)
+    sample = generate_suite_a(f, c, p, seed=1103, fixed_exposures=fixed)
+    observed = sample.observations
+    assert 'o0' in assigned and 'o2' in assigned  # target AND supported training
+    assert all(0 <= a <= 10 for a in observed.a[:4])
+    assert observed.a[4:] == (7., 7.)
+    assert observed.measured_x[4] == observed.measured_x[5]
+    for row in (4, 5):
+        local, regional = observed.measured_x[row]
+        assert observed.y[row] == 50. + 7. + 2 * local + 2 * regional
+    assert fixed == {'o4': 7., 'o5': 7.}
+
+
+def test_fixed_exposures_have_no_truth_mass_and_keep_recorded_atlas_a():
+    f, p, fixed = a2_training_frame()
+    c = config('nonlinear', exposure_error=.4, noise_sd=0.)
+    a = generate_suite_a(f, c, p, seed=4, fixed_exposures=fixed)
+    b = generate_suite_a(f, c, p, seed=4, fixed_exposures={'o4': 9., 'o5': 9.})
+    target = replace(frame(2), weights=(1., 1.))
+    truth = generate_suite_a(target, c, policy(), seed=4)
+    assert a.observations.a[4:] == (7., 7.) and b.observations.a[4:] == (9., 9.)
+    assert a.observed_law_truth.value == b.observed_law_truth.value == truth.observed_law_truth.value
+    assert a.structural_causal_truth.value == b.structural_causal_truth.value == truth.structural_causal_truth.value
+
+
+def test_fixed_count_exposure_is_validated_before_sampling(monkeypatch):
+    from oxyformer.validation import generators
+    f, p, fixed = a2_training_frame()
+    # Sampled support has positive rates; only the fixed atlas dose is invalid.
+    p = replace(p, components_by_key=(('s', ((0., 1.),)), ('fixed', ())))
+    def forbidden(*args, **kwargs):
+        pytest.fail('invalid fixed count rate reached sampling')
+    monkeypatch.setattr(generators, '_sample_observations', forbidden)
+    with pytest.raises(ContractError, match='negative event rate'):
+        generate_suite_a(f, config(beta=-10., registration_probability=.5), p, fixed_exposures=fixed)

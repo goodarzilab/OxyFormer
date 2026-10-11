@@ -380,6 +380,24 @@ class SCMConfig(Immutable):
         require(self.heterogeneous_eligibility == heterogeneous, "eligibility switch disagrees with frozen support")
 
 
+def sampled_support_facts(policy, frame, *, fixed_exposures=None):
+    """Frame facts for registered real-frame declarations; fixed rows do not sample."""
+    validate_policy_domain(policy)
+    support = dict(policy.components_by_key)
+    require(set(frame.support_keys) <= support.keys(), "unknown frame support key")
+    fixed = validate_fixed_exposures(frame, policy, fixed_exposures)
+    sampled = [(oid, key) for oid, key in zip(frame.original_ids, frame.support_keys) if oid not in fixed]
+    require(all(support[key] for _, key in sampled), "SCM assignment needs nonempty support")
+    eligible = {key: bool(exact_shift_intervals(support[key], policy.delta_mmhg))
+                for _, key in sampled}
+    gaps = tuple(oid for oid, key in sampled if len(support[key]) > 1)
+    ineligible = tuple(oid for oid, key in sampled if not eligible[key])
+    return {"support_gaps": bool(gaps),
+            "heterogeneous_eligibility": bool(ineligible) and len(ineligible) < len(sampled),
+            "sampled_ids": tuple(oid for oid, _ in sampled),
+            "gap_ids": gaps, "no_positive_width_shift_ids": ineligible}
+
+
 @dataclass(frozen=True)
 class LatentState:
     local: float = 0.0
