@@ -200,6 +200,19 @@ def publish(request, values, *, status, message, extra_artifacts=()):
     return result
 
 
+def fixed_exposures(template, frame):
+    """Atlas A for unsupported training-only rows; no serialized API change."""
+    support = dict(template.policy.components_by_key)
+    training = {i for i, role in zip(template.outer.frame_original_ids, template.outer.roles)
+                if role == "training"}
+    exposures = dict(zip(template.data.manifest.original_ids,
+                         template.data.column(template.data.manifest.exposure_field)))
+    fixed = {i: exposures[i] for i, key in zip(frame.original_ids, frame.support_keys)
+             if key in support and not support[key]}
+    require(set(fixed) <= training, "only labelled training-only rows may have fixed exposure")
+    return fixed
+
+
 def bind_observations(template, observations):
     """Rebind a reviewed synthetic endpoint to one draw, preserving X/design.
 
@@ -210,7 +223,13 @@ def bind_observations(template, observations):
     frame = observations.frame
     require(template.data.manifest.spec.endpoint.startswith("synthetic"), "synthetic endpoint template required")
     require(template.family == "identity", "SCM adapter requires identity likelihood")
-    require(tuple(frame.original_ids) == template.outer.original_ids, "SCM frame must equal frozen inference target")
+    targets = set(template.outer.original_ids)
+    require(tuple(i for i in frame.original_ids if i in targets) == template.outer.original_ids,
+            "SCM frame target rows must equal frozen inference target")
+    training = tuple(i for i, role in zip(template.outer.frame_original_ids, template.outer.roles)
+                     if role == "training")
+    require(tuple(i for i in frame.original_ids if i not in targets) == training,
+            "SCM frame training rows must equal labelled training-only rows")
     require(not observations.measured_columns, "measured confounders require a reviewed endpoint adapter")
     require(all(y is not None for y in observations.y), "selection requires a reviewed endpoint adapter")
     data = template.data
@@ -223,13 +242,17 @@ def bind_observations(template, observations):
     policy_rows = dict(zip(template.policy_covariates.original_ids,
         zip(template.policy_covariates.geography_ids, template.policy_covariates.support_keys)))
     geography = {r.original_id: r for r in template.geography.rows}
+    fixed = fixed_exposures(template, frame)
     for index, oid in enumerate(frame.original_ids):
         row = values[oid]
         require(tuple(row[n] for n in features) == frame.x[index], "fixed-X template drift")
         require(policy_rows[oid] == (frame.geography_ids[index], frame.support_keys[index]), "SCM policy routing drift")
-        require((1. if manifest.weight_field is None else row[manifest.weight_field]) == frame.weights[index], "SCM weight drift")
+        weight = (1. if manifest.weight_field is None else row[manifest.weight_field]) if oid in targets else 0.
+        require(weight == frame.weights[index], "SCM weight drift")
         require(geography[oid].county == frame.region_ids[index], "SCM region/county mismatch")
         require((geography[oid].latitude, geography[oid].longitude) == frame.coordinates[index], "SCM geography drift")
+        if oid in fixed:
+            require(observations.a[index] == fixed[oid], "fixed exposure differs from atlas value")
         row[manifest.exposure_field], row[manifest.outcome_field] = observations.a[index], observations.y[index]
     source = replace(manifest.sources[0], payload_hash=observations.content_hash,
                      source_id="synthetic-repetition", uri="synthetic://independent-repetition")
@@ -314,7 +337,9 @@ def execute_draw(draw, frame, scenario, template, recipe, root, deadline):
     if started >= deadline:
         return {**record, "wall_seconds": 0.}
     try:
-        sample = numerical_call(generate_suite_a, frame, scenario, template.policy, seed=draw["seed"])
+        fixed = fixed_exposures(template, frame)
+        options = {"fixed_exposures": fixed} if fixed else {}
+        sample = numerical_call(generate_suite_a, frame, scenario, template.policy, seed=draw["seed"], **options)
         if sample.observed_law_truth.status in ("design_rejected", "empty_target"):
             record.update(status="eligibility_rejection", reason=sample.observed_law_truth.reason)
         else:

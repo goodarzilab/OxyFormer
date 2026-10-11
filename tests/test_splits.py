@@ -185,13 +185,15 @@ def test_twenty_five_km_buffer_can_preserve_a_supported_geographic_split():
 
 def test_small_county_exclusion_does_not_remove_adequate_county():
     rows, graph, manifest, reservation = split_fixture(30, counties=2)
-    # Exclude all but nine of the second county before split assignment.
+    # A county with only nine labelled rows fails even with 30 frame rows.
+    rows = tuple(replace(r, label_available=False) if r.county == "c1" and r.original_id >= "o039"
+                 else r for r in rows)
     candidates = tuple(r.original_id for r in rows if r.county == "c0" or r.original_id < "o039")
     result = build_scenario(rows, graph, manifest, reservation, candidates, {},
                             radius_km=0, policy_id=digest("policy"))
     assert result.status == "pass"
     by_id = {r.original_id: r for r in rows}
-    assert {by_id[oid].county for oid in result.outer.original_ids} == {"c0"}
+    assert {by_id[oid].county for oid in result.outer.target_ids} == {"c0"}
     assert len(result.exclusions) == 30
 
 
@@ -201,6 +203,8 @@ def test_one_unsupported_tract_does_not_delete_supported_county():
     from oxyformer.design.policies import ShiftOrStayPolicy
     from oxyformer.design.support import FrozenSupport, SupportRecipe
     rows, graph, manifest, reservation = split_fixture(40)
+    rows = (rows[0], replace(rows[1], subblock=rows[0].subblock), *rows[2:])
+    reservation = replace(reservation, groups=dependence_groups(rows, graph))
     covariates = CovariateView(spec=manifest.spec, registry=manifest.registry,
                               original_ids=manifest.original_ids, columns=("female_share",),
                               values=((.5,),) * len(rows), use="nuisance", lineage=manifest.lineage)
@@ -220,6 +224,63 @@ def test_one_unsupported_tract_does_not_delete_supported_county():
     result = build_scenario(rows, graph, manifest, reservation, manifest.original_ids, {}, radius_km=0,
                             policy_id=policy.policy_id, atlas=atlas, covariates=covariates, support=support)
     assert result.status == "pass"
-    assert len(result.outer.original_ids) == 39
+    assert len(result.outer.target_ids) == 39
     assert result.exclusions == ((rows[0].original_id, "outer_conditional_support"),)
+    assert rows[1].original_id in result.outer.target_ids
+    roles = dict(zip(result.outer.frame_original_ids, result.outer.roles))
+    assert roles[rows[0].original_id] == "training"
+    folds = dict(zip(result.outer.frame_original_ids, result.outer.geographic_fold_ids))
+    assert folds[rows[0].original_id] == folds[rows[1].original_id]
+    assert rows[0].original_id not in result.outer.training_ids(folds[rows[1].original_id])
     assert all(a.outer_training_tracts >= 8 and min(a.inner_fitting_tracts) >= 4 for a in result.count_audit)
+
+
+def test_training_only_rows_supply_county_minima():
+    rows, graph, manifest, reservation = split_fixture(30)
+    targets = {rows[0].original_id}
+    result = build_scenario(rows, graph, manifest, reservation, targets, {}, radius_km=0, policy_id=digest("policy"))
+    assert result.status == "pass" and set(result.outer.target_ids) == targets
+    assert all(a.outer_training_tracts == 24 for a in result.count_audit)
+    for inner in result.inner:
+        assert len(result.outer.training_ids(inner.outer_fold)) == 24
+        assert set(inner.split.frame_original_ids) == set(result.outer.frame_training_ids(inner.outer_fold))
+
+
+def test_county_without_labelled_outer_training_rows_refuses():
+    rows, graph, manifest, reservation = split_fixture(30, counties=2)
+    rows = tuple(replace(r, label_available=False) if r.county == "c1" and r.original_id != "o030" else r for r in rows)
+    result = build_scenario(rows, graph, manifest, reservation, {"o000", "o030"}, {},
+                            radius_km=0, policy_id=digest("policy"))
+    assert result.outer.target_ids == ("o000",)
+    assert dict(result.exclusions)["o030"] == "fewer_than_eight_outer_training_tracts"
+    assert any(a.county == "c0" and a.outer_training_tracts >= 8 for a in result.count_audit)
+
+
+def test_buffer_sees_inert_and_training_only_frame_rows():
+    rows, graph, manifest, reservation = split_fixture(30)
+    rows = tuple(replace(r, outcome_flag=2) if i == 6 else r for i, r in enumerate(rows))
+    targets = {rows[i].original_id for i in (5, 12, 18, 24)}
+    folds = geographic_folds(rows, reservation.groups, 5)
+    full_buffer = buffer_exclusions(rows, folds, reservation.groups, 10)
+    target_only = buffer_exclusions([r for r in rows if r.original_id in targets], folds, reservation.groups, 10)
+    assert rows[5].original_id in full_buffer and rows[6].original_id in full_buffer
+    assert rows[5].original_id not in target_only
+    scenario = build_scenario(rows, graph, manifest, reservation, targets, {}, radius_km=10, policy_id=digest("p"))
+    assert dict(scenario.exclusions)[rows[5].original_id] == "outer_buffer"
+    if scenario.outer:
+        assert not full_buffer.intersection(scenario.outer.frame_original_ids)
+
+
+def test_four_inner_fitting_tract_screen_without_outer_failure():
+    rows, graph, manifest, reservation = split_fixture(13)
+    # Six geographic components. Every outer partition has >=8 labels, but
+    # grouping (3,2,1,1,1,5) leaves only three labels in an inner fitting set.
+    blocks = tuple(f"b{g}" for g, size in enumerate((3, 2, 1, 1, 1, 5)) for _ in range(size))
+    rows = tuple(replace(r, subblock=b) for r, b in zip(rows, blocks))
+    reservation = replace(reservation, groups=dependence_groups(rows, graph))
+    scenario = build_scenario(rows, graph, manifest, reservation, manifest.original_ids, {},
+                              radius_km=0, policy_id=digest("inner-minimum"))
+    assert scenario.status == "fail"
+    assert all(a.outer_training_tracts >= 8 for a in scenario.count_audit)
+    assert any(min(a.inner_fitting_tracts) == 3 for a in scenario.count_audit)
+    assert {reason for _, reason in scenario.exclusions} == {"fewer_than_four_inner_fitting_tracts"}

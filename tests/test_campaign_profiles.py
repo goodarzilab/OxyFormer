@@ -52,7 +52,12 @@ def built():
 
 def test_real_frame_preserves_x_geography_missingness_and_whole_clusters(built):
     v, (endpoint, frame, support, audit) = built
-    assert frame.original_ids == endpoint.outer.original_ids
+    assert frame.original_ids == tuple(i for i, role in zip(endpoint.outer.frame_original_ids,
+        endpoint.outer.roles) if role != 'inert')
+    assert tuple(i for i, w in zip(frame.original_ids, frame.weights) if w) == endpoint.outer.original_ids
+    assert audit['evaluation_rows'] == len(endpoint.outer.original_ids)
+    assert audit['simulation_rows'] == len(frame.original_ids)
+    assert audit['training_only_rows'] > 0
     assert frame.x == ((None,),) * len(frame.original_ids)
     assert endpoint.data.covariates(frame.columns).values == v['covariates'].values
     assert set(endpoint.data.column('y')) == {None}
@@ -102,7 +107,9 @@ def test_real_frame_refuses_missing_atlas_and_failed_primary_gate():
                               coverage_complete=False)
     with pytest.raises(ContractError, match='incomplete atlas'):
         real_frame.build_inputs(values, config)
-    values['atlas'] = replace(atlas, rows=tuple(replace(r, inhabited_elevation_m=1.) for r in atlas.rows))
+    values['atlas'] = atlas
+    values['geography'] = replace(values['geography'], rows=tuple(
+        replace(r, label_available=False) for r in values['geography'].rows))
     with pytest.raises(ContractError, match='no tract target'):
         real_frame.build_inputs(values, config)
 
@@ -251,13 +258,14 @@ def test_profile_resources_are_explicit_and_match_estimate():
 
 
 @pytest.mark.parametrize('fixture_name', ['smoke', 'real_fixture'])
-def test_existing_profile_task_bytes_match_launch_base(fixture_name, built):
-    # SHA256 of canonical bytes at dev/launch base a778a7c; excludes only the
-    # appended probe. This pins every CPU/estimate field, including draw seeds.
+def test_profile_task_bytes_pin_smoke_and_amended_real_frame(fixture_name, built):
+    # Smoke retains the dev/launch-base a778a7c bytes. The real fixture binds
+    # A2 support/target/split identities. Both pins cover every CPU/estimate
+    # field, including draw seeds, and exclude only the appended GPU probe.
     pair = smoke_inputs.build_inputs() if fixture_name == 'smoke' else built[1][:2]
     expected = {
         'smoke': '1fb64eaf6987e8fb62c6df3c95b53f0482e2fe7cfcc07e5db214a20fd35e7377',
-        'real_fixture': '3c6f161d31f47ffe9a04e13c9fd264dcc8d1acdc84f200cb71608738c2ac6490',
+        'real_fixture': 'ec44a0c499cfd354bc3a617661514bcd3d96779d284a73f9b7ea158fefbc15d3',
     }
     assert coverage.digest(real_frame.profile_tasks(*pair)['tasks'][:5]) == expected[fixture_name]
 
@@ -394,3 +402,119 @@ def test_real_frame_dispatch_excludes_accounted_dem_and_preserves_reservation(tm
     result = real_frame.run_stage(req)
     assert result.status == 'pass', result.message
     result.verify(req)
+
+
+def test_real_frame_reports_fixed_training_rows_and_binds_their_atlas_exposure(built):
+    values, (original, _, _, _) = built
+    oid = original.outer.original_ids[0]
+    covariates = values['covariates']
+    changed = replace(covariates, values=tuple((0.,) if i == oid else x
+        for i, x in zip(covariates.original_ids, covariates.values)))
+    endpoint, frame, support, audit = real_frame.build_inputs(
+        {**values, 'covariates': changed}, read_mapping(ROOT / 'configs/design.yaml'))
+    roles = dict(zip(endpoint.outer.frame_original_ids, endpoint.outer.roles))
+    fixed = coverage.fixed_exposures(endpoint, frame)
+    assert roles[oid] == 'training' and oid in fixed
+    assert all(roles[i] == 'training' for i in fixed)
+    assert audit['fixed_exposure_rows'] == len(fixed)
+    assert audit['sampled_exposure_rows'] + len(fixed) == audit['simulation_rows']
+    assert dict(zip(frame.original_ids, frame.weights))[oid] == 0.
+    from oxyformer.validation.generators import ObservedRecords
+    doses = dict(zip(endpoint.data.manifest.original_ids, endpoint.data.column(endpoint.data.manifest.exposure_field)))
+    n = len(frame.original_ids)
+    observed = ObservedRecords(frame=frame, a=tuple(doses[i] for i in frame.original_ids),
+        y=(50.,) * n, measured_columns=(), measured_x=((),) * n,
+        flag_available=(True,) * n, survey_included=(True,) * n,
+        biomarker_available=(True,) * n, registered_events=(None,) * n, observed_denominator=(None,) * n)
+    rebound = coverage.bind_observations(endpoint, observed)
+    assert rebound.data.column(endpoint.data.manifest.exposure_field) == endpoint.data.column(endpoint.data.manifest.exposure_field)
+    wrong = replace(observed, a=tuple(a + 1 if i == oid else a for i, a in zip(frame.original_ids, observed.a)))
+    with pytest.raises(ContractError, match='fixed exposure differs from atlas value'):
+        coverage.bind_observations(endpoint, wrong)
+    locations = real_frame.profile_tasks(endpoint, frame)['tasks'][0]['parameters']['recipe']['inference']['county_locations']
+    geo = {r.original_id: r for r in endpoint.geography.rows}
+    for county, location in locations.items():
+        rows = [geo[i] for i in endpoint.outer.original_ids if geo[i].county == county]
+        assert location == [sum(r.latitude for r in rows) / len(rows), sum(r.longitude for r in rows) / len(rows)]
+
+
+def derived_support_fixture(built):
+    """Policy-only fixture for registry comparisons, not for fitting."""
+    _, (endpoint, frame, _, _) = built
+    targets = set(endpoint.outer.original_ids)
+    keys = dict(zip(frame.original_ids, frame.support_keys))
+    training = [i for i in frame.original_ids if i not in targets]
+    replacements = {keys[endpoint.outer.original_ids[0]]: ((0., 3.), (7., 10.)),
+                    keys[training[0]]: ((0., 1.),), keys[training[1]]: ()}
+    policy = replace(endpoint.policy, components_by_key=tuple(
+        (key, replacements.get(key, components)) for key, components in endpoint.policy.components_by_key))
+    return replace(endpoint, policy=policy), frame
+
+
+def test_real_frame_declarations_derive_sampled_facts_and_keep_synthetic_explicit(built):
+    from oxyformer.validation.scm import sampled_support_facts
+    endpoint, frame = derived_support_fixture(built)
+    fixed = coverage.fixed_exposures(endpoint, frame)
+    facts = sampled_support_facts(endpoint.policy, frame, fixed_exposures=fixed)
+    assert len(facts['gap_ids']) == len(facts['no_positive_width_shift_ids']) == len(fixed) == 1
+    assert not set(fixed).intersection(facts['sampled_ids'])
+    original_policy = endpoint.policy.to_json()
+    profiles = real_frame.profile_tasks(endpoint, frame)['tasks'][:4]
+    for task, scenario in zip(profiles, campaign.registered_scenarios(endpoint, frame)):
+        assert task['parameters']['scenario'] == scenario
+        assert scenario['support_gaps'] and scenario['heterogeneous_eligibility']
+        SCMConfig(**scenario).validate_policy(endpoint.policy, frame, fixed_exposures=fixed)
+    assert endpoint.policy.to_json() == original_policy
+    gap_key = dict(zip(frame.original_ids, frame.support_keys))[endpoint.outer.original_ids[0]]
+    assert not endpoint.policy.shift_mask([2.], [gap_key])[0]
+    manifest = endpoint.data.manifest
+    synthetic = replace(endpoint, data=replace(endpoint.data, manifest=replace(manifest,
+        spec=replace(manifest.spec, endpoint='synthetic-suite-a'))))
+    for scenario in campaign.registered_scenarios(synthetic, frame):
+        assert not scenario['support_gaps'] and not scenario['heterogeneous_eligibility']
+        with pytest.raises(ContractError, match='support_gaps switch'):
+            SCMConfig(**scenario).validate_policy(synthetic.policy, frame, fixed_exposures=fixed)
+
+
+def test_estimate_and_lock_compare_derived_real_frame_scenarios(built, tmp_path, monkeypatch):
+    from test_campaign import setup_lock
+    endpoint, frame = derived_support_fixture(built)
+    tasks = real_frame.profile_tasks(endpoint, frame)['tasks']
+    deps = {'real-frame-inputs': tmp_path / 'real-inputs'}
+    write(deps['real-frame-inputs'] / 'endpoint.json', endpoint.to_dict())
+    write(deps['real-frame-inputs'] / 'frame.json', frame.to_dict())
+    monkeypatch.setattr(campaign, 'fingerprint', lambda: deepcopy(STAMPS))
+    for task in tasks[:4]:
+        p = task['parameters']
+        _, records = successful_records(1)
+        records[0]['draw'] = p['draws'][0]
+        root = deps[task['id']] = tmp_path / task['id']
+        write(root / 'result.json', {'mode': 'profile', 'scenario': p['scenario'],
+            'recipe_hash': coverage.digest(p['recipe']), 'draws': p['draws'], 'records': records})
+        write(root / 'timing.json', {'production_equivalent': True, 'complete': True, 'all_successful': True,
+            'recipe_hash': coverage.digest(p['recipe']), 'device': 'cpu', 'gpu_seconds': 0,
+            'complete_repetition_seconds': [10.], 'wall_seconds': 13., 'setup_seconds': 2.,
+            'measurement_scope': 'complete_stage_return', **STAMPS})
+    req = request(tmp_path / 'estimate-derived', tasks[4], deps)
+    assert campaign_estimate.estimate_budget(req)['total_repetitions'] == 4000
+    # Exercise registry admission without fitting or timing this policy-only fixture.
+    monkeypatch.setattr(campaign, '_admit_locked_leaves', lambda *args: [])
+    _, lock_task = setup_lock(tmp_path / 'lock-template')
+    p = lock_task['parameters']
+    p.update({key: tasks[4]['parameters'][key] for key in ('endpoint_input', 'frame_input', 'recipe')})
+    scenario = tasks[0]['parameters']['scenario']
+    p.update(scenario_family=[scenario], profiles={'null_effect': tasks[4]['parameters']['profiles']['null_effect']})
+    lock_req = request(tmp_path / 'lock-derived', lock_task, deps)
+    config = coverage.read_json(lock_req.config_path)
+    lock, _, _ = campaign.build_lock(lock_req, config, lock_task)
+    assert lock['scenario_family'] == [scenario]
+    explicit = SCMConfig(name='null_effect', effect='null', active_mechanisms=('null',)).to_dict()['payload']
+    lock_task['parameters']['scenario_family'] = [explicit]
+    with pytest.raises(ContractError, match='unregistered final scenario'):
+        campaign.build_lock(lock_req, config, lock_task)
+    stale = coverage.read_json(deps['profile-null-effect'] / 'result.json')
+    stale['scenario'] = explicit
+    write(deps['profile-null-effect'] / 'result.json', stale)
+    req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    with pytest.raises(ContractError, match='profile scenario mismatch'):
+        campaign_estimate.estimate_budget(req)

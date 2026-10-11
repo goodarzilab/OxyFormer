@@ -47,7 +47,7 @@ from oxyformer.training.calibration import (AffineCalibration, CalibrationPartit
 from oxyformer.training.checkpoint import (CheckpointArtifact, CheckpointRequest, capture_rng,
     restore_rng, load_checkpoint, save_checkpoint, model_state_hash)
 from oxyformer.training.fit import (FitConfig, FoldArtifacts, NuisanceSettings,
-    subset, _inputs, _values, _partition, _weight_unit, _outcome_loss, _origin_loss,
+    subset, _inputs, _values, _weight_unit, _outcome_loss, _origin_loss,
     _backward_and_clip, _pooled_metrics, _bundle, _lineage, _tensor_state)
 from oxyformer.training.pretrain import (StatefulSampler, SSLSettings, PretrainConfig, pretrain, environment_identity,
     fit_preprocessing)
@@ -103,8 +103,11 @@ class PreparedEndpoint(Immutable):
         return config
 
 
-def _whole_groups(groups, assignments):
+def _whole_groups(groups, assignments, eligible=None):
     for group in groups:
+        if eligible is not None:
+            group = tuple(i for i in group if i in eligible)
+
         present = set(group).intersection(assignments)
         if present:
             require(present == set(group) and len({assignments[i] for i in group}) == 1,
@@ -112,7 +115,7 @@ def _whole_groups(groups, assignments):
 
 
 def _split_assignments(split):
-    assignments = dict(zip(split.original_ids, split.fold_ids))
+    assignments = dict(zip(split.frame_original_ids, split.geographic_fold_ids))
     assignments.update((oid, "design") for oid in split.design_ids)
     assignments.update((oid, "excluded") for oid in split.excluded_ids)
     return assignments
@@ -126,7 +129,7 @@ def _validate_geography(data, graph, outer, inner, geography, county_field, fold
     """
     manifest = data.manifest
     validate_split(outer, manifest, graph)
-    require(outer.level == "outer" and set(outer.fold_ids) == set(range(5)),
+    require(outer.level == "outer" and set(outer.geographic_fold_ids) == set(range(5)),
             "five outer geographic folds required")
     require(outer.seed_ids == SEEDS, "registered seeds required")
     require(type(fold) is int and fold in range(5), "invalid outer fold")
@@ -134,9 +137,14 @@ def _validate_geography(data, graph, outer, inner, geography, county_field, fold
     validate_split(inner.split, inner.data_manifest, inner.entity_graph)
     manifest.spec.assert_compatible(inner.split.spec)
     require(inner.split.level == "inner" and inner.split.seed_ids == SEEDS and
-            set(inner.split.fold_ids) == {0, 1, 2}, "three inner geographic folds required")
+            set(inner.split.geographic_fold_ids) == {0, 1, 2}, "three inner geographic folds required")
     training = outer.training_ids(fold)
-    require(set(inner.data_manifest.original_ids) == set(training), "inner escapes outer training")
+    require(set(inner.data_manifest.original_ids) == set(outer.frame_training_ids(fold)), "inner escapes outer training")
+    require(set(inner.split.training_ids(0)) | set(inner.split.training_ids(1)) |
+            set(inner.split.training_ids(2)) == set(training), "inner labelled training membership mismatch")
+    outer_roles = dict(zip(outer.frame_original_ids, outer.roles))
+    require(all(outer_roles.get(i) == role for i, role in zip(inner.split.frame_original_ids, inner.split.roles)),
+            "inner membership roles differ from outer split")
     for field in ("schema", "registry", "sources", "id_field", "outcome_field", "exposure_field", "weight_field"):
         require(getattr(inner.data_manifest, field) == getattr(manifest, field), "inner data identity mismatch")
     require(type(geography) is GeographyTable and geography.data_manifest_hash == manifest.content_hash,
@@ -146,18 +154,20 @@ def _validate_geography(data, graph, outer, inner, geography, county_field, fold
     routes = dict(zip(manifest.original_ids, data.county_routing(county_field)))
     require(all(rows[i].county == routes[i] for i in rows), "county route mismatch")
     flags = primary_outcome_flags()
-    require(all(rows[i].outcome_flag in flags and rows[i].label_available for i in outer.original_ids),
+    require(all(rows[i].outcome_flag in flags and rows[i].label_available for i, role in zip(outer.frame_original_ids, outer.roles) if role != "inert"),
             "non-primary or unavailable labels forbidden")
     groups = dependence_groups(geography.rows, graph)
     _whole_groups(groups, _split_assignments(outer))
     _whole_groups(groups, _split_assignments(inner.split))
-    counties = {rows[i].county for i in outer.original_ids}
+    counties = {rows[i].county for i in outer.target_ids}
+    outer_labelled = {i for i, role in zip(outer.frame_original_ids, outer.roles) if role != "inert"}
+    inner_labelled = {i for i, role in zip(inner.split.frame_original_ids, inner.split.roles) if role != "inert"}
     for county in counties:
-        require({f for i, f in zip(outer.original_ids, outer.fold_ids) if rows[i].county == county}
+        require({f for i, f in zip(outer.frame_original_ids, outer.geographic_fold_ids) if i in outer_labelled and rows[i].county == county}
                 == set(range(5)), "outer folds must be within counties")
         require(tract_count([rows[i] for i in training], county) >= 8,
                 "fewer than eight outer-training tracts")
-        require({f for i, f in zip(inner.split.original_ids, inner.split.fold_ids) if rows[i].county == county}
+        require({f for i, f in zip(inner.split.frame_original_ids, inner.split.geographic_fold_ids) if i in inner_labelled and rows[i].county == county}
                 == {0, 1, 2}, "inner folds must be within counties")
     stops = dict(stopping_ids)
     require(len(stops) == len(stopping_ids) and set(stops) <= {0, 1, 2}, "invalid stopping folds")
@@ -169,7 +179,7 @@ def _validate_geography(data, graph, outer, inner, geography, county_field, fold
         ids = allowed - set(stopping)
         assignments = _split_assignments(inner.split)
         assignments.update((i, "fit" if i in ids else "stop") for i in allowed)
-        _whole_groups(groups, assignments)
+        _whole_groups(groups, assignments, inner_labelled)
         for county in counties:
             require(tract_count([rows[i] for i in ids], county) >= 4,
                     "fewer than four inner-fitting tracts after stopping reservation")
@@ -180,6 +190,53 @@ def _check_fitting_minima(config, outer, geography):
     return _validate_geography(config.data, config.entity_graph, outer, config.inner,
                                geography, config.county_field, config.fold, config.stopping_ids)
 
+
+
+def _validate_fitting(spec, split, manifest, config, seed):
+    require(type(config) is FitConfig and type(manifest) is fitting.DataManifest, "FitConfig and DataManifest required")
+    spec.assert_compatible(manifest.spec)
+    require(config.data.manifest == manifest, "training data manifest mismatch")
+    validate_split(split, manifest, config.entity_graph)
+    require(split.level == "outer" and len(set(split.geographic_fold_ids)) == 5, "five outer folds required")
+    require(seed in (1103, 2207, 3301) and seed in split.seed_ids, "unregistered nuisance seed")
+    require(config.inner.outer_fold == config.fold, "wrong inner parent fold")
+    validate_split(config.inner.split, config.inner.data_manifest, config.inner.entity_graph)
+    spec.assert_compatible(config.inner.split.spec)
+    require(config.inner.split.level == "inner" and set(config.inner.split.geographic_fold_ids) == {0, 1, 2},
+            "three inner geographic folds required")
+    allowed = split.training_ids(config.fold)
+    require(set(config.inner.data_manifest.original_ids) == set(split.frame_training_ids(config.fold)), "inner split escapes outer training")
+    for field in ("schema", "registry", "sources", "id_field", "outcome_field", "exposure_field", "weight_field"):
+        require(getattr(config.inner.data_manifest, field) == getattr(manifest, field), "inner data identity mismatch")
+    require(config.policy.policy_id == spec.policy_id, "policy mismatch")
+    require(set(config.policy_covariates.original_ids) == set(manifest.original_ids), "policy metadata coverage mismatch")
+    require(set(dict(config.stopping_ids)) <= {0, 1, 2}, "unknown stopping fold")
+    require(bool(config.feature_kinds) and len(dict(config.feature_kinds)) == len(config.feature_kinds),
+            "invalid feature configuration")
+    for name, _ in config.feature_kinds:
+        for use in ("nuisance", "ssl", "context"):
+            manifest.registry.require(name, spec.endpoint, use)
+    # Construction checks every prediction-metadata value without accessing Y.
+    _inputs(config, split.target_ids)
+    for name in (manifest.outcome_field,) + ((config.population_field,) if config.population_field else ()):
+        require(all(type(x) in (int, float) and math.isfinite(x) for x in _values(config, name, allowed)),
+                "missing/nonfinite target or likelihood exposure in outer training")
+    return allowed
+
+def _partition(config, parent, fold, *, stopping=()):
+    allowed = parent.training_ids(fold)
+    stopping = tuple(stopping)
+    require(len(set(stopping)) == len(stopping) and set(stopping) < set(allowed),
+            "stopping records must be inside the fitting partition")
+    fit = tuple(i for i in allowed if i not in set(stopping))
+    held = parent.evaluation_ids(fold)
+    # Derive model access from the validated frame. Inert rows retain geographic
+    # provenance but cannot become SSL, context, label or classifier inputs.
+    derived = replace(parent, fold_ids=tuple(1 if i in fit else 0 for i in parent.original_ids),
+                      frame_fold_ids=tuple(1 if i in fit else 0 for i in parent.frame_ids),
+                      training_exclusions=(),
+                      lineage=replace(parent.lineage, parent_hashes=(parent.content_hash,)))
+    return derived, fit, held
 
 def _build(bundle, *, encoder_state=None):
     variant = bundle.get("variant", "A0")
@@ -369,7 +426,8 @@ def _train_transaction(config, bundle, encoder_state, view, stopping, epochs, se
 
 # Merged SSL numerical/checkpoint algorithm with design-owned stopping groups.
 def _grouped_ssl(config, split, fitting, view, root, seed, budget, predecessor, geographic_groups):
-    groups = [g for g in geographic_groups if set(g) <= set(fitting)]
+    allowed = set(fitting)
+    groups = [tuple(i for i in g if i in allowed) for g in geographic_groups if allowed.intersection(g)]
     require(len(groups) >= 2, "SSL needs two independent fitting components")
     # A deterministic component draw, shared by all later transformed copies.
     stop = min(groups, key=lambda group: digest([seed, group, "ssl-stopping"]))
@@ -406,14 +464,26 @@ def _advance(config, outer, manifest, identity, controller, root, budget, varian
     tasks = []
     partitions = {}
     audits = {}
+    outcome_audits = {}
+    targets = set(outer.target_ids)
     for fold in range(3):
         stopping = tuple(dict(config.stopping_ids).get(fold, ()))
         local, fitting, held = _partition(config, config.inner.split, fold, stopping=stopping)
+        # Fold presence and minima concern labelled frame rows. A fold with
+        # no target observations contributes no tuning or calibration scores.
+        if not held:
+            continue
         audit = CalibrationPartition(fold=fold, evaluation_ids=held, fitting_ids=fitting,
             checkpoint_ids=stopping, frozen_epochs=None if stopping else config.settings.frozen_epochs)
         audit.validate(outer_ids)
         partitions[fold] = (local, fitting, held, stopping)
-        audits[fold] = audit
+        outcome_audits[fold] = audit
+        origin_stopping = tuple(i for i in stopping if i in targets)
+        origin_audit = replace(audit, fitting_ids=tuple(i for i in fitting if i in targets),
+            checkpoint_ids=origin_stopping,
+            frozen_epochs=None if origin_stopping else config.settings.frozen_epochs)
+        origin_audit.validate(outer_ids)
+        audits[fold] = origin_audit
         tasks.append(("ssl", fold, None))
         tasks.extend((kind, fold, grid) for kind in ("outcome", "origin") for grid in range(4))
     outer_local, fitting, held = _partition(config, outer, config.fold)
@@ -441,7 +511,7 @@ def _advance(config, outer, manifest, identity, controller, root, budget, varian
             origin = [min((r for r in controller["results"]
                            if r["kind"] == "origin" and r["fold"] == fold),
                           key=lambda r: (r["selection_metrics"], r["grid"]))
-                      for fold in range(3)]
+                      for fold in audits]
             selected["origin"]["calibration_grids"] = tuple(r["grid"] for r in origin)
             ids = tuple(oid for r in origin for oid in r["ids"])
             logits = [z for r in origin for z in r["predictions"]]
@@ -465,18 +535,24 @@ def _advance(config, outer, manifest, identity, controller, root, budget, varian
             controller["initializations"][fold] = artifact.to_json()
             controller["ssl_pending"] = None
         else:
+            # The classifier has its own stopping regime after target filtering.
+            model_ids = tuple(i for i in fitting if kind != "origin" or i in targets)
+            model_stopping = tuple(i for i in stopping if kind != "origin" or i in targets)
             if fold == 3:
                 grid = controller["selection"][kind]["grid"]
                 epochs = controller["selection"][kind]["epochs"]
             else:
-                epochs = config.settings.max_epochs if stopping else config.settings.frozen_epochs
+                epochs = config.settings.max_epochs if model_stopping else config.settings.frozen_epochs
             initialization = CheckpointArtifact.from_json(controller["initializations"][fold])
             bundle, encoder_state = _bundle(config, local, fitting, initialization, kind, config.settings.grid[grid])
             bundle["variant"] = variant
-            view = subset(all_view, fitting)
+            # SSL and the outcome nuisance use every labelled fitting row.
+            # Classification gradients, stopping and calibration use only T.
+            require(bool(model_ids), "empty target-distribution classifier fitting partition")
+            view = subset(all_view, model_ids)
             if controller["active"] is None:
                 controller["counts"]["nuisance_fits"] += 1
-            model, state, complete, reason = _train_transaction(config, bundle, encoder_state, view, stopping,
+            model, state, complete, reason = _train_transaction(config, bundle, encoder_state, view, model_stopping,
                 epochs, identity.seed, budget, controller["active"])
             controller["parameter_count"] = sum(p.numel() for p in model.parameters())
             if not complete:
@@ -485,7 +561,7 @@ def _advance(config, outer, manifest, identity, controller, root, budget, varian
             controller["active"] = None
             if fold == 3:
                 with torch.no_grad():
-                    _predict(model, view, _inputs(config, fitting), config.policy,
+                    _predict(model, view, _inputs(config, model_ids), config.policy,
                              outcome_mean=kind == "outcome")
                 bundle["state"] = deepcopy(model.state_dict())
                 controller["final"][kind] = bundle
@@ -502,12 +578,13 @@ def _advance(config, outer, manifest, identity, controller, root, budget, varian
                     predictions=predicted.tolist(), metrics=metrics,
                     mass=sum(w / mass_unit for w in metadata.origin_weights), mass_unit=mass_unit,
                     mass_ratio=(exact_mass.numerator, exact_mass.denominator),
-                    epochs=state["progress"]["best_epoch"], ownership=audits[fold].to_json())
+                    epochs=state["progress"]["best_epoch"],
+                    ownership=(audits if kind == "origin" else outcome_audits)[fold].to_json())
                 if kind == "origin":
                     # With frozen epochs, an in-sample fitting score may choose
                     # a grid, but never a calibration evaluation score. Explicit
                     # stopping partitions provide an independent tuning score.
-                    selection_ids = stopping or fitting
+                    selection_ids = model_stopping or model_ids
                     require(set(selection_ids).isdisjoint(held),
                             "calibration records entered grid selection")
                     selection_inputs = _inputs(config, selection_ids)
@@ -540,7 +617,7 @@ def run_fold(config, outer, seed, *, geography, variant="A0"):
     """One resumable endpoint/outer-fold/seed; no mutable cache survives a call."""
     require(variant in TRANSFORMER_VARIANTS, "variant needs a compatible resumable nuisance adapter")
     manifest = config.data.manifest
-    allowed = fitting._validate(manifest.spec, outer, manifest, config, seed)
+    allowed = _validate_fitting(manifest.spec, outer, manifest, config, seed)
     groups = _check_fitting_minima(config, outer, geography)
     destination = Path(config.output_dir)
     require(not any(p.is_symlink() for p in (destination, *destination.parents)),
@@ -584,7 +661,7 @@ def run_fold(config, outer, seed, *, geography, variant="A0"):
                    "progress": {"epoch": controller["position"], "step": controller["position"]}},
             complete=complete, reason=reason,
             predecessor=config.predecessor.checkpoint if config.predecessor else None)
-        held = tuple(i for i, f in zip(outer.original_ids, outer.fold_ids) if f == config.fold)
+        held = outer.evaluation_ids(config.fold)
         return FoldArtifacts(spec=manifest.spec, split=outer, data_manifest=manifest,
             fold=config.fold, seed=seed, prediction_inputs=_inputs(config, held), checkpoint=checkpoint)
 

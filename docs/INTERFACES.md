@@ -53,7 +53,7 @@ artifacts, not mutable filenames. The producer must make those parents available
 | `EstimandSpec` | Endpoint, frozen target ID, outcome scale, frozen policy ID, weight ID, adjustment registry hash, inference unit, source lineage hash. `assert_compatible` requires equality in every dimension. |
 | `SourceManifest` | Root source bytes/schema/licence identity and source-to-canonical mapping. Unreviewed manifests can be serialized but `assert_usable` and data loaders refuse them. |
 | `DataManifest` | Spec, reviewed-or-pending sources, ordered `ColumnSpec` schema, feature registry, original IDs, explicit ID/outcome/exposure/weight roles, entity graph hash and lineage. Its `schema_hash` binds ordered column names, dtypes and nullability. |
-| `SplitManifest` | Spec, outer/inner level, original IDs with held-out fold IDs, sealed design IDs, excluded IDs, registered seed IDs, entity graph hash and lineage. Design/excluded records never enter `training_ids(fold)`. Inner manifests describe their own permitted parent partition. |
+| `SplitManifest` | Spec, outer/inner level, target original IDs with fold IDs, separate frame IDs/folds and aligned membership roles, sealed design IDs, buffer-excluded IDs, registered seed IDs, entity graph hash and lineage. `target_ids` and `evaluation_ids(fold)` select evaluation rows; `training_ids(fold)` selects labelled target/training rows outside the held-out fold and its declared training exclusions. Inner manifests cover the outer-training frame. |
 | `CovariateView` | Spec, permissions, original IDs, permitted feature names, copied scalar values and lineage. Use is nuisance, SSL or county context. Contains no labels or reference to the original data object. |
 | `OOFNuisances` | Spec, original IDs, fold and seed IDs, `mu_a`, `mu_d`, `r_a`, `r_d`, origin weights and lineage. `mu_d` and `r_d` mean predictions at `d(A,X)`, never at a clipped dose. |
 | `Estimate` | Spec, method, point estimate, optional SE, per-original-observation scores/influence contributions, contributing seed IDs and lineage. Values represent the endpoint's declared scale. |
@@ -69,7 +69,7 @@ IDs are stable strings (preserve leading zeros). An OOF row is uniquely keyed by
 `(original_id, seed_id)`, with a fold ID. Original/shifted predictions live on the
 same row and share the origin weight. The fold and weight cannot vary across
 seeds. `loaders.validate_oof` requires the complete original-ID × registered-seed
-product for that split, the correct held-out fold, original weights, source/data
+product for that split’s `target_ids`, the correct held-out fold, original weights, source/data
 parent and split hash. Partial fold outputs may be serialized while assembling;
 they cannot enter `join_outcomes` as a complete OOF artifact. Do not stack
 shifted copies or seeds as independent epidemiological observations. Estimate
@@ -108,6 +108,60 @@ only `data.covariates(columns, use=...)`. `county_routing(name)` is separate.
 `CovariateView.column` and indexing reject labels, including absent labels;
 construction and deserialization also reject them. Opaque lineage hashes may
 change with upstream labels, but covariate values contain no label channel.
+
+Empty A2 extension fields are omitted from canonical split serialization,
+including embedded splits, so legacy all-target artifacts retain their hashes.
+Nonempty roles, frame fields and exclusions are always serialized and hashed.
+
+A2 split `membership_roles` align with `frame_ids`: `target` means an
+eligible evaluation tract (also usable in other folds' training), `training`
+means an eligible labelled non-target tract, and `inert` grants no evaluation
+or training access. Empty frame fields/roles retain the legacy all-target interpretation.
+`original_ids` and `fold_ids` retain their target-only meaning for estimator
+compatibility; `frame_original_ids` and `geographic_fold_ids` expose the frame.
+Roles do not alter geography: inert rows retain fold membership so both sides
+of every boundary are buffered across the whole frame. `design_ids` are sealed;
+`excluded_ids` are frame removals due to buffers. The scenario's separate
+`exclusions` ledger records target exclusions, including rows still available
+for labelled training.
+
+`frame_training_ids(fold)` returns the full frame outside that fold, while
+`training_exclusions` maps outer folds to their whole-component inner buffer
+removals. `training_ids(fold)` applies those removals and excludes inert rows.
+An `InnerSplit.data_manifest` describes that outer-training frame; its split
+excludes inner buffers. Nested CV validates frame coverage, matching roles,
+labelled training membership, group atomicity, and the 8/4 minima. An inner
+fold containing no target rows contributes no evaluation/calibration scores;
+its labelled frame membership still counts in every fitting partition. Outcome/SSL
+fits use the labelled rows; origin-classifier gradients, stopping, calibration
+and evaluation use target rows. OOF completeness is target-by-seed, never
+frame-by-seed. Consumers must use these accessors rather than treating all
+`original_ids` as evaluation or fitting rows.
+
+Suite A's existing `CovariateFrame` covers both target and labelled training-only
+rows from the split frame; inert, sealed and buffer-excluded rows receive no
+simulated outcomes. The adapters separately verify the ordered target membership
+against `outer.original_ids` and the ordered training-only membership against the
+`training` roles. One SCM generates outcomes for both. Training-only rows have
+zero SCM estimand weight; target rows keep their original weights (including any
+legitimate zero target weights). These zero simulation weights do not alter the
+labelled outcome-regression/SSL fitting weights. Truth integration, OOF scores,
+coverage/release statistics and county representatives remain target-only.
+Classifier checkpoint-selection audits also contain only target rows. If a
+labelled stopping reservation contains no target rows, the classifier uses its
+independently frozen epoch schedule; the outcome model retains its own stopping
+reservation and audit.
+
+Orchestrator ruling of 2026-10-11 (A2 validation harness): supported target and
+training-only rows sample exposure from their frozen components. Unsupported
+training-only rows keep their atlas A and use the same SCM outcome/latent-state
+machinery, with zero estimand weight. The adapter passes these values from the
+existing `DataManifest.exposure_field` via the optional `fixed_exposures` mapping;
+`CovariateFrame` and serialized artifact schemas do not change. Membership and
+atlas-dose checks prevent target rows or altered A from entering this path.
+`SCMConfig.validate_policy` checks nonempty support and the gap/eligibility switches
+on sampled rows only; fixed rows bypass `AssignmentLaw`. The real-frame audit
+includes `sampled_exposure_rows` and `fixed_exposure_rows`.
 
 Call `validate_split(split, manifest, entity_graph)` before fitting. It binds
 data/source/graph identity and enforces whole-lineage partitions, including the
@@ -152,3 +206,23 @@ and all science identities before resuming or skipping work. Partial artifacts
 may accompany blocked/failed results but cannot be consumed as passed outputs.
 Checkpoint writers own atomic publication and format-specific validation. No
 universal tensor/checkpoint schema or runtime stage is fabricated here.
+
+
+The A2 gate continues to publish source-bound `SplitScenario` records in
+`splits.json`. Consumers verify the stage receipt and deserialize these records
+with the existing contract. Source and parent hashes remain authoritative;
+outcome-blindness compares decisions while allowing only the documented
+provenance paths to change when an upstream Y payload changes.
+
+Orchestrator ruling of 2026-10-11 (A2 profile consistency):
+`configs/validation/final_scenarios.yaml.real_frame_declarations` declares
+`support_gaps` and `heterogeneous_eligibility` as `from_frame`. For the
+`synthetic-suite-a-real-frame` endpoint, `campaign.registered_scenarios` derives
+these switches from sampled rows' frozen support and includes their enabled
+names in `active_mechanisms`. Profiles, campaign locks and budget estimates use
+the same resolved scenario payloads. Fully synthetic scenarios keep the registry's
+explicit declarations and validation. No policy or support is changed.
+The real-frame audit reports `support_declarations`, their `from_frame` source,
+and `sampled_rows_with_gaps` / `sampled_rows_without_positive_width_shift` counts
+with `total`, `target` and `training_only` membership. Fixed-exposure rows are
+excluded from both declarations; their existing count remains reported separately.

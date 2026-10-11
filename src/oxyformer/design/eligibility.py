@@ -124,7 +124,7 @@ def _usable(row, atlas, flags):
 
 
 def county_screen(rows, atlas):
-    """Fixed four-tract / 300 m / 25 km screens on allocation-qualified inputs."""
+    """Four-tract / 25 km screens; county relief is an A2 diagnostic."""
     flags = primary_outcome_flags()
     counties = {}
     for row in rows:
@@ -142,8 +142,6 @@ def county_screen(rows, atlas):
         reasons = []
         if len(values) < 4:
             reasons.append("fewer_than_four_primary_eligible_tracts")
-        if spread < 300:
-            reasons.append("inhabited_relief_below_300m")
         if not local:
             reasons.append("no_local_comparison_within_25km")
         result[county] = {"tract_count": len(values), "p90_p10_m": spread,

@@ -271,6 +271,28 @@ class CovariateFrame(Immutable):
             require(by_geo.setdefault(geo, value) == value, "inconsistent assignment geography")
 
 
+def validate_fixed_exposures(frame, policy, fixed_exposures=None):
+    """A2 validation-only atlas doses for zero-mass rows with empty support.
+
+    Values come from the endpoint's existing exposure column, not from X or a
+    new assignment distribution. The caller additionally enforces training roles.
+    """
+    fixed = {} if fixed_exposures is None else dict(fixed_exposures)
+    require(set(fixed) <= set(frame.original_ids), "unknown fixed-exposure row")
+    support = dict(policy.components_by_key)
+    by_geo = {}
+    for oid, geo, key, weight in zip(frame.original_ids, frame.geography_ids,
+                                    frame.support_keys, frame.weights):
+        if oid in fixed:
+            require(weight == 0, "fixed-exposure rows must have zero estimand weight")
+            require(key in support and not support[key], "fixed-exposure rows require empty frozen support")
+            fixed[oid] = binary64_scalar(fixed[oid], "fixed exposure")
+            validate_numeric(fixed[oid], "recorded_exposure", "fixed exposure")
+        mode = (oid in fixed, fixed.get(oid))
+        require(by_geo.setdefault(geo, mode) == mode, "inconsistent fixed exposure within assignment geography")
+    return fixed
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SCMConfig(Immutable):
     """Explicit mechanism switches, not a Cartesian scenario grid.
@@ -341,18 +363,39 @@ class SCMConfig(Immutable):
     def has_illness(self):
         return bool(self.migration or self.selected_outcome or self.missing_biomarkers)
 
-    def validate_policy(self, policy: ShiftOrStayPolicy, frame: CovariateFrame, *, eligible_by_key=None):
+    def validate_policy(self, policy: ShiftOrStayPolicy, frame: CovariateFrame, *, eligible_by_key=None,
+                        fixed_exposures=None):
         validate_policy_domain(policy)
         support = dict(policy.components_by_key)
         require(set(frame.support_keys) <= support.keys(), "unknown frame support key")
-        used = [support[k] for k in set(frame.support_keys)]
+        fixed = validate_fixed_exposures(frame, policy, fixed_exposures)
+        sampled_keys = {k for oid, k in zip(frame.original_ids, frame.support_keys) if oid not in fixed}
+        used = [support[k] for k in sampled_keys]
         require(all(components for components in used), "SCM assignment needs nonempty support")
         require(self.support_gaps == any(len(c) > 1 for c in used), "support_gaps switch disagrees with frozen support")
         if eligible_by_key is None:
             eligible_by_key = {key:exact_shift_intervals(c,policy.delta_mmhg) for key,c in support.items()}
-        eligible = [bool(eligible_by_key[key]) for key in set(frame.support_keys)]
+        eligible = [bool(eligible_by_key[key]) for key in sampled_keys]
         heterogeneous = any(eligible) and not all(eligible)
         require(self.heterogeneous_eligibility == heterogeneous, "eligibility switch disagrees with frozen support")
+
+
+def sampled_support_facts(policy, frame, *, fixed_exposures=None):
+    """Frame facts for registered real-frame declarations; fixed rows do not sample."""
+    validate_policy_domain(policy)
+    support = dict(policy.components_by_key)
+    require(set(frame.support_keys) <= support.keys(), "unknown frame support key")
+    fixed = validate_fixed_exposures(frame, policy, fixed_exposures)
+    sampled = [(oid, key) for oid, key in zip(frame.original_ids, frame.support_keys) if oid not in fixed]
+    require(all(support[key] for _, key in sampled), "SCM assignment needs nonempty support")
+    eligible = {key: bool(exact_shift_intervals(support[key], policy.delta_mmhg))
+                for _, key in sampled}
+    gaps = tuple(oid for oid, key in sampled if len(support[key]) > 1)
+    ineligible = tuple(oid for oid, key in sampled if not eligible[key])
+    return {"support_gaps": bool(gaps),
+            "heterogeneous_eligibility": bool(ineligible) and len(ineligible) < len(sampled),
+            "sampled_ids": tuple(oid for oid, _ in sampled),
+            "gap_ids": gaps, "no_positive_width_shift_ids": ineligible}
 
 
 @dataclass(frozen=True)
@@ -1076,7 +1119,7 @@ class AssignmentLaw:
         return tuple(rules)
 
 
-def validate_count_rates(frame, config, policy, *, eligible_by_key=None):
+def validate_count_rates(frame, config, policy, *, eligible_by_key=None, fixed_exposures=None):
     """Check the entire factual/intervention support, not only sampled events."""
     validate_policy_domain(policy)
     if config.registration_probability == 1 and config.denominator_error == 0:
@@ -1084,6 +1127,7 @@ def validate_count_rates(frame, config, policy, *, eligible_by_key=None):
     support = dict(policy.components_by_key)
     if eligible_by_key is None:
         eligible_by_key = {key:exact_shift_intervals(c,policy.delta_mmhg) for key,c in support.items()}
+    fixed = validate_fixed_exposures(frame, policy, fixed_exposures)
     delta = exact(policy.delta_mmhg)
     for row in range(len(frame.original_ids)):
         key = frame.support_keys[row]
@@ -1091,6 +1135,9 @@ def validate_count_rates(frame, config, policy, *, eligible_by_key=None):
         for state, _ in latent_states(config):
             intervals = list(components)
             error = exact(state.error)
+            if frame.original_ids[row] in fixed:
+                dose = exact(fixed[frame.original_ids[row]]) - error
+                intervals = [(dose, dose)]
             for lo, hi in components:
                 for p_lo, p_hi in eligible_by_key[key]:
                     start = max(lo, p_lo-error)

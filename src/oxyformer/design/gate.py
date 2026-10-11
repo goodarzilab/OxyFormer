@@ -18,14 +18,15 @@ from pathlib import Path
 import platform
 import tempfile
 
+import numpy as np
 import yaml
 
 from oxyformer.contracts import CovariateView, DataManifest, StageRequest, StageResult
 from oxyformer.data.adapters.usaleep import primary_outcome_flags
 from oxyformer.data.entity_graph import EntityGraph
 from oxyformer.data.feature_roles import FeatureRegistry
-from oxyformer.design.eligibility import CollectedAtlas, GeographyTable, county_screen, usable
-from oxyformer.design.splits import Reservation, build_scenario, close_groups, reserve_design
+from oxyformer.design.eligibility import CollectedAtlas, GeographyTable, county_screen, usable, _usable
+from oxyformer.design.splits import Reservation, build_scenario, reserve_design
 from oxyformer.design.support import FrozenSupport, SupportRecipe, freeze_support, policy_for, supported_ids
 from oxyformer.provenance import (
     ArtifactLineage, ArtifactRecord, ContractError, Immutable, canonical_json, file_hash,
@@ -36,7 +37,7 @@ ROOT = Path(__file__).resolve().parents[3]
 OWNER_APPROVALS = ROOT / "configs" / "approvals.yaml"
 DESIGN_CONFIG = ROOT / "configs" / "design.yaml"
 INFERENCE_FRAME = (
-    "Equal-tract inference is conditional on the sealed geographic support design, "
+    "A2 equal-tract inference is conditional on the realised allocation-qualified frame, "
     "approved raw-X registry, frozen support policy, atlas coverage and buffer-specific "
     "eligible primary (flag-1/3) tract frame. Sealed design outcomes enter neither nuisance fitting "
     "nor effect evaluation. Uncertainty concerns the declared geographic stochastic "
@@ -56,6 +57,66 @@ class FrozenDesign(Immutable):
     approved_features: FeatureRegistry
     inference_frame: str = INFERENCE_FRAME
     effect_release_authorized: bool = False
+    estimand_id: str = "usaleep-a2-2026-10-10"
+    locked_analysis: str = "owner_decisions.tract_design_amendment/2026-10-10"
+
+
+A2_ESTIMAND_ID = "usaleep-a2-2026-10-10"
+# Published tract-gate-r2 primary target, retained even though infeasible.
+FROZEN_TARGET_ID = "e2999854bbeb2d232ca59b46e058b55e69b9ca6c2ddb0896d805f018350181d5"
+
+
+def amendment(approvals):
+    owner = approvals.get("owner_decisions") if isinstance(approvals, dict) else None
+    value = owner.get("tract_design_amendment") if isinstance(owner, dict) else None
+    required = {"new_estimand", "supersedes", "eligibility_closure", "non_target_frame_rows",
+                "county_minima_count", "support_pool", "support_recipe", "relief_screen",
+                "declared_fallback", "census", "disclosures", "process_change"}
+    valid = isinstance(value, dict) and set(value) == required
+    if valid:
+        expected = {"eligibility_closure": "tract", "county_minima_count": "labelled_training_tracts",
+                    "support_pool": "all_allocation_qualified_frame_tracts",
+                    "relief_screen": "reported_diagnostic",
+                    "support_recipe": {"bin_width_mmhg": 1.0, "min_bin_tracts": 2, "raw_x_radius_iqr": 2.0},
+                    "declared_fallback": {"raw_x_radius_iqr": 3.0}}
+        valid = all(value[k] == v for k, v in expected.items())
+        if not valid:
+            raise MissingPrerequisite("missing or malformed owner_decisions.tract_design_amendment")
+        valid &= all(isinstance(value[k], str) and bool(value[k].strip()) for k in
+                     ("new_estimand", "supersedes", "non_target_frame_rows", "disclosures", "process_change"))
+        valid &= value["new_estimand"] == ("the first application gets a new estimand ID and a locked analysis; "
+                    "the current estimand ID is recorded as infeasible as specified and kept in the registry")
+        valid &= value["supersedes"] == ("frozen section 4.1 target, recorded as infeasible as specified "
+                    "(tract-gate-r2, 2026-10-10)")
+        valid &= value["non_target_frame_rows"] == ("primary-eligible labelled rows are training rows for the outcome "
+                    "regression and SSL; all others are inert; the density-ratio classifier fits on "
+                    "target-distribution rows only (section 4.2)")
+        census = value["census"]
+        valid &= isinstance(census, dict) and census == {
+            "evaluable_tracts": 1752, "counties": 158, "states": 33, "max_county_share": .054,
+            "effective_counties": 59.2, "target_hash": "c8ecb139b57de78d", "flag1_tracts": 79}
+        recipe = value["support_recipe"]
+        valid &= (type(recipe["min_bin_tracts"]) is int and
+                  all(type(recipe[k]) in (int, float) for k in ("bin_width_mmhg", "raw_x_radius_iqr")))
+    if not valid:
+        raise MissingPrerequisite("missing or malformed owner_decisions.tract_design_amendment")
+    return value
+
+
+def census(rows, ids, screens):
+    ids = set(ids)
+    selected = [r for r in rows if r.original_id in ids]
+    counties = Counter(r.county for r in selected)
+    n = len(selected)
+    relief = [screens[c]["p90_p10_m"] for c in counties]
+    return {"tracts": n, "counties": len(counties), "states": len({r.state for r in selected}),
+            "per_county": dict(sorted(counties.items())), "flag_counts": flag_counts(selected),
+            "max_county_share": max(counties.values()) / n if n else None,
+            "effective_counties": n*n / sum(v*v for v in counties.values()) if n else None,
+            "target_hash": sha256(json.dumps(sorted(ids)).encode()).hexdigest()[:16],
+            "county_relief_quantiles_p10_p50_p90_m": np.quantile(relief, [.1, .5, .9]).tolist() if relief else [],
+            "tracts_in_counties_relief_below_m": {str(t): sum(v for c, v in counties.items()
+                if screens[c]["p90_p10_m"] < t) for t in (50, 100, 300)}}
 
 
 def validate_approvals(config, approvals, manifest, covariates, geography, atlas):
@@ -63,6 +124,7 @@ def validate_approvals(config, approvals, manifest, covariates, geography, atlas
         primary_outcome_flags(approvals)
     except ValueError as exc:
         raise MissingPrerequisite(str(exc)) from exc
+    a2 = amendment(approvals)
     fixed = approvals.get("plan_fixed", {})
     owner = approvals.get("owner_decisions", {})
     pairs = {
@@ -84,10 +146,25 @@ def validate_approvals(config, approvals, manifest, covariates, geography, atlas
             or fixed.get("policy_form") != "shift_or_stay"
             or fixed.get("county_membership") != "coarse_comparison_stratum"):
         raise MissingPrerequisite("missing or contradictory policy/geography approval")
+    for key in ("eligibility_closure", "county_minima_count", "support_pool", "relief_screen"):
+        if config.get(key) != a2[key]:
+            raise MissingPrerequisite(f"configuration contradicts tract_design_amendment: {key}")
+    historical = owner.get("design_support_recipe", {})
+    if (any(historical.get(k) != v for k, v in
+            {"bin_width_mmhg": 1.0, "min_bin_tracts": 2, "raw_x_radius_iqr": 1.0}.items())
+            or fixed.get("primary_outcome_flags") != [1]):
+        raise MissingPrerequisite("missing or contradictory historical support/flag approval")
+    recipe = dict(a2["support_recipe"])
+    recipe["raw_x_radius"] = recipe.pop("raw_x_radius_iqr")
+    if config.get("support") != recipe:
+        raise MissingPrerequisite("support recipe contradicts tract_design_amendment")
     endpoint = manifest.spec.endpoint
     concepts = owner.get("endpoint_covariates", {}).get(endpoint, {}).get("concepts", {})
     if not concepts or not covariates.columns or not set(covariates.columns) <= set(concepts):
         raise MissingPrerequisite("explicit endpoint-approved feature concepts required")
+    approved = {r.name for r in manifest.registry.rules if r.role == "predictor" and endpoint in r.endpoints}
+    if set(covariates.columns) != approved:
+        raise MissingPrerequisite("every approved covariate must remain in conditional support")
     try:
         for name in covariates.columns:
             rule = manifest.registry.require(name, endpoint, "nuisance")
@@ -340,6 +417,8 @@ def run_stage(request: StageRequest) -> StageResult:
                                   split_hash=None, config_hash=request.config_hash, model_hash=None,
                                   environment=lineage.environment, seed=1103, parameter_count=None)
         rows = geography.rows
+        flags = primary_outcome_flags(values["approvals"])
+        a2 = amendment(values["approvals"])
         a = {r.tract_id: r for r in atlas.rows}
         reservation = reserve_design(rows, graph)
         design_ids = set(reservation.design_ids)
@@ -351,7 +430,7 @@ def run_stage(request: StageRequest) -> StageResult:
                   "registered_sensitivity": "flag1_only",
                   "mortality_input_flag": {r.original_id: r.outcome_flag for r in rows},
                   "flag_counts": flag_counts(rows),
-                  "primary_eligible_flag_counts": flag_counts(r for r in rows if usable(r, a)),
+                  "primary_eligible_flag_counts": flag_counts(r for r in rows if _usable(r, a, flags)),
                   "sealed_design_flag_counts": flag_counts(
                       r for r in rows if r.original_id in design_ids),
                   "allocation_exclusions": allocation_exclusions(rows, coverage, set(reservation.design_ids)),
@@ -363,10 +442,6 @@ def run_stage(request: StageRequest) -> StageResult:
                                   "sealed_fraction": len(reservation.sealed_subblocks) / reservation.total_subblocks,
                                   "excluded_design_labels": len(reservation.design_ids)}}
         design_ids = set(reservation.design_ids)
-        if not atlas.coverage_complete and not any(
-                r.original_id in design_ids and r.tract_id in a
-                and a[r.tract_id].allocation_qualified and a[r.tract_id].population > 0 for r in rows):
-            raise MissingPrerequisite("incomplete atlas coverage leaves no qualified sealed design records")
         frozen = freeze_support(rows, reservation.design_ids, a, covariates,
                                 recipe=SupportRecipe(**config["support"]))
         design = FrozenDesign(reservation=reservation, support=frozen, approved_features=manifest.registry)
@@ -378,25 +453,38 @@ def run_stage(request: StageRequest) -> StageResult:
                 continue
             if row.tract_id in accounted_missing:
                 reasons[row.original_id] = "atlas_missing_dem_coverage"
-            elif not usable(row, a):
+            elif not _usable(row, a, flags):
                 reasons[row.original_id] = "flag_label_or_allocation_unusable"
             elif screens[row.county]["reasons"]:
                 reasons[row.original_id] = "initial_county_screen"
             elif row.original_id not in supported:
                 reasons[row.original_id] = "outside_frozen_conditional_support"
-        excluded = close_groups(reasons, reservation.groups) - design_ids
+        excluded = set(reasons) - design_ids
         candidates = set(manifest.original_ids) - design_ids - excluded
         scenarios = tuple(build_scenario(rows, graph, manifest, reservation, candidates, reasons,
                                          radius_km=radius, policy_id=frozen.policy.policy_id,
                                          atlas=a, covariates=covariates, support=frozen)
                           for radius in config["buffers_km"])
-        split_payload = {"design_hash": design.content_hash, "scenarios": [s.to_dict() for s in scenarios],
+        registry = [{"estimand_id": FROZEN_TARGET_ID, "status": "infeasible as specified",
+                     "reference": "frozen section 4.1; tract-gate-r2/2026-10-10"},
+                    {"estimand_id": A2_ESTIMAND_ID, "status": "locked analysis",
+                     "reference": "configs/approvals.yaml#owner_decisions.tract_design_amendment"}]
+        eligible = {r.original_id for r in rows if _usable(r, a, flags)}
+        unsealed = eligible - design_ids
+        screened = {r.original_id for r in rows if r.original_id in unsealed and not screens[r.county]["reasons"]}
+        layers = [("eligibility", eligible), ("reservation", unsealed), ("screens", screened),
+                  ("support", candidates)]
+        report.update(estimand_registry=registry, estimand_id=A2_ESTIMAND_ID,
+                      declared_fallback={**a2["declared_fallback"], "run": False},
+                      support_pool=frozen.support_pool, raw_x_radius_iqr=frozen.recipe.raw_x_radius,
+                      layers={key: census(rows, ids, screens) for key, ids in layers})
+        split_payload = {"estimand_id": A2_ESTIMAND_ID, "estimand_registry": registry, "design_hash": design.content_hash, "scenarios": [s.to_dict() for s in scenarios],
                          "buffer_rule": "common target excludes both sides of cross-fold boundaries, whole lineages",
                          "deletion_rule": "full analysis refit after deleting county/state"}
         diagnostics = []
-        primary_ids = set(scenarios[0].outer.original_ids) if scenarios[0].outer else set()
+        primary_ids = set(scenarios[0].outer.target_ids) if scenarios[0].outer else set()
         for scenario in scenarios:
-            ids = set(scenario.outer.original_ids) if scenario.outer else set()
+            ids = set(scenario.outer.target_ids) if scenario.outer else set()
             chosen = [r for r in rows if r.original_id in ids]
             action = policy_for(chosen, a, frozen) if chosen else None
             counts = {}
@@ -404,6 +492,11 @@ def run_stage(request: StageRequest) -> StageResult:
                 counts[reason] = counts.get(reason, 0) + 1
             diagnostics.append({"buffer_km": scenario.buffer_km, "status": scenario.status,
                                 "target_id": scenario.target_id, "evaluation_count": len(ids),
+                                "target_hash": scenario.target_hash, "census": census(rows, ids, screens),
+                                "layers": {k: census(rows, v, screens) for k, v in scenario.layer_ids},
+                                "uninformative": not bool(ids),
+                                "outer_buffer_excluded_count": len(scenario.outer_buffer_excluded_ids),
+                                "outer_buffer_frame_census": census(rows, scenario.outer_buffer_excluded_ids, screens),
                                 "evaluation_flag_counts": flag_counts(chosen),
                                 "sealed_design_count": len(design_ids), "excluded_count": len(scenario.exclusions),
                                 "exclusion_counts": counts, "removed_from_primary": sorted(primary_ids - ids),

@@ -7,6 +7,11 @@ minimum_final_repetitions: 1000
 # outer folds, three inner folds, four tuning choices and three neural seeds.
 # Selection and latent measured-X adapters remain prerequisites for their own
 # cells; their truth targets must never be substituted for these cells.
+# Orchestrator ruling 2026-10-11: these are facts of dispatched frozen
+# support for real-frame profiles; fully synthetic profiles remain explicit.
+real_frame_declarations:
+  support_gaps: from_frame
+  heterogeneous_eligibility: from_frame
 scenarios:
   - name: null_effect
     effect: "null"

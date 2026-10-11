@@ -1,7 +1,7 @@
 """Proposed internal APIs. These contracts do not assert scientific eligibility."""
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from hashlib import sha256
 from pathlib import Path
 import re
@@ -164,24 +164,76 @@ class SplitManifest(Immutable):
     seed_ids: tuple[int, ...]
     entity_graph_hash: str
     lineage: ArtifactLineage
+    # Empty roles preserve existing all-target manifests. Explicit roles retain
+    # inert frame rows in geographic folds without granting fitting permission.
+    frame_ids: tuple[str, ...] = field(default=(), metadata={"omit_empty": True})
+    frame_fold_ids: tuple[int, ...] = field(default=(), metadata={"omit_empty": True})
+    membership_roles: tuple[Literal["target", "training", "inert"], ...] = field(default=(), metadata={"omit_empty": True})
+    training_exclusions: tuple[tuple[int, tuple[str, ...]], ...] = field(default=(), metadata={"omit_empty": True})
 
     def __post_init__(self):
         Immutable.__post_init__(self)
-        _ids(self.original_ids)
+        if not self.frame_ids:
+            _ids(self.original_ids)
+        else:
+            unique(self.original_ids, "target IDs")
         require(len(self.fold_ids) == len(self.original_ids), "fold alignment mismatch")
         require(all(x >= 0 for x in self.fold_ids), "negative fold")
-        require(len(set(self.fold_ids)) >= 2, "cross-fitting requires multiple folds")
+        require(len(set(self.geographic_fold_ids)) >= 2, "cross-fitting requires multiple folds")
         require(bool(self.seed_ids), "seeds required")
         unique(self.seed_ids, "seeds")
         require(all(x >= 0 for x in self.seed_ids), "negative seed")
-        all_ids = self.original_ids + self.design_ids + self.excluded_ids
+        all_ids = self.frame_original_ids + self.design_ids + self.excluded_ids
         _ids(all_ids, "split IDs")
         _aligned(self.lineage, all_ids)
         check_hash(self.entity_graph_hash)
+        require(not self.membership_roles or len(self.membership_roles) == len(self.frame_original_ids),
+                "membership role alignment mismatch")
+        require(not self.membership_roles or bool(self.frame_ids), "membership roles require an explicit frame")
+        require(len(self.frame_ids) == len(self.frame_fold_ids), "frame fold alignment mismatch")
+        require(all(f >= 0 for f in self.frame_fold_ids), "negative frame fold")
+        if self.frame_ids:
+            require(bool(self.membership_roles), "explicit frame requires membership roles")
+            targets = tuple(i for i, role in zip(self.frame_ids, self.roles) if role == "target")
+            require(set(targets) == set(self.original_ids), "target role membership mismatch")
+            folds = dict(zip(self.frame_ids, self.frame_fold_ids))
+            require(all(folds[i] == f for i, f in zip(self.original_ids, self.fold_ids)),
+                    "target/frame fold mismatch")
+        unique(tuple(f for f, _ in self.training_exclusions), "training exclusion folds")
+        for fold, ids in self.training_exclusions:
+            unique(ids, "training exclusions")
+            require(fold in self.geographic_fold_ids and set(ids) <= set(self.frame_training_ids(fold)),
+                    "training exclusions outside outer training frame")
+
+    @property
+    def frame_original_ids(self):
+        return self.frame_ids or self.original_ids
+
+    @property
+    def geographic_fold_ids(self):
+        return self.frame_fold_ids or self.fold_ids
+
+    @property
+    def roles(self):
+        return self.membership_roles or ("target",) * len(self.frame_original_ids)
+
+    @property
+    def target_ids(self):
+        return self.original_ids
+
+    def evaluation_ids(self, fold):
+        require(fold in self.geographic_fold_ids, "unknown fold")
+        return tuple(i for i, f in zip(self.original_ids, self.fold_ids) if f == fold)
+
+    def frame_training_ids(self, fold):
+        require(fold in self.geographic_fold_ids, "unknown fold")
+        return tuple(i for i, f in zip(self.frame_original_ids, self.geographic_fold_ids) if f != fold)
 
     def training_ids(self, fold: int) -> tuple[str, ...]:
-        require(fold in self.fold_ids, "unknown fold")
-        return tuple(x for x, k in zip(self.original_ids, self.fold_ids) if k != fold)
+        require(fold in self.geographic_fold_ids, "unknown fold")
+        excluded = set(dict(self.training_exclusions).get(fold, ()))
+        return tuple(x for x, k, role in zip(self.frame_original_ids, self.geographic_fold_ids, self.roles)
+                     if k != fold and role != "inert" and x not in excluded)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

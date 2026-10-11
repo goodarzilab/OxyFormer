@@ -1,9 +1,9 @@
 """Immutable within-county geographic splits and explicit buffer targets.
 
 For each radius, both sides of every cross-fold boundary within that radius
-leave the frozen target (whole dependence components). This conservative,
-common-target convention lets the authoritative SplitManifest.training_ids()
-remain correct; no caller needs a hidden, fold-dependent exclusion overlay.
+leave the frame (whole dependence components). Membership roles keep eligible
+non-target rows available for fitting and leave other frame rows inert. Explicit
+training_exclusions record the inner buffers for each outer refit.
 Inner splits use the same convention inside their permitted outer partition.
 Whole-geography deletion is an analysis refit, never unseen-county prediction.
 """
@@ -12,6 +12,8 @@ from hashlib import sha256
 from math import ceil
 from typing import Literal
 
+import json
+
 import numpy as np
 from scipy.spatial import cKDTree
 
@@ -19,7 +21,7 @@ from oxyformer.contracts import DataManifest, SplitManifest
 from oxyformer.data.adapters.usaleep import primary_outcome_flags
 from oxyformer.data.entity_graph import EntityGraph
 from oxyformer.data.loaders import validate_split
-from oxyformer.design.eligibility import county_screen
+from oxyformer.design.eligibility import county_screen, usable
 from oxyformer.design.support import recheck_support
 from oxyformer.provenance import Immutable, canonical_json, require
 
@@ -165,6 +167,11 @@ class SplitScenario(Immutable):
     inner: tuple[InnerSplit, ...]
     exclusions: tuple[tuple[str, str], ...]
     count_audit: tuple[CountAudit, ...]
+    target_hash: str = ""
+    layer_ids: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    estimand_id: str = "usaleep-a2-2026-10-10"
+    outer_buffer_excluded_ids: tuple[str, ...] = ()
+
 
 
 def _manifest(manifest, ids, graph):
@@ -173,22 +180,28 @@ def _manifest(manifest, ids, graph):
                                    parent_hashes=(manifest.content_hash,)))
 
 
-def _split(manifest, ids, folds, design_ids, excluded_ids, *, level):
-    split = SplitManifest(spec=manifest.spec, level=level, original_ids=tuple(ids),
-                          fold_ids=tuple(folds[oid] for oid in ids), design_ids=tuple(design_ids),
-                          excluded_ids=tuple(excluded_ids), seed_ids=SEEDS,
-                          entity_graph_hash=manifest.entity_graph_hash,
-                          lineage=replace(manifest.lineage, parent_hashes=(manifest.content_hash,)))
-    return split
+def _split(manifest, ids, folds, design_ids, excluded_ids, *, level, targets, labelled,
+           training_exclusions=()):
+    target_ids = tuple(i for i in ids if i in targets)
+    return SplitManifest(spec=manifest.spec, level=level, original_ids=target_ids,
+                         fold_ids=tuple(folds[oid] for oid in target_ids),
+                         frame_ids=tuple(ids), frame_fold_ids=tuple(folds[oid] for oid in ids),
+                         design_ids=tuple(design_ids),
+                         excluded_ids=tuple(excluded_ids), seed_ids=SEEDS,
+                         membership_roles=tuple("target" if i in targets else
+                                                "training" if i in labelled else "inert" for i in ids),
+                         training_exclusions=tuple(training_exclusions),
+                         entity_graph_hash=manifest.entity_graph_hash,
+                         lineage=replace(manifest.lineage, parent_hashes=(manifest.content_hash,)))
 
 
 def build_scenario(rows, graph, manifest, reservation, candidate_ids, initial_reasons,
                    *, radius_km, policy_id, atlas=None, covariates=None, support=None):
-    """Freeze eligibility to a fixed point before any fitting is possible.
+    """A2: frame-atomic folds and buffers, tract-level target exclusions.
 
-    Passing a frozen support record enables the required conditional rechecks.
-    The low-level split-only API can be exercised without an exposure model;
-    run_stage always supplies support, atlas and covariates.
+    Inner geography is fixed on the whole outer-training frame before label
+    selection. The same labelled rows, minus inner buffers, supply each outer
+    nuisance fit, its eight-tract audit and its conditional support recheck.
     """
     require(radius_km in (0, 10, 25), "unapproved buffer radius")
     by_id = {r.original_id: r for r in rows}
@@ -198,39 +211,49 @@ def build_scenario(rows, graph, manifest, reservation, candidate_ids, initial_re
     require(set(candidate_ids) <= all_ids, "unknown target ID")
     groups = reservation.groups
     reasons = dict(initial_reasons)
-    excluded = close_groups(all_ids - set(candidate_ids) - design_ids, groups) - design_ids
-    for oid in excluded:
-        reasons.setdefault(oid, "ineligible_or_linked_to_ineligible")
-    active = all_ids - design_ids - excluded
-    folds = geographic_folds([by_id[oid] for oid in sorted(active)], groups, 5)
-    buffered = buffer_exclusions([by_id[oid] for oid in sorted(active)], folds, groups, radius_km)
+    frame = [r for r in rows if r.original_id not in design_ids]
+    folds = geographic_folds(frame, groups, 5)
+    buffered = buffer_exclusions(frame, folds, groups, radius_km)
+    frame = [r for r in frame if r.original_id not in buffered]
+    frame_ids = {r.original_id for r in frame}
+    flags = primary_outcome_flags()
+    labelled = {r.original_id for r in frame if (usable(r, atlas) if atlas is not None else
+                r.outcome_flag in flags and r.label_available)}
+    active = set(candidate_ids) & labelled - buffered
     for oid in buffered:
-        reasons[oid] = "outer_buffer"
-    active -= buffered
-    audits, inner_plans = [], []
+        reasons.setdefault(oid, "outer_buffer")
+    for oid in all_ids - design_ids - set(candidate_ids):
+        reasons.setdefault(oid, "initial_target_exclusion")
+    for oid in set(candidate_ids) - labelled - buffered:
+        reasons.setdefault(oid, "flag_label_or_allocation_unusable")
+    layers = [("buffers", tuple(sorted(active)))]
+    inner_plans = []
+    for outer in range(5):
+        training_frame = [r for r in frame if folds[r.original_id] != outer]
+        inner_folds = geographic_folds(training_frame, groups, 3)
+        inner_buffer = buffer_exclusions(training_frame, inner_folds, groups, radius_km)
+        inner_plans.append((outer, {r.original_id for r in training_frame}, inner_folds, inner_buffer))
+    audits = []
+    minima_removed, recheck_removed = set(), set()
     while active:
-        current = [by_id[oid] for oid in sorted(active)]
-        counties = sorted({r.county for r in current})
-        failures = {}
-        unsupported = {}
-        audits, inner_plans = [], []
+        counties = sorted({by_id[i].county for i in active})
+        fitting = [r for r in frame if r.original_id in labelled and r.county in counties]
+        failures, unsupported, audits = {}, {}, []
         if atlas is not None:
-            for county, screen in county_screen(current, atlas).items():
-                if screen["reasons"]:
+            screens = county_screen(fitting, atlas)
+            for county in counties:
+                if county not in screens or screens[county]["reasons"]:
                     failures[county] = "post_exclusion_geographic_screen"
         for county in counties:
-            if {folds[r.original_id] for r in current if r.county == county} != set(range(5)):
+            if {folds[r.original_id] for r in fitting if r.county == county} != set(range(5)):
                 failures[county] = "missing_within_county_outer_fold"
-        for outer in range(5):
-            training = [r for r in current if folds[r.original_id] != outer]
-            evaluation = [r for r in current if folds[r.original_id] == outer]
-            train_ids = {r.original_id for r in training}
-            inner_folds = geographic_folds(training, groups, 3)
-            inner_buffer = buffer_exclusions(training, inner_folds, groups, radius_km)
-            inner_rows = [r for r in training if r.original_id not in inner_buffer]
+        for outer, _, inner_folds, inner_buffer in inner_plans:
+            training = [r for r in fitting if folds[r.original_id] != outer
+                        and r.original_id not in inner_buffer]
+            evaluation = [by_id[i] for i in sorted(active) if folds[i] == outer]
             for county in counties:
                 n_outer = tract_count(training, county)
-                n_inner = tuple(tract_count([r for r in inner_rows
+                n_inner = tuple(tract_count([r for r in training
                                             if inner_folds[r.original_id] != fold], county)
                                 for fold in range(3))
                 audits.append(CountAudit(county=county, outer_fold=outer,
@@ -239,47 +262,48 @@ def build_scenario(rows, graph, manifest, reservation, candidate_ids, initial_re
                     failures[county] = "fewer_than_eight_outer_training_tracts"
                 elif min(n_inner) < 4:
                     failures[county] = "fewer_than_four_inner_fitting_tracts"
-                elif {inner_folds[r.original_id] for r in inner_rows if r.county == county} != {0, 1, 2}:
+                elif {inner_folds[r.original_id] for r in training if r.county == county} != {0, 1, 2}:
                     failures[county] = "missing_within_county_inner_fold"
             if support is not None:
-                failed = recheck_support(evaluation, training, atlas, covariates, support)
-                for oid in failed:
+                for oid in recheck_support(evaluation, training, atlas, covariates, support):
                     unsupported.setdefault(oid, "outer_conditional_support")
                 for fold in range(3):
-                    held = [r for r in inner_rows if inner_folds[r.original_id] == fold]
-                    fit = [r for r in inner_rows if inner_folds[r.original_id] != fold]
+                    held = [r for r in training if r.original_id in active and inner_folds[r.original_id] == fold]
+                    fit = [r for r in training if inner_folds[r.original_id] != fold]
                     for oid in recheck_support(held, fit, atlas, covariates, support):
                         unsupported.setdefault(oid, "inner_conditional_support")
-            inner_plans.append((outer, train_ids, inner_folds, inner_buffer))
-        if not failures and not unsupported:
+        removed_minima = {i for i in active if by_id[i].county in failures}
+        removed_support = active.intersection(unsupported)
+        if not removed_minima and not removed_support:
             break
-        # A row-level support failure is not a county-level failure. Exclude
-        # its complete geographic/dependence component, then recompute all
-        # county minima and conditional support on the remaining fixed target.
-        removed = close_groups({r.original_id for r in current if r.county in failures}
-                               | set(unsupported), groups)
-        for oid in removed:
-            reason = failures.get(by_id[oid].county, unsupported.get(oid, "linked_component_exclusion"))
-            reasons.setdefault(oid, reason)
-        active -= removed
+        minima_removed |= removed_minima
+        recheck_removed |= removed_support
+        for oid in removed_minima | removed_support:
+            reasons.setdefault(oid, failures.get(by_id[oid].county, unsupported.get(oid)))
+        active -= removed_minima | removed_support
+    layers.extend((("fold_minima", tuple(sorted(set(layers[0][1]) - minima_removed))),
+                   ("recheck", tuple(sorted(active)))))
     excluded = all_ids - active - design_ids
     for oid in excluded:
-        reasons.setdefault(oid, "ineligible_or_linked_to_ineligible")
-    target_id = sha256(canonical_json({"ids": sorted(active), "design_ids": sorted(design_ids),
-                                      "buffer_km": float(radius_km), "policy": policy_id,
-                                      "folds": sorted((oid, folds[oid]) for oid in active)}).encode()).hexdigest()
+        reasons.setdefault(oid, "initial_target_exclusion")
+    estimand_id = "usaleep-a2-2026-10-10"
+    target_id = sha256(canonical_json({"estimand": estimand_id, "ids": sorted(active),
+                                      "design_ids": sorted(design_ids), "buffer_km": float(radius_km),
+                                      "policy": policy_id, "folds": sorted(folds.items())}).encode()).hexdigest()
     final_manifest = replace(manifest, spec=replace(manifest.spec, target_id=target_id, policy_id=policy_id),
                              lineage=replace(manifest.lineage, parent_hashes=(manifest.content_hash,)))
     outer_split, inners = None, []
     if active:
-        outer_split = _split(final_manifest, sorted(active), folds, sorted(design_ids), sorted(excluded), level="outer")
+        outer_split = _split(final_manifest, sorted(frame_ids), folds, sorted(design_ids), sorted(buffered),
+                             level="outer", targets=active, labelled=labelled,
+                             training_exclusions=tuple((o, tuple(sorted(b))) for o, _, _, b in inner_plans))
         validate_split(outer_split, final_manifest, graph)
         for outer, train_ids, inner_folds, inner_buffer in inner_plans:
             inner_graph = EntityGraph(original_ids=tuple(sorted(train_ids)),
                                       links=tuple(link for link in graph.links if link.observation_id in train_ids))
             inner_manifest = _manifest(final_manifest, sorted(train_ids), inner_graph)
             split = _split(inner_manifest, sorted(train_ids - inner_buffer), inner_folds, (),
-                           sorted(inner_buffer), level="inner")
+                           sorted(inner_buffer), level="inner", targets=active, labelled=labelled)
             validate_split(split, inner_manifest, inner_graph)
             inners.append(InnerSplit(outer_fold=outer, data_manifest=inner_manifest,
                                      entity_graph=inner_graph, split=split,
@@ -287,7 +311,9 @@ def build_scenario(rows, graph, manifest, reservation, candidate_ids, initial_re
     return SplitScenario(buffer_km=float(radius_km), status="pass" if active else "fail", target_id=target_id,
                          data_manifest=final_manifest, outer=outer_split, inner=tuple(inners),
                          exclusions=tuple(sorted((oid, reasons[oid]) for oid in excluded)),
-                         count_audit=tuple(audits))
+                         count_audit=tuple(audits), layer_ids=tuple(layers), estimand_id=estimand_id,
+                         outer_buffer_excluded_ids=tuple(sorted(buffered)),
+                         target_hash=sha256(json.dumps(sorted(active)).encode()).hexdigest()[:16])
 
 
 def deletion_refit_ids(rows, *, county=None, state=None):

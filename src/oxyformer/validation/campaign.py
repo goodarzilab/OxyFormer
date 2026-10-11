@@ -20,8 +20,8 @@ from oxyformer.execution import identity
 from oxyformer.execution.campaign import expand_campaign, validate_plan, concrete_id
 from oxyformer.provenance import ContractError, file_hash, require
 from oxyformer.validation.coverage import (MIN_REPETITIONS, RETRY_RULES, dependency, digest,
-    finite, integer, publish, read_json, repetition_plan, summarize, validate_draws, prepare_batch, atomic_json)
-from oxyformer.validation.scm import SCMConfig, CovariateFrame
+    finite, integer, publish, read_json, repetition_plan, summarize, validate_draws, prepare_batch, atomic_json, fixed_exposures)
+from oxyformer.validation.scm import SCMConfig, CovariateFrame, sampled_support_facts
 
 REGISTRY = Path(__file__).parents[3] / "configs/validation/final_scenarios.yaml"
 REPOSITORY = Path(__file__).parents[3]
@@ -82,6 +82,28 @@ def _registry():
     value = yaml.safe_load(REGISTRY.read_text())
     require(value["minimum_final_repetitions"] == MIN_REPETITIONS, "registry replication drift")
     return value
+
+
+def registered_scenarios(endpoint, frame):
+    """Resolve only real-frame consistency declarations from dispatched support."""
+    registry = _registry()
+    derived = {}
+    if endpoint.data.manifest.spec.endpoint == "synthetic-suite-a-real-frame":
+        declarations = registry.get("real_frame_declarations")
+        require(declarations == {"support_gaps": "from_frame", "heterogeneous_eligibility": "from_frame"},
+                "real-frame support declarations must be derived from frame")
+        facts = sampled_support_facts(endpoint.policy, frame,
+                                      fixed_exposures=fixed_exposures(endpoint, frame))
+        derived = {name: facts[name] for name in declarations}
+    scenarios = []
+    for row in registry["scenarios"]:
+        values = dict(row)
+        if derived:
+            mechanisms = [name for name in values.get("active_mechanisms", ("linear",)) if name not in derived]
+            mechanisms.extend(name for name, enabled in derived.items() if enabled)
+            values.update(derived, active_mechanisms=tuple(mechanisms))
+        scenarios.append(SCMConfig(**values).to_dict()["payload"])
+    return scenarios
 
 
 def _profile(request, config, reference, scenario, recipe, stamps):
@@ -191,9 +213,14 @@ def build_lock(request, config, task):
     require(len(campaign_id) <= 25, "campaign ID must leave room for instance suffix")
     recipe = deepcopy(parameters["recipe"])
     validate_recipe(recipe)
-    registry = _registry()
+    inputs = {}
+    for name, expected_hash, record_type in (("endpoint_input", recipe["endpoint_hash"], PreparedEndpoint),
+                                             ("frame_input", recipe["frame_hash"], CovariateFrame)):
+        record = record_type.from_json(dependency(request, config, parameters[name]).read_text())
+        require(record.content_hash == expected_hash, "locked endpoint/frame hash mismatch")
+        inputs[name] = record
     family = parameters["scenario_family"]
-    registered = {SCMConfig(**row).name: SCMConfig(**row).to_dict()["payload"] for row in registry["scenarios"]}
+    registered = {row["name"]: row for row in registered_scenarios(inputs["endpoint_input"], inputs["frame_input"])}
     require(type(family) is list and bool(family), "scenario family required")
     scenarios = [SCMConfig(**row).to_dict()["payload"] for row in family]
     require(len({s["name"] for s in scenarios}) == len(scenarios), "duplicate scenarios")
@@ -228,12 +255,6 @@ def build_lock(request, config, task):
     for scenario in scenarios:
         profiles[scenario["name"]] = _profile(request, config, parameters["profiles"][scenario["name"]], scenario, recipe, stamps)
         prior_seeds.update(d["seed"] for d in profiles[scenario["name"]]["draws"])
-    # Bind actual input artifact identities before expanding anything.
-    for name, expected_hash, record_type in (("endpoint_input", recipe["endpoint_hash"], PreparedEndpoint),
-                                             ("frame_input", recipe["frame_hash"], CovariateFrame)):
-        path = dependency(request, config, parameters[name])
-        require(record_type.from_json(path.read_text()).content_hash == expected_hash,
-                "locked endpoint/frame hash mismatch")
     batches = []
     for mode, repetitions in (("screening", screen_count), ("final", count)):
         mode_leaves = 0
