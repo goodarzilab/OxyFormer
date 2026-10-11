@@ -872,6 +872,7 @@ def test_invalid_cost_study_parameters(field, value):
 
 def test_cost_study_defaults_preserve_identity_and_independent_options(tmp_path):
     _, split, manifest, config = make_case(tmp_path)
+    config = replace(config, device="cpu")
     explicit = replace(config, study=fitting.RecipeStudy())
     args = (split, manifest, 1103, split.training_ids(0))
     assert fitting._science_identity(config, *args).to_json() == fitting._science_identity(explicit, *args).to_json()

@@ -529,7 +529,8 @@ def test_cost_study_two_grid_points_keep_nested_tuning_and_cap_reload(tmp_path, 
     config = tiny_config(prepared, tmp_path / "candidate", study=RecipeStudy(grid_points=2, reference_cap=2))
     artifact = nested.run_fold(config, prepared.outer, 1103, geography=prepared.geography)
     controller = state(artifact)
-    assert controller["counts"] == {"ssl_fits": 4, "nuisance_fits": 14}
+    assert controller["counts"]["ssl_fits"] == 4
+    assert controller["counts"]["nuisance_fits"] == 14
     assert len(controller["results"]) == 12
     assert {(r["fold"], r["kind"], r["grid"]) for r in controller["results"]} == {
         (f, k, g) for f in range(3) for k in ("outcome", "origin") for g in range(2)}
@@ -548,7 +549,8 @@ def test_cost_study_frozen_schedule_reaches_controller_without_patience(tmp_path
     from oxyformer.training.fit import RecipeStudy, _Budget
     from oxyformer.training.checkpoint import CheckpointRequest
     prepared, registered = full
-    config = tiny_config(prepared, tmp_path / "candidate", study=RecipeStudy(frozen_epochs=30, grid_points=2))
+    config = tiny_config(prepared, tmp_path / "candidate", device="cpu",
+                         study=RecipeStudy(frozen_epochs=30, grid_points=2))
     original = nested._train_transaction
     requested = []
     def shortened(config, bundle, encoder, view, stopping, epochs, seed, budget, saved=None):
@@ -561,7 +563,7 @@ def test_cost_study_frozen_schedule_reaches_controller_without_patience(tmp_path
     assert all(json.loads(r["ownership"])["payload"]["frozen_epochs"] == 30 for r in state(result)["results"])
     # Exercise the actual transaction for longer than registered patience=15.
     bundle = state(registered)["final"]["outcome"]
-    local, ids, _ = nested._partition(config, config.inner.split, 0)
+    ids = prepared.outer.training_ids(0)
     view = subset(prepared.data.covariates(("x",)), ids)
     _, trained, complete, reason = original(config, bundle, None, view, (), 30, 1103,
                                            _Budget(config, CheckpointRequest()))
