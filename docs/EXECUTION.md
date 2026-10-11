@@ -280,16 +280,21 @@ set is retained whole); this is an execution workspace limit, not a reference
 cap or a change to the original-record minibatch size.
 
 Training with nonzero dropout instead encodes separate `(query, reference)`
-occurrences in one call. Dropout masks are drawn in the former per-query order:
-all three reference-encoder blocks, then PMA attention and its residual/feed-
-forward dropouts, before advancing to the next query. Attention-output masks
-retain the original transposed strides. The masks are then concatenated and
-replayed through the batched dropout operations without additional random draws.
-Padded reference positions consume no random draws and have no value or gradient
-channel. The registered CPU random stream on CUDA, FP32 arithmetic, deterministic
-kernels, seeds, grid, epochs, stopping, loss normalization and optimizer remain
-in force. The private scalar `_pool` implementation is retained as a comparison
-oracle; ordinary prediction and training use the batched path.
+occurrences in one call. Native encoder and PMA dropout draw independent masks
+for these occurrences with the same Bernoulli keep probabilities. Batching
+changes the random draw order and the stochastic realization. This path is
+**training-path equivalence in distribution, pending owner confirmation** under
+the orchestrator's 2026-10-11 fallback ruling. The exact-mask replay prototype
+preserved the CPU RNG stream, but its CUDA context comparison exceeded the
+forward tolerance at one near-zero element (absolute difference 1.27e-6).
+The tolerance was not loosened. Seed-paired short fits report the resulting
+numerical and decision differences rather than asserting equality.
+
+The registered CPU random stream on CUDA, FP32 arithmetic, deterministic kernels,
+seeds, grid, epochs, stopping, loss normalization and optimizer remain in force.
+Padding is masked and empty contexts are zero. The private scalar `_pool`
+implementation remains a comparison oracle; ordinary prediction and training
+use the batched path.
 
 Both identity-outcome offset passes still predict the whole fitting partition
 in eval mode, once before and once after each epoch. They compute both doses,
@@ -304,9 +309,10 @@ forward relative tolerance `1e-5` with absolute floor `1e-6`. The orchestrator's
 clarification permits gradient relative tolerance `1e-4` with absolute floor
 `1e-5` on matched minibatches. Test assertions use the conventional
 `abs(actual-reference) <= atol + rtol*abs(reference)` bound and report maximum
-absolute and raw relative differences separately. Tuning and epoch decisions,
-counts, preprocessing, calibration parameters and audits are compared separately;
-a tolerable forward difference does not certify their equality. Repeatability
+absolute and raw relative differences separately. The orchestrator clarified that continuous fitted quantities, including affine
+calibration coefficients, county offsets, logits, means and losses, use the
+forward tolerance. Discrete tuning and epoch decisions, counts, preprocessing
+categories, stopping IDs and audit outcomes must remain identical. Repeatability
 requires matching tensor bytes on repeated runs under the same deterministic
 settings. A comparison may normalize explicit enclosing-checkpoint provenance
 links only after validating them; it must retain the differing source hashes in

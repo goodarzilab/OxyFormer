@@ -315,7 +315,7 @@ def test_study_cap_none_preserves_tensor_bytes_and_caps_actual_pool(setup, monke
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
-@pytest.mark.parametrize("training,dropout", [(False, .1), (True, 0.), (True, .1)])
+@pytest.mark.parametrize("training,dropout", [(False, .1), (True, 0.)])
 def test_batched_context_matches_scalar_outputs_gradients_and_rng(setup, device, training, dropout):
     from copy import deepcopy
     from oxyformer.training.fit import _numerics
@@ -371,12 +371,49 @@ def test_batched_context_self_exclusion_and_padding(setup, monkeypatch):
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
 
 
-def test_occurrence_masks_are_independent_and_have_correct_marginal(setup):
-    context = make_context(setup, dropout=.1).train()
-    torch.manual_seed(3301)
-    encoder, pooling = context._dropout_masks((1000, 1000), 1000)
-    mask = encoder[0][1].ne(0)
-    assert not torch.equal(mask[:1000], mask[1000:])
-    assert abs(float(mask.float().mean()) - .9) < .01
-    assert not torch.equal(pooling[0][1][0], pooling[0][1][1])
-    assert abs(float(pooling[0][1].ne(0).float().mean()) - .9) < .02
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_occurrence_masks_are_independent_and_have_correct_marginal(setup, device):
+    from torch.utils._python_dispatch import TorchDispatchMode
+    from oxyformer.training.fit import _numerics
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+
+    class RecordMasks(TorchDispatchMode):
+        def __init__(self):
+            super().__init__()
+            self.masks = []
+        def __torch_dispatch__(self, operation, types, args=(), kwargs=None):
+            result = operation(*args, **(kwargs or {}))
+            if operation == torch.ops.aten.bernoulli_.float:
+                self.masks.append(result.detach().cpu().clone())
+            elif operation == torch.ops.aten.native_dropout.default:
+                self.masks.append(result[1].detach().cpu().clone())
+            return result
+
+    with _numerics(device):
+        torch.manual_seed(1103)
+        context = make_context(setup, dropout=.1).to(device).train()
+        # Distinct query IDs have the same three valid training references.
+        queries = tuple(f"transfer-{i}" for i in range(256))
+        routes = ("c",) * len(queries)
+        torch.manual_seed(3301)
+        trace = RecordMasks()
+        calls = []
+        hook = context.encoder.register_forward_hook(lambda module, args, result: calls.append(len(args[0].numeric_values)))
+        with trace:
+            first = context(queries, routes)
+        hook.remove()
+        assert calls == [768], "references must remain separate stochastic occurrences"
+        mask = trace.masks[0].bool().reshape(256, -1)
+        # Every occurrence has its own large mask; no query-wide mask is shared.
+        assert len({row.numpy().tobytes() for row in mask}) == 256
+        assert abs(float(mask.float().mean()) - .9) < .01
+        weights = torch.linspace(-1, 1, first.numel(), device=device).reshape_as(first)
+        (first * weights).mean().backward()
+        gradients = [p.grad.detach().cpu().numpy().tobytes() for p in context.parameters() if p.grad is not None]
+        context.zero_grad(set_to_none=True)
+        torch.manual_seed(3301)
+        second = context(queries, routes)
+        (second * weights).mean().backward()
+        assert first.detach().cpu().numpy().tobytes() == second.detach().cpu().numpy().tobytes()
+        assert gradients == [p.grad.detach().cpu().numpy().tobytes() for p in context.parameters() if p.grad is not None]
