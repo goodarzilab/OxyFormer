@@ -464,6 +464,8 @@ def _advance(config, outer, manifest, identity, controller, root, budget, varian
     tasks = []
     partitions = {}
     audits = {}
+    outcome_audits = {}
+    targets = set(outer.target_ids)
     for fold in range(3):
         stopping = tuple(dict(config.stopping_ids).get(fold, ()))
         local, fitting, held = _partition(config, config.inner.split, fold, stopping=stopping)
@@ -475,7 +477,13 @@ def _advance(config, outer, manifest, identity, controller, root, budget, varian
             checkpoint_ids=stopping, frozen_epochs=None if stopping else config.settings.frozen_epochs)
         audit.validate(outer_ids)
         partitions[fold] = (local, fitting, held, stopping)
-        audits[fold] = audit
+        outcome_audits[fold] = audit
+        origin_stopping = tuple(i for i in stopping if i in targets)
+        origin_audit = replace(audit, fitting_ids=tuple(i for i in fitting if i in targets),
+            checkpoint_ids=origin_stopping,
+            frozen_epochs=None if origin_stopping else config.settings.frozen_epochs)
+        origin_audit.validate(outer_ids)
+        audits[fold] = origin_audit
         tasks.append(("ssl", fold, None))
         tasks.extend((kind, fold, grid) for kind in ("outcome", "origin") for grid in range(4))
     outer_local, fitting, held = _partition(config, outer, config.fold)
@@ -527,18 +535,19 @@ def _advance(config, outer, manifest, identity, controller, root, budget, varian
             controller["initializations"][fold] = artifact.to_json()
             controller["ssl_pending"] = None
         else:
+            # The classifier has its own stopping regime after target filtering.
+            model_ids = tuple(i for i in fitting if kind != "origin" or i in targets)
+            model_stopping = tuple(i for i in stopping if kind != "origin" or i in targets)
             if fold == 3:
                 grid = controller["selection"][kind]["grid"]
                 epochs = controller["selection"][kind]["epochs"]
             else:
-                epochs = config.settings.max_epochs if stopping else config.settings.frozen_epochs
+                epochs = config.settings.max_epochs if model_stopping else config.settings.frozen_epochs
             initialization = CheckpointArtifact.from_json(controller["initializations"][fold])
             bundle, encoder_state = _bundle(config, local, fitting, initialization, kind, config.settings.grid[grid])
             bundle["variant"] = variant
             # SSL and the outcome nuisance use every labelled fitting row.
             # Classification gradients, stopping and calibration use only T.
-            model_ids = tuple(i for i in fitting if kind != "origin" or i in set(local.target_ids))
-            model_stopping = tuple(i for i in stopping if kind != "origin" or i in set(local.target_ids))
             require(bool(model_ids), "empty target-distribution classifier fitting partition")
             view = subset(all_view, model_ids)
             if controller["active"] is None:
@@ -569,7 +578,8 @@ def _advance(config, outer, manifest, identity, controller, root, budget, varian
                     predictions=predicted.tolist(), metrics=metrics,
                     mass=sum(w / mass_unit for w in metadata.origin_weights), mass_unit=mass_unit,
                     mass_ratio=(exact_mass.numerator, exact_mass.denominator),
-                    epochs=state["progress"]["best_epoch"], ownership=audits[fold].to_json())
+                    epochs=state["progress"]["best_epoch"],
+                    ownership=(audits if kind == "origin" else outcome_audits)[fold].to_json())
                 if kind == "origin":
                     # With frozen epochs, an in-sample fitting score may choose
                     # a grid, but never a calibration evaluation score. Explicit

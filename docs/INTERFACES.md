@@ -147,6 +147,10 @@ zero SCM estimand weight; target rows keep their original weights (including any
 legitimate zero target weights). These zero simulation weights do not alter the
 labelled outcome-regression/SSL fitting weights. Truth integration, OOF scores,
 coverage/release statistics and county representatives remain target-only.
+Classifier checkpoint-selection audits also contain only target rows. If a
+labelled stopping reservation contains no target rows, the classifier uses its
+independently frozen epoch schedule; the outcome model retains its own stopping
+reservation and audit.
 
 Orchestrator ruling of 2026-10-11 (A2 validation harness): supported target and
 training-only rows sample exposure from their frozen components. Unsupported

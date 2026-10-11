@@ -462,7 +462,7 @@ def test_nested_refuses_held_out_target_in_training_partition(tmp_path):
         bad.validate(0)
 
 
-def test_nested_accepts_empty_target_fold_with_labelled_frame_presence(tmp_path):
+def test_nested_accepts_empty_target_fold_with_labelled_frame_presence(tmp_path, monkeypatch):
     prepared = mixed_role_endpoint(tmp_path)
     inner = prepared.inner[0]
     demoted = {i for i, fold in zip(inner.split.original_ids, inner.split.fold_ids) if fold == 2}
@@ -475,9 +475,49 @@ def test_nested_accepts_empty_target_fold_with_labelled_frame_presence(tmp_path)
                        inner=(replace(inner, split=demote(inner.split)),))
     assert set(prepared.inner[0].split.fold_ids) == {0, 1}
     assert set(prepared.inner[0].split.geographic_fold_ids) == {0, 1, 2}
+    ssl_ids = []
+    original = nested.fitting_module_ssl
+    def observe(config, split, fitting, *args, **kwargs):
+        ssl_ids.append(set(fitting))
+        return original(config, split, fitting, *args, **kwargs)
+    monkeypatch.setattr(nested, 'fitting_module_ssl', observe)
     _, artifact = fitted(tmp_path / 'fit', prepared)
+    assert ssl_ids and all(demoted <= ids for ids in ssl_ids)
     assert artifact.complete
     calibration = nested.AffineCalibration.from_json(state(artifact)['calibration'])
     assert {p.fold for p in calibration.partitions} == {0, 1}
     assert set(calibration.original_ids) == set(prepared.outer.training_ids(0)) & set(prepared.outer.target_ids)
     assert set(predictions(prepared, artifact).original_ids) == set(prepared.outer.evaluation_ids(0))
+
+
+def test_origin_stopping_regime_uses_only_target_rows(tmp_path, monkeypatch):
+    prepared = mixed_role_endpoint(tmp_path)
+    allowed = set(prepared.inner[0].split.training_ids(0))
+    targets = set(prepared.outer.target_ids)
+    groups = nested.dependence_groups(prepared.geography.rows, prepared.entity_graph)
+    stopping = next(tuple(i for i in g if i in allowed) for g in groups
+                    if set(g) & allowed and set(g) & allowed <= allowed - targets)
+    config = tiny_config(prepared, tmp_path / 'fit', stopping_ids=((0, stopping),))
+    seen = []
+    original = nested._train_transaction
+    def observe(config, bundle, encoder, view, stops, epochs, *args, **kwargs):
+        seen.append((bundle['kind'], tuple(stops), epochs))
+        if bundle['kind'] == 'origin':
+            assert not stops
+            assert epochs == config.settings.frozen_epochs
+        # Bound the outcome-stopping fixture; scheduling and metadata are the
+        # subject here, while the actual training loop is exercised elsewhere.
+        return original(config, bundle, encoder, view, stops, min(epochs, 1), *args, **kwargs)
+    monkeypatch.setattr(nested, '_train_transaction', observe)
+    artifact = nested.run_fold(config, prepared.outer, 1103, geography=prepared.geography)
+    assert artifact.complete
+    assert any(kind == 'outcome' and stops == stopping and epochs == config.settings.max_epochs
+               for kind, stops, epochs in seen)
+    calibration = nested.AffineCalibration.from_json(state(artifact)['calibration'])
+    for audit in calibration.partitions:
+        assert not audit.checkpoint_ids
+        assert audit.frozen_epochs == config.settings.frozen_epochs
+        assert set(audit.fitting_ids) <= targets
+    outcome = next(r for r in state(artifact)['results'] if r['kind'] == 'outcome' and r['fold'] == 0)
+    audit = nested.CalibrationPartition.from_json(outcome['ownership'])
+    assert audit.checkpoint_ids == stopping and audit.frozen_epochs is None
