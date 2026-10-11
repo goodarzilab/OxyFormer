@@ -521,3 +521,52 @@ def test_origin_stopping_regime_uses_only_target_rows(tmp_path, monkeypatch):
     outcome = next(r for r in state(artifact)['results'] if r['kind'] == 'outcome' and r['fold'] == 0)
     audit = nested.CalibrationPartition.from_json(outcome['ownership'])
     assert audit.checkpoint_ids == stopping and audit.frozen_epochs is None
+
+
+def test_cost_study_two_grid_points_keep_nested_tuning_and_cap_reload(tmp_path, full):
+    from oxyformer.training.fit import RecipeStudy
+    prepared, registered = full
+    config = tiny_config(prepared, tmp_path / "candidate", study=RecipeStudy(grid_points=2, reference_cap=2))
+    artifact = nested.run_fold(config, prepared.outer, 1103, geography=prepared.geography)
+    controller = state(artifact)
+    assert controller["counts"]["ssl_fits"] == 4
+    assert controller["counts"]["nuisance_fits"] == 14
+    assert len(controller["results"]) == 12
+    assert {(r["fold"], r["kind"], r["grid"]) for r in controller["results"]} == {
+        (f, k, g) for f in range(3) for k in ("outcome", "origin") for g in range(2)}
+    for kind, bundle in controller["final"].items():
+        assert bundle["dropout"] == 0. and bundle["learning_rate"] in (3e-4, 1e-3)
+        assert bundle["reference_cap"] == 2
+        model = nested._build(bundle)
+        assert model.county_context.reference_cap == 2
+        assert model.county_context.references.original_ids == nested._build(state(registered)["final"][kind]).county_context.references.original_ids
+        assert all(len(model.county_context._reference_ids(i, c)) == 2 for i, c in model.county_context._routes.items())
+    actual = predictions(prepared, artifact)
+    assert actual.original_ids == predictions(prepared, registered).original_ids
+
+
+def test_cost_study_frozen_schedule_reaches_controller_without_patience(tmp_path, full, monkeypatch):
+    from oxyformer.training.fit import RecipeStudy, _Budget
+    from oxyformer.training.checkpoint import CheckpointRequest
+    prepared, registered = full
+    config = tiny_config(prepared, tmp_path / "candidate", device="cpu",
+                         study=RecipeStudy(frozen_epochs=30, grid_points=2))
+    original = nested._train_transaction
+    requested = []
+    def shortened(config, bundle, encoder, view, stopping, epochs, seed, budget, saved=None):
+        requested.append((bool(stopping), epochs))
+        return original(config, bundle, encoder, view, stopping, 1, seed, budget, saved)
+    monkeypatch.setattr(nested, "_train_transaction", shortened)
+    result = nested.run_fold(config, prepared.outer, 1103, geography=prepared.geography)
+    assert requested[:12] == [(False, 30)] * 12
+    assert requested[12:] == [(False, 1)] * 2  # median of this test's shortened inner fits
+    assert all(json.loads(r["ownership"])["payload"]["frozen_epochs"] == 30 for r in state(result)["results"])
+    # Exercise the actual transaction for longer than registered patience=15.
+    bundle = state(registered)["final"]["outcome"]
+    ids = prepared.outer.training_ids(0)
+    view = subset(prepared.data.covariates(("x",)), ids)
+    _, trained, complete, reason = original(config, bundle, None, view, (), 30, 1103,
+                                           _Budget(config, CheckpointRequest()))
+    assert complete and reason == "max_epochs"
+    assert trained["progress"]["epoch"] == 30 and trained["progress"]["bad_epochs"] == 0
+    assert trained["progress"]["history"] == [None] * 30

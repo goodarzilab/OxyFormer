@@ -861,3 +861,36 @@ def test_reference_reuse_distinguishes_equal_preprocessing(reference_setup, chan
         assert left.numpy().tobytes() == right.numpy().tobytes()
         changed |= getattr(old, field.name).numpy().tobytes() != right.numpy().tobytes()
     assert changed
+
+
+@pytest.mark.parametrize("field,value", [("reference_cap", 0), ("reference_cap", True),
+    ("frozen_epochs", 15), ("grid_points", 3), ("seed_count", 2)])
+def test_invalid_cost_study_parameters(field, value):
+    with pytest.raises(ContractError):
+        fitting.RecipeStudy(**{field: value})
+
+
+def test_cost_study_defaults_preserve_identity_and_independent_options(tmp_path):
+    _, split, manifest, config = make_case(tmp_path)
+    config = replace(config, device="cpu")
+    explicit = replace(config, study=fitting.RecipeStudy())
+    args = (split, manifest, 1103, split.training_ids(0))
+    assert fitting._science_identity(config, *args).to_json() == fitting._science_identity(explicit, *args).to_json()
+    assert config.grid == config.settings.grid
+    assert config.frozen_epochs == config.settings.frozen_epochs
+    assert config.study.seeds == (1103, 2207, 3301)
+    original = fitting._science_identity(config, *args)
+    for study in (fitting.RecipeStudy(reference_cap=32), fitting.RecipeStudy(frozen_epochs=30),
+                  fitting.RecipeStudy(grid_points=2), fitting.RecipeStudy(seed_count=1)):
+        candidate = replace(config, study=study)
+        identity = fitting._science_identity(candidate, *args)
+        assert identity.config_hash != original.config_hash
+        assert identity.training_ids == original.training_ids
+        assert identity.data_hash == original.data_hash and identity.split_hash == original.split_hash
+        assert candidate.settings == config.settings and candidate.ssl_epochs == config.ssl_epochs
+    assert replace(config, study=fitting.RecipeStudy(grid_points=2)).grid == ((3e-4, 0.), (1e-3, 0.))
+    for epochs in (30, 60, 150):
+        assert replace(config, study=fitting.RecipeStudy(frozen_epochs=epochs)).frozen_epochs == epochs
+    with pytest.raises(ContractError, match="excluded by cost study"):
+        fitting._validate(config.data.manifest.spec, split, manifest,
+            replace(config, study=fitting.RecipeStudy(seed_count=1)), 2207)
