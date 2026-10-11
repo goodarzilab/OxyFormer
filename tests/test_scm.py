@@ -2723,3 +2723,45 @@ def test_resumed_round2_binary64_subnormal_survives_final_response_rounding():
     # The omitted O(q**2) inverse-series term is over280 orders smaller than
     # the distance from the rounding midpoint after denominator scaling.
     assert sampled_mean(dose, f, 0, state, c) == float(target)
+
+
+def a2_training_frame():
+    f = replace(frame(6), support_keys=('s',) * 4 + ('fixed',) * 2,
+                weights=(1., 1., 0., 0., 0., 0.))
+    p = replace(policy(), components_by_key=(('s', ((0., 10.),)), ('fixed', ())))
+    return f, p, {'o4': 7., 'o5': 7.}
+
+
+@pytest.mark.parametrize('bad', ['missing', 'positive_mass', 'supported', 'geography'])
+def test_fixed_exposure_validation_requires_zero_mass_empty_support_and_consistent_atlas_a(bad):
+    f, p, fixed = a2_training_frame()
+    message = 'SCM assignment needs nonempty support'
+    if bad == 'missing':
+        fixed = {}
+    elif bad == 'positive_mass':
+        f = replace(f, weights=(1., 1., 0., 0., 1., 1.))
+        message = 'zero estimand weight'
+    elif bad == 'supported':
+        fixed.update(o2=7., o3=7.)
+        message = 'empty frozen support'
+    else:
+        fixed['o5'] = 8.
+        message = 'inconsistent fixed exposure'
+    with pytest.raises(ContractError, match=message):
+        config().validate_policy(p, f, fixed_exposures=fixed)
+
+
+def test_fixed_exposure_switches_ignore_fixed_rows_but_include_supported_training():
+    f, p, fixed = a2_training_frame()
+    # Empty support of fixed rows does not create heterogeneous eligibility.
+    config().validate_policy(p, f, fixed_exposures=fixed)
+    f = replace(f, support_keys=('s', 's', 'short', 'short', 'fixed', 'fixed'))
+    p = replace(p, components_by_key=p.components_by_key + (('short', ((0., 1.),)),))
+    with pytest.raises(ContractError, match='eligibility switch'):
+        config().validate_policy(p, f, fixed_exposures=fixed)
+    config(heterogeneous_eligibility=True).validate_policy(p, f, fixed_exposures=fixed)
+    p = replace(p, components_by_key=tuple((k, ((0., 3.), (7., 10.))) if k == 'short' else (k, v)
+                                           for k, v in p.components_by_key))
+    with pytest.raises(ContractError, match='support_gaps switch'):
+        config().validate_policy(p, f, fixed_exposures=fixed)
+    config(support_gaps=True).validate_policy(p, f, fixed_exposures=fixed)

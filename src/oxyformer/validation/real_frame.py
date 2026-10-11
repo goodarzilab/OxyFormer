@@ -139,8 +139,11 @@ def build_inputs(values, design):
         weights=tuple(1. if r.original_id in targets else 0. for r in selected),
         outcome_available=tuple(r.label_available for r in selected),
         biomarker_available=(True,) * len(selected))
+    components = dict(frozen.policy.components_by_key)
+    fixed_exposures = {r.original_id: a[r.tract_id].exposure_mmhg for r in selected
+                       if not components[r.assignment_geography]}
     for row in campaign._registry()['scenarios']:
-        SCMConfig(**row).validate_policy(frozen.policy, frame)
+        SCMConfig(**row).validate_policy(frozen.policy, frame, fixed_exposures=fixed_exposures)
     knots = frozen.spline_knots
     sealed_a = [a[r.tract_id].exposure_mmhg for r in rows
                 if r.original_id in design_ids and r.tract_id not in accounted_missing]
@@ -162,6 +165,8 @@ def build_inputs(values, design):
         endpoint.validate(fold)
     audit = {'input_rows': len(rows), 'evaluation_rows': len(targets),
         'simulation_rows': len(selected), 'training_only_rows': len(selected) - len(targets),
+        'sampled_exposure_rows': len(selected) - len(fixed_exposures),
+        'fixed_exposure_rows': len(fixed_exposures),
         'coverage': atlas_coverage,
         'allocation_exclusions': gate.allocation_exclusions(rows, atlas_coverage, design_ids),
         'design_ids': list(reservation.design_ids), 'exclusions': list(scenario.exclusions),
@@ -170,7 +175,7 @@ def build_inputs(values, design):
         'target_id': spec.target_id, 'source_manifest_hash': manifest.content_hash,
         'source_covariates_hash': covariates.content_hash, 'source_geography_hash': geography.content_hash,
         'source_entity_graph_hash': graph.content_hash, 'atlas_hash': atlas.content_hash,
-        'labels': 'No real outcomes read; generated A/Y replace placeholders for every draw',
+        'labels': 'No real outcomes read; Y generated for target/training rows; empty-support training A stays at atlas value',
         'certifies_production_coverage': False, 'effect_release_authorized': False}
     return endpoint, frame, frozen, audit
 

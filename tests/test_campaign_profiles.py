@@ -402,3 +402,37 @@ def test_real_frame_dispatch_excludes_accounted_dem_and_preserves_reservation(tm
     result = real_frame.run_stage(req)
     assert result.status == 'pass', result.message
     result.verify(req)
+
+
+def test_real_frame_reports_fixed_training_rows_and_binds_their_atlas_exposure(built):
+    values, (original, _, _, _) = built
+    oid = original.outer.original_ids[0]
+    covariates = values['covariates']
+    changed = replace(covariates, values=tuple((0.,) if i == oid else x
+        for i, x in zip(covariates.original_ids, covariates.values)))
+    endpoint, frame, support, audit = real_frame.build_inputs(
+        {**values, 'covariates': changed}, read_mapping(ROOT / 'configs/design.yaml'))
+    roles = dict(zip(endpoint.outer.frame_original_ids, endpoint.outer.roles))
+    fixed = coverage.fixed_exposures(endpoint, frame)
+    assert roles[oid] == 'training' and oid in fixed
+    assert all(roles[i] == 'training' for i in fixed)
+    assert audit['fixed_exposure_rows'] == len(fixed)
+    assert audit['sampled_exposure_rows'] + len(fixed) == audit['simulation_rows']
+    assert dict(zip(frame.original_ids, frame.weights))[oid] == 0.
+    from oxyformer.validation.generators import ObservedRecords
+    doses = dict(zip(endpoint.data.manifest.original_ids, endpoint.data.column(endpoint.data.manifest.exposure_field)))
+    n = len(frame.original_ids)
+    observed = ObservedRecords(frame=frame, a=tuple(doses[i] for i in frame.original_ids),
+        y=(50.,) * n, measured_columns=(), measured_x=((),) * n,
+        flag_available=(True,) * n, survey_included=(True,) * n,
+        biomarker_available=(True,) * n, registered_events=(None,) * n, observed_denominator=(None,) * n)
+    rebound = coverage.bind_observations(endpoint, observed)
+    assert rebound.data.column(endpoint.data.manifest.exposure_field) == endpoint.data.column(endpoint.data.manifest.exposure_field)
+    wrong = replace(observed, a=tuple(a + 1 if i == oid else a for i, a in zip(frame.original_ids, observed.a)))
+    with pytest.raises(ContractError, match='fixed exposure differs from atlas value'):
+        coverage.bind_observations(endpoint, wrong)
+    locations = real_frame.profile_tasks(endpoint, frame)['tasks'][0]['parameters']['recipe']['inference']['county_locations']
+    geo = {r.original_id: r for r in endpoint.geography.rows}
+    for county, location in locations.items():
+        rows = [geo[i] for i in endpoint.outer.original_ids if geo[i].county == county]
+        assert location == [sum(r.latitude for r in rows) / len(rows), sum(r.longitude for r in rows) / len(rows)]

@@ -180,3 +180,24 @@ is not run by this gate. The 2 mmHg shift-or-stay policy, equal-tract weights,
 release criteria and flag-1-only sensitivity remain fixed. Structural county
 counts are proxies, not the fitted influence-concentration release checks;
 ratio p99 and ESS on the moved target portion remain required downstream.
+
+### A2 validation-harness ruling (orchestrator, 2026-10-11)
+
+The semi-synthetic frame includes the target and its labelled training rows.
+Rows with nonempty frozen support sample exposure by the registered SCM, including
+supported training-only rows. A training-only row with empty support instead keeps
+its observed atlas exposure and receives Y through the same SCM outcome and
+latent-state machinery. It has zero estimand weight and never enters the
+origin-classifier fit. Inert rows receive no Y. No new assignment law or support
+interval is introduced, and no outcome enters the design.
+
+The existing endpoint exposure column supplies fixed doses; artifact schemas and
+frozen support/policy identities do not change. Nonempty-support validation and
+the support-gaps/heterogeneous-eligibility switches concern sampled rows only.
+Fixed rows bypass `AssignmentLaw`; existing measurement-error semantics recover
+true dose from the fixed recorded dose for outcome generation. The real-frame
+report counts sampled and fixed-exposure rows. On the approved historical frame
+these are 7,061 sampled (1,752 targets plus 5,309 training-only) and 36,927 fixed.
+Truth, coverage and release statistics remain target-only. This ruling addresses
+a validation-harness consequence of A2 and will be disclosed to the owner in the
+orchestrator's hourly report.

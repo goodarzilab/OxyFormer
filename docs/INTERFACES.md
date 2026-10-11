@@ -148,6 +148,17 @@ legitimate zero target weights). These zero simulation weights do not alter the
 labelled outcome-regression/SSL fitting weights. Truth integration, OOF scores,
 coverage/release statistics and county representatives remain target-only.
 
+Orchestrator ruling of 2026-10-11 (A2 validation harness): supported target and
+training-only rows sample exposure from their frozen components. Unsupported
+training-only rows keep their atlas A and use the same SCM outcome/latent-state
+machinery, with zero estimand weight. The adapter passes these values from the
+existing `DataManifest.exposure_field` via the optional `fixed_exposures` mapping;
+`CovariateFrame` and serialized artifact schemas do not change. Membership and
+atlas-dose checks prevent target rows or altered A from entering this path.
+`SCMConfig.validate_policy` checks nonempty support and the gap/eligibility switches
+on sampled rows only; fixed rows bypass `AssignmentLaw`. The real-frame audit
+includes `sampled_exposure_rows` and `fixed_exposure_rows`.
+
 Call `validate_split(split, manifest, entity_graph)` before fitting. It binds
 data/source/graph identity and enforces whole-lineage partitions, including the
 sealed design partition. The split producer additionally enforces geography,
