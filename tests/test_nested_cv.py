@@ -525,23 +525,27 @@ def test_origin_stopping_regime_uses_only_target_rows(tmp_path, monkeypatch):
 
 def supported_study_endpoint(root):
     """Mixed roles with two empty-support training rows and supported training rows."""
+    from oxyformer.data.entity_graph import EntityGraph
     prepared = mixed_role_endpoint(root)
+    graph = EntityGraph(original_ids=prepared.entity_graph.original_ids, links=())
     policy = replace(prepared.policy, components_by_key=prepared.policy.components_by_key + (("empty", ()),))
     spec = replace(prepared.data.manifest.spec, policy_id=policy.policy_id)
-    manifest = replace(prepared.data.manifest, spec=spec)
+    manifest = replace(prepared.data.manifest, spec=spec, entity_graph_hash=graph.content_hash)
     empty = {"o08", "o12"}
     inners = []
     for inner in prepared.inner:
-        local = replace(inner.data_manifest, spec=spec)
-        split = replace(inner.split, spec=spec,
+        local_graph = EntityGraph(original_ids=inner.entity_graph.original_ids, links=())
+        local = replace(inner.data_manifest, spec=spec, entity_graph_hash=local_graph.content_hash)
+        split = replace(inner.split, spec=spec, entity_graph_hash=local_graph.content_hash,
             lineage=replace(inner.split.lineage, parent_hashes=(local.content_hash,)))
-        inners.append(replace(inner, data_manifest=local, split=split))
-    return replace(prepared, data=replace(prepared.data, manifest=manifest), policy=policy,
-        outer=replace(prepared.outer, spec=spec,
+        inners.append(replace(inner, data_manifest=local, split=split, entity_graph=local_graph))
+    return replace(prepared, data=replace(prepared.data, manifest=manifest), policy=policy, entity_graph=graph,
+        outer=replace(prepared.outer, spec=spec, entity_graph_hash=graph.content_hash,
             lineage=replace(prepared.outer.lineage, parent_hashes=(manifest.content_hash,))),
         inner=tuple(inners),
-        geography=replace(prepared.geography, data_manifest_hash=manifest.content_hash),
-        policy_covariates=replace(prepared.policy_covariates,
+        geography=replace(prepared.geography, data_manifest_hash=manifest.content_hash,
+            rows=tuple(replace(r, subblock=r.original_id) for r in prepared.geography.rows)),
+        policy_covariates=replace(prepared.policy_covariates, geography_ids=prepared.policy_covariates.original_ids,
             support_keys=tuple("empty" if i in empty else "s" for i in prepared.policy_covariates.original_ids)))
 
 
@@ -580,6 +584,11 @@ def test_study_c_excludes_exactly_empty_support_training_rows(tmp_path, monkeypa
     assert study_fitting_ids(config, prepared.outer, original_ids) == tuple(
         i for i in original_ids if i not in {"o08", "o12"})
     assert "o16" in study_fitting_ids(config, prepared.outer, original_ids)
+    target = next(i for i in original_ids if i in prepared.outer.target_ids)
+    empty_target = replace(config, policy_covariates=replace(config.policy_covariates,
+        support_keys=tuple("empty" if i == target else key for i, key in
+                           zip(config.policy_covariates.original_ids, config.policy_covariates.support_keys))))
+    assert target in study_fitting_ids(empty_target, prepared.outer, original_ids)
     calls = []
     original = nested._train_transaction
     def observe(config, bundle, encoder_state, view, stopping, *args, **kwargs):
