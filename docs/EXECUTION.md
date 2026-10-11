@@ -267,3 +267,65 @@ belong in the attempt directory, never in this repository. A cost projection is
 not campaign admission or evidence of statistical adequacy. Candidate C (target
 plus supported training rows) is not implemented: the prior attempt's registered
 `PreparedEndpoint.validate` rejected all five folds under plan 5.1 minima.
+
+### Batched county context and numerical comparison
+
+County context constructs sorted, fold-owned reference IDs per query, removes the
+query before applying an optional RecipeStudy cap, and retains the raw-input
+cache. Empty reference sets return four zero tokens. In evaluation and when all
+context dropout is disabled, the encoder processes the deduplicated union once.
+PMA gathers each query's reference states and masks padding. PMA workspaces are
+bounded at 262,144 reference slots per tensor batch (a single larger reference
+set is retained whole); this is an execution workspace limit, not a reference
+cap or a change to the original-record minibatch size.
+
+Training with nonzero dropout instead encodes separate `(query, reference)`
+occurrences in one call. Masks are drawn independently in the original query
+order, with the original tensor strides, then applied in batched layer order.
+This retains the original RNG stream and Bernoulli keep probabilities. The
+replay comparison on CUDA exceeded the forward tolerance at one near-zero
+context element (absolute difference 1.27e-6); the tolerance was not loosened.
+The nonzero-dropout path therefore remains **training-path equivalence in
+distribution, pending owner confirmation** under the orchestrator's 2026-10-11
+fallback ruling. Seed-paired short fits report the actual numerical and decision
+differences. Native layer-first mask generation was also evaluated, but failed
+the existing extreme-weight invariance regression, so original-order mask
+replay is retained.
+
+The registered CPU random stream on CUDA, FP32 arithmetic, deterministic kernels,
+seeds, grid, epochs, stopping, loss normalization and optimizer remain in force.
+Padding is masked and empty contexts are zero. The private scalar `_pool`
+implementation remains a comparison oracle; ordinary prediction and training
+use the batched path.
+
+Both identity-outcome offset passes still predict the whole fitting partition
+in eval mode, once before and once after each epoch. They compute both doses,
+then profile county offsets from factual-dose residuals with FP64 reductions.
+Model-output caching remains restricted to eval with gradients disabled and
+binds actual model bytes, reference IDs/content, preprocessing, split, checkpoint
+and parameter version. Source changes produce a new scientific code hash; old
+production continuations must still pass the existing identity checks.
+
+The owner-approved 2026-10-11 comparison criterion for this change is elementwise
+forward relative tolerance `1e-5` with absolute floor `1e-6`. The orchestrator's
+clarification permits gradient relative tolerance `1e-4` with absolute floor
+`1e-5` on matched minibatches. Test assertions use the conventional
+`abs(actual-reference) <= atol + rtol*abs(reference)` bound and report maximum
+absolute and raw relative differences separately. The orchestrator clarified that continuous fitted quantities, including affine
+calibration coefficients, county offsets, logits, means and losses, use the
+forward tolerance. Discrete tuning and epoch decisions, counts, preprocessing
+categories, stopping IDs and audit outcomes must remain identical. Repeatability
+requires matching tensor bytes on repeated runs under the same deterministic
+settings. A comparison may normalize explicit enclosing-checkpoint provenance
+links only after validating them; it must retain the differing source hashes in
+its report and must never bypass a production resume check.
+
+Run the fit/nested-CV/context/token tests with and without `-B` in both the shared
+CUDA-build environment (with CUDA hidden) and the CI CPU-only environment. Run
+CUDA comparisons on an H100 and the full suite as CI does, without `-B`. All tests,
+synthetic reproductions, real-frame reads and timed measurements run on Slurm
+`standard`/`root`. Bounded cost slices report cold setup separately, match ordinary
+minibatch step IDs, distinguish measured epochs from projections, retain the two
+offset-pass costs and include the registered and requested RecipeStudy settings.
+An incomplete equivalence check or a different stochastic realization must be
+reported explicitly; deterministic repetition alone is not equivalence.
