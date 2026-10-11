@@ -829,3 +829,35 @@ def test_reference_reuse_does_not_prepare_excluded_values(reference_setup):
         assert torch.equal(context(("t0",), ("c",)), ordinary(("t0",), ("c",)))
         with pytest.raises(RuntimeError, match="overflow"):
             context(("t1",), ("c",))
+
+
+@pytest.mark.parametrize("change", ["category_cell_type", "signed_zero_mean"])
+def test_reference_reuse_distinguishes_equal_preprocessing(reference_setup, change):
+    from dataclasses import fields
+    from oxyformer.models.tokens import FeatureSpec
+
+    features, references, split, counties = reference_setup
+    if change == "category_cell_type":
+        features = (features[0], FeatureSpec(name="cat", kind="categorical", categories=(1,)))
+        references = replace(references, values=((0., 1), (1., 1.0)) + references.values[2:])
+        updated = (features[0], replace(features[1], categories=(1.0,)))
+    else:
+        features = (replace(features[0], mean=0., scale=1.), features[1])
+        references = replace(references, values=((-0., "own"),) + references.values[1:])
+        updated = (replace(features[0], mean=-0.), features[1])
+    context = make_context((features, references, split, counties))
+    ids = ("t0", "t1")
+    old = context._reference_batch(ids)
+    old_hash = context.encoder.tokenizer.preprocessing_hash
+    assert features == updated  # Python equality is weaker than the schema.
+    context.encoder.tokenizer.features = updated
+    assert old_hash != context.encoder.tokenizer.preprocessing_hash
+    expected = _uncached_reference_batch(context, ids)
+    actual = context._reference_batch(ids)
+    changed = False
+    for field in fields(actual):
+        left, right = getattr(actual, field.name), getattr(expected, field.name)
+        assert left.dtype == right.dtype and left.shape == right.shape
+        assert left.numpy().tobytes() == right.numpy().tobytes()
+        changed |= getattr(old, field.name).numpy().tobytes() != right.numpy().tobytes()
+    assert changed

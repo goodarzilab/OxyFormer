@@ -194,7 +194,9 @@ its conversion and overflow behavior and leaving excluded values untouched.
 Each query gathers its own ordered rows before running the unchanged encoder
 and attention graph. Optimizer steps still recompute all learned activations
 and gradients. Preprocessing, device or dtype changes invalidate the prepared
-inputs; inference-mode preparation retains ordinary tensors usable by later
+inputs. Immutable preprocessing objects are compared by identity: categorical
+`1` and `1.0`, or signed-zero means, must not collide through Python value
+equality. Inference-mode preparation retains ordinary tensors usable by later
 autograd calls. These inputs are private runtime caches, absent from checkpoint
 tensor state. Neither offset-profile pass is removed.
 
@@ -205,9 +207,9 @@ change. The attempt-local canonical comparison checks full SSL training state,
 both nuisance tensor states, tuning/epoch decisions, counts, preprocessing,
 calibration, audits and predictions at A and d(A,X). Its only removed provenance
 paths are the nuisance and four SSL identity source hashes, the two final
-bundles' validated `ssl_hash` parent-descriptor links, and the prediction's
-validated enclosing-checkpoint parent link. Artifact paths, ZIP timestamps and
-elapsed compute are retained as separate transport/measurement metadata, not
+bundles' validated `ssl_hash` parent-descriptor links, the prediction's
+validated enclosing-checkpoint parent link, and explicit checkpoint predecessor
+links (including a matching final SSL lineage parent when present). Artifact paths, ZIP timestamps and elapsed compute are retained as separate transport/measurement metadata, not
 scientific values. Checkpoint format remains version 1 with uncompressed tensor
 members; archive byte counts can change with embedded paths and elapsed-time
 text. Production fingerprints and resume identity checks are unchanged.

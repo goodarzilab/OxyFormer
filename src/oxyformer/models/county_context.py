@@ -140,8 +140,13 @@ class CountyContext(nn.Module):
     def _reference_batch(self, ids: tuple[str, ...]) -> FeatureBatch:
         tokenizer = self.encoder.tokenizer
         weight = tokenizer.numeric_weight
-        identity = (id(self._references), tokenizer.features, weight.device, weight.dtype)
-        if identity != self._prepared_identity:
+        identity = (self._references, tokenizer.features, weight.device, weight.dtype)
+        previous = self._prepared_identity
+        # Immutable specifications are identified by object, not Python value
+        # equality: categorical 1 and 1.0 (and signed-zero means) can compare
+        # equal while preparing different tensor bytes.
+        if (previous is None or previous[0] is not identity[0]
+                or previous[1] is not identity[1] or previous[2:] != identity[2:]):
             self._prepared = None
             self._prepared_ids.clear()
             self._prepared_identity = identity
