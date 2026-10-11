@@ -21,6 +21,7 @@ from torch import Tensor, nn
 
 from oxyformer.contracts import CovariateView, SplitManifest
 from oxyformer.models.encoder import FeatureEncoder
+from oxyformer.models.tokens import FeatureBatch
 from oxyformer.provenance import canonical_json, check_hash, nonempty, require
 
 
@@ -93,6 +94,11 @@ class CountyContext(nn.Module):
         self.output_norm = nn.LayerNorm(64)
         self._cache: dict[ContextCacheKey, Tensor] = {}
         self._cache_generation = None
+        # Raw, parameter-independent inputs are reusable in training too. Prepare
+        # only requested rows so self-excluded/unused values are never converted.
+        self._prepared: FeatureBatch | None = None
+        self._prepared_ids: set[str] = set()
+        self._prepared_identity = None
         self.set_cache_identity(checkpoint_hash=checkpoint_hash, parameter_version=parameter_version)
         require(sum(p.numel() for p in self.parameters()) <= 1_000_000,
                 "backbone exceeds nuisance parameter cap; heads must check the complete network")
@@ -131,13 +137,44 @@ class CountyContext(nn.Module):
         return tuple(sorted(oid for oid, route in self._routes.items()
                             if route == county and oid != query_id))
 
+    def _reference_batch(self, ids: tuple[str, ...]) -> FeatureBatch:
+        tokenizer = self.encoder.tokenizer
+        weight = tokenizer.numeric_weight
+        identity = (id(self._references), tokenizer.features, weight.device, weight.dtype)
+        if identity != self._prepared_identity:
+            self._prepared = None
+            self._prepared_ids.clear()
+            self._prepared_identity = identity
+        pending = tuple(oid for oid in ids if oid not in self._prepared_ids)
+        if pending:
+            rows = tuple(self._references.values[self._rows[oid]] for oid in pending)
+            view = replace(self._references, original_ids=pending, values=rows,
+                           lineage=replace(self._references.lineage, unit_ids=pending))
+            # An inference call may populate inputs subsequently used by autograd.
+            # Keep the retained raw tensors ordinary tensors, even in that case.
+            with torch.inference_mode(False):
+                prepared = tokenizer.prepare(view)
+                if self._prepared is None:
+                    shape = (len(self._references.original_ids), len(tokenizer.features))
+                    self._prepared = FeatureBatch(prepared.feature_ids, *(
+                        value.new_empty(shape) for value in (
+                            prepared.numeric_values, prepared.categorical_values,
+                            prepared.missing, prepared.masked, prepared.padding)))
+                positions = torch.tensor([self._rows[oid] for oid in pending],
+                                         device=weight.device, dtype=torch.long)
+                for field in ("numeric_values", "categorical_values", "missing", "masked", "padding"):
+                    getattr(self._prepared, field).index_copy_(0, positions, getattr(prepared, field))
+            self._prepared_ids.update(pending)
+        positions = torch.tensor([self._rows[oid] for oid in ids],
+                                 device=weight.device, dtype=torch.long)
+        return FeatureBatch(self._prepared.feature_ids, *(
+            getattr(self._prepared, field).index_select(0, positions)
+            for field in ("numeric_values", "categorical_values", "missing", "masked", "padding")))
+
     def _pool(self, ids: tuple[str, ...]) -> Tensor:
         if not ids:
             return self.seeds.new_zeros((4, 64))
-        rows = tuple(self._references.values[self._rows[oid]] for oid in ids)
-        view = replace(self._references, original_ids=ids, values=rows,
-                       lineage=replace(self._references.lineage, unit_ids=ids))
-        _, z = self.encoder(self.encoder.tokenizer.prepare(view))
+        _, z = self.encoder(self._reference_batch(ids))
         memory = self.reference_norm(z.unsqueeze(0))
         seeds = self.seeds
         attended, _ = self.attention(self.seed_norm(seeds), memory, memory, need_weights=False)
