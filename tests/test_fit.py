@@ -112,6 +112,62 @@ def completed(tmp_path_factory):
     return case, artifact
 
 
+def test_fit_local_subsets_preserve_lineage_and_permissions(tmp_path, monkeypatch):
+    _, split, _, config = make_case(tmp_path)
+    view = config.data.covariates(("x",))
+    ids = split.training_ids(0)[:3][::-1]
+    expected = subset(view, ids, use="context", split_hash=split.content_hash)
+    cached = fitting._CovariateSubsets(view)
+    # Repeated minibatches must not serialize the immutable full parent again.
+    from oxyformer.provenance import Immutable
+    original = Immutable.content_hash.fget
+    def checked(value):
+        assert value is not view, "rehashed full parent for a minibatch"
+        return original(value)
+    monkeypatch.setattr(Immutable, "content_hash", property(checked))
+    actual = cached(ids, use="context", split_hash=split.content_hash)
+    assert actual.to_json() == expected.to_json()
+    assert cached(ids).lineage.parent_hashes == expected.lineage.parent_hashes
+    with pytest.raises(ContractError, match="duplicate"):
+        cached((ids[0], ids[0]))
+    with pytest.raises(KeyError):
+        cached(("not-in-parent",))
+
+
+def test_fit_policy_reuses_only_matching_frozen_inputs(tmp_path, monkeypatch):
+    _, split, _, config = make_case(tmp_path)
+    inputs = _inputs(config, split.training_ids(0))
+    cache = fitting._FitPolicy(config.policy, inputs)
+    part = fitting._take_inputs(inputs, inputs.original_ids[:4][::-1])
+    expected = config.policy.apply(part.a_mmhg, part.policy_covariates)
+    original = ShiftOrStayPolicy.apply
+    calls = []
+    def observe(policy, a, covariates):
+        calls.append(covariates.original_ids)
+        return original(policy, a, covariates)
+    monkeypatch.setattr(ShiftOrStayPolicy, "apply", observe)
+    assert cache.apply(config.policy, part).to_json() == expected.to_json()
+    assert not calls
+    for policy, changed in (
+        (replace(config.policy, delta_mmhg=0.), part),
+        (config.policy, replace(part, a_mmhg=(0.,) * len(part.original_ids))),
+        (config.policy, _inputs(config, split.evaluation_ids(0)[:2])),
+    ):
+        assert cache.apply(policy, changed).to_json() == original(
+            policy, changed.a_mmhg, changed.policy_covariates).to_json()
+    assert len(calls) == 3
+
+
+def test_fit_policy_preserves_signed_zero_on_changed_inputs(tmp_path):
+    _, _, _, config = make_case(tmp_path, identity=True)
+    inputs = _inputs(config, (config.data.manifest.original_ids[0],))
+    inputs = replace(inputs, a_mmhg=(-0.,))
+    cache = fitting._FitPolicy(config.policy, inputs)
+    changed = replace(inputs, a_mmhg=(0.,))
+    assert cache.apply(config.policy, changed).to_json() == config.policy.apply(
+        changed.a_mmhg, changed.policy_covariates).to_json()
+
+
 def test_registered_configuration():
     expected = yaml.safe_load(Path("configs/training/nuisance.yaml").read_text())
     actual = NuisanceSettings()

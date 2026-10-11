@@ -81,6 +81,44 @@ def test_prepare_standardizes_and_respects_column_identities(setup):
     assert tokenizer.preprocessing_hash != FeatureEncoder((replace(features[0], mean=2), features[1])).tokenizer.preprocessing_hash
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_bulk_prepare_matches_scalar_bytes_and_categories(setup, device, dtype):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    features, refs, *_ = setup
+    features = (replace(features[0], mean=0., scale=1.),
+                replace(features[1], categories=(1, 1., True, "1")))
+    refs = replace(refs, values=((-0., 1), (1.00000006, 1.), (1e-45, True),
+                                (None, "1"), (-1e-45, "unknown")))
+    tokenizer = FeatureEncoder(features).tokenizer.to(device=device, dtype=dtype)
+    actual = tokenizer.prepare(refs)
+    numeric = torch.zeros((5, 2), dtype=dtype, device=device)
+    for i, value in enumerate((-0., 1.00000006, 1e-45, None, -1e-45)):
+        if value is not None:
+            numeric[i, 0] = value
+    assert actual.numeric_values.cpu().view(torch.uint8).numpy().tobytes() == numeric.cpu().view(torch.uint8).numpy().tobytes()
+    assert actual.categorical_values[:, 1].tolist() == [0, 1, 2, 3, 4]
+    assert actual.missing[:, 0].tolist() == [False, False, False, True, False]
+    assert not actual.masked.any() and not actual.padding.any()
+    permuted = replace(refs, columns=refs.columns[::-1], values=tuple(row[::-1] for row in refs.values))
+    assert torch.equal(tokenizer.prepare(permuted).numeric_values, actual.numeric_values)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_bulk_prepare_retains_scalar_overflow_refusal(setup, device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    import math
+    features, refs, *_ = setup
+    features = (replace(features[0], mean=0., scale=1.), features[1])
+    tokenizer = FeatureEncoder(features).tokenizer.to(device)
+    for value in (math.nextafter(torch.finfo(torch.float32).max, math.inf), 1e100):
+        invalid = replace(refs, values=((value, "own"),) + refs.values[1:])
+        with pytest.raises(RuntimeError, match="overflow"):
+            tokenizer.prepare(invalid)
+
+
 def test_reference_and_query_permutations(setup):
     _, refs, _, counties = setup
     context = make_context(setup).eval()
