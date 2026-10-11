@@ -530,10 +530,16 @@ def supported_study_endpoint(root):
     spec = replace(prepared.data.manifest.spec, policy_id=policy.policy_id)
     manifest = replace(prepared.data.manifest, spec=spec)
     empty = {"o08", "o12"}
+    inners = []
+    for inner in prepared.inner:
+        local = replace(inner.data_manifest, spec=spec)
+        split = replace(inner.split, spec=spec,
+            lineage=replace(inner.split.lineage, parent_hashes=(local.content_hash,)))
+        inners.append(replace(inner, data_manifest=local, split=split))
     return replace(prepared, data=replace(prepared.data, manifest=manifest), policy=policy,
-        outer=replace(prepared.outer, spec=spec),
-        inner=tuple(replace(i, data_manifest=replace(i.data_manifest, spec=spec),
-                            split=replace(i.split, spec=spec)) for i in prepared.inner),
+        outer=replace(prepared.outer, spec=spec,
+            lineage=replace(prepared.outer.lineage, parent_hashes=(manifest.content_hash,))),
+        inner=tuple(inners),
         geography=replace(prepared.geography, data_manifest_hash=manifest.content_hash),
         policy_covariates=replace(prepared.policy_covariates,
             support_keys=tuple("empty" if i in empty else "s" for i in prepared.policy_covariates.original_ids)))
