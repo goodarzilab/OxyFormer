@@ -86,6 +86,8 @@ def amendment(approvals):
                      ("new_estimand", "supersedes", "non_target_frame_rows", "disclosures", "process_change"))
         valid &= value["new_estimand"] == ("the first application gets a new estimand ID and a locked analysis; "
                     "the current estimand ID is recorded as infeasible as specified and kept in the registry")
+        valid &= value["supersedes"] == ("frozen section 4.1 target, recorded as infeasible as specified "
+                    "(tract-gate-r2, 2026-10-10)")
         valid &= value["non_target_frame_rows"] == ("primary-eligible labelled rows are training rows for the outcome "
                     "regression and SSL; all others are inert; the density-ratio classifier fits on "
                     "target-distribution rows only (section 4.2)")

@@ -582,6 +582,15 @@ def test_a2_missing_or_malformed_owner_amendment_refuses(change):
         validate_approvals(config, approvals, v["data_manifest"], v["covariates"], v["geography"], v["atlas"])
 
 
+def test_a2_contradictory_supersedes_refuses_fabricated_dictionary():
+    from oxyformer.design.gate import amendment
+    approvals = yaml.safe_load(OWNER_APPROVALS.read_text())
+    assert amendment(approvals) == approvals["owner_decisions"]["tract_design_amendment"]
+    approvals["owner_decisions"]["tract_design_amendment"]["supersedes"] = "unrelated estimand"
+    with pytest.raises(MissingPrerequisite, match="missing or malformed owner_decisions.tract_design_amendment"):
+        amendment(approvals)
+
+
 @pytest.mark.parametrize("field", ["raw_x_radius", "bin_width_mmhg", "min_bin_tracts"])
 def test_a2_support_config_must_equal_amendment(field):
     v = make_inputs()
