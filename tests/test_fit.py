@@ -739,3 +739,125 @@ def test_extreme_weight_ratio_preserves_representable_origin_loss(tmp_path, smal
     expected_gradient = torch.tensor([[0., 0.], [small / 1e300, -small / 1e300]], dtype=torch.float64)
     torch.testing.assert_close(prediction.grad, expected_gradient, rtol=1e-10, atol=0.)
     assert pairs.origin_weights == (1e300, small, 1e300, small)
+
+
+# Reuse the public synthetic reference fixture; no study inputs enter tests.
+from test_context_invariance import setup as reference_setup, make_context
+
+
+def _uncached_reference_batch(context, ids):
+    references = context.references
+    indices = {oid: i for i, oid in enumerate(references.original_ids)}
+    view = replace(references, original_ids=ids,
+                   values=tuple(references.values[indices[oid]] for oid in ids),
+                   lineage=replace(references.lineage, unit_ids=ids))
+    return context.encoder.tokenizer.prepare(view)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_reference_reuse_preserves_training_transactions(reference_setup, monkeypatch, device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+    with fitting._numerics(device):
+        cached = make_context(reference_setup, dropout=0.1).to(device)
+        uncached = make_context(reference_setup, dropout=0.1).to(device)
+        uncached.load_state_dict(cached.state_dict())
+        monkeypatch.setattr(uncached, "_reference_batch",
+                            lambda ids: _uncached_reference_batch(uncached, ids))
+        prepared_ids = []
+        prepare = cached.encoder.tokenizer.prepare
+
+        def observed_prepare(view):
+            prepared_ids.extend(view.original_ids)
+            return prepare(view)
+
+        monkeypatch.setattr(cached.encoder.tokenizer, "prepare", observed_prepare)
+        optimizers = [torch.optim.AdamW(model.parameters(), lr=0.001)
+                      for model in (cached, uncached)]
+        queries, counties = ("t0", "t1", "t4"), ("c", "c", "singleton")
+        outputs = []
+        for model in (cached, uncached):
+            model.eval()
+            with torch.inference_mode():
+                outputs.append(model(queries, counties))
+        assert torch.equal(*outputs)
+        for step in range(2):
+            outputs = []
+            for model, optimizer in zip((cached, uncached), optimizers):
+                torch.manual_seed(1103 + step)
+                model.train()
+                optimizer.zero_grad()
+                result = model(queries, counties)
+                outputs.append(result.detach())
+                (result * torch.linspace(-1, 1, 64, device=device)).sum().backward()
+                optimizer.step()
+            assert torch.equal(*outputs)
+            for left, right in zip(cached.parameters(), uncached.parameters()):
+                assert torch.equal(left, right)
+                if left.grad is not None:
+                    assert torch.equal(left.grad, right.grad)
+        assert sorted(prepared_ids) == ["t0", "t1", "t2"]
+        assert cached.state_dict().keys() == uncached.state_dict().keys()
+
+
+def test_reference_reuse_tracks_preprocessing_dtype_and_order(reference_setup):
+    from dataclasses import fields
+
+    context = make_context(reference_setup)
+    for dtype, mean in ((torch.float32, 1.), (torch.float64, 3.), (torch.float32, -2.)):
+        context.to(dtype=dtype)
+        tokenizer = context.encoder.tokenizer
+        tokenizer.features = (replace(tokenizer.features[0], mean=mean), tokenizer.features[1])
+        for ids in (("t2", "t1"), ("t0", "t2", "t1"), ("t4", "t3"), ("t1",)):
+            actual = context._reference_batch(ids)
+            expected = _uncached_reference_batch(context, ids)
+            for field in fields(actual):
+                left, right = getattr(actual, field.name), getattr(expected, field.name)
+                assert left.dtype == right.dtype and left.device == right.device
+                assert torch.equal(left, right)
+
+
+def test_reference_reuse_does_not_prepare_excluded_values(reference_setup):
+    references = reference_setup[1]
+    # This finite double overflows scalar float32 assignment. It is immaterial
+    # to t0's own context, and must still fail when another query includes t0.
+    altered = replace(references, values=((7e38, "own"),) + references.values[1:])
+    context = make_context(reference_setup, refs=altered).eval()
+    ordinary = make_context(reference_setup).eval()
+    ordinary.load_state_dict(context.state_dict())
+    with torch.no_grad():
+        assert torch.equal(context(("t0",), ("c",)), ordinary(("t0",), ("c",)))
+        with pytest.raises(RuntimeError, match="overflow"):
+            context(("t1",), ("c",))
+
+
+@pytest.mark.parametrize("change", ["category_cell_type", "signed_zero_mean"])
+def test_reference_reuse_distinguishes_equal_preprocessing(reference_setup, change):
+    from dataclasses import fields
+    from oxyformer.models.tokens import FeatureSpec
+
+    features, references, split, counties = reference_setup
+    if change == "category_cell_type":
+        features = (features[0], FeatureSpec(name="cat", kind="categorical", categories=(1,)))
+        references = replace(references, values=((0., 1), (1., 1.0)) + references.values[2:])
+        updated = (features[0], replace(features[1], categories=(1.0,)))
+    else:
+        features = (replace(features[0], mean=0., scale=1.), features[1])
+        references = replace(references, values=((-0., "own"),) + references.values[1:])
+        updated = (replace(features[0], mean=-0.), features[1])
+    context = make_context((features, references, split, counties))
+    ids = ("t0", "t1")
+    old = context._reference_batch(ids)
+    old_hash = context.encoder.tokenizer.preprocessing_hash
+    assert features == updated  # Python equality is weaker than the schema.
+    context.encoder.tokenizer.features = updated
+    assert old_hash != context.encoder.tokenizer.preprocessing_hash
+    expected = _uncached_reference_batch(context, ids)
+    actual = context._reference_batch(ids)
+    changed = False
+    for field in fields(actual):
+        left, right = getattr(actual, field.name), getattr(expected, field.name)
+        assert left.dtype == right.dtype and left.shape == right.shape
+        assert left.numpy().tobytes() == right.numpy().tobytes()
+        changed |= getattr(old, field.name).numpy().tobytes() != right.numpy().tobytes()
+    assert changed

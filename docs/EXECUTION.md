@@ -171,3 +171,52 @@ excluded. Commit/push the anchored attempt branch, open a PR into `dev` only
 after REVIEW_PASS, and stop; the worker never merges or enables auto-merge.
 Write the declared evidence into `$SWARM_UNIT_DIR`, with `completion.json`
 last. That code receipt does not admit a scientific campaign.
+
+## Production nuisance cost diagnosis
+
+A quiet tuning directory does not establish a stalled fit. The nested controller
+retains minibatch state in memory and publishes an enclosing checkpoint at a
+slice boundary. Inspect its active epoch, step, sampler cursor and counts before
+attributing elapsed time to checkpoint I/O.
+
+The real-frame fold-0/inner-0 outcome grid-0 fit uses 19,434 labelled fitting
+rows, including 837 target rows, and 76 original-record minibatches per epoch.
+The A2 tract-design amendment uses the A0 architecture; it is not the A2
+no-context ablation. In bounded pre-repair profiles, repeated construction and
+validation of leave-self-out views dominated CPU time, while repeated scalar
+reference preparation dominated H100 host time. A 75-reference, 30-feature
+context call made 2,250 host-to-device scalar transfers. No per-minibatch durable
+checkpoint writes appeared in those supervised slices.
+
+`CountyContext` now retains only parameter-independent prepared reference
+inputs. Rows are prepared lazily with the existing scalar tokenizer, preserving
+its conversion and overflow behavior and leaving excluded values untouched.
+Each query gathers its own ordered rows before running the unchanged encoder
+and attention graph. Optimizer steps still recompute all learned activations
+and gradients. Preprocessing, device or dtype changes invalidate the prepared
+inputs. Immutable preprocessing objects are compared by identity: categorical
+`1` and `1.0`, or signed-zero means, must not collide through Python value
+equality. Inference-mode preparation retains ordinary tensors usable by later
+autograd calls. These inputs are private runtime caches, absent from checkpoint
+tensor state. Neither offset-profile pass is removed.
+
+The owner-authorized equivalence criterion compares scientific values and
+decisions exactly while retaining truthful production provenance. A source edit
+must change `scientific_code_hash`; enclosing checkpoint parent links also
+change. The attempt-local canonical comparison checks full SSL training state,
+both nuisance tensor states, tuning/epoch decisions, counts, preprocessing,
+calibration, audits and predictions at A and d(A,X). Its only removed provenance
+paths are the nuisance and four SSL identity source hashes, the two final
+bundles' validated `ssl_hash` parent-descriptor links, the prediction's
+validated enclosing-checkpoint parent link, and explicit checkpoint predecessor
+links (including a matching final SSL lineage parent when present). Artifact paths, ZIP timestamps and elapsed compute are retained as separate transport/measurement metadata, not
+scientific values. Checkpoint format remains version 1 with uncompressed tensor
+members; archive byte counts can change with embedded paths and elapsed-time
+text. Production fingerprints and resume identity checks are unchanged.
+
+The registered recipe remains FP32 with BF16 disabled, the same deterministic
+backend settings, original batch size 256, four grid points, 150 frozen epochs,
+three inner folds, five outer folds and three seeds. Full-fit and campaign
+projections from bounded profiles are extrapolations. They cannot establish
+campaign feasibility or authorize different epochs, stopping rules, precision,
+batch semantics, profile budgets or the four-GPU-hour leaf cap.
