@@ -220,3 +220,50 @@ three inner folds, five outer folds and three seeds. Full-fit and campaign
 projections from bounded profiles are extrapolations. They cannot establish
 campaign feasibility or authorize different epochs, stopping rules, precision,
 batch semantics, profile budgets or the four-GPU-hour leaf cap.
+
+### Opt-in recipe cost study
+
+`oxyformer.training.fit.RecipeStudy` is an explicit study parameter object for
+`FitConfig(study=...)` and `PreparedEndpoint.configuration(..., study=...)`.
+These are candidate amendments for an owner decision, not registered values.
+Campaign configuration, approvals, profiles, scenarios and allocation caps do
+not consume these overrides. `coverage.estimate_repetition(..., study=...)` is
+available to a separately invoked study; registered callers omit it.
+
+| Parameter | Default (existing behavior) | Study choices |
+| --- | --- | --- |
+| `reference_cap` | `None`: all permitted labelled county references | 32, 64, 128 (positive integers supported for synthetic diagnostics) |
+| `frozen_epochs` | `None`: inherit `NuisanceSettings.frozen_epochs`, registered 150 | 150, 60, 30 |
+| `grid_points` | 4 | 2: retain both registered learning rates, each at dropout 0 |
+| `seed_count` | 3: 1103, 2207, 3301 | 1: retain 1103 |
+
+The reference cap takes the first K sorted `original_id` values in the permitted
+county after removing the query itself. It uses no outcomes, exposure, weights
+or random state. This preserves the existing ordering and keeps precise geography
+outside the nuisance interface (plan 3.1); it is not nearest-distance selection.
+It caps each context call only, retaining all fitting rows, preprocessing/SSL
+ownership, both heads and county offset passes. The selected cap travels in model
+bundles so checkpoint reload and prediction use the same rule. In the two-point
+study, grid indices are 0/1 for learning rates 0.0003/0.001; registered indices
+remain 0/1/2/3. All three inner and five outer folds remain in repetition studies.
+
+Frozen fitting has no stopping score, resets its bad-epoch counter, and reaches
+its frozen epoch count. This study does not add patience-based stopping. Explicit
+training-local stopping sets retain the registered maximum 150 and patience 15;
+outer refits use the median selected inner epoch. SSL retains maximum 30 and
+patience five. A frozen-epoch override does not shorten explicitly stopped fits
+or SSL. One-seed studies average only the selected neural seed and bind the
+aggregate scoring split to that seed; original fold manifests remain unchanged.
+Neural seeds are not simulation repetitions. No final replication count changes.
+
+Default study fields are omitted from scientific identity and bundle payloads,
+preserving existing scientific values and decisions; changed package source has
+its truthful new fingerprint. Nondefault settings enter scientific identity, so
+a different study cannot resume a registered nuisance checkpoint. Default
+base/current comparisons allow only source fingerprints and validated enclosing
+checkpoint parent links, using the diagnosis's canonical scientific comparator.
+Study artifacts, timing slices, projections and candidate prediction differences
+belong in the attempt directory, never in this repository. A cost projection is
+not campaign admission or evidence of statistical adequacy. Candidate C (target
+plus supported training rows) is not implemented: the prior attempt's registered
+`PreparedEndpoint.validate` rejected all five folds under plan 5.1 minima.

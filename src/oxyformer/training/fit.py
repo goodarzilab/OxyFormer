@@ -97,6 +97,36 @@ class NuisanceSettings(Immutable):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class RecipeStudy(Immutable):
+    """Explicit cost-study overrides; these do not amend the registered recipe.
+
+    None inherits the current frozen schedule. Two grid points retain both
+    registered learning rates at zero dropout; one seed retains 1103.
+    """
+    reference_cap: int | None = None
+    frozen_epochs: int | None = None
+    grid_points: int = 4
+    seed_count: int = 3
+
+    def __post_init__(self):
+        Immutable.__post_init__(self)
+        require(self.reference_cap is None or
+                (type(self.reference_cap) is int and self.reference_cap > 0),
+                "reference cap must be a positive integer or None")
+        require(self.frozen_epochs is None or
+                (type(self.frozen_epochs) is int and self.frozen_epochs in (30, 60, 150)),
+                "study frozen epochs must be 30, 60, 150 or None")
+        require(type(self.grid_points) is int and self.grid_points in (2, 4),
+                "study grid points must be 2 or 4")
+        require(type(self.seed_count) is int and self.seed_count in (1, 3),
+                "study seed count must be 1 or 3")
+
+    @property
+    def seeds(self):
+        return (1103, 2207, 3301)[:self.seed_count]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class PredictionInputs(Immutable):
     """Treatment and routing are separate from the approved-X predictor view."""
     original_ids: tuple[str, ...]
@@ -155,6 +185,7 @@ class FitConfig:
     family: Literal["identity", "bernoulli", "poisson"] = "identity"
     population_field: str | None = None
     settings: NuisanceSettings = NuisanceSettings()
+    study: RecipeStudy = RecipeStudy()
     stopping_ids: tuple[tuple[int, tuple[str, ...]], ...] = ()
     ssl_epochs: int = 30
     predecessor: FoldArtifacts | None = None
@@ -165,6 +196,7 @@ class FitConfig:
     device: str = "auto"
 
     def __post_init__(self):
+        require(type(self.study) is RecipeStudy, "RecipeStudy required")
         require(type(self.data) is LoadedData and type(self.inner) is InnerSplit,
                 "explicit LoadedData and InnerSplit required")
         require(self.family in ("identity", "bernoulli", "poisson"), "unknown endpoint likelihood")
@@ -177,6 +209,15 @@ class FitConfig:
         require(math.isfinite(self.slice_seconds) and 0 < self.slice_seconds <= 14400 and
                 0 <= self.checkpoint_margin_seconds < self.slice_seconds, "invalid slice bound")
         require(len(dict(self.stopping_ids)) == len(self.stopping_ids), "duplicate stopping fold")
+
+    @property
+    def grid(self):
+        grid = self.settings.grid
+        return grid if self.study.grid_points == 4 else tuple(p for p in grid if p[1] == 0.)
+
+    @property
+    def frozen_epochs(self):
+        return self.settings.frozen_epochs if self.study.frozen_epochs is None else self.study.frozen_epochs
 
 
 def _hash(value):
@@ -263,7 +304,8 @@ def _build(bundle, *, encoder_state=None):
     split = SplitManifest.from_json(bundle["split"])
     references = CovariateView.from_json(bundle["references"])
     context = CountyContext(encoder, references, split, 0, tuple(bundle["counties"]),
-        county_field=bundle["county_field"], checkpoint_hash=bundle["ssl_hash"], dropout=bundle["dropout"])
+        county_field=bundle["county_field"], checkpoint_hash=bundle["ssl_hash"], dropout=bundle["dropout"],
+        reference_cap=bundle.get("reference_cap"))
     family = bundle["family"] if bundle["kind"] == "outcome" else "bernoulli"
     offsets = CountyOffsets(split, 0, tuple(bundle["counties"]), family=family,
                             exposure_assignment_level=bundle["exposure_assignment_level"])
@@ -591,6 +633,7 @@ def _validate(spec, split, manifest, config, seed):
     validate_split(split, manifest, config.entity_graph)
     require(split.level == "outer" and len(set(split.fold_ids)) == 5, "five outer folds required")
     require(seed in (1103, 2207, 3301) and seed in split.seed_ids, "unregistered nuisance seed")
+    require(seed in config.study.seeds, "seed excluded by cost study")
     require(config.inner.outer_fold == config.fold, "wrong inner parent fold")
     validate_split(config.inner.split, config.inner.data_manifest, config.inner.entity_graph)
     spec.assert_compatible(config.inner.split.spec)
@@ -626,6 +669,8 @@ def _science_identity(config, split, manifest, seed, allowed):
         policy=config.policy.to_dict(), treatment_design=config.treatment_design.to_dict(),
         stopping_ids=config.stopping_ids, ssl_epochs=config.ssl_epochs,
         policy_training_inputs=_inputs(config, allowed).to_dict())
+    if config.study != RecipeStudy():
+        science["recipe_study"] = config.study.to_dict()
     # Hash the executed package source, never generated outputs or path names.
     package = Path(__file__).resolve().parents[1]
     code = _hash([(str(path.relative_to(package)), file_hash(path))
@@ -785,6 +830,8 @@ def _bundle(config, split, fitting, initialization, kind, hyperparameters):
         exposure_assignment_level=config.exposure_assignment_level, family=config.family,
         kind=kind, treatment_design=config.treatment_design.to_json(),
         ssl_hash=initialization.content_hash, learning_rate=lr, dropout=dropout)
+    if config.study.reference_cap is not None:
+        bundle["reference_cap"] = config.study.reference_cap
     return bundle, encoder_state
 
 
@@ -861,12 +908,12 @@ def _fit_controller(config, outer, manifest, identity, controller, root, budget)
         stopping = tuple(dict(config.stopping_ids).get(fold, ()))
         local, fitting, held = _partition(config, config.inner.split, fold, stopping=stopping)
         audit = CalibrationPartition(fold=fold, evaluation_ids=held, fitting_ids=fitting,
-            checkpoint_ids=stopping, frozen_epochs=None if stopping else config.settings.frozen_epochs)
+            checkpoint_ids=stopping, frozen_epochs=None if stopping else config.frozen_epochs)
         audit.validate(outer_ids)
         partitions[fold] = (local, fitting, held, stopping)
         audits[fold] = audit
         tasks.append(("ssl", fold, None))
-        tasks.extend((kind, fold, grid) for kind in ("outcome", "origin") for grid in range(4))
+        tasks.extend((kind, fold, grid) for kind in ("outcome", "origin") for grid in range(len(config.grid)))
     outer_local, fitting, held = _partition(config, outer, config.fold)
     partitions[3] = (outer_local, fitting, held, ())
     tasks.extend((("select", 3, None), ("ssl", 3, None), ("outcome", 3, None), ("origin", 3, None)))
@@ -880,7 +927,7 @@ def _fit_controller(config, outer, manifest, identity, controller, root, budget)
             selected = {}
             for model_kind in ("outcome", "origin"):
                 candidates = []
-                for g in range(4):
+                for g in range(len(config.grid)):
                     values = [r for r in controller["results"] if r["kind"] == model_kind and r["grid"] == g]
                     scores = _pooled_metrics(values)
                     candidates.append((scores, g))
@@ -917,9 +964,9 @@ def _fit_controller(config, outer, manifest, identity, controller, root, budget)
                 grid = controller["selection"][kind]["grid"]
                 epochs = controller["selection"][kind]["epochs"]
             else:
-                epochs = config.settings.max_epochs if stopping else config.settings.frozen_epochs
+                epochs = config.settings.max_epochs if stopping else config.frozen_epochs
             initialization = CheckpointArtifact.from_json(controller["initializations"][fold])
-            bundle, encoder_state = _bundle(config, local, fitting, initialization, kind, config.settings.grid[grid])
+            bundle, encoder_state = _bundle(config, local, fitting, initialization, kind, config.grid[grid])
             view = subset(all_view, fitting)
             model, state, complete, reason = _train_one(config, bundle, encoder_state, view, stopping,
                 epochs, identity.seed, budget, controller["active"])

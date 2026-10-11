@@ -293,7 +293,8 @@ def test_incomplete_fold_stops_repetition_without_estimating(tmp_path, monkeypat
     assert calls == [(0, 1103)]
 
 
-def test_complete_controller_counts_fifteen_fits_as_one_repetition(tmp_path, monkeypatch):
+@pytest.mark.parametrize("seed_count", [3, 1])
+def test_complete_controller_counts_fifteen_fits_as_one_repetition(tmp_path, monkeypatch, seed_count):
     from types import SimpleNamespace
     from oxyformer.contracts import OOFNuisances
     endpoint, frame = synthetic_endpoint(tmp_path)
@@ -313,8 +314,11 @@ def test_complete_controller_counts_fifteen_fits_as_one_repetition(tmp_path, mon
             lineage=replace(prepared.data.manifest.lineage, unit_ids=ids, split_hash=prepared.outer.content_hash))
     monkeypatch.setattr(coverage.nested_cv, "run_fold", fake_fit)
     monkeypatch.setattr(coverage.nested_cv, "predict", fake_predict)
-    result = coverage.estimate_repetition(prepared, smoke_recipe(endpoint, frame), tmp_path, coverage.time.monotonic() + 60)
-    assert calls == [(fold, seed) for fold in range(5) for seed in coverage.nested_cv.SEEDS]
+    from oxyformer.training.fit import RecipeStudy
+    result = coverage.estimate_repetition(prepared, smoke_recipe(endpoint, frame), tmp_path,
+        coverage.time.monotonic() + 60, study=RecipeStudy(seed_count=seed_count))
+    assert calls == [(fold, seed) for fold in range(5) for seed in coverage.nested_cv.SEEDS[:seed_count]]
+    assert prepared.outer.seed_ids == coverage.nested_cv.SEEDS
     assert set(result) == set(coverage.METHODS)
     assert all(type(value["value"]) is float and type(value["se"]) is float for value in result.values())
     assert result["one_step"]["value"] == 0

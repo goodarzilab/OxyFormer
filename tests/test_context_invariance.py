@@ -268,3 +268,47 @@ def test_context_dropout_and_cache_are_disabled_during_training(setup):
         context.clear_cache()
         assert not torch.equal(context(("h0",), ("c",)), context(("h0",), ("c",)))
         assert context.cache_keys == ()
+
+
+@pytest.mark.parametrize("cap", [1, 2, 32, 64, 128])
+def test_study_cap_is_seedless_permutation_invariant_and_self_out(setup, cap):
+    features, refs, split, counties = setup
+    context = CountyContext(FeatureEncoder(features), refs, split, 0, counties,
+        county_field="county", checkpoint_hash=digest("checkpoint"), reference_cap=cap)
+    for query, county in (("t0", "c"), ("t1", "c"), ("t2", "c"), ("h0", "c"),
+                          ("t4", "singleton"), ("new", "unseen")):
+        expected = tuple(sorted(i for i, c in zip(refs.original_ids, counties)
+                                if c == county and i != query))[:cap]
+        assert context._reference_ids(query, county) == expected
+        torch.manual_seed(3301)
+        context._routes = dict(reversed(tuple(context._routes.items())))
+        assert context._reference_ids(query, county) == expected
+        assert query not in expected
+    # Changed approved X cannot affect which references are selected.
+    changed = replace(refs, values=tuple((999., row[1]) for row in refs.values))
+    other = CountyContext(FeatureEncoder(features), changed, split, 0, counties,
+        county_field="county", checkpoint_hash=digest("checkpoint"), reference_cap=cap)
+    assert other._reference_ids("t0", "c") == context._reference_ids("t0", "c")
+
+
+def test_study_cap_none_preserves_tensor_bytes_and_caps_actual_pool(setup, monkeypatch):
+    from oxyformer.provenance import canonical_json
+    plain = make_context(setup).eval()
+    features, refs, split, counties = setup
+    explicit = CountyContext(FeatureEncoder(features, dropout=0.), refs, split, 0, counties,
+        county_field="county", checkpoint_hash=digest("checkpoint"), dropout=0., reference_cap=None).eval()
+    explicit.load_state_dict(plain.state_dict())
+    with torch.no_grad():
+        a, b = plain(("t0", "h0"), ("c", "c")), explicit(("t0", "h0"), ("c", "c"))
+    assert a.numpy().tobytes() == b.numpy().tobytes()
+    assert canonical_json([k.reference_ids for k in plain.cache_keys]) == canonical_json([k.reference_ids for k in explicit.cache_keys])
+    calls = []
+    original = explicit._pool
+    def pool(ids):
+        calls.append(ids)
+        return original(ids)
+    monkeypatch.setattr(explicit, "_pool", pool)
+    explicit.reference_cap = 1
+    with torch.no_grad():
+        explicit(("t0", "h0"), ("c", "c"))
+    assert calls == [("t1",), ("t0",)]

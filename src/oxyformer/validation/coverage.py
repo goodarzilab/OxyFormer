@@ -271,22 +271,26 @@ def bind_observations(template, observations):
                    geography=replace(template.geography, data_manifest_hash=manifest.content_hash))
 
 
-def estimate_repetition(endpoint, recipe, root, deadline):
-    """All five folds, three neural seeds, the merged tuning and calibration."""
+def estimate_repetition(endpoint, recipe, root, deadline, *, study=None):
+    """All five folds with nested tuning; study overrides require explicit use."""
     from oxyformer.estimation.mtp import one_step
     from oxyformer.estimation.targeting import cv_tmle
     from oxyformer.estimation.covariance import align_estimates, spatial_sensitivities
-    from oxyformer.training.fit import subset
+    from oxyformer.training.fit import RecipeStudy, subset
 
+    study = RecipeStudy() if study is None else study
+    require(type(study) is RecipeStudy, "RecipeStudy required")
+    seeds = study.seeds
+    scoring_split = endpoint.outer if study.seed_count == 3 else replace(endpoint.outer, seed_ids=seeds)
     options = nested_cv._settings(recipe, endpoint)
     parts = []
     for fold in range(5):
-        for neural_seed in nested_cv.SEEDS:
+        for neural_seed in seeds:
             remaining = min(14400., deadline - time.monotonic())
             if remaining <= 0:
                 return None
             config = endpoint.configuration(fold, root / f"fold-{fold}-seed-{neural_seed}",
-                **options, slice_seconds=remaining, checkpoint_margin_seconds=min(1., remaining / 10))
+                **options, study=study, slice_seconds=remaining, checkpoint_margin_seconds=min(1., remaining / 10))
             artifact = nested_cv.run_fold(config, endpoint.outer, neural_seed, geography=endpoint.geography)
             if not artifact.complete:
                 return None
@@ -296,14 +300,14 @@ def estimate_repetition(endpoint, recipe, root, deadline):
     names = ("original_ids", "fold_ids", "seed_ids", "mu_a", "mu_d", "r_a", "r_d", "origin_weights")
     values = {name: tuple(v for part in parts for v in getattr(part, name)) for name in names}
     lineage = replace(parts[0].lineage, unit_ids=endpoint.outer.original_ids,
-        split_hash=endpoint.outer.content_hash, parent_hashes=(endpoint.data.manifest.content_hash,
+        split_hash=scoring_split.content_hash, parent_hashes=(endpoint.data.manifest.content_hash,
         *(part.content_hash for part in parts)), model_hash=None, seed=None, parameter_count=None)
     nuisances = OOFNuisances(spec=endpoint.data.manifest.spec, lineage=lineage, **values)
     weights = dict(zip(endpoint.data.manifest.original_ids,
         (1.,) * len(endpoint.data.rows) if endpoint.data.manifest.weight_field is None
         else endpoint.data.column(endpoint.data.manifest.weight_field)))
     weights = {oid: weights[oid] for oid in endpoint.outer.original_ids}
-    common = dict(split=endpoint.outer, policy=endpoint.policy)
+    common = dict(split=scoring_split, policy=endpoint.policy)
     estimates = {"one_step": one_step(nuisances, endpoint.data, weights, nuisances.spec, **common),
                  "cv_tmle": cv_tmle(nuisances, endpoint.data, weights, "identity", nuisances.spec, **common).estimate}
     by_id = {r.original_id: r for r in endpoint.geography.rows}
