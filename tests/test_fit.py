@@ -861,3 +861,42 @@ def test_reference_reuse_distinguishes_equal_preprocessing(reference_setup, chan
         assert left.numpy().tobytes() == right.numpy().tobytes()
         changed |= getattr(old, field.name).numpy().tobytes() != right.numpy().tobytes()
     assert changed
+
+
+def test_recipe_study_defaults_preserve_science_identity_and_partitions(tmp_path):
+    spec, outer, manifest, config = make_case(tmp_path)
+    config = replace(config, device="cpu")
+    explicit = replace(config, study=fitting.RecipeStudy())
+    assert config.grid == config.settings.grid
+    assert config.frozen_epochs == config.settings.frozen_epochs
+    allowed = outer.training_ids(0)
+    with fitting._numerics("cpu"):
+        assert fitting._science_identity(config, outer, manifest, 1103, allowed).to_json() == \
+            fitting._science_identity(explicit, outer, manifest, 1103, allowed).to_json()
+    assert _partition(config, config.inner.split, 0) == _partition(explicit, config.inner.split, 0)
+    assert fitting.study_split(explicit, outer) is outer
+    reduced = replace(config, study=fitting.RecipeStudy(grid_points=2, frozen_epochs=60))
+    assert reduced.grid == ((3e-4, 0.), (1e-3, 0.))
+    assert reduced.frozen_epochs == 60
+    assert reduced.settings.to_json() == config.settings.to_json()
+    with fitting._numerics("cpu"):
+        assert fitting._science_identity(config, outer, manifest, 1103, allowed).config_hash != \
+            fitting._science_identity(reduced, outer, manifest, 1103, allowed).config_hash
+
+
+def test_frozen_study_schedule_does_not_use_patience(completed, tmp_path):
+    case, artifact = completed
+    config = replace(case[-1], output_dir=str(tmp_path), study=fitting.RecipeStudy(frozen_epochs=30))
+    bundle = dict(state(artifact)["final"]["outcome"])
+    bundle.pop("state")
+    refs = fitting.CovariateView.from_json(bundle["references"])
+    view = replace(refs, use="nuisance")
+    budget = _Budget(config, CheckpointRequest())
+    with fitting._numerics("cpu"):
+        _, saved, complete, reason = _train_one(config, bundle, None, view, (),
+            config.frozen_epochs, 1103, budget)
+    assert complete and reason == "max_epochs"
+    assert saved["progress"]["epoch"] == saved["progress"]["best_epoch"] == 30
+    assert saved["progress"]["bad_epochs"] == 0
+    assert saved["progress"]["history"] == [None] * 30
+    assert config.settings.patience == 15

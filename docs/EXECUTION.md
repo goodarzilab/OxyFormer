@@ -220,3 +220,45 @@ three inner folds, five outer folds and three seeds. Full-fit and campaign
 projections from bounded profiles are extrapolations. They cannot establish
 campaign feasibility or authorize different epochs, stopping rules, precision,
 batch semantics, profile budgets or the four-GPU-hour leaf cap.
+
+### Opt-in recipe cost studies
+
+`training.fit.RecipeStudy` describes study parameters, **not registered values**.
+Pass it as `study=` to `PreparedEndpoint.configuration` / `FitConfig`, or to
+`validation.coverage.estimate_repetition`. Registered recipe loaders and stage
+campaigns do not read study overrides from their locks. Defaults retain the
+existing serialized scientific identities and decisions; nondefault parameters
+are included in checkpoint configuration identities. Production source hashes
+remain truthful.
+
+| Parameter | Default | Study behavior |
+| --- | --- | --- |
+| `reference_cap` | `None` | At most K labelled same-county references per query; study K values 32, 64, 128. |
+| `supported_training_only` | `False` | Fit on target rows plus training-role rows with nonempty frozen support. |
+| `frozen_epochs` | `None` | Inherit existing settings (150 registered); opt into 150, 60 or 30. |
+| `grid_points` | `4` | `2` retains both registered learning rates with dropout zero; all inner folds and both heads remain tuned. |
+| `seed_count` | `3` | `1` runs seed 1103 in a study repetition; scoring uses an explicit runtime copy declaring that seed set. |
+
+Reference capping sorts eligible `original_id` strings lexicographically, excludes
+the query itself, then takes K. It is deterministic, seedless and outcome-blind;
+reference row order and RNG consumption at the uncapped default are unchanged.
+The rule uses the existing ID/county-only context interface and introduces no
+geographic predictor input. The cap is saved with the model bundle and honored
+when reconstructing predictions, including supported context ablations.
+
+The frame-shrink study uses published membership and frozen support, never a
+new support fit. Its retained partition owns preprocessing, SSL, context,
+supervised gradients and offset fitting; classifier queries remain target-only.
+Held-out targets, geographic fold assignments and prior exclusions stay fixed.
+The same effective partitions must pass existing eight-outer/four-inner labelled
+tract minima. On the published real frame candidate C fails those minima;
+C and A64+C timings are diagnostic microbenchmarks, not admitted nested runs or
+coverage results. They cannot justify dropping target counties or waiving gates.
+
+Frozen fits have no validation score and run their entire frozen epoch count:
+the existing patience-15 rule cannot stop them. Explicit training-local stopping
+partitions still use the registered maximum and patience; SSL retains maximum
+30 epochs and patience five. Cost projections for other epochs, grids and seed
+counts are extrapolations, not measured completed campaigns. No study parameter
+changes registered scenarios, replication requirements, profile budgets, or the
+four-GPU-hour leaf cap. Any recipe decision remains with the owner.

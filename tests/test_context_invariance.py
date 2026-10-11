@@ -268,3 +268,39 @@ def test_context_dropout_and_cache_are_disabled_during_training(setup):
         context.clear_cache()
         assert not torch.equal(context(("h0",), ("c",)), context(("h0",), ("c",)))
         assert context.cache_keys == ()
+
+
+@pytest.mark.parametrize("cap", [1, 2, 32, 64, 128, None])
+def test_reference_cap_is_seedless_sorted_and_leave_self_out(setup, cap):
+    features, refs, split, counties = setup
+    context = CountyContext(FeatureEncoder(features, dropout=0), refs, split, 0, counties,
+        county_field="county", checkpoint_hash=digest("checkpoint"), dropout=0, reference_cap=cap)
+    before = torch.get_rng_state().clone()
+    expected = ("t1", "t2") if cap is None else ("t1", "t2")[:cap]
+    assert context._reference_ids("t0", "c") == expected
+    assert context._reference_ids("t0", "c") == expected
+    assert torch.equal(before, torch.get_rng_state())
+    assert context._reference_ids("t4", "singleton") == ()
+    order = (4, 2, 0, 3, 1)
+    ids = tuple(refs.original_ids[i] for i in order)
+    permuted = replace(refs, original_ids=ids, values=tuple(refs.values[i] for i in order),
+                       lineage=replace(refs.lineage, unit_ids=ids))
+    other = CountyContext(FeatureEncoder(features, dropout=0), permuted, split, 0,
+        tuple(counties[i] for i in order), county_field="county",
+        checkpoint_hash=digest("checkpoint"), dropout=0, reference_cap=cap)
+    other.load_state_dict(context.state_dict())
+    context.eval()
+    other.eval()
+    with torch.no_grad():
+        left = context(("t0", "h0"), ("c", "c"))
+        right = other(("t0", "h0"), ("c", "c"))
+    assert torch.equal(left.view(torch.uint8), right.view(torch.uint8))
+    assert context.cache_keys[0].reference_ids == expected
+
+
+@pytest.mark.parametrize("cap", [0, -1, True, 1.5])
+def test_reference_cap_rejects_invalid_values(setup, cap):
+    features, refs, split, counties = setup
+    with pytest.raises(ContractError, match="reference cap"):
+        CountyContext(FeatureEncoder(features), refs, split, 0, counties,
+            county_field="county", checkpoint_hash=digest("checkpoint"), reference_cap=cap)

@@ -97,6 +97,35 @@ class NuisanceSettings(Immutable):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class RecipeStudy(Immutable):
+    """Opt-in cost-study parameters; never a registered recipe amendment.
+
+    None inherits the existing frozen schedule (150 in registered runs). Two
+    grid points retain both learning rates at zero dropout. One seed retains
+    1103. Reference selection uses sorted original IDs, after self-exclusion.
+    """
+    reference_cap: int | None = None
+    supported_training_only: bool = False
+    frozen_epochs: int | None = None
+    grid_points: int = 4
+    seed_count: int = 3
+
+    def __post_init__(self):
+        Immutable.__post_init__(self)
+        require(self.reference_cap is None or
+                (type(self.reference_cap) is int and self.reference_cap > 0),
+                "reference cap must be a positive integer or None")
+        require(type(self.supported_training_only) is bool, "invalid fitting-row study flag")
+        require(self.frozen_epochs is None or
+                (type(self.frozen_epochs) is int and self.frozen_epochs in (30, 60, 150)),
+                "study frozen epochs must be 30, 60, 150 or None")
+        require(type(self.grid_points) is int and self.grid_points in (2, 4),
+                "study grid points must be 2 or 4")
+        require(type(self.seed_count) is int and self.seed_count in (1, 3),
+                "study seed count must be 1 or 3")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class PredictionInputs(Immutable):
     """Treatment and routing are separate from the approved-X predictor view."""
     original_ids: tuple[str, ...]
@@ -155,6 +184,7 @@ class FitConfig:
     family: Literal["identity", "bernoulli", "poisson"] = "identity"
     population_field: str | None = None
     settings: NuisanceSettings = NuisanceSettings()
+    study: RecipeStudy = RecipeStudy()
     stopping_ids: tuple[tuple[int, tuple[str, ...]], ...] = ()
     ssl_epochs: int = 30
     predecessor: FoldArtifacts | None = None
@@ -165,6 +195,7 @@ class FitConfig:
     device: str = "auto"
 
     def __post_init__(self):
+        require(type(self.study) is RecipeStudy, "RecipeStudy required")
         require(type(self.data) is LoadedData and type(self.inner) is InnerSplit,
                 "explicit LoadedData and InnerSplit required")
         require(self.family in ("identity", "bernoulli", "poisson"), "unknown endpoint likelihood")
@@ -177,6 +208,44 @@ class FitConfig:
         require(math.isfinite(self.slice_seconds) and 0 < self.slice_seconds <= 14400 and
                 0 <= self.checkpoint_margin_seconds < self.slice_seconds, "invalid slice bound")
         require(len(dict(self.stopping_ids)) == len(self.stopping_ids), "duplicate stopping fold")
+
+    @property
+    def grid(self):
+        grid = self.settings.grid
+        return grid if self.study.grid_points == 4 else tuple(p for p in grid if p[1] == 0.)
+
+    @property
+    def frozen_epochs(self):
+        return self.settings.frozen_epochs if self.study.frozen_epochs is None else self.study.frozen_epochs
+
+
+def study_fitting_ids(config, parent, ids):
+    """Preserve targets; optionally remove exactly empty-support training rows.
+
+    No eligibility, exposure, label, or support estimation happens here. SSL,
+    preprocessing and both nuisance reference sets use this same partition.
+    """
+    if not config.study.supported_training_only:
+        return tuple(ids)
+    roles = dict(zip(parent.frame_original_ids, parent.roles))
+    keys = dict(zip(config.policy_covariates.original_ids, config.policy_covariates.support_keys))
+    support = dict(config.policy.components_by_key)
+    return tuple(i for i in ids if roles[i] == "target" or
+                 (roles[i] == "training" and bool(support[keys[i]])))
+
+
+def study_split(config, parent):
+    """A runtime exclusion copy for auditing the study's effective partitions."""
+    if not config.study.supported_training_only:
+        return parent
+    exclusions = dict(parent.training_exclusions)
+    for fold in sorted(set(parent.geographic_fold_ids)):
+        permitted = parent.training_ids(fold)
+        retained = set(study_fitting_ids(config, parent, permitted))
+        removed = set(exclusions.get(fold, ())) | (set(permitted) - retained)
+        if removed:
+            exclusions[fold] = tuple(i for i in parent.frame_training_ids(fold) if i in removed)
+    return replace(parent, training_exclusions=tuple(sorted(exclusions.items())))
 
 
 def _hash(value):
@@ -222,7 +291,7 @@ def _take_inputs(inputs, ids):
 def _partition(config, parent, fold, *, stopping=()):
     """Derive a fitting-only manifest; sealed/excluded IDs retain their status."""
     stopping = tuple(stopping)
-    allowed = parent.training_ids(fold)
+    allowed = study_fitting_ids(config, parent, parent.training_ids(fold))
     require(len(set(stopping)) == len(stopping) and set(stopping) < set(allowed),
             "stopping records must be inside the fitting partition")
     fitting = tuple(oid for oid in allowed if oid not in set(stopping))
@@ -263,7 +332,8 @@ def _build(bundle, *, encoder_state=None):
     split = SplitManifest.from_json(bundle["split"])
     references = CovariateView.from_json(bundle["references"])
     context = CountyContext(encoder, references, split, 0, tuple(bundle["counties"]),
-        county_field=bundle["county_field"], checkpoint_hash=bundle["ssl_hash"], dropout=bundle["dropout"])
+        county_field=bundle["county_field"], checkpoint_hash=bundle["ssl_hash"], dropout=bundle["dropout"],
+        reference_cap=bundle.get("reference_cap"))
     family = bundle["family"] if bundle["kind"] == "outcome" else "bernoulli"
     offsets = CountyOffsets(split, 0, tuple(bundle["counties"]), family=family,
                             exposure_assignment_level=bundle["exposure_assignment_level"])
@@ -626,6 +696,8 @@ def _science_identity(config, split, manifest, seed, allowed):
         policy=config.policy.to_dict(), treatment_design=config.treatment_design.to_dict(),
         stopping_ids=config.stopping_ids, ssl_epochs=config.ssl_epochs,
         policy_training_inputs=_inputs(config, allowed).to_dict())
+    if config.study != RecipeStudy():
+        science["recipe_study"] = config.study.to_dict()
     # Hash the executed package source, never generated outputs or path names.
     package = Path(__file__).resolve().parents[1]
     code = _hash([(str(path.relative_to(package)), file_hash(path))
@@ -785,6 +857,8 @@ def _bundle(config, split, fitting, initialization, kind, hyperparameters):
         exposure_assignment_level=config.exposure_assignment_level, family=config.family,
         kind=kind, treatment_design=config.treatment_design.to_json(),
         ssl_hash=initialization.content_hash, learning_rate=lr, dropout=dropout)
+    if config.study.reference_cap is not None:
+        bundle["reference_cap"] = config.study.reference_cap
     return bundle, encoder_state
 
 
@@ -861,12 +935,12 @@ def _fit_controller(config, outer, manifest, identity, controller, root, budget)
         stopping = tuple(dict(config.stopping_ids).get(fold, ()))
         local, fitting, held = _partition(config, config.inner.split, fold, stopping=stopping)
         audit = CalibrationPartition(fold=fold, evaluation_ids=held, fitting_ids=fitting,
-            checkpoint_ids=stopping, frozen_epochs=None if stopping else config.settings.frozen_epochs)
+            checkpoint_ids=stopping, frozen_epochs=None if stopping else config.frozen_epochs)
         audit.validate(outer_ids)
         partitions[fold] = (local, fitting, held, stopping)
         audits[fold] = audit
         tasks.append(("ssl", fold, None))
-        tasks.extend((kind, fold, grid) for kind in ("outcome", "origin") for grid in range(4))
+        tasks.extend((kind, fold, grid) for kind in ("outcome", "origin") for grid in range(len(config.grid)))
     outer_local, fitting, held = _partition(config, outer, config.fold)
     partitions[3] = (outer_local, fitting, held, ())
     tasks.extend((("select", 3, None), ("ssl", 3, None), ("outcome", 3, None), ("origin", 3, None)))
@@ -880,7 +954,7 @@ def _fit_controller(config, outer, manifest, identity, controller, root, budget)
             selected = {}
             for model_kind in ("outcome", "origin"):
                 candidates = []
-                for g in range(4):
+                for g in range(len(config.grid)):
                     values = [r for r in controller["results"] if r["kind"] == model_kind and r["grid"] == g]
                     scores = _pooled_metrics(values)
                     candidates.append((scores, g))
@@ -917,9 +991,9 @@ def _fit_controller(config, outer, manifest, identity, controller, root, budget)
                 grid = controller["selection"][kind]["grid"]
                 epochs = controller["selection"][kind]["epochs"]
             else:
-                epochs = config.settings.max_epochs if stopping else config.settings.frozen_epochs
+                epochs = config.settings.max_epochs if stopping else config.frozen_epochs
             initialization = CheckpointArtifact.from_json(controller["initializations"][fold])
-            bundle, encoder_state = _bundle(config, local, fitting, initialization, kind, config.settings.grid[grid])
+            bundle, encoder_state = _bundle(config, local, fitting, initialization, kind, config.grid[grid])
             view = subset(all_view, fitting)
             model, state, complete, reason = _train_one(config, bundle, encoder_state, view, stopping,
                 epochs, identity.seed, budget, controller["active"])

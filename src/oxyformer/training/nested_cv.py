@@ -187,7 +187,9 @@ def _validate_geography(data, graph, outer, inner, geography, county_field, fold
 
 
 def _check_fitting_minima(config, outer, geography):
-    return _validate_geography(config.data, config.entity_graph, outer, config.inner,
+    effective_outer = fitting.study_split(config, outer)
+    effective_inner = replace(config.inner, split=fitting.study_split(config, config.inner.split))
+    return _validate_geography(config.data, config.entity_graph, effective_outer, effective_inner,
                                geography, config.county_field, config.fold, config.stopping_ids)
 
 
@@ -224,7 +226,7 @@ def _validate_fitting(spec, split, manifest, config, seed):
     return allowed
 
 def _partition(config, parent, fold, *, stopping=()):
-    allowed = parent.training_ids(fold)
+    allowed = fitting.study_fitting_ids(config, parent, parent.training_ids(fold))
     stopping = tuple(stopping)
     require(len(set(stopping)) == len(stopping) and set(stopping) < set(allowed),
             "stopping records must be inside the fitting partition")
@@ -250,7 +252,8 @@ def _build(bundle, *, encoder_state=None):
     references = CovariateView.from_json(bundle["references"])
     context = None if variant == "A2" else CountyContext(encoder, references, split, 0,
         tuple(bundle["counties"]), county_field=bundle["county_field"],
-        checkpoint_hash=bundle["ssl_hash"], dropout=bundle["dropout"])
+        checkpoint_hash=bundle["ssl_hash"], dropout=bundle["dropout"],
+        reference_cap=bundle.get("reference_cap"))
     def offsets(family):
         return CountyOffsets(split, 0, tuple(bundle["counties"]), family=family,
             exposure_assignment_level=bundle["exposure_assignment_level"])
@@ -474,18 +477,18 @@ def _advance(config, outer, manifest, identity, controller, root, budget, varian
         if not held:
             continue
         audit = CalibrationPartition(fold=fold, evaluation_ids=held, fitting_ids=fitting,
-            checkpoint_ids=stopping, frozen_epochs=None if stopping else config.settings.frozen_epochs)
+            checkpoint_ids=stopping, frozen_epochs=None if stopping else config.frozen_epochs)
         audit.validate(outer_ids)
         partitions[fold] = (local, fitting, held, stopping)
         outcome_audits[fold] = audit
         origin_stopping = tuple(i for i in stopping if i in targets)
         origin_audit = replace(audit, fitting_ids=tuple(i for i in fitting if i in targets),
             checkpoint_ids=origin_stopping,
-            frozen_epochs=None if origin_stopping else config.settings.frozen_epochs)
+            frozen_epochs=None if origin_stopping else config.frozen_epochs)
         origin_audit.validate(outer_ids)
         audits[fold] = origin_audit
         tasks.append(("ssl", fold, None))
-        tasks.extend((kind, fold, grid) for kind in ("outcome", "origin") for grid in range(4))
+        tasks.extend((kind, fold, grid) for kind in ("outcome", "origin") for grid in range(len(config.grid)))
     outer_local, fitting, held = _partition(config, outer, config.fold)
     partitions[3] = (outer_local, fitting, held, ())
     tasks.extend((("select", 3, None), ("ssl", 3, None), ("outcome", 3, None), ("origin", 3, None)))
@@ -499,7 +502,7 @@ def _advance(config, outer, manifest, identity, controller, root, budget, varian
             selected = {}
             for model_kind in ("outcome", "origin"):
                 candidates = []
-                for g in range(4):
+                for g in range(len(config.grid)):
                     values = [r for r in controller["results"] if r["kind"] == model_kind and r["grid"] == g]
                     scores = _pooled_metrics(values)
                     candidates.append((scores, g))
@@ -542,9 +545,9 @@ def _advance(config, outer, manifest, identity, controller, root, budget, varian
                 grid = controller["selection"][kind]["grid"]
                 epochs = controller["selection"][kind]["epochs"]
             else:
-                epochs = config.settings.max_epochs if model_stopping else config.settings.frozen_epochs
+                epochs = config.settings.max_epochs if model_stopping else config.frozen_epochs
             initialization = CheckpointArtifact.from_json(controller["initializations"][fold])
-            bundle, encoder_state = _bundle(config, local, fitting, initialization, kind, config.settings.grid[grid])
+            bundle, encoder_state = _bundle(config, local, fitting, initialization, kind, config.grid[grid])
             bundle["variant"] = variant
             # SSL and the outcome nuisance use every labelled fitting row.
             # Classification gradients, stopping and calibration use only T.

@@ -521,3 +521,88 @@ def test_origin_stopping_regime_uses_only_target_rows(tmp_path, monkeypatch):
     outcome = next(r for r in state(artifact)['results'] if r['kind'] == 'outcome' and r['fold'] == 0)
     audit = nested.CalibrationPartition.from_json(outcome['ownership'])
     assert audit.checkpoint_ids == stopping and audit.frozen_epochs is None
+
+
+def supported_study_endpoint(root):
+    """Mixed roles with two empty-support training rows and supported training rows."""
+    prepared = mixed_role_endpoint(root)
+    policy = replace(prepared.policy, components_by_key=prepared.policy.components_by_key + (("empty", ()),))
+    spec = replace(prepared.data.manifest.spec, policy_id=policy.policy_id)
+    manifest = replace(prepared.data.manifest, spec=spec)
+    empty = {"o08", "o12"}
+    return replace(prepared, data=replace(prepared.data, manifest=manifest), policy=policy,
+        outer=replace(prepared.outer, spec=spec),
+        inner=tuple(replace(i, data_manifest=replace(i.data_manifest, spec=spec),
+                            split=replace(i.split, spec=spec)) for i in prepared.inner),
+        geography=replace(prepared.geography, data_manifest_hash=manifest.content_hash),
+        policy_covariates=replace(prepared.policy_covariates,
+            support_keys=tuple("empty" if i in empty else "s" for i in prepared.policy_covariates.original_ids)))
+
+
+def test_study_defaults_reproduce_full_nested_science(full, tmp_path):
+    from oxyformer.training.fit import RecipeStudy
+    prepared, expected = full
+    actual = nested.run_fold(tiny_config(prepared, tmp_path / "fit", study=RecipeStudy()),
+                             prepared.outer, 1103, geography=prepared.geography)
+    assert_fitted_invariant(expected, actual)
+    assert_prediction_invariant(predictions(prepared, expected), predictions(prepared, actual))
+    assert state(expected)["selection"] == state(actual)["selection"]
+    assert state(expected)["results"] == state(actual)["results"]
+    assert state(expected)["counts"] == state(actual)["counts"]
+
+
+def test_study_two_grid_points_retain_nested_tuning(tmp_path):
+    from oxyformer.training.fit import RecipeStudy
+    prepared, artifact = fitted(tmp_path / "fit", study=RecipeStudy(grid_points=2, reference_cap=1))
+    controller = state(artifact)
+    assert artifact.complete
+    assert controller["counts"]["nuisance_fits"] == 14
+    assert controller["counts"]["ssl_fits"] == 4
+    assert {(r["fold"], r["kind"], r["grid"]) for r in controller["results"]} == {
+        (f, kind, grid) for f in range(3) for kind in ("outcome", "origin") for grid in range(2)}
+    for bundle in controller["final"].values():
+        assert bundle["dropout"] == 0.
+        assert bundle["learning_rate"] in (3e-4, 1e-3)
+        assert nested._build(bundle).county_context.reference_cap == 1
+
+
+def test_study_c_excludes_exactly_empty_support_training_rows(tmp_path, monkeypatch):
+    from oxyformer.training.fit import RecipeStudy, study_fitting_ids
+    prepared = supported_study_endpoint(tmp_path)
+    config = tiny_config(prepared, tmp_path / "fit", study=RecipeStudy(supported_training_only=True))
+    original_ids = prepared.outer.training_ids(0)
+    assert study_fitting_ids(config, prepared.outer, original_ids) == tuple(
+        i for i in original_ids if i not in {"o08", "o12"})
+    assert "o16" in study_fitting_ids(config, prepared.outer, original_ids)
+    calls = []
+    original = nested._train_transaction
+    def observe(config, bundle, encoder_state, view, stopping, *args, **kwargs):
+        refs = nested.CovariateView.from_json(bundle["references"])
+        assert set(view.original_ids).isdisjoint({"o08", "o12"})
+        assert set(refs.original_ids).isdisjoint({"o08", "o12"})
+        calls.append(bundle["kind"])
+        return original(config, bundle, encoder_state, view, stopping, *args, **kwargs)
+    monkeypatch.setattr(nested, "_train_transaction", observe)
+    artifact = nested.run_fold(config, prepared.outer, 1103, geography=prepared.geography)
+    assert artifact.complete and set(calls) == {"outcome", "origin"}
+    controller = state(artifact)
+    for value in controller["initializations"].values():
+        ssl = CheckpointArtifact.from_json(value)
+        assert set(ssl.identity.training_ids).isdisjoint({"o08", "o12"})
+    assert artifact.prediction_inputs.original_ids == prepared.outer.evaluation_ids(0)
+
+
+def test_study_c_keeps_frozen_fitting_minima(tmp_path):
+    from oxyformer.training.fit import RecipeStudy
+    prepared = supported_study_endpoint(tmp_path)
+    roles = {i: "target" if i == "o01" else "inert" if i == "o29" else "training"
+             for i in prepared.outer.frame_ids}
+    def narrow(split):
+        selected = [(i, f) for i, f in zip(split.original_ids, split.fold_ids) if roles[i] == "target"]
+        return replace(split, original_ids=tuple(i for i, _ in selected),
+            fold_ids=tuple(f for _, f in selected), membership_roles=tuple(roles[i] for i in split.frame_ids))
+    prepared = replace(prepared, outer=narrow(prepared.outer),
+        inner=tuple(replace(i, split=narrow(i.split)) for i in prepared.inner),
+        policy_covariates=replace(prepared.policy_covariates, support_keys=("empty",) * len(prepared.policy_covariates.original_ids)))
+    with pytest.raises(ContractError, match="fewer than eight outer-training tracts"):
+        tiny_config(prepared, tmp_path / "fit", study=RecipeStudy(supported_training_only=True))

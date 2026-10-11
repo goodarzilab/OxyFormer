@@ -56,7 +56,7 @@ class CountyContext(nn.Module):
     def __init__(self, encoder: FeatureEncoder, references: CovariateView,
                  split: SplitManifest, fold: int, reference_counties: tuple[str, ...],
                  *, county_field: str, checkpoint_hash: str, parameter_version: int = 0,
-                 dropout: float = 0.1):
+                 dropout: float = 0.1, reference_cap: int | None = None):
         super().__init__()
         require(type(encoder) is FeatureEncoder, "expected FeatureEncoder")
         require(type(references) is CovariateView and references.use == "context",
@@ -77,6 +77,9 @@ class CountyContext(nn.Module):
         for county in counties:
             nonempty(county, "county route")
         require(0 <= dropout < 1, "dropout must be in [0,1)")
+        require(reference_cap is None or (type(reference_cap) is int and reference_cap > 0),
+                "reference cap must be a positive integer or None")
+        self.reference_cap = reference_cap
         self.encoder = encoder
         self._references = references
         self._split = split
@@ -134,8 +137,9 @@ class CountyContext(nn.Module):
         return digest.hexdigest()
 
     def _reference_ids(self, query_id: str, county: str) -> tuple[str, ...]:
-        return tuple(sorted(oid for oid, route in self._routes.items()
-                            if route == county and oid != query_id))
+        ids = tuple(sorted(oid for oid, route in self._routes.items()
+                           if route == county and oid != query_id))
+        return ids if self.reference_cap is None else ids[:self.reference_cap]
 
     def _reference_batch(self, ids: tuple[str, ...]) -> FeatureBatch:
         tokenizer = self.encoder.tokenizer
