@@ -226,6 +226,19 @@ owner_decisions:
     census: {evaluable_tracts: 1752, counties: 158, states: 33, max_county_share: 0.054, effective_counties: 59.2, target_hash: c8ecb139b57de78d, flag1_tracts: 79}   # outcome-blind, reproducible; Slurm 85615, verify-tmp/search_tract_design.py
     disclosures: "count-informed by owner instruction; the target is low-relief (1,724 of 1,752 tracts in counties below 300 m); the 10 and 25 km buffer sensitivities leave no evaluable tract under within-county folds and are reported as uninformative; the flag-1-only sensitivity has 79 tracts"
     process_change: "design_support_recipe.revisit_rule above is rewritten to require a joint outcome-blind feasibility census before any gate design or amendment is approved; docs/SCIENTIFIC_GATES.md is to reference it"
+  # Approved by the owner on 2026-10-12 ("ok, 3600 H100hr is fine, but never use more than 4 GPU at a time, except for pre-emptible")
+  # after fit-cost-profile-2 measured the vectorised nuisance fits on the real frame (H100 ordinary minibatch 0.53 s): the registered
+  # recipe projects to about 900 H100-hours per repetition and the lightest opt-in study cell to about 36, so 1,000 repetitions per
+  # scenario do not fit the 5,400 H100-hour final-coverage allocation (plan section 9.1). This is the owner's explicit screening-breadth
+  # reduction; it does not weaken the final replication count, which is deferred.
+  screening_campaign:
+    scenarios: [null_effect, linear_reference, nonlinear, sign_changing]   # the four registered final scenarios in configs/validation/final_scenarios.yaml
+    repetitions_per_scenario: 25
+    recipe: {reference_cap: 32, frozen_epochs: 30, grid_points: 2, seed_count: 1}   # the RecipeStudy cell measured by recipe-cost-study-r2 and fit-cost-profile-2; registered recipe values are unchanged for final cells
+    budget_h100_hours: 3600            # planning ceiling for this screening campaign; measured lock estimates above it reduce repetitions per scenario, never the ceiling
+    final_cells: "the 1,000-repetition final cells (minimum_final_repetitions) are deferred to month 2 with a separate allocation; this screening campaign certifies no release criterion"
+    gpu_concurrency_max: 4             # standing rule for this run: never more than 4 GPUs held at once
+    gpu_concurrency_exempt_partitions: [preemptible]   # the owner wrote "pre-emptible"; this cluster's partition is literally named preemptible (sinfo, 2026-10-12: all, h100-reserved, large_batch, preemptible, standard); using any partition other than standard still needs its own approval
 
 # Not yet approved. A unit that needs one of these must stop and report; the orchestrator brings it to the owner.
 pending_owner_approval:
