@@ -238,7 +238,7 @@ owner_decisions:
     budget_h100_hours: 3600            # planning ceiling for this screening campaign; measured lock estimates above it reduce repetitions per scenario, never the ceiling
     final_cells: "the 1,000-repetition final cells (minimum_final_repetitions) are deferred to month 2 with a separate allocation; this screening campaign certifies no release criterion"
     gpu_concurrency_max: 4             # standing rule for this run: never more than 4 GPUs held at once
-    gpu_concurrency_exempt_partitions: [preemptible]   # the only exemption the owner named; using any partition other than standard still needs its own approval
+    gpu_concurrency_exempt_partitions: [preemptible]   # the owner wrote "pre-emptible"; this cluster's partition is literally named preemptible (sinfo, 2026-10-12: all, h100-reserved, large_batch, preemptible, standard); using any partition other than standard still needs its own approval
 
 # Not yet approved. A unit that needs one of these must stop and report; the orchestrator brings it to the owner.
 pending_owner_approval:
