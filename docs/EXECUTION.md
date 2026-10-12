@@ -361,10 +361,13 @@ inputs; production source/resume identity checks remain in force.
 
 Token preparation keeps the Python scalar standardisation and canonical category
 lookup, including distinct numeric/string/boolean categories, missingness and
-signed zero. It constructs arrays before tensor transfer, avoiding one tensor
-write per cell. Values outside the destination dtype's finite range use the
-original scalar conversion behavior: bulk constructors alone can silently accept
-a value for which scalar FP32 assignment raises. Encoder, PMA, dropout draws,
+signed zero. Numeric values use the original scalar PyTorch assignment into a
+CPU buffer in the destination dtype, then transfer the complete buffer once.
+This retains the native scalar rounding, subnormal and overflow behavior for
+every value instead of duplicating selected parts of that conversion with a
+Python-list tensor constructor. Category and missingness arrays still transfer
+in bulk. Raw target weights retain their separate existing FP64 arithmetic;
+they never enter the numeric token buffer. Encoder, PMA, dropout draws,
 loss reductions, clipping, optimizer updates and both full offset passes retain
 their existing mathematics.
 
@@ -395,6 +398,15 @@ offsets, calibration, discrete decisions and repeated scientific bytes. Preserve
 every exceeding element with its reference value, candidate value and bound;
 historical PR #63 exceptions confer no waiver. Verify source fingerprints and
 enclosing provenance links before normalizing only transport/identity metadata.
+
+The conversion regression grid compares storage bytes against scalar assignment
+and Python binary64 subtraction/division followed by an explicit dtype cast.
+It includes the smallest subnormal, `1e-311`, FP32 subnormals, signed zero,
+`1e307`, negative counterparts and both sides of the FP32 finite boundary.
+Run the unchanged extreme-weight complete-fold regression as well. Diagnostic
+CPU-dispatch and flush-to-zero probes belong in isolated Slurm processes; they
+must not change the production deterministic or precision settings. A cluster
+pass does not replace checking the actual GitHub PR run on its own CPU.
 
 Keep `fit_cost_profile_2.json`, `equivalence_report.json`, `pytest.log` and the
 job receipts in the attempt directory. Cost projections retain the previous

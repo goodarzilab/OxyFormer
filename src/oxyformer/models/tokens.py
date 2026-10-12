@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from hashlib import sha256
-import math
 from typing import Literal
 
 import torch
@@ -94,13 +93,13 @@ class FeatureTokenizer(nn.Module):
         for name in view.columns:
             view.registry.require(name, view.spec.endpoint, view.use)
         shape = (len(view.original_ids), len(self.features))
-        # Keep Python scalar preprocessing and its rounding order, but transfer
-        # each complete array once instead of launching a tensor write per cell.
-        numeric = [[0.] * shape[1] for _ in range(shape[0])]
+        # Use the reference scalar cast on the host, including its subnormal,
+        # signed-zero and overflow behavior. Transfer the completed buffer once;
+        # constructing it from a Python list uses a different conversion path.
+        dtype, device = self.numeric_weight.dtype, self.numeric_weight.device
+        numeric = torch.zeros(shape, dtype=dtype, device="cpu")
         category = [[0] * shape[1] for _ in range(shape[0])]
         missing = [[False] * shape[1] for _ in range(shape[0])]
-        dtype, device = self.numeric_weight.dtype, self.numeric_weight.device
-        maximum = torch.finfo(dtype).max
         for j, feature in enumerate(self.features):
             values = view.column(feature.name)
             vocabulary = {canonical_json(value): i for i, value in enumerate(feature.categories)}
@@ -109,15 +108,10 @@ class FeatureTokenizer(nn.Module):
                     missing[i][j] = True
                 elif feature.kind == "numeric":
                     require(type(value) in (int, float), f"non-numeric value for {feature.name}")
-                    standardized = (value - feature.mean) / feature.scale
-                    if math.isfinite(standardized) and abs(standardized) > maximum:
-                        # Bulk construction can silently overflow where scalar
-                        # assignment raises. Retain the scalar conversion there.
-                        torch.empty((), dtype=dtype, device=device).fill_(standardized)
-                    numeric[i][j] = standardized
+                    numeric[i, j] = (value - feature.mean) / feature.scale
                 else:
                     category[i][j] = vocabulary.get(canonical_json(value), len(vocabulary))
-        numeric = torch.tensor(numeric, dtype=dtype, device=device).reshape(shape)
+        numeric = numeric.to(device=device)
         category = torch.tensor(category, dtype=torch.long, device=device).reshape(shape)
         missing = torch.tensor(missing, dtype=torch.bool, device=device).reshape(shape)
         return FeatureBatch(torch.arange(shape[1], device=device), numeric, category,
