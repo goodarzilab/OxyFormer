@@ -538,6 +538,28 @@ def test_extreme_weights_complete_fold_with_same_predictions(completed, tmp_path
                                    torch.tensor(getattr(expected, field), dtype=torch.float32))
 
 
+@pytest.mark.parametrize("scale", [1., 5e-324, 1e-311, 1e307])
+def test_extreme_weight_construction_retains_python_float64_bytes(scale):
+    import struct
+
+    # Include both power-of-two and non-power-of-two normalization units.
+    # The actual weighting path remains FP64; do not route mass through FP32
+    # token preparation or compare floats with a tolerance that hides flushing.
+    for largest in (3, 4):
+        raw = tuple(i * scale for i in range(1, largest + 1))
+        unit = fitting._weight_unit(raw)
+        scalar = torch.zeros(len(raw), dtype=torch.float64)
+        for i, value in enumerate(raw):
+            scalar[i] = value
+        bulk = torch.tensor(raw, dtype=torch.float64)
+        expected = b"".join(struct.pack("=d", value) for value in raw)
+        assert bulk.view(torch.uint8).numpy().tobytes() == expected
+        assert scalar.view(torch.uint8).numpy().tobytes() == expected
+        normalized = bulk / unit
+        expected = b"".join(struct.pack("=d", value / unit) for value in raw)
+        assert normalized.view(torch.uint8).numpy().tobytes() == expected
+
+
 def test_identity_offsets_keep_positive_counties_at_different_weight_scales(completed):
     case, artifact = completed
     config = case[-1]

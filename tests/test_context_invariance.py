@@ -119,6 +119,49 @@ def test_bulk_prepare_retains_scalar_overflow_refusal(setup, device):
             tokenizer.prepare(invalid)
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_bulk_prepare_extreme_grid_matches_scalar_and_python_bytes(setup, device, dtype):
+    """Compare bytes, so signed zero and flushed subnormals cannot compare equal."""
+    import math
+    import struct
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    features, refs, *_ = setup
+    maximum = torch.finfo(torch.float32).max
+    values = (-0., 0., 5e-324, -5e-324, 1e-311, -1e-311, 1e-45, -1e-45,
+              math.nextafter(2.**-126, 0.), 2.**-126, 1.00000006,
+              maximum, -maximum, math.nextafter(maximum, math.inf),
+              -math.nextafter(maximum, math.inf), 1e307, -1e307)
+    refs = replace(refs, original_ids=refs.original_ids[:1], values=refs.values[:1],
+                   lineage=replace(refs.lineage, unit_ids=refs.original_ids[:1]))
+    for mean, scale in ((0., 1.), (0., 1e307), (1e307, 1e307),
+                        (-1e307, 1e307), (0., 1e-311), (0., 5e-324)):
+        schema = (replace(features[0], mean=mean, scale=scale), features[1])
+        tokenizer = FeatureEncoder(schema).tokenizer.to(device=device, dtype=dtype)
+        for value in values:
+            view = replace(refs, values=((value, "own"),))
+            # The old path subtracts and divides in Python binary64 before a
+            # single destination-dtype cast. No tensor normalization oracle.
+            standardized = (value - mean) / scale
+            scalar = torch.zeros((1, 2), dtype=dtype, device=device)
+            try:
+                scalar[0, 0] = standardized
+            except RuntimeError as error:
+                assert "overflow" in str(error)
+                with pytest.raises(RuntimeError, match="overflow"):
+                    tokenizer.prepare(view)
+                continue
+            actual = tokenizer.prepare(view).numeric_values
+            actual_bytes = actual.cpu().view(torch.uint8).numpy().tobytes()
+            scalar_bytes = scalar.cpu().view(torch.uint8).numpy().tobytes()
+            assert actual_bytes == scalar_bytes, (value, mean, scale, dtype, device)
+            python_bytes = struct.pack("=ff" if dtype == torch.float32 else "=dd",
+                                       standardized, 0.)
+            assert actual_bytes == python_bytes, (value, mean, scale, dtype, device)
+
+
 def test_reference_and_query_permutations(setup):
     _, refs, _, counties = setup
     context = make_context(setup).eval()
