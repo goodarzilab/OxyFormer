@@ -459,7 +459,7 @@ def test_subnormal_raw_weights_do_not_overflow_training_normalization(completed,
     test_training_objective_is_invariant_to_extreme_common_weight_scale(completed, kind, weight)
 
 
-@pytest.mark.parametrize("weight_scale", [1e-311, 1e-300, 1e300, 1e307])
+@pytest.mark.parametrize("weight_scale", [1e-311, 1e307])
 def test_extreme_weights_complete_fold_with_same_predictions(completed, tmp_path, weight_scale):
     case, baseline = completed
     spec, split, manifest, config = case

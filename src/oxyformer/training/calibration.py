@@ -11,7 +11,8 @@ Coordinate medians use exact binary64 masses and the lower-median rule: the
 first sorted element whose cumulative mass is at least half the total, with
 an exact comparison. The returned value is that element, without averaging.
 Common scaling that preserves the mass ratios preserves this selection;
-rounding the input weights to binary64 can itself change those ratios.
+rounding the input weights to binary64 can itself change those ratios. At an
+exact tie, a non-exact common rescale can move the selection by one index.
 """
 from dataclasses import dataclass, replace
 import math
