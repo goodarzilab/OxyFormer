@@ -50,6 +50,15 @@ def finite(value, name):
     return value
 
 
+BUDGET_RECORD = "budget_record.json"
+MEASUREMENTS = "coverage_measurements.json"
+
+
+def publication_reserve(seconds):
+    """Post-check publication uses part of the existing finalization reserve."""
+    return min(30., seconds / 20)
+
+
 OVERHEAD_PHASES = ("setup_seconds", "import_seconds", "export_seconds", "publication_seconds")
 
 
@@ -70,6 +79,99 @@ def remaining_compute(budget, **measured):
     """Charge positive phase overruns once; never credit an underrun."""
     return max(0., budget["compute_seconds"] - math.fsum(
         max(0., seconds - budget["overheads"][phase]) for phase, seconds in measured.items()))
+
+
+def budget_binding(request, task, recipe_hash):
+    parameters = task["parameters"]
+    return {"request_hash": request.content_hash, "wall_seconds": parameters["wall_seconds"],
+        "task_id": task["id"], "chain": task.get("continuation"),
+        "recipe_hash": recipe_hash, "lock_hash": task.get("recipe_lock", {}).get("sha256"),
+        "draws": parameters["draws"], "scenario": parameters["scenario"],
+        "mode": parameters["mode"], "code_identity": request.code_identity}
+
+
+def record_measurements(request, completed, started, task, timing, summary):
+    """Worker measurements only. They cannot authorize any downstream decision."""
+    value = {"binding": budget_binding(request, task, timing["recipe_hash"]),
+        "started_monotonic": started, "timing": timing,
+        "counts": summary["counts"], "received": summary["received_repetitions"]}
+    path = atomic_json(request.output_dir, MEASUREMENTS, value)
+    return replace(completed, artifacts=(*completed.artifacts,
+        ArtifactRecord(path=MEASUREMENTS, kind="coverage_measurements", sha256=file_hash(path),
+            lineage=completed.artifacts[0].lineage)))
+
+
+def load_budget(request, config, unit, *, expected_task=None):
+    """The only budget-evidence loader: declared request, sealed pass, bound hash.
+
+    Diagnostic result/timing/runtime files have no budget authority. Scientific
+    payloads may be read by callers only after this returns successfully.
+    """
+    from oxyformer.execution.integrity import verify_publication
+    def declared(name):
+        path = dependency(request, config, {"dependency": unit, "path": name})
+        expected = dict(zip(request.dependency_paths, request.dependency_hashes))[str(path)]
+        require(file_hash(path) == expected, "budget dependency hash mismatch: " + name)
+        return path
+    producer = StageRequest.from_json(declared("_execution/request.json").read_text())
+    root = Path(config["dependencies"][unit]).resolve(strict=True)
+    require(Path(producer.output_dir).resolve() == root, "budget producer owner mismatch")
+    task_path = declared("_execution/task.json")
+    require(file_hash(task_path) == producer.task_hash, "budget producer task mismatch")
+    task = read_json(task_path)
+    require(task["id"] == unit, "budget producer identity mismatch")
+    if expected_task is not None:
+        require(task == expected_task, "budget expected task mismatch")
+    terminal = StageResult.from_json(declared("_execution/result.json").read_text())
+    require(terminal.status == "pass", "budget stage did not pass")
+    require(terminal.request_hash == producer.content_hash, "budget request mismatch")
+    verify_publication(root, terminal)
+    records = [a for a in terminal.artifacts if a.path == BUDGET_RECORD]
+    require(len(records) == 1, "runner-finalized budget record missing")
+    path = declared(BUDGET_RECORD)
+    require(file_hash(path) == records[0].sha256, "budget record hash mismatch")
+    value = read_json(path)
+    binding = value["binding"]
+    require(binding == budget_binding(producer, task, binding["recipe_hash"]), "budget binding mismatch")
+    if "recipe" in task["parameters"]:
+        require(binding["recipe_hash"] == digest(task["parameters"]["recipe"]), "budget recipe mismatch")
+    require(value["schema_version"] == 1, "unknown budget record schema")
+    wall = finite(binding["wall_seconds"], "budget wall binding")
+    require(wall > 0, "invalid budget wall binding")
+    leaves = value["leaves"]
+    require(bool(leaves), "missing budget measurements")
+    chain = binding["chain"]
+    if value["chained"]:
+        require(chain is not None and len(leaves) == chain["step"] + 1
+            and [row["step"] for row in leaves] == list(range(len(leaves)))
+            and leaves[-1]["task_id"] == task["id"], "partial budget chain")
+    for leaf in leaves:
+        names = ("compute_seconds", *OVERHEAD_PHASES)
+        require(all(finite(leaf[k], k) >= 0 for k in names), "negative budget measurement")
+        elapsed = finite(leaf["wall_seconds"], "measured budget wall")
+        require(math.isclose(math.fsum(leaf[k] for k in names), elapsed, rel_tol=1e-6, abs_tol=.01),
+            "budget accounting mismatch")
+        require(leaf["post_check_reserve_seconds"] == publication_reserve(wall), "publication reserve drift")
+        require(elapsed + publication_reserve(wall) <= wall, "coverage leaf exceeded admitted budget")
+        contract = leaf.get("leaf_budget")
+        if contract is not None:
+            require(contract == {**leaf_budget(wall, contract["safety_factor"], contract["overheads"]),
+                "compute_seconds": contract["compute_seconds"]}, "budget contract drift")
+            require(0 < contract["compute_seconds"] <= leaf_budget(wall, contract["safety_factor"], contract["overheads"])["compute_seconds"],
+                "invalid budget compute ceiling")
+            phases = {k: leaf[k] for k in OVERHEAD_PHASES} if leaf["measured_overheads"] else {
+                k: leaf[k] for k in ("setup_seconds", "import_seconds")}
+            require(leaf["compute_seconds"] <= remaining_compute(contract, **phases),
+                "coverage compute exceeded admitted budget")
+    counts = value["counts"]
+    require(set(counts) == STATUSES and all(type(v) is int and v >= 0 for v in counts.values()),
+        "invalid budget outcome counts")
+    require(sum(counts.values()) == value["received"] <= len(binding["draws"]), "budget outcome count mismatch")
+    complete = value["received"] == len(binding["draws"]) and counts["incomplete"] == 0
+    successful = complete and counts["success"] == len(binding["draws"])
+    # Stored complete/success/eligibility flags are never consulted.
+    return {**value, "complete": complete, "all_successful": successful,
+        "wall_seconds": math.fsum(row["wall_seconds"] for row in leaves), "record_hash": file_hash(path)}
 
 
 def binomial_bound(events, total, *, side):
@@ -698,16 +800,13 @@ def _run_chain(request, started):
         states = [{"parts": [], "sample": {}, "pending": None, "record": None, "compute_seconds": 0.}
                   for _ in parameters["draws"]]
     else:
+        previous = load_budget(request, config, chain["predecessor"])
+        require(previous["binding"]["chain"]["owner"] == chain["owner"]
+            and previous["binding"]["chain"]["step"] + 1 == chain["step"], "budget chain drift")
+        require(previous["binding"]["wall_seconds"] == seconds, "budget wall binding drift")
         archive = dependency(request, config, {"dependency": chain["predecessor"], "path": "continuation.tar"})
         states = _read_continuation(archive, binding, chain)
-        previous_timing = read_json(dependency(request, config,
-            {"dependency": chain["predecessor"], "path": "timing.json"}))
-        require(previous_timing["chain"] == {**chain, "step": chain["step"] - 1,
-                "predecessor": previous_timing["chain"]["predecessor"]}, "timing chain drift")
-        history = previous_timing["leaves"]
-        require(previous_timing["measurement_scope"] == "complete_chain_return"
-                and len(history) == chain["step"] and history[-1]["task_id"] == chain["predecessor"]
-                and [row["step"] for row in history] == list(range(chain["step"])), "partial profile chain")
+        history = previous["leaves"]
     destinations = []
     for draw, state in zip(parameters["draws"], states):
         destination = output_path(root, "repetitions/" + draw["repetition_id"])
@@ -811,7 +910,7 @@ def _run_chain(request, started):
     completed = record_runtime(request, completed, started, task, budget_exceeded=exceeded)
     if time.monotonic() - started > seconds:
         completed = replace(completed, status="fail", message="Coverage publication exceeded wall budget")
-    return completed
+    return record_measurements(request, completed, started, task, timing, summary)
 
 
 def run_stage(request: StageRequest) -> StageResult:
@@ -832,7 +931,12 @@ def run_stage(request: StageRequest) -> StageResult:
             return _run_chain(request, started)
         if task.get("parameters", {}).get("mode") != "profile":
             completed = _run_batch(request, started)
-            return record_runtime(request, completed, started, task)
+            completed = record_runtime(request, completed, started, task)
+            if not completed.artifacts:
+                return completed
+            root = Path(request.output_dir)
+            return record_measurements(request, completed, started, task,
+                read_json(root / "timing.json"), read_json(root / "result.json")["summary"])
         root = Path(request.output_dir)
         root.mkdir(parents=True, exist_ok=True)
         destination = output_path(root, "_profiled")
@@ -864,10 +968,11 @@ def run_stage(request: StageRequest) -> StageResult:
                     message="CUDA profile incomplete, unsuccessful or over budget; no usable profile")
         result["profiled_request_hash"] = profiled_request.content_hash
         extra = tuple(replace(a, path="_profiled/" + a.path) for a in completed.artifacts)
-        return publish(request, {"result.json": result, "timing.json": timing,
+        published = publish(request, {"result.json": result, "timing.json": timing,
             "profile_receipt.json": {"request": profiled_request.to_dict(), "result": completed.to_dict()}},
             status=completed.status, message="Production profile measured through complete stage return; " + completed.message,
             extra_artifacts=extra)
+        return record_measurements(request, published, started, task, timing, result["summary"])
     except (ContractError, KeyError, TypeError, ValueError, OSError, tarfile.TarError) as exc:
         return StageResult(request_hash=request.content_hash, status="blocked", artifacts=(),
                            message=str(exc) or type(exc).__name__)

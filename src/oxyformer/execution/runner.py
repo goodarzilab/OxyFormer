@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import re
 import sys
+import time
+from dataclasses import replace
 
 import yaml
 
@@ -359,6 +361,14 @@ def _verify_dependency_result(root, *, expected_hash, trees, active, verified, o
                             require(digest is not None, 'dependency fingerprint absent from published request')
                             parents.append((parent, digest, parent_unit, False))
                     _verify_publication_result(result, request, recorded_inputs)
+                    if request.stage in ('coverage', 'simulation-smoke'):
+                        from oxyformer.validation.coverage import load_budget
+                        names = ('_execution/request.json', '_execution/task.json', '_execution/result.json', 'budget_record.json')
+                        paths = tuple(str(current / name) for name in names)
+                        consumer = replace(request, dependency_paths=paths,
+                            dependency_hashes=tuple(file_hash(p) for p in paths))
+                        producer_task = read_mapping(current / '_execution/task.json')
+                        load_budget(consumer, {'dependencies': {producer_task['id']: str(current)}}, producer_task['id'])
                     pending[current] = (result, tree)
                     stack.append((current, expected, unit, True))
                     stack.extend(reversed(parents))
@@ -414,7 +424,73 @@ def verify_continuation(task, deps):
     verify_dependency_result(deps[predecessor])
 
 
+def finalize_coverage_budget(request, result, started):
+    """Reconcile worker accounting after verification; seal only in publish_result.
+
+    The record write and immutable terminal publication spend an explicit part
+    of the existing checkpoint reserve. No budget consumer accepts this record
+    until the independent publication receipt binds the terminal StageResult.
+    """
+    from oxyformer.validation.coverage import (BUDGET_RECORD, MEASUREMENTS, OVERHEAD_PHASES,
+        budget_binding, finite, publication_reserve, remaining_compute)
+    from oxyformer.provenance import ArtifactRecord
+    if request.stage not in ('coverage', 'simulation-smoke'):
+        return result
+    artifacts = [a for a in result.artifacts if a.path == MEASUREMENTS]
+    if not artifacts:
+        require(result.status != 'pass', 'coverage worker measurements missing')
+        return result
+    require(len(artifacts) == 1, 'duplicate coverage measurements')
+    path = Path(request.output_dir) / MEASUREMENTS
+    require(file_hash(path) == artifacts[0].sha256, 'coverage measurements hash mismatch')
+    raw = read_mapping(path)
+    task = read_mapping(request.task_path)
+    timing = raw['timing']
+    binding = budget_binding(request, task, timing['recipe_hash'])
+    require(raw['binding'] == binding, 'coverage measurement binding mismatch')
+    chained = timing.get('measurement_scope') == 'complete_chain_return'
+    history = timing['leaves'][:-1] if chained else []
+    if chained:
+        leaf = dict(timing['leaves'][-1])
+        leaf['measured_overheads'] = 'leaf_budget' in task['parameters']
+    else:
+        leaf = {'task_id': task['id'], 'step': 0, 'compute_seconds': sum(timing['complete_repetition_seconds']),
+            'setup_seconds': timing['setup_seconds'], 'import_seconds': 0., 'export_seconds': 0.}
+    # Runner preparation precedes the worker clock; charge it once as setup.
+    leaf['setup_seconds'] += max(0., raw['started_monotonic'] - started)
+    elapsed = time.monotonic() - started
+    leaf['wall_seconds'] = elapsed
+    leaf['publication_seconds'] = elapsed - sum(leaf[k] for k in
+        ('setup_seconds', 'import_seconds', 'compute_seconds', 'export_seconds'))
+    wall = finite(binding['wall_seconds'], 'coverage wall')
+    leaf['post_check_reserve_seconds'] = publication_reserve(wall)
+    exceeded = elapsed + publication_reserve(wall) > wall
+    if chained:
+        phases = OVERHEAD_PHASES if leaf['measured_overheads'] else ('setup_seconds', 'import_seconds')
+        exceeded |= leaf['compute_seconds'] > remaining_compute(leaf['leaf_budget'], **{k: leaf[k] for k in phases})
+    require(leaf['publication_seconds'] >= 0, 'coverage accounting exceeds measured runner interval')
+    # This is the last wall check. Subsequent record/publication writes are
+    # reserved, and no code mutates the terminal result after it is sealed.
+    if exceeded:
+        result = replace(result, status='fail', message='Coverage final wall/compute budget exceeded')
+    counts = raw['counts']
+    complete = raw['received'] == len(binding['draws']) and counts['incomplete'] == 0
+    value = {'schema_version': 1, 'binding': binding, 'chained': chained,
+        'leaves': [*history, leaf], 'counts': counts, 'received': raw['received'],
+        'complete': complete, 'success': complete and counts['success'] == len(binding['draws']),
+        'profile': {k: timing[k] for k in ('device', 'environment', 'production_equivalent',
+            'complete_repetition_seconds', 'scientific_fingerprint', 'environment_hash')},
+        'measurement_scope': 'runner_final_wall_check',
+        'excluded': ['reserved budget-record and terminal StageResult publication']}
+    record_path = atomic_json(request.output_dir, BUDGET_RECORD, value)
+    artifact = ArtifactRecord(path=BUDGET_RECORD, kind='coverage_budget', sha256=file_hash(record_path),
+        lineage=artifacts[0].lineage)
+    require(not any(a.path == BUDGET_RECORD for a in result.artifacts), 'worker supplied runner budget record')
+    return replace(result, artifacts=(*result.artifacts, artifact))
+
+
 def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, approvals=None, execute=None):
+    started = time.monotonic()
     out = Path(out).absolute()
     require(out.is_dir() and not out.is_symlink(), 'output must be an existing attempt directory')
     out = out.resolve(strict=True)
@@ -498,7 +574,9 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
             '_execution/task.json', '_execution/request.json', '_execution/result.json',
             '_execution/environment.json', '_execution/identity.json'}
         require(set(needs[unit]) <= allowed, 'dependency file not declared by passing stage')
-        for relative in ('_execution/request.json', '_execution/result.json', FINGERPRINT):
+        producer = StageRequest.from_json(read_regular(root / '_execution/request.json'))
+        budget_files = ('_execution/task.json', 'budget_record.json') if producer.stage in ('coverage', 'simulation-smoke') else ()
+        for relative in ('_execution/request.json', '_execution/result.json', FINGERPRINT, *budget_files):
             path = dependency_file(root, relative)
             if path not in files:
                 files.append(path)
@@ -608,7 +686,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
                     require(all(not a.path.startswith('_execution/') for a in result.artifacts), 'reserved execution artifact')
                     declared = set(task.get('outputs', []))
                     if result.status == 'pass':
-                        require(declared <= {a.path for a in result.artifacts}, 'stage omitted declared outputs')
+                        require(declared - {'budget_record.json'} <= {a.path for a in result.artifacts}, 'stage omitted declared outputs')
                     for path, digest in sources.items():
                         require(file_hash(path) == digest, f'input source changed: {path}')
                     observed_head = code_identity(repo, out)
@@ -617,6 +695,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
                 except BaseException as exc:
                     result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
                         message=str(exc).strip() or type(exc).__name__)
+            result = finalize_coverage_budget(request, result, started)
             return publish_result(out, result, owned_controls=True, dependency_roots=dependency_trees,
                 dependency_identities=dependency_identities)
         except BaseException as exc:
