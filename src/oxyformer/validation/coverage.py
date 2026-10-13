@@ -647,10 +647,11 @@ def _run_batch(request: StageRequest, started: float) -> StageResult:
             "production_equivalent": production, "recipe_hash": digest(recipe),
             "complete_repetition_seconds": [seconds for r, seconds in zip(records, repetition_seconds) if r["status"] == "success"],
             "complete": summary["complete"], "all_successful": summary["counts"]["success"] == len(draws), **stamps}
-        return publish(request, {"result.json": result, "timing.json": timing},
+        completed = publish(request, {"result.json": result, "timing.json": timing},
             status="pass" if summary["complete"] else "fail",
             message="Declared repetitions accounted for; production coverage requires complete campaign collection"
                 if summary["complete"] else "Incomplete batch; all declared draws retained")
+        return record_measurements(request, completed, started, task, timing, summary)
     except (ContractError, KeyError, TypeError, ValueError, OSError, tarfile.TarError) as exc:
         return StageResult(request_hash=request.content_hash, status="blocked", artifacts=(), message=str(exc) or type(exc).__name__)
 
@@ -935,12 +936,7 @@ def run_stage(request: StageRequest) -> StageResult:
             return _run_chain(request, started)
         if task.get("parameters", {}).get("mode") != "profile":
             completed = _run_batch(request, started)
-            completed = record_runtime(request, completed, started, task)
-            if not completed.artifacts:
-                return completed
-            root = Path(request.output_dir)
-            return record_measurements(request, completed, started, task,
-                read_json(root / "timing.json"), read_json(root / "result.json")["summary"])
+            return record_runtime(request, completed, started, task)
         root = Path(request.output_dir)
         root.mkdir(parents=True, exist_ok=True)
         destination = output_path(root, "_profiled")
@@ -955,7 +951,8 @@ def run_stage(request: StageRequest) -> StageResult:
         completed.verify(profiled_request)
         elapsed = time.monotonic() - started
         result = read_json(destination / "result.json")
-        timing = read_json(destination / "timing.json")
+        measurement = read_json(destination / MEASUREMENTS)
+        timing = dict(measurement["timing"])
         timing.update(wall_seconds=elapsed,
                       gpu_seconds=elapsed if timing["device"].startswith("cuda") else 0.,
                       publication_verification_seconds=elapsed - timing["setup_seconds"] - math.fsum(timing["complete_repetition_seconds"]),
@@ -966,17 +963,16 @@ def run_stage(request: StageRequest) -> StageResult:
             exceeded = elapsed > timing["admitted_budget_seconds"]
             timing.update(budget_exceeded=exceeded,
                           overrun_seconds=max(0., elapsed - timing["admitted_budget_seconds"]))
-            timing["complete"] = timing["complete"] and timing["all_successful"] and not exceeded
-            if not timing["complete"]:
-                completed = replace(completed, status="fail",
-                    message="CUDA profile incomplete, unsuccessful or over budget; no usable profile")
+            timing["complete"] = (measurement["received"] == len(task["parameters"]["draws"])
+                and measurement["counts"]["success"] == len(task["parameters"]["draws"]) and not exceeded)
         result["profiled_request_hash"] = profiled_request.content_hash
         extra = tuple(replace(a, path="_profiled/" + a.path) for a in completed.artifacts)
         published = publish(request, {"result.json": result, "timing.json": timing,
             "profile_receipt.json": {"request": profiled_request.to_dict(), "result": completed.to_dict()}},
             status=completed.status, message="Production profile measured through complete stage return; " + completed.message,
             extra_artifacts=extra)
-        return record_measurements(request, published, started, task, timing, result["summary"])
+        return record_measurements(request, published, started, task, timing,
+            {"counts": measurement["counts"], "received_repetitions": measurement["received"]})
     except (ContractError, KeyError, TypeError, ValueError, OSError, tarfile.TarError) as exc:
         return StageResult(request_hash=request.content_hash, status="blocked", artifacts=(),
                            message=str(exc) or type(exc).__name__)

@@ -431,11 +431,11 @@ def finalize_coverage_budget(request, result, started):
     of the existing checkpoint reserve. No budget consumer accepts this record
     until the independent publication receipt binds the terminal StageResult.
     """
+    if request.stage not in ('coverage', 'simulation-smoke'):
+        return result
     from oxyformer.validation.coverage import (BUDGET_RECORD, MEASUREMENTS, OVERHEAD_PHASES,
         budget_binding, finite, publication_reserve, remaining_compute)
     from oxyformer.provenance import ArtifactRecord
-    if request.stage not in ('coverage', 'simulation-smoke'):
-        return result
     artifacts = [a for a in result.artifacts if a.path == MEASUREMENTS]
     if not artifacts:
         require(result.status != 'pass', 'coverage worker measurements missing')
@@ -475,6 +475,9 @@ def finalize_coverage_budget(request, result, started):
         result = replace(result, status='fail', message='Coverage final wall/compute budget exceeded')
     counts = raw['counts']
     complete = raw['received'] == len(binding['draws']) and counts['incomplete'] == 0
+    if not chained and binding['mode'] == 'profile' and timing['device'].startswith('cuda'):
+        if not complete or counts['success'] != len(binding['draws']):
+            result = replace(result, status='fail', message='CUDA profile incomplete or unsuccessful; no usable profile')
     value = {'schema_version': 1, 'binding': binding, 'chained': chained,
         'leaves': [*history, leaf], 'counts': counts, 'received': raw['received'],
         'complete': complete, 'success': complete and counts['success'] == len(binding['draws']),
