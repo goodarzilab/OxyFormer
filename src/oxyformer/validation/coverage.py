@@ -681,6 +681,12 @@ def _run_chain(request, started):
         require(previous_timing["measurement_scope"] == "complete_chain_return"
                 and len(history) == chain["step"] and history[-1]["task_id"] == chain["predecessor"]
                 and [row["step"] for row in history] == list(range(chain["step"])), "partial profile chain")
+        if previous_timing.get("runtime_required"):
+            runtime = read_json(dependency(request, config,
+                {"dependency": chain["predecessor"], "path": "runtime.json"}))
+            require(runtime["admitted_budget_seconds"] == seconds, "runtime budget drift")
+            history[-1]["budget_exceeded"] = (runtime["budget_exceeded"]
+                or finite(runtime["wall_seconds"], "predecessor runtime") > seconds)
     destinations = []
     for draw, state in zip(parameters["draws"], states):
         destination = output_path(root, "repetitions/" + draw["repetition_id"])
@@ -767,7 +773,7 @@ def _run_chain(request, started):
     timing = {"chain": chain, "leaves": leaves, "wall_seconds": math.fsum(v["wall_seconds"] for v in leaves),
         "gpu_seconds": math.fsum(v["wall_seconds"] for v in leaves) if device.type == "cuda" else 0.,
         "device": str(device), "environment": environment,
-        "measurement_scope": "complete_chain_return", "excluded": ["timing/runtime receipt publication", "outer executor and scheduler"],
+        "measurement_scope": "complete_chain_return", "runtime_required": True, "excluded": ["timing/runtime receipt publication", "outer executor and scheduler"],
         "setup_seconds": math.fsum(v["setup_seconds"] for v in leaves),
         "publication_verification_seconds": math.fsum(v["publication_seconds"] for v in leaves),
         "admitted_budget_seconds": seconds,
@@ -780,16 +786,7 @@ def _run_chain(request, started):
     path = atomic_json(root, "timing.json", timing)
     completed = replace(completed, artifacts=(*completed.artifacts,
         ArtifactRecord(path="timing.json", kind="timing", sha256=file_hash(path), lineage=lineage)))
-    completed = record_runtime(request, completed, started, task)
-    # Receipt writes are excluded from phase measurements, but a known overrun
-    # during them must survive into the next leaf and forbid profile admission.
-    if time.monotonic() - started > seconds:
-        leaf["budget_exceeded"] = True
-        timing["complete"] = False
-        path = atomic_json(root, "timing.json", timing)
-        completed = replace(completed, artifacts=tuple(
-            replace(a, sha256=file_hash(path)) if a.path == "timing.json" else a for a in completed.artifacts))
-    return completed
+    return record_runtime(request, completed, started, task)
 
 
 def run_stage(request: StageRequest) -> StageResult:

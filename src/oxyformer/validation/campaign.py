@@ -137,6 +137,13 @@ def _profile(request, config, reference, scenario, recipe, stamps):
     extra = {}
     rate = max(measured)
     if chained:
+        if timing.get("runtime_required"):
+            runtime = read_json(dependency(request, config,
+                {"dependency": reference["dependency"], "path": "runtime.json"}))
+            require(not runtime["budget_exceeded"]
+                    and runtime["admitted_budget_seconds"] == timing["admitted_budget_seconds"]
+                    and finite(runtime["wall_seconds"], "profile runtime") <= timing["admitted_budget_seconds"],
+                    "profile leaf exceeds slice budget")
         leaves = timing["leaves"]
         require(bool(leaves) and [v["step"] for v in leaves] == list(range(len(leaves))),
                 "partial profile chain")

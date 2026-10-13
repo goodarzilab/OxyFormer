@@ -454,8 +454,10 @@ the finite wall-derived deadline and reserve, with an optional positive
 `bootstrap_compute_seconds` ceiling that can only shorten computation. That
 ceiling is bound across the chain and cannot substitute for measured costs or
 be supplied to locked work. Bootstrap failures, partial chains and known wall
-overruns cannot justify a lock. Known overruns during receipt publication are
-carried in leaf timing even though receipt writes are excluded from phase costs.
+overruns cannot justify a lock. Each new timing receipt requires its declared
+runtime receipt too: profile admission checks that later wall measurement, and
+successors carry its overrun flag into their timing history. Receipt writes stay
+excluded from phase costs; the reserve covers their expected cost.
 Generic step-zero metadata also exists on honest archive-free legacy leaves;
 archive declaration opts into coverage-owned continuation, while any actual
 predecessor must import and may never fall back to legacy execution.

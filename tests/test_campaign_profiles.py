@@ -637,7 +637,8 @@ def test_profile_carries_receipt_overrun_and_cannot_justify_lock(tmp_path, monke
     assert done.status == 'pass', done.message
     done.verify(first)
     timing = coverage.read_json(Path(first.output_dir) / 'timing.json')
-    assert not timing['complete'] and timing['leaves'][0]['budget_exceeded']
+    assert timing['runtime_required']
+    assert coverage.read_json(Path(first.output_dir) / 'runtime.json')['budget_exceeded']
     # A later cheap leaf must not erase its predecessor's known overrun.
     task = deepcopy(task)
     task.update(id='chain-1', continuation={'owner': 'coverage-test', 'step': 1, 'predecessor': 'chain-0'})
