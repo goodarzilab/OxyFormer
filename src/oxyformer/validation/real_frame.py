@@ -196,7 +196,8 @@ def profile_tasks(endpoint, frame, *, campaign_mode=None):
     Profile and projection resources share one declaration.
     """
     if campaign_mode is None:
-        campaign_mode = read_mapping(ROOT / 'configs/execution/tasks/campaign.yaml')['campaign_mode']
+        campaign_mode = (read_mapping(ROOT / 'configs/execution/tasks/campaign.yaml')['campaign_mode']
+                         if endpoint.data.manifest.spec.endpoint == ENDPOINT else 'registered')
     require(campaign_mode in ('screening', 'registered'), 'unknown campaign mode')
     decision = campaign.screening_decision() if campaign_mode == 'screening' else None
     locations = {}

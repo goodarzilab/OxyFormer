@@ -549,7 +549,7 @@ def test_screening_requires_complete_owner_decision(tmp_path, monkeypatch, chang
     path = write(tmp_path / 'approvals.json', approvals)
     monkeypatch.setattr(campaign, 'OWNER_APPROVALS', path)
     with pytest.raises(ContractError, match='screening'):
-        real_frame.profile_tasks(*smoke_inputs.build_inputs())
+        real_frame.profile_tasks(*smoke_inputs.build_inputs(), campaign_mode='screening')
     # Registered callers remain opt-in and do not consume screening overrides.
     registered = real_frame.profile_tasks(*smoke_inputs.build_inputs(), campaign_mode='registered')
     assert 'study' not in registered['tasks'][0]['parameters']['recipe']
@@ -557,7 +557,7 @@ def test_screening_requires_complete_owner_decision(tmp_path, monkeypatch, chang
 
 def test_screening_profiles_bind_exact_cell_without_changing_registered_values():
     endpoint, frame = smoke_inputs.build_inputs()
-    manifest = real_frame.profile_tasks(endpoint, frame)
+    manifest = real_frame.profile_tasks(endpoint, frame, campaign_mode='screening')
     assert manifest['campaign_label'] == campaign.SCREENING_LABEL
     assert len(manifest['tasks']) == 5
     for task in manifest['tasks']:
@@ -578,7 +578,7 @@ def screening_request(tmp_path, monkeypatch):
     monkeypatch.setattr(campaign, 'resolve_device', lambda: torch.device('cuda:0'))
     monkeypatch.setattr(fit, 'resolve_device', lambda device='auto': torch.device('cuda:0'))
     endpoint, frame = smoke_inputs.build_inputs()
-    tasks = real_frame.profile_tasks(endpoint, frame)['tasks']
+    tasks = real_frame.profile_tasks(endpoint, frame, campaign_mode='screening')['tasks']
     deps = {'real-frame-inputs': tmp_path / 'inputs'}
     write(deps['real-frame-inputs'] / 'endpoint.json', endpoint.to_dict())
     write(deps['real-frame-inputs'] / 'frame.json', frame.to_dict())
@@ -725,7 +725,7 @@ def test_screening_lock_refuses_overlong_repetitions(screening_request, tmp_path
 def test_screening_draw_passes_exact_cell_to_production_fitting(tmp_path, monkeypatch):
     from oxyformer.training.fit import RecipeStudy
     endpoint, frame = smoke_inputs.build_inputs()
-    task = real_frame.profile_tasks(endpoint, frame)['tasks'][0]
+    task = real_frame.profile_tasks(endpoint, frame, campaign_mode='screening')['tasks'][0]
     p = task['parameters']
     observed = []
     def estimate(bound, recipe, root, deadline, *, study=None):
@@ -747,3 +747,14 @@ def test_screening_draw_passes_exact_cell_to_production_fitting(tmp_path, monkey
     assert observed, record
     assert record['status'] == 'incomplete'
     assert record['reason'] == 'budget exhausted', record
+
+
+def test_real_frame_automatically_uses_declared_screening_mode(built):
+    manifest = real_frame.profile_tasks(*built[1][:2])
+    assert manifest['campaign_mode'] == 'screening'
+    assert len(manifest['tasks']) == 5
+    assert all(t['parameters']['recipe']['study'] == campaign.SCREENING_CELL for t in manifest['tasks'])
+    # The established synthetic CUDA probe remains registered and opt-in.
+    synthetic = real_frame.profile_tasks(*smoke_inputs.build_inputs())
+    assert synthetic['tasks'][-1]['id'] == 'profile-null-effect-gpu'
+    assert 'study' not in synthetic['tasks'][-1]['parameters']['recipe']

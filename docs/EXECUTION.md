@@ -424,7 +424,7 @@ scenario or authorize a campaign or a larger leaf.
 `real_frame.profile_tasks`. It emits four single-GPU profile tasks and one
 estimate task, binding the four registered scenarios and the approved
 32-reference / 30-frozen-epoch / two-grid-point / one-seed cell. The synthetic
-smoke tasks retain their separate recipe. Direct callers needing registered
+smoke tasks and synthetic profile callers retain their separate registered recipe. Direct callers needing registered
 profiles explicitly pass `campaign_mode="registered"`. Missing or malformed
 screening approval blocks fail before fitting or admission. Dispatcher and
 repository approvals must agree. Units never modify approvals.
