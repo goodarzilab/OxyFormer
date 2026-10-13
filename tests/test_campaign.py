@@ -72,6 +72,83 @@ def setup_lock(tmp_path, **changes):
     return req, task
 
 
+@pytest.mark.parametrize('receipt,failure', [
+    ('timing.json', 'overrun'), ('runtime.json', 'overrun'),
+    ('timing.json', 'write_error'), ('runtime.json', 'write_error'),
+    ('runtime.json', None),
+])
+def test_chain_profile_receipt_failure_cannot_admit_lock(tmp_path, monkeypatch, receipt, failure):
+    from test_coverage import chain_request
+    _, lock_task = setup_lock(tmp_path, repetitions_per_leaf=1000,
+        screening_repetitions=1000, wall_seconds=600, profile_safety_factor=1.2)
+    parameters = lock_task['parameters']
+    task = {'id': 'profile-null', 'stage': 'simulation-smoke',
+        'outputs': [*campaign.LEAF_OUTPUTS, 'continuation.tar'],
+        'continuation': {'owner': 'profile-null', 'step': 0, 'predecessor': None},
+        'parameters': {'mode': 'profile', 'recipe': parameters['recipe'],
+            'scenario': parameters['scenario_family'][0],
+            'draws': coverage.repetition_plan('receipt-boundary', 'null_effect', 1000),
+            'wall_seconds': 600, 'endpoint_input': parameters['endpoint_input'],
+            'frame_input': parameters['frame_input']}}
+    clock = [0.]
+    monkeypatch.setattr(coverage.time, 'monotonic', lambda: clock[0])
+    def execute(draw, *args, **kwargs):
+        clock[0] += .5
+        return {'draw': draw, 'status': 'success', 'wall_seconds': .5,
+            'truth': 0., 'causal_truth': 0., 'truth_integration_error': 0.,
+            'estimates': {m: {'value': 0., 'se': 1.} for m in coverage.METHODS}}
+    monkeypatch.setattr(coverage, 'execute_draw', execute)
+    original_export, original_publish = coverage._write_continuation, coverage.publish
+    original_json = coverage.atomic_json
+    def export(*args, **kwargs):
+        clock[0] += 90.
+        return original_export(*args, **kwargs)
+    def publish(*args, **kwargs):
+        result = original_publish(*args, **kwargs)
+        clock[0] += 9.
+        return result
+    def write_receipt(root, name, data):
+        path = original_json(root, name, data)
+        if name == receipt:
+            clock[0] += .5 if failure is None else 2.
+            if failure == 'write_error':
+                raise OSError('synthetic receipt failure after write')
+        return path
+    monkeypatch.setattr(coverage, '_write_continuation', export)
+    monkeypatch.setattr(coverage, 'publish', publish)
+    monkeypatch.setattr(coverage, 'atomic_json', write_receipt)
+    profile = chain_request(tmp_path / 'producer', task, {'inputs': tmp_path / 'inputs'})
+    result = coverage.run_stage(profile)
+    result.verify(profile)
+    root = Path(profile.output_dir)
+    if failure is None:
+        assert result.status == 'pass', result.message
+        assert clock[0] == 599.5
+        saved = {p: p.read_bytes() for p in root.iterdir() if p.is_file()}
+        # Refusing a second invocation must not erase the successful attempt.
+        assert coverage.run_stage(profile).status == 'blocked'
+        assert all(p.read_bytes() == value for p, value in saved.items())
+    else:
+        assert result.status == ('fail' if failure == 'overrun' else 'blocked')
+        assert not result.artifacts
+        assert clock[0] == 601.
+        assert not any((root / name).exists() for name in task['outputs'])
+        assert (root / 'repetitions').is_dir()  # Keep draw diagnostics; never redraw.
+    monkeypatch.setattr(coverage, 'publish', original_publish)
+    monkeypatch.setattr(coverage, 'atomic_json', original_json)
+    lock_request = request(tmp_path / 'admission', lock_task,
+        {'inputs': tmp_path / 'inputs', 'profile': root})
+    admitted = campaign.run_stage(lock_request)
+    if failure is None:
+        assert admitted.status == 'pass', admitted.message
+        admitted.verify(lock_request)
+        lock = coverage.read_json(Path(lock_request.output_dir) / 'recipe_lock.json')
+        assert [batch['slices'] for batch in lock['batches']] == [2, 2]
+    else:
+        assert admitted.status == 'blocked'
+        assert not (Path(lock_request.output_dir) / 'recipe_lock.json').exists()
+
+
 def locked(tmp_path):
     req, task = setup_lock(tmp_path)
     result = campaign.run_stage(req)
