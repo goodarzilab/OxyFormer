@@ -93,22 +93,28 @@ class FeatureTokenizer(nn.Module):
         for name in view.columns:
             view.registry.require(name, view.spec.endpoint, view.use)
         shape = (len(view.original_ids), len(self.features))
-        numeric = torch.zeros(shape, dtype=self.numeric_weight.dtype,
-                              device=self.numeric_weight.device)
-        category = torch.zeros(shape, dtype=torch.long, device=numeric.device)
-        missing = torch.zeros(shape, dtype=torch.bool, device=numeric.device)
+        # Use the reference scalar cast on the host, including its subnormal,
+        # signed-zero and overflow behavior. Transfer the completed buffer once;
+        # constructing it from a Python list uses a different conversion path.
+        dtype, device = self.numeric_weight.dtype, self.numeric_weight.device
+        numeric = torch.zeros(shape, dtype=dtype, device="cpu")
+        category = [[0] * shape[1] for _ in range(shape[0])]
+        missing = [[False] * shape[1] for _ in range(shape[0])]
         for j, feature in enumerate(self.features):
             values = view.column(feature.name)
             vocabulary = {canonical_json(value): i for i, value in enumerate(feature.categories)}
             for i, value in enumerate(values):
                 if value is None:
-                    missing[i, j] = True
+                    missing[i][j] = True
                 elif feature.kind == "numeric":
                     require(type(value) in (int, float), f"non-numeric value for {feature.name}")
                     numeric[i, j] = (value - feature.mean) / feature.scale
                 else:
-                    category[i, j] = vocabulary.get(canonical_json(value), len(vocabulary))
-        return FeatureBatch(torch.arange(shape[1], device=numeric.device), numeric, category,
+                    category[i][j] = vocabulary.get(canonical_json(value), len(vocabulary))
+        numeric = numeric.to(device=device)
+        category = torch.tensor(category, dtype=torch.long, device=device).reshape(shape)
+        missing = torch.tensor(missing, dtype=torch.bool, device=device).reshape(shape)
+        return FeatureBatch(torch.arange(shape[1], device=device), numeric, category,
                             missing, torch.zeros_like(missing), torch.zeros_like(missing))
 
     def forward(self, batch: FeatureBatch) -> Tensor:

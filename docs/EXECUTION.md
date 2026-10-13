@@ -285,10 +285,12 @@ order, with the original tensor strides, then applied in batched layer order.
 This retains the original RNG stream and Bernoulli keep probabilities. The
 replay comparison on CUDA exceeded the forward tolerance at one near-zero
 context element (absolute difference 1.27e-6); the tolerance was not loosened.
-The nonzero-dropout path therefore remains **training-path equivalence in
-distribution, pending owner confirmation** under the orchestrator's 2026-10-11
-fallback ruling. Seed-paired short fits report the actual numerical and decision
-differences. Native layer-first mask generation was also evaluated, but failed
+The owner subsequently accepted PR #63's three documented exception categories:
+that context element, intermediate base-only prediction drift after optimizer
+updates, and the two-grid/dropout-zero calibration differences. This acceptance
+applies to PR #63 only; subsequent changes must report every new strict exception
+against the current path for a new owner decision. Seed-paired short fits retain
+the actual numerical and decision differences. Native layer-first mask generation was also evaluated, but failed
 the existing extreme-weight invariance regression, so original-order mask
 replay is retained.
 
@@ -329,3 +331,88 @@ minibatch step IDs, distinguish measured epochs from projections, retain the two
 offset-pass costs and include the registered and requested RecipeStudy settings.
 An incomplete equivalence check or a different stochastic realization must be
 reported explicitly; deterministic repetition alone is not equivalence.
+
+### Fit preparation cost profile
+
+The next profile isolates immutable preparation from the already batched model.
+Use the same saved fold-0/inner-0 outcome grid-0 SSL initialization, observations,
+seed 1103, 19,434 fitting originals, 30 features and 76 minibatches per epoch.
+Keep the 1,200-second supervised slice and record cold setup separately. Run
+cProfile over that slice and a separate torch.profiler capture of an ordinary
+256-original minibatch. Report host wall ranges, device kernel duration, kernel
+launch counts and synchronisation separately: asynchronous GPU durations must
+not be added to the host ranges that contain them.
+
+Record the parameter count of the instantiated nuisance model separately from
+the saved SSL descriptor. In these slices the SSL checkpoint reports 110,238
+parameters, while the complete outcome nuisance has 193,143 in both the baseline
+and candidate; adding context, treatment readout and county offsets changes the
+object being counted. A shared initialization does not make these counts equal.
+
+The implementation now creates one fit-local covariate index and parent content
+hash, then uses ordinary validated CovariateView and lineage constructors for
+every sampled subset. A second fit-local object applies the authoritative frozen
+policy once to fitting inputs and selects its original results by ID. Reuse
+requires the identical policy object and matching exposure bytes, geography and
+support key. Changed inputs, including signed zero, or records outside the fit
+use the policy API again. These objects contain no learned states, never cross
+fits and do not enter checkpoints. Each resume reconstructs them from validated
+inputs; production source/resume identity checks remain in force.
+
+Token preparation keeps the Python scalar standardisation and canonical category
+lookup, including distinct numeric/string/boolean categories, missingness and
+signed zero. Numeric values use the original scalar PyTorch assignment into a
+CPU buffer in the destination dtype, then transfer the complete buffer once.
+This retains the native scalar rounding, subnormal and overflow behavior for
+every value instead of duplicating selected parts of that conversion with a
+Python-list tensor constructor. Category and missingness arrays still transfer
+in bulk. Raw target weights retain their separate existing FP64 arithmetic;
+they never enter the numeric token buffer. Encoder, PMA, dropout draws,
+loss reductions, clipping, optimizer updates and both full offset passes retain
+their existing mathematics.
+
+Before review, run the required matrix on Slurm `standard`/`root`, eight CPUs,
+with each of these interpreters and with both ordinary mode and `-B`:
+
+```sh
+timeout 1200s env CUDA_VISIBLE_DEVICES='' PYTHONPATH=src \
+  /mnt/weka/home/hgoodarzi/envs/oxyformer/bin/python -B -m pytest -q \
+  tests/test_fit.py tests/test_nested_cv.py tests/test_context_invariance.py tests/test_tokens.py
+# Repeat without -B, and repeat both commands with:
+# /mnt/weka/home/hgoodarzi/oxyformer-swarm/envs/ci-cpu/bin/python
+```
+
+Run the complete suite once with the CI CPU wheel and CI's ordinary interpreter
+mode, inside an eight-CPU Slurm allocation:
+
+```sh
+timeout 3600s env CUDA_VISIBLE_DEVICES='' PYTHONPATH=src \
+  /mnt/weka/home/hgoodarzi/oxyformer-swarm/envs/ci-cpu/bin/python -m pytest -q
+```
+
+Use separate H100 allocations with `--gres=gpu:1`, each limited to at most one
+hour and all GPU allocations totaling less than four hours, for real saved-state
+replays, synthetic nested-fit comparisons and repeated GPU tests. Compare every
+captured intermediate output, loss and gradient as well as full-partition means,
+offsets, calibration, discrete decisions and repeated scientific bytes. Preserve
+every exceeding element with its reference value, candidate value and bound;
+historical PR #63 exceptions confer no waiver. Verify source fingerprints and
+enclosing provenance links before normalizing only transport/identity metadata.
+
+The conversion regression grid compares storage bytes against scalar assignment
+and Python binary64 subtraction/division followed by an explicit dtype cast.
+It includes the smallest subnormal, `1e-311`, FP32 subnormals, signed zero,
+`1e307`, negative counterparts and both sides of the FP32 finite boundary.
+Run the unchanged extreme-weight complete-fold regression as well. Diagnostic
+CPU-dispatch and flush-to-zero probes belong in isolated Slurm processes; they
+must not change the production deterministic or precision settings. A cluster
+pass does not replace checking the actual GitHub PR run on its own CPU.
+
+Keep `fit_cost_profile_2.json`, `equivalence_report.json`, `pytest.log` and the
+job receipts in the attempt directory. Cost projections retain the previous
+reference-row workload scaling and SSL proxy, with explicit limitations, for the
+registered recipe and the K=32/E=30/G=2/S=1 and K=None/E=60/G=2/S=1 study cells.
+Report the 5,400/1,700 H100-hour comparisons and
+`floor(5400 / (scenario_count * repetition_hours))` for 4, 2 and 1 scenarios.
+This arithmetic does not amend the frozen minimum of 1,000 repetitions per final
+scenario or authorize a campaign or a larger leaf.
