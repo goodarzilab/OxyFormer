@@ -32,11 +32,12 @@ COLLECT_OUTPUTS = ["result.json", "gate.json", "artifact_manifest.json"]
 SCREENING_LABEL = "screening; final 1,000-repetition cells deferred (owner decision 2026-10-12)"
 SCREENING_CELL = {"reference_cap": 32, "frozen_epochs": 30, "grid_points": 2, "seed_count": 1}
 OWNER_APPROVALS = REPOSITORY / "configs/approvals.yaml"
+_REPOSITORY_APPROVALS = object()
 
 
-def screening_decision(approvals=None):
+def screening_decision(approvals=_REPOSITORY_APPROVALS):
     """Read, never amend, the owner decision. Absence is not an opt-in."""
-    if approvals is None:
+    if approvals is _REPOSITORY_APPROVALS:
         approvals = yaml.safe_load(OWNER_APPROVALS.read_text())
     require(type(approvals) is dict, "missing screening campaign approval")
     owner = approvals.get("owner_decisions")

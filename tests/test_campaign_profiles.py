@@ -631,14 +631,17 @@ def test_screening_uniform_reduction_never_raises_ceiling(hours, expected):
         assert 4 * hours * (expected + 1) + 600 / 3600 > 3600
 
 
-@pytest.mark.parametrize('drift', ['approval', 'cell', 'profile_cell'])
+@pytest.mark.parametrize('drift', ['approval', 'approval_null', 'approval_scalar', 'cell', 'profile_cell',
+                                   'screening_repetitions', 'repetitions_per_leaf'])
 def test_screening_estimate_refuses_unapproved_or_mismatched_cell(screening_request, drift):
     req = screening_request
-    if drift == 'approval':
+    if drift in ('approval', 'approval_null', 'approval_scalar'):
         value = coverage.read_json(req.config_path)
-        value['approvals'] = {}
+        value['approvals'] = {'approval': {}, 'approval_null': None, 'approval_scalar': []}[drift]
         write(Path(req.config_path), value)
         req = replace(req, config_hash=file_hash(req.config_path))
+    elif drift in ('screening_repetitions', 'repetitions_per_leaf'):
+        req = update_task(req, lambda p: p.update({drift: 1000}))
     elif drift == 'cell':
         req = update_task(req, lambda p: p['recipe']['study'].update(grid_points=4))
     else:

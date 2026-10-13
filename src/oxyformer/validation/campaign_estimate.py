@@ -81,7 +81,8 @@ def estimate_budget(request):
     screening = bool(campaign.screening_metadata(recipe))
     decision = campaign.validate_screening(recipe, config.get('approvals', {})) if screening else None
     if screening:
-        require('final_repetitions' not in p, 'screening cannot request final cells')
+        require(not {'final_repetitions', 'screening_repetitions', 'repetitions_per_leaf'}.intersection(p),
+                'screening counts are derived from measured profiles and owner approval')
         count = decision['repetitions_per_scenario']
     else:
         count = integer(p['final_repetitions'], 'final repetitions', 1000)
