@@ -648,14 +648,15 @@ def test_coverage_chain_bit_equivalence(tmp_path, monkeypatch):
         assert expected["terminal"]
         phase[0] = "chain"
         clock = [0.]
-        monotonic = time.monotonic
-        monkeypatch.setattr(coverage.time, "monotonic", lambda: monotonic() + clock[0])
+        # Advance exactly to the checkpoint/leaf deadlines. Jumping beyond the
+        # wall would test an overrun, which must not publish a usable leaf.
+        monkeypatch.setattr(coverage.time, "monotonic", lambda: clock[0])
         step = [0]
         original_reason = fit._Budget.reason
         cut = [False, False]
         def deadline(self):
             if step[0] == 0 and self.batches >= 3 and not cut[0]:
-                clock[0] += 14400
+                clock[0] = self.started + self.config.slice_seconds - self.config.checkpoint_margin_seconds
                 cut[0] = True
             return original_reason(self)
         monkeypatch.setattr(fit._Budget, "reason", deadline)
@@ -663,7 +664,7 @@ def test_coverage_chain_bit_equivalence(tmp_path, monkeypatch):
         def predict(*args, **kwargs):
             value = original_predict(*args, **kwargs)
             if step[0] == 1 and not cut[1]:
-                clock[0] += 14400
+                clock[0] += 14280.
                 cut[1] = True
             return value
         monkeypatch.setattr(coverage.nested_cv, "predict", predict)
@@ -753,7 +754,7 @@ def saved_coverage_chain(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("field", ["draws", "scenario", "endpoint_hash", "frame_hash", "recipe_hash", "study",
-                                    "lock_hash", "code_identity", "mode", "wall_seconds", "scientific_fingerprint", "environment_hash"])
+                                    "lock_hash", "code_identity", "mode", "wall_seconds", "leaf_budget", "scientific_fingerprint", "environment_hash"])
 def test_coverage_binding_refuses_each_field(saved_coverage_chain, field):
     req, task, _, header = saved_coverage_chain
     binding = deepcopy(header["binding"])
@@ -916,3 +917,104 @@ def test_profile_continuation_refuses_changed_wall_budget(tmp_path, monkeypatch)
     assert result.status == "blocked", result.message
     assert "binding mismatch" in result.message
     assert not (Path(next_req.output_dir) / "continuation.tar").exists()
+
+
+def test_generic_step_zero_preserves_archive_free_legacy_path(tmp_path, monkeypatch):
+    from test_campaign import STAMPS
+    task, inputs = chain_fixture(tmp_path)
+    task['outputs'].remove('continuation.tar')
+    monkeypatch.setattr(campaign, 'fingerprint', lambda: deepcopy(STAMPS))
+    monkeypatch.setattr(coverage, 'estimate_repetition', lambda *a, **k:
+        {m: {'value': 0., 'se': 1.} for m in coverage.METHODS})
+    req = chain_request(tmp_path / 'legacy', task, {'inputs': inputs})
+    result = coverage.run_stage(req)
+    assert result.status == 'pass', result.message
+    assert not (Path(req.output_dir) / 'continuation.tar').exists()
+    assert coverage.read_json(Path(req.output_dir) / 'result.json')['summary']['complete']
+
+
+@pytest.mark.parametrize('setup,imported,expected', [(20., 30., 350.), (0., 0., 350.),
+    (30., 0., 340.), (0., 40., 340.), (30., 40., 330.)])
+def test_chain_deadline_charges_phase_overruns_once(tmp_path, monkeypatch, setup, imported, expected):
+    from test_campaign import STAMPS
+    task, inputs = chain_fixture(tmp_path)
+    task['parameters'].update(wall_seconds=600, leaf_budget=coverage.leaf_budget(600, 1.2,
+        {'setup_seconds': 20., 'import_seconds': 30., 'export_seconds': 40., 'publication_seconds': 10.}))
+    clock = [0.]
+    monkeypatch.setattr(coverage.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(campaign, 'fingerprint', lambda: deepcopy(STAMPS))
+    original_prepare = coverage.prepare_batch
+    def prepare(*a):
+        value = original_prepare(*a)
+        clock[0] += setup
+        return value
+    monkeypatch.setattr(coverage, 'prepare_batch', prepare)
+    first = chain_request(tmp_path / 'first', task, {'inputs': inputs})
+    monkeypatch.setattr(coverage, 'estimate_repetition', lambda *a, **k: None)
+    assert coverage.run_stage(first).status == 'pass'
+    task.update(id='chain-1', continuation={'owner': 'coverage-test', 'step': 1, 'predecessor': 'chain-0'})
+    original_read = coverage._read_continuation
+    def read(*a):
+        value = original_read(*a)
+        clock[0] += imported
+        return value
+    monkeypatch.setattr(coverage, '_read_continuation', read)
+    calls = []
+    def consume(endpoint, recipe, root, deadline, **kw):
+        calls.append(deadline - clock[0])
+        clock[0] = deadline - 1.
+        return None
+    monkeypatch.setattr(coverage, 'estimate_repetition', consume)
+    original_write = coverage._write_continuation
+    def export(*a, **kw):
+        clock[0] += 40.
+        return original_write(*a, **kw)
+    monkeypatch.setattr(coverage, '_write_continuation', export)
+    original_publish = coverage.publish
+    def publish(*a, **kw):
+        clock[0] += 10.
+        return original_publish(*a, **kw)
+    monkeypatch.setattr(coverage, 'publish', publish)
+    monkeypatch.setattr(coverage, 'generate_suite_a', lambda *a, **k: pytest.fail('redraw'))
+    req = chain_request(tmp_path / 'second', task, {'inputs': inputs, 'chain-0': Path(first.output_dir)})
+    clock[0] = 0.
+    result = coverage.run_stage(req)
+    assert result.status == 'pass', result.message
+    assert calls == [expected]
+    leaf = coverage.read_json(Path(req.output_dir) / 'timing.json')['leaves'][-1]
+    assert leaf['compute_seconds'] == expected - 1.
+    assert leaf['wall_seconds'] == setup + imported + expected - 1. + 50. <= 600.
+    assert leaf['compute_capacity_seconds'] == expected
+
+
+def test_bootstrap_compute_ceiling_is_immutable(tmp_path, monkeypatch):
+    from test_campaign import STAMPS
+    task, inputs = chain_fixture(tmp_path)
+    task['parameters']['compute_ceiling_seconds'] = 100.
+    monkeypatch.setattr(campaign, 'fingerprint', lambda: deepcopy(STAMPS))
+    monkeypatch.setattr(coverage, 'estimate_repetition', lambda *a, **k: None)
+    first = chain_request(tmp_path / 'first', task, {'inputs': inputs})
+    assert coverage.run_stage(first).status == 'pass'
+    task.update(id='chain-1', continuation={'owner': 'coverage-test', 'step': 1, 'predecessor': 'chain-0'})
+    task['parameters']['compute_ceiling_seconds'] = 200.
+    second = chain_request(tmp_path / 'second', task, {'inputs': inputs, 'chain-0': Path(first.output_dir)})
+    result = coverage.run_stage(second)
+    assert result.status == 'blocked' and 'binding mismatch' in result.message
+
+
+def test_compute_overrun_cannot_publish_a_usable_chain(tmp_path, monkeypatch):
+    from test_campaign import STAMPS
+    task, inputs = chain_fixture(tmp_path)
+    task['parameters']['compute_ceiling_seconds'] = 100.
+    monkeypatch.setattr(campaign, 'fingerprint', lambda: deepcopy(STAMPS))
+    clock = [0.]
+    monkeypatch.setattr(coverage.time, 'monotonic', lambda: clock[0])
+    def overrun(*a, **k):
+        clock[0] = a[3] + 1.
+        return None
+    monkeypatch.setattr(coverage, 'estimate_repetition', overrun)
+    req = chain_request(tmp_path / 'overrun', task, {'inputs': inputs})
+    result = coverage.run_stage(req)
+    assert result.status == 'blocked' and 'compute exceeded' in result.message
+    assert not result.artifacts
+    assert not (Path(req.output_dir) / 'continuation.tar').exists()
