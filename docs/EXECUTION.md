@@ -416,3 +416,60 @@ Report the 5,400/1,700 H100-hour comparisons and
 `floor(5400 / (scenario_count * repetition_hours))` for 4, 2 and 1 scenarios.
 This arithmetic does not amend the frozen minimum of 1,000 repetitions per final
 scenario or authorize a campaign or a larger leaf.
+
+### Coverage-owned continuation chains
+
+Coverage work may use the generic campaign `slices` chain. A work item that
+uses chained profiling declares `continuation.tar` on **every** slice, including
+the terminal slice. Its immutable parameters retain the draws, recipe, scenario,
+wall budget and optional `RecipeStudy` cell. The owner/step/predecessor fields
+come from the generic expansion; no new instance type or scheduler is involved.
+Legacy single-leaf profiles and locks retain their existing interface.
+
+The coverage archive binds draw IDs and simulation seeds, scenario payload,
+endpoint/frame/observation hashes, recipe, study cell, lock, code identity and
+scientific/environment fingerprints. Import resolves only the named predecessor
+from `StageRequest.dependency_paths`; the executor authenticates its declared
+outputs. Digest-named archive members carry the original observations/truth
+receipts, completed `(fold, seed)` prediction parts and the unfinished fold's
+nested-CV continuation. Embedded old checkpoint paths are never opened. Each
+predecessor must have the same owner and exactly the preceding step. Binding
+drift, gaps, reordered parts and corrupt blobs are refusals, never new draws.
+
+A bounded coverage leaf reserves `min(120 seconds, wall_seconds / 10)` for
+publication and uses the remaining deadline with nested-CV's existing checkpoint
+margin. The 14,400-second bound applies to a slice, not to a fold's cumulative
+training. Epochs, tuning, seeds and estimators are unchanged. Only after all
+prediction parts exist does the usual terminal aggregation run. Incomplete
+repetitions have no `repetitions/<id>/result.json`; a valid checkpointed slice
+passes execution while its batch summary remains incomplete. If a leaf crashes
+before export, retry in a fresh attempt root with the same task and exported
+predecessor. Never consume partial files in the failed root.
+
+Chained `timing.json` uses `measurement_scope: complete_chain_return`. It lists
+per-leaf compute, setup, import, export, publication and total seconds, as well
+as the chain total and accumulated compute per completed repetition. Timing and
+runtime receipt writes and the outer executor/scheduler are explicitly excluded.
+A partial or unsuccessful chain cannot justify a lock. For a chained profile,
+lock sizing pays the maximum measured cost of each overhead phase on every
+slice and applies the declared safety factor. Usable compute per slice is
+`(wall_seconds - checkpoint_reserve) / safety_factor - sum(max_phase_overheads)`;
+the slice count is the ceiling of measured repetition compute divided by this
+capacity. Admission also measures actual locked setup and refuses if it exceeds
+the allocation. Collection counts the last leaf's accumulated terminal records
+once, retains all declared draws in denominators, and lists incomplete chains.
+
+The bounds remain 4 GPU-hours per leaf and 40 leaves **per campaign spec**.
+Screening and final instances are still formed as before, and all generated
+resources remain `standard`/`root`. Per-scenario instances and month-1 sizing
+belong to the subsequent campaign-binding unit.
+
+The synthetic equivalence regression runs one reference repetition and a chain
+of three leaves, cutting inside a fold and between folds. It compares floating
+values by their binary64 bytes and records discrete fields separately. Only the
+explicitly enumerated timing/provenance fields in its report are excluded.
+`OXYFORMER_EQUIVALENCE_REPORT` selects the external report path;
+`OXYFORMER_CHAIN_DEVICE=cuda` selects the single-device H100 check. CPU is the
+default. Run the required coverage/campaign/profile/nested-CV files with and
+without `-B` in both the shared and CI CPU environments, plus the full CI-style
+suite, on Slurm. Tests use only synthetic fixtures and no network access.

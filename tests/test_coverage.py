@@ -591,3 +591,264 @@ def test_failed_publication_does_not_expose_success_estimates(tmp_path, monkeypa
     assert record["estimates"] == {}
     assert "truth" not in record
     assert "injected publication fault" in record["reason"]
+
+
+def chain_request(tmp_path, task, dependencies):
+    from test_campaign import request
+    req = request(tmp_path, task, dependencies)
+    paths = tuple(str(p) for root in dependencies.values() for p in sorted(root.iterdir()) if p.is_file())
+    return replace(req, dependency_paths=paths, dependency_hashes=tuple(map(file_hash, paths)))
+
+
+def chain_fixture(tmp_path):
+    endpoint, frame = synthetic_endpoint(tmp_path)
+    inputs = tmp_path / "inputs"
+    inputs.mkdir()
+    (inputs / "endpoint.json").write_text(endpoint.to_json())
+    (inputs / "frame.json").write_text(frame.to_json())
+    task = {"id": "chain-0", "stage": "simulation-smoke", "outputs": ["continuation.tar", "result.json", "timing.json"],
+        "continuation": {"owner": "coverage-test", "step": 0, "predecessor": None},
+        "parameters": {"mode": "smoke", "recipe": smoke_recipe(endpoint, frame),
+            "study": {"seed_count": 1, "grid_points": 2},
+            "scenario": {"name": "null_effect", "active_mechanisms": ["null"], "effect": "null"},
+            "draws": coverage.repetition_plan("coverage-chain", "null_effect", 1), "wall_seconds": 14400,
+            "endpoint_input": {"dependency": "inputs", "path": "endpoint.json"},
+            "frame_input": {"dependency": "inputs", "path": "frame.json"}}}
+    return task, inputs
+
+
+def test_coverage_chain_bit_equivalence(tmp_path, monkeypatch):
+    """Actual training; deadlines cut inside a fold and after the first outer fold."""
+    import os
+    import struct
+    import time
+    import torch
+    from oxyformer.training import fit
+    from oxyformer.validation.leakage import assert_fitted_invariant, model_hashes
+    from test_campaign import STAMPS
+    monkeypatch.setattr(campaign, "fingerprint", lambda: deepcopy(STAMPS))
+    monkeypatch.setenv("OXYFORMER_DEVICE", os.environ.get("OXYFORMER_CHAIN_DEVICE", "cpu"))
+    old_threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    task, inputs = chain_fixture(tmp_path)
+    fitted = {"reference": [], "chain": []}
+    phase = ["reference"]
+    original_fold = coverage.nested_cv.run_fold
+    def capture(*args, **kwargs):
+        artifact = original_fold(*args, **kwargs)
+        if artifact.complete:
+            fitted[phase[0]].append(artifact)
+        return artifact
+    monkeypatch.setattr(coverage.nested_cv, "run_fold", capture)
+    try:
+        reference = chain_request(tmp_path / "reference", task, {"inputs": inputs})
+        result = coverage.run_stage(reference)
+        assert result.status == "pass", result.message
+        expected = coverage.read_json(Path(reference.output_dir) / "result.json")
+        assert expected["terminal"]
+        phase[0] = "chain"
+        clock = [0.]
+        monotonic = time.monotonic
+        monkeypatch.setattr(coverage.time, "monotonic", lambda: monotonic() + clock[0])
+        step = [0]
+        original_reason = fit._Budget.reason
+        cut = [False, False]
+        def deadline(self):
+            if step[0] == 0 and self.batches >= 3 and not cut[0]:
+                clock[0] += 14400
+                cut[0] = True
+            return original_reason(self)
+        monkeypatch.setattr(fit._Budget, "reason", deadline)
+        original_predict = coverage.nested_cv.predict
+        def predict(*args, **kwargs):
+            value = original_predict(*args, **kwargs)
+            if step[0] == 1 and not cut[1]:
+                clock[0] += 14400
+                cut[1] = True
+            return value
+        monkeypatch.setattr(coverage.nested_cv, "predict", predict)
+        requests = []
+        for index in range(3):
+            step[0] = index
+            current = deepcopy(task)
+            current["id"] = f"chain-{index}"
+            current["continuation"] = {"owner": "coverage-test", "step": index,
+                "predecessor": None if index == 0 else f"chain-{index - 1}"}
+            dependencies = {"inputs": inputs}
+            if requests:
+                dependencies[f"chain-{index - 1}"] = Path(requests[-1].output_dir)
+                monkeypatch.setattr(coverage, "generate_suite_a", lambda *a, **k: pytest.fail("redrew observations"))
+            req = chain_request(tmp_path / f"slice-{index}", current, dependencies)
+            done = coverage.run_stage(req)
+            assert done.status == "pass", done.message
+            done.verify(req)
+            actual = coverage.read_json(Path(req.output_dir) / "result.json")
+            assert actual["terminal"] == (index == 2)
+            if index != 2:
+                assert not list(Path(req.output_dir).glob("repetitions/*/result.json"))
+            requests.append(req)
+        assert cut == [True, True]
+        assert len(fitted["reference"]) == len(fitted["chain"]) == 5
+        rid = task["parameters"]["draws"][0]["repetition_id"]
+        expected_oof = coverage.read_json(Path(reference.output_dir) / "repetitions" / rid / "nuisances.json")
+        actual_oof = coverage.read_json(Path(requests[-1].output_dir) / "repetitions" / rid / "nuisances.json")
+        # Every payload field is enumerated, including discrete identity fields.
+        excluded = ["nuisances.payload.lineage.parent_hashes", "record.wall_seconds"]
+        fields = {}
+        def compare(a, b, name):
+            if name in excluded:
+                fields[name] = {"result": "excluded", "reason": "provenance" if "lineage" in name else "timing"}
+            elif isinstance(a, dict):
+                assert set(a) == set(b), name
+                for key in sorted(a):
+                    compare(a[key], b[key], name + "." + key)
+            elif isinstance(a, list):
+                assert len(a) == len(b), name
+                for index, (x, y) in enumerate(zip(a, b)):
+                    compare(x, y, f"{name}[{index}]")
+            else:
+                identical = struct.pack("!d", a) == struct.pack("!d", b) if isinstance(a, float) else type(a) == type(b) and a == b
+                fields[name] = {"result": "identical" if identical else "different", "reference": a, "chained": b}
+        compare(expected_oof, actual_oof, "nuisances")
+        compare(expected["records"][0], actual["records"][0], "record")
+        for fold, (a, b) in enumerate(zip(fitted["reference"], fitted["chain"])):
+            compare(model_hashes(a), model_hashes(b), f"models.fold{fold}")
+            states = [coverage.nested_cv.load_checkpoint(x.checkpoint, x.checkpoint.identity)["controller"] for x in (a, b)]
+            compare(states[0]["selection"], states[1]["selection"], f"selection.fold{fold}")
+            compare(states[0]["counts"], states[1]["counts"], f"counts.fold{fold}")
+            for name in ("calibration", "transfer_diagnostics"):
+                x, y = [json.loads(state[name]) for state in states]
+                excluded.append(f"{name}.fold{fold}.payload.lineage.parent_hashes")
+                compare(x, y, f"{name}.fold{fold}")
+            for kind in ("outcome", "origin"):
+                compare(states[0]["final"][kind]["preprocessing"], states[1]["final"][kind]["preprocessing"],
+                        f"preprocessing.fold{fold}.{kind}")
+        report = {"device": str(fit.resolve_device()), "leaves": 3,
+            "cuts": ["inside fold", "between folds"], "excluded_fields": excluded,
+            "passed": all(v["result"] != "different" for v in fields.values()), "fields": fields}
+        report_path = os.environ.get("OXYFORMER_EQUIVALENCE_REPORT")
+        if report_path:
+            Path(report_path).write_text(json.dumps(report, indent=2))
+        assert report["passed"], [k for k, v in fields.items() if v["result"] == "different"]
+        for a, b in zip(fitted["reference"], fitted["chain"]):
+            assert_fitted_invariant(a, b)
+    finally:
+        torch.set_num_threads(old_threads)
+
+
+@pytest.fixture
+def saved_coverage_chain(tmp_path, monkeypatch):
+    from test_campaign import STAMPS
+    monkeypatch.setattr(campaign, "fingerprint", lambda: deepcopy(STAMPS))
+    task, inputs = chain_fixture(tmp_path)
+    monkeypatch.setattr(coverage, "estimate_repetition", lambda *a, **k: None)
+    req = chain_request(tmp_path / "first", task, {"inputs": inputs})
+    result = coverage.run_stage(req)
+    assert result.status == "pass", result.message
+    archive = Path(req.output_dir) / "continuation.tar"
+    import tarfile
+    with tarfile.open(archive) as tar:
+        header = json.loads(tar.extractfile("coverage.json").read())
+    return req, task, inputs, header
+
+
+@pytest.mark.parametrize("field", ["draws", "scenario", "endpoint_hash", "frame_hash", "recipe_hash", "study",
+                                    "lock_hash", "code_identity", "mode", "scientific_fingerprint", "environment_hash"])
+def test_coverage_binding_refuses_each_field(saved_coverage_chain, field):
+    req, task, _, header = saved_coverage_chain
+    binding = deepcopy(header["binding"])
+    binding[field] = "changed"
+    with pytest.raises(ContractError, match="binding mismatch"):
+        coverage._read_continuation(Path(req.output_dir) / "continuation.tar", binding,
+            {"owner": "coverage-test", "step": 1, "predecessor": task["id"]})
+
+
+@pytest.mark.parametrize("field,value", [("owner", "other"), ("step", 0), ("step", 2), ("predecessor", "other")])
+def test_coverage_chain_refuses_gap_reordering_and_owner(saved_coverage_chain, field, value):
+    req, task, _, header = saved_coverage_chain
+    chain = {"owner": "coverage-test", "step": 1, "predecessor": task["id"], field: value}
+    with pytest.raises(ContractError, match="nonconsecutive"):
+        coverage._read_continuation(Path(req.output_dir) / "continuation.tar", header["binding"], chain)
+
+
+@pytest.mark.parametrize("change", ["blob", "observation", "draw_seed", "draw_id"])
+def test_coverage_rejects_tampered_state(saved_coverage_chain, tmp_path, change):
+    import tarfile
+    from io import BytesIO
+    req, task, _, header = saved_coverage_chain
+    source = Path(req.output_dir) / "continuation.tar"
+    with tarfile.open(source) as tar:
+        blobs = {m.name: tar.extractfile(m).read() for m in tar.getmembers()}
+    if change == "blob":
+        name = next(k for k in blobs if k.startswith("blobs/"))
+        blobs[name] += b"x"
+    else:
+        binding = header["states"][0]["binding"]
+        if change == "observation":
+            binding["observation_hash"] = "0" * 64
+        else:
+            binding["draw"]["seed" if change == "draw_seed" else "repetition_id"] = 0
+        blobs["coverage.json"] = canonical_json(header).encode()
+    target = tmp_path / "tampered.tar"
+    with tarfile.open(target, "w") as tar:
+        for name, value in blobs.items():
+            member = tarfile.TarInfo(name)
+            member.size = len(value)
+            tar.addfile(member, BytesIO(value))
+    with pytest.raises(ContractError, match="tampered|binding drift"):
+        coverage._read_continuation(target, header["binding"],
+            {"owner": "coverage-test", "step": 1, "predecessor": task["id"]})
+
+
+def test_coverage_retry_uses_last_export_without_redraw(saved_coverage_chain, tmp_path, monkeypatch):
+    req, task, inputs, _ = saved_coverage_chain
+    task = deepcopy(task)
+    task.update(id="chain-1", continuation={"owner": "coverage-test", "step": 1, "predecessor": "chain-0"})
+    dependencies = {"inputs": inputs, "chain-0": Path(req.output_dir)}
+    monkeypatch.setattr(coverage, "generate_suite_a", lambda *a, **k: pytest.fail("redrew predecessor"))
+    def failure(*a, **k):
+        raise OSError("injected leaf failure")
+    monkeypatch.setattr(coverage, "estimate_repetition", failure)
+    failed = chain_request(tmp_path / "failed", task, dependencies)
+    result = coverage.run_stage(failed)
+    assert result.status == "blocked" and "injected leaf failure" in result.message
+    assert not (Path(failed.output_dir) / "continuation.tar").exists()
+    monkeypatch.setattr(coverage, "estimate_repetition", lambda *a, **k:
+        {m: {"value": 0., "se": 1.} for m in coverage.METHODS})
+    retry = chain_request(tmp_path / "retry", task, dependencies)
+    result = coverage.run_stage(retry)
+    assert result.status == "pass", result.message
+    actual = coverage.read_json(Path(retry.output_dir) / "result.json")
+    assert actual["terminal"] and actual["records"][0]["draw"] == task["parameters"]["draws"][0]
+
+
+def test_coverage_predecessor_must_be_declared(saved_coverage_chain, tmp_path):
+    req, task, inputs, _ = saved_coverage_chain
+    task = deepcopy(task)
+    task.update(id="chain-1", continuation={"owner": "coverage-test", "step": 1, "predecessor": "chain-0"})
+    next_req = chain_request(tmp_path / "next", task, {"inputs": inputs, "chain-0": Path(req.output_dir)})
+    paths = tuple(p for p in next_req.dependency_paths if not p.endswith("continuation.tar"))
+    next_req = replace(next_req, dependency_paths=paths, dependency_hashes=tuple(map(file_hash, paths)))
+    result = coverage.run_stage(next_req)
+    assert result.status == "blocked" and "undeclared dependency" in result.message
+
+
+@pytest.mark.parametrize("folds", [(1,), (1, 0), (0, 0)])
+def test_coverage_prediction_parts_must_be_consecutive(saved_coverage_chain, tmp_path, folds):
+    from oxyformer.contracts import OOFNuisances
+    req, task, inputs, header = saved_coverage_chain
+    chain = {"owner": "coverage-test", "step": 1, "predecessor": task["id"]}
+    states = coverage._read_continuation(Path(req.output_dir) / "continuation.tar", header["binding"], chain)
+    endpoint = coverage.nested_cv.PreparedEndpoint.from_json((inputs / "endpoint.json").read_text())
+    parts = []
+    for fold in folds:
+        ids = endpoint.outer.evaluation_ids(fold)
+        parts.append(OOFNuisances(spec=endpoint.data.manifest.spec, original_ids=ids, fold_ids=(fold,) * len(ids),
+            seed_ids=(1103,) * len(ids), mu_a=(0.,) * len(ids), mu_d=(0.,) * len(ids),
+            r_a=(1.,) * len(ids), r_d=(1.,) * len(ids), origin_weights=(1.,) * len(ids),
+            lineage=replace(endpoint.data.manifest.lineage, unit_ids=ids)).to_json())
+    states[0]["parts"] = parts
+    path = tmp_path / "reordered.tar"
+    coverage._write_continuation(path, states, binding=header["binding"], chain=task["continuation"], task_id=task["id"])
+    with pytest.raises(ContractError, match="reordered prediction"):
+        coverage._read_continuation(path, header["binding"], chain)
