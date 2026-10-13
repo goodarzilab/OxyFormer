@@ -50,6 +50,28 @@ def finite(value, name):
     return value
 
 
+OVERHEAD_PHASES = ("setup_seconds", "import_seconds", "export_seconds", "publication_seconds")
+
+
+def leaf_budget(seconds, factor, overheads):
+    """The immutable budget used by sizing, admission and chain execution."""
+    require(0 < finite(seconds, "leaf wall seconds") <= 14400, "coverage slice exceeds four hours")
+    require(finite(factor, "profile safety factor") >= 1, "invalid profile safety factor")
+    require(set(overheads) == set(OVERHEAD_PHASES), "incomplete leaf overheads")
+    require(all(finite(overheads[k], k) >= 0 for k in OVERHEAD_PHASES), "negative leaf overhead")
+    reserve = min(120., seconds / 10)
+    capacity = (seconds - reserve) / factor - math.fsum(overheads.values())
+    require(capacity > 0, "infeasible batch budget: leaf overhead consumes slice")
+    return {"wall_seconds": seconds, "reserve_seconds": reserve, "safety_factor": factor,
+            "overheads": dict(overheads), "compute_seconds": capacity}
+
+
+def remaining_compute(budget, **measured):
+    """Charge positive phase overruns once; never credit an underrun."""
+    return max(0., budget["compute_seconds"] - math.fsum(
+        max(0., seconds - budget["overheads"][phase]) for phase, seconds in measured.items()))
+
+
 def binomial_bound(events, total, *, side):
     """Exact one-sided 95% Clopper-Pearson bound, including empty samples."""
     integer(total, "total")
@@ -529,7 +551,7 @@ def _run_batch(request: StageRequest, started: float) -> StageResult:
 
 
 
-def record_runtime(request, completed, started, task):
+def record_runtime(request, completed, started, task, *, budget_exceeded=False):
     """Record the measured complete batch, including publication/verification.
 
     This small telemetry receipt is emitted after measurement; its own write
@@ -543,7 +565,7 @@ def record_runtime(request, completed, started, task):
     aggregate = read_json(Path(request.output_dir) / "result.json")
     elapsed = time.monotonic() - started
     runtime = {"measurement_scope": "complete_batch_return", "wall_seconds": elapsed,
-        "admitted_budget_seconds": budget, "budget_exceeded": elapsed > budget,
+        "admitted_budget_seconds": budget, "budget_exceeded": budget_exceeded or elapsed > budget,
         "overrun_seconds": max(0., elapsed - budget), "batch_id": parameters.get("batch_id"),
         "lock_hash": aggregate["lock_hash"], "request_hash": completed.request_hash,
         "excluded": ["runtime receipt publication", "outer executor and scheduler"]}
@@ -645,15 +667,32 @@ def _run_chain(request, started):
     require(seconds <= 14400, "coverage slice exceeds four hours")
     study = RecipeStudy(**parameters.get("study", {}))
     require(parameters["mode"] != "final" or study == RecipeStudy(), "final recipe cannot use study overrides")
+    # Locked budgets were authenticated by prepare_batch against the lock and
+    # expansion. Bootstrap profiles need no measurements: their checkpoint
+    # reserve covers finalization, and an optional fixed ceiling can cut them
+    # earlier. Neither mode may grow its compute allowance across successors.
+    budget = parameters.get("leaf_budget")
+    if lock:
+        require(budget is not None, "locked chain requires leaf budget")
+    if budget is not None:
+        require(budget == leaf_budget(seconds, budget["safety_factor"], budget["overheads"]),
+                "leaf budget drift")
+    else:
+        budget = leaf_budget(seconds, 1., {k: 0. for k in OVERHEAD_PHASES})
+    ceiling = parameters.get("compute_ceiling_seconds", budget["compute_seconds"])
+    require(0 < finite(ceiling, "compute ceiling") <= budget["compute_seconds"], "invalid compute ceiling")
+    require(not lock or ceiling == budget["compute_seconds"], "locked compute ceiling drift")
+    budget = {**budget, "compute_seconds": ceiling}
     binding = {"draws": parameters["draws"], "scenario": scenario.to_dict()["payload"],
         "endpoint_hash": template.content_hash, "frame_hash": frame.content_hash,
         "recipe_hash": digest(recipe), "study": study.to_dict(), "lock_hash": digest(lock) if lock else None,
-        "code_identity": request.code_identity, "mode": parameters["mode"], "wall_seconds": seconds, **stamps}
+        "code_identity": request.code_identity, "mode": parameters["mode"], "wall_seconds": seconds,
+        "leaf_budget": budget, **stamps}
     for name in ("continuation.tar", "repetitions", "result.json", "timing.json"):
         require(not output_path(root, name).exists(), "coverage attempt already exists: " + name)
-    setup = time.monotonic() - started
     config = yaml.safe_load(Path(request.config_path).read_text())
     imported_at = time.monotonic()
+    setup = imported_at - started
     history = []
     if chain["predecessor"] is None:
         states = [{"parts": [], "sample": {}, "pending": None, "record": None, "compute_seconds": 0.}
@@ -683,15 +722,17 @@ def _run_chain(request, started):
             (destination / "pending.tar").write_bytes(state["pending"])
             state["predecessor"] = nested_cv.import_continuation(destination / "pending.tar", imported,
                 binding=state["binding"], chain=chain)
-    import_seconds = time.monotonic() - imported_at
     compute_at = time.monotonic()
-    # The existing checkpoint margin reserves time for checkpoint publication.
-    deadline = started + seconds - min(120., seconds / 10)
+    import_seconds = compute_at - imported_at
+    capacity = remaining_compute(budget, setup_seconds=setup, import_seconds=import_seconds)
+    deadline = compute_at + capacity
     for draw, state, destination in zip(parameters["draws"], states, destinations):
         if state["record"] is not None:
             require(state["record"]["draw"] == draw and state["record"]["status"] != "incomplete",
                     "terminal draw drift")
             continue
+        if time.monotonic() >= deadline:
+            break
         draw_at = time.monotonic()
         record = execute_draw(draw, frame, scenario, template, recipe, destination, deadline,
                               continuation=state, study=study)
@@ -705,8 +746,9 @@ def _run_chain(request, started):
     if device.type == "cuda":
         import torch
         torch.cuda.synchronize(device)
-    compute_seconds = time.monotonic() - compute_at
     export_at = time.monotonic()
+    compute_seconds = export_at - compute_at
+    require(compute_seconds <= capacity, "coverage compute exceeded admitted budget; no usable leaf")
     for state, destination in zip(states, destinations):
         if state["predecessor"] is not None:
             path = destination / "next-fold.tar"
@@ -740,8 +782,13 @@ def _run_chain(request, started):
     publication_seconds = elapsed - setup - import_seconds - compute_seconds - export_seconds
     leaf = {"task_id": task["id"], "step": chain["step"], "compute_seconds": compute_seconds,
         "setup_seconds": setup, "import_seconds": import_seconds, "export_seconds": export_seconds,
-        "publication_seconds": publication_seconds, "wall_seconds": elapsed}
+        "publication_seconds": publication_seconds, "wall_seconds": elapsed,
+        "compute_capacity_seconds": capacity, "leaf_budget": budget,
+        "budget_exceeded": elapsed > seconds or (parameters.get("leaf_budget") is not None and
+            compute_seconds > remaining_compute(budget, setup_seconds=setup, import_seconds=import_seconds,
+                export_seconds=export_seconds, publication_seconds=publication_seconds))}
     leaves = [*history, leaf]
+    exceeded = any(v.get("budget_exceeded", False) for v in leaves)
     timing = {"chain": chain, "leaves": leaves, "wall_seconds": math.fsum(v["wall_seconds"] for v in leaves),
         "gpu_seconds": math.fsum(v["wall_seconds"] for v in leaves) if device.type == "cuda" else 0.,
         "device": str(device), "environment": environment,
@@ -753,12 +800,18 @@ def _run_chain(request, started):
         "study": study.to_dict(),
         "complete_repetition_seconds": [s["compute_seconds"] for s in states if s["record"] is not None
                                         and s["record"]["status"] == "success"],
-        "complete": summary["complete"], "all_successful": summary["counts"]["success"] == len(states),
+        "complete": summary["complete"] and not exceeded, "budget_exceeded": exceeded,
+        "all_successful": summary["counts"]["success"] == len(states),
         "recipe_hash": digest(recipe), **stamps}
     path = atomic_json(root, "timing.json", timing)
     completed = replace(completed, artifacts=(*completed.artifacts,
         ArtifactRecord(path="timing.json", kind="timing", sha256=file_hash(path), lineage=lineage)))
-    return record_runtime(request, completed, started, task)
+    if exceeded:
+        completed = replace(completed, status="fail", message="Coverage budget exceeded; no usable profile or leaf")
+    completed = record_runtime(request, completed, started, task, budget_exceeded=exceeded)
+    if time.monotonic() - started > seconds:
+        completed = replace(completed, status="fail", message="Coverage publication exceeded wall budget")
+    return completed
 
 
 def run_stage(request: StageRequest) -> StageResult:
@@ -799,6 +852,7 @@ def run_stage(request: StageRequest) -> StageResult:
                       gpu_seconds=elapsed if timing["device"].startswith("cuda") else 0.,
                       publication_verification_seconds=elapsed - timing["setup_seconds"] - math.fsum(timing["complete_repetition_seconds"]),
                       measurement_scope="complete_stage_return",
+                      budget_exceeded=elapsed > timing["admitted_budget_seconds"],
                       profiled_request_hash=profiled_request.content_hash)
         if timing["device"].startswith("cuda"):
             exceeded = elapsed > timing["admitted_budget_seconds"]

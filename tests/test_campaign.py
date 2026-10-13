@@ -555,3 +555,121 @@ def test_collection_counts_chained_terminal_records_once(tmp_path, incomplete):
     assert len(value["records"]) == (999 if incomplete else 1000)
     assert len(value["gate"]["incomplete_chains"]) == int(incomplete)
     assert value["gate"]["scenario_summaries"]["null_effect"]["missing_repetitions"] == int(incomplete)
+
+
+def test_producer_budget_600_120_percent_800_compute_100_overhead(tmp_path, monkeypatch):
+    """Real lock -> expansion -> execution -> collection; synthetic draw costs.
+
+    A 1,000-draw batch costs 800 s. This preserves the frozen final minimum
+    and instance structure while testing the committee's 800 s work item.
+    """
+    from test_coverage import chain_request
+    req, task = setup_lock(tmp_path, screening_repetitions=1000, repetitions_per_leaf=1000,
+                           wall_seconds=600, profile_safety_factor=1.2)
+    profile_root = tmp_path / 'profile'
+    data = coverage.read_json(profile_root / 'result.json')
+    data['draws'], data['records'] = successful_records(1000)
+    write(profile_root / 'result.json', data)
+    timing = coverage.read_json(profile_root / 'timing.json')
+    timing.update(measurement_scope='complete_chain_return', admitted_budget_seconds=600,
+        complete_repetition_seconds=[.8] * 1000, wall_seconds=1100., setup_seconds=0.,
+        leaves=[{'task_id': f'profile-{i}', 'step': i, 'compute_seconds': c,
+                 'setup_seconds': 0., 'import_seconds': 0., 'export_seconds': 100.,
+                 'publication_seconds': 0., 'wall_seconds': c + 100.}
+                for i, c in enumerate([350., 350., 100.])])
+    write(profile_root / 'timing.json', timing)
+    req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    clock = [0.]
+    monkeypatch.setattr(coverage.time, 'monotonic', lambda: clock[0])
+    result = campaign.run_stage(req)
+    assert result.status == 'pass', result.message
+    lock_root = Path(req.output_dir)
+    lock = coverage.read_json(lock_root / 'recipe_lock.json')
+    plans = coverage.read_json(lock_root / 'expanded_units.json')['plans']
+    assert [len(p['expected_leaves']) for p in plans] == [3, 3]
+    assert all(b['leaf_budget']['compute_seconds'] == 350. for b in lock['batches'])
+    assert all('continuation.tar' in leaf['outputs'] for p in plans for leaf in p['tasks'][:-1])
+    dependencies = {'campaign-lock': lock_root, 'inputs': tmp_path / 'inputs'}
+    original_export = coverage._write_continuation
+    def export(*a, **kw):
+        clock[0] += 100.
+        return original_export(*a, **kw)
+    monkeypatch.setattr(coverage, '_write_continuation', export)
+    finished, resumed, deadlines = set(), [], []
+    def execute(draw, frame, scenario, template, recipe, root, deadline, *, continuation, study):
+        rid = draw['repetition_id']
+        assert rid not in finished  # Completed draws are carried, never rerun.
+        deadlines.append(deadline)
+        used = continuation['compute_seconds']
+        if used:
+            resumed.append(rid)
+        remaining = .8 - used
+        consumed = min(remaining, max(0., deadline - clock[0] - 1.))
+        clock[0] += consumed
+        if consumed < remaining:
+            return {'draw': draw, 'status': 'incomplete', 'reason': 'budget exhausted'}
+        finished.add(rid)
+        return {'draw': draw, 'status': 'success', 'reason': 'complete', 'wall_seconds': consumed,
+                'truth': 0., 'causal_truth': 0., 'truth_integration_error': 0.,
+                'estimates': {m: {'value': 0., 'se': 1.} for m in coverage.METHODS}}
+    monkeypatch.setattr(coverage, 'execute_draw', execute)
+    for index, leaf in enumerate(plans[0]['tasks'][:-1]):
+        clock[0] = 0.
+        leaf_req = chain_request(tmp_path / f'leaf-{index}', leaf, dependencies)
+        done = coverage.run_stage(leaf_req)
+        assert done.status == 'pass', done.message
+        done.verify(leaf_req)
+        directory = Path(leaf_req.output_dir)
+        row = coverage.read_json(directory / 'timing.json')['leaves'][-1]
+        assert row['compute_capacity_seconds'] == 350.
+        assert row['compute_seconds'] <= 350.
+        assert row['export_seconds'] == 100.
+        assert row['wall_seconds'] <= 450. < 600.
+        assert coverage.read_json(directory / 'result.json')['terminal'] == (index == 2)
+        dependencies[leaf['id']] = directory
+    assert set(deadlines) == {350.}
+    assert len(finished) == 1000 and len(resumed) == 2
+    collector = chain_request(tmp_path / 'collector', plans[0]['tasks'][-1], dependencies)
+    done = campaign.run_stage(collector)
+    assert done.status == 'pass', done.message
+    result = coverage.read_json(Path(collector.output_dir) / 'result.json')
+    assert len(result['records']) == 1000
+    assert result['gate']['incomplete_chains'] == result['gate']['budget_overruns'] == []
+
+
+@pytest.mark.parametrize('field', ['compute_seconds', 'wall_seconds', 'reserve_seconds', 'safety_factor', 'overheads'])
+def test_locked_budget_refuses_executor_parameter_drift(tmp_path, field):
+    from test_coverage import chain_request
+    req, _ = setup_chain_lock(tmp_path)
+    assert campaign.run_stage(req).status == 'pass'
+    lock_root = Path(req.output_dir)
+    plans = coverage.read_json(lock_root / 'expanded_units.json')['plans']
+    leaf = deepcopy(plans[0]['tasks'][0])
+    leaf['parameters']['leaf_budget'][field] = 999
+    leaf_req = chain_request(tmp_path / 'changed', leaf, {'campaign-lock': lock_root, 'inputs': tmp_path / 'inputs'})
+    result = coverage.run_stage(leaf_req)
+    assert result.status == 'blocked', result.message
+    assert not result.artifacts
+    assert not list(Path(leaf_req.output_dir).glob('repetitions/*'))
+
+
+@pytest.mark.parametrize('case', ['partial', 'unsuccessful', 'known_overrun', 'earlier_leaf_overrun', 'legacy_overrun'])
+def test_partial_unsuccessful_or_overrun_profile_cannot_lock(tmp_path, case):
+    req, _ = setup_chain_lock(tmp_path)
+    path = tmp_path / 'profile/timing.json'
+    timing = coverage.read_json(path)
+    if case == 'partial':
+        timing['complete'] = False
+    elif case == 'unsuccessful':
+        timing['all_successful'] = False
+    elif case == 'known_overrun':
+        timing['budget_exceeded'] = True
+    elif case == 'earlier_leaf_overrun':
+        timing['leaves'][0]['budget_exceeded'] = True
+    else:
+        timing.update(measurement_scope='complete_stage_return', admitted_budget_seconds=30.)
+    write(path, timing)
+    req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    result = campaign.run_stage(req)
+    assert result.status == 'blocked', result.message
+    assert not result.artifacts

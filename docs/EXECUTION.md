@@ -473,3 +473,31 @@ explicitly enumerated timing/provenance fields in its report are excluded.
 default. Run the required coverage/campaign/profile/nested-CV files with and
 without `-B` in both the shared and CI CPU environments, plus the full CI-style
 suite, on Slurm. Tests use only synthetic fixtures and no network access.
+
+### Shared coverage leaf budget
+
+For coverage-owned chains, the lock stores `leaf_budget` in each batch and its
+expanded tasks. Sizing, locked preflight admission, and execution all use
+`C = (wall_seconds - min(120, wall_seconds / 10)) / safety_factor - sum(overheads)`.
+Overheads name setup, import, export, and publication separately. The immutable
+lock and continuation binding authenticate the budget, including the compute
+ceiling. A 600-second wall, factor 1.2, and 100 seconds of overhead admit 350
+seconds of compute: 800 seconds of work requires three leaves.
+
+The whole leaf shares one compute deadline. Setup and import are each charged
+once; each positive overrun reduces C and underruns never increase it. Export
+and publication remain reserved, along with the checkpoint margin and safety
+factor. A compute overrun refuses usable publication. Observed finalization or
+wall overruns fail the leaf and cannot justify a profile lock. The collector
+refuses over-budget chained leaves. Checkpoint boundaries are cooperative;
+uninterruptible operations that overrun are detected, not certified as within
+budget. The scheduler remains the hard wall limit.
+
+Bootstrap chain profiles need no prior measurement. They may declare an
+immutable `compute_ceiling_seconds` below the wall minus checkpoint reserve;
+otherwise that bound applies. Their separate phase measurements supply the
+next lock. Partial, unsuccessful, or known-overrun measurements never admit a
+lock. Existing archive-free single-leaf producers retain their legacy behavior:
+generic step-zero metadata alone does not promise an archive. New locks built
+from chained profiles explicitly declare `continuation.tar`. Malformed archive
+declaration hardening is deferred to a follow-up.
