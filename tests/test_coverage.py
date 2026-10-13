@@ -864,3 +864,34 @@ def test_predecessor_cannot_fall_back_to_legacy_redraw(saved_coverage_chain, tmp
     next_req = chain_request(tmp_path / "omitted-output", task, {"inputs": inputs, "chain-0": Path(req.output_dir)})
     result = coverage.run_stage(next_req)
     assert result.status == "blocked" and "must be declared" in result.message
+
+
+def test_nested_checkpoint_import_is_inside_import_timer(saved_coverage_chain, tmp_path, monkeypatch):
+    req, task, inputs, header = saved_coverage_chain
+    predecessor = Path(req.output_dir)
+    chain = {"owner": "coverage-test", "step": 1, "predecessor": "chain-0"}
+    states = coverage._read_continuation(predecessor / "continuation.tar", header["binding"], chain)
+    states[0]["pending"] = b"synthetic-checkpoint-for-timed-import"
+    replacement = tmp_path / "timed-import.tar"
+    coverage._write_continuation(replacement, states, binding=header["binding"], chain=task["continuation"], task_id=task["id"])
+    replacement.replace(predecessor / "continuation.tar")
+    task = deepcopy(task)
+    task.update(id="chain-1", continuation=chain)
+    clock = [0.]
+    monkeypatch.setattr(coverage.time, "monotonic", lambda: clock[0])
+    def import_checkpoint(*a, **k):
+        clock[0] += 90.
+        return object()
+    monkeypatch.setattr(coverage.nested_cv, "import_continuation", import_checkpoint)
+    def finish(draw, *a, continuation, **k):
+        continuation.update(predecessor=None, pending=None)
+        return {"draw": draw, "status": "success", "truth": 0., "causal_truth": 0.,
+                "truth_integration_error": 0., "estimates": {m: {"value": 0., "se": 1.} for m in coverage.METHODS}}
+    monkeypatch.setattr(coverage, "execute_draw", finish)
+    next_req = chain_request(tmp_path / "timed-import", task, {"inputs": inputs, "chain-0": predecessor})
+    result = coverage.run_stage(next_req)
+    assert result.status == "pass", result.message
+    leaf = coverage.read_json(Path(next_req.output_dir) / "timing.json")["leaves"][-1]
+    assert leaf["import_seconds"] == 90.
+    assert leaf["publication_seconds"] == 0.
+    assert leaf["wall_seconds"] == 90.

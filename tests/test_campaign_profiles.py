@@ -575,3 +575,36 @@ def test_profile_chain_accounts_for_every_leaf_and_refuses_partial(tmp_path, mon
     measured = profile(second)
     assert measured["seconds_per_repetition"] == 20.
     assert measured["leaf_overheads"] == {"setup_seconds": 2., "import_seconds": 3., "export_seconds": 4., "publication_seconds": 5.}
+
+
+@pytest.mark.parametrize("case", ["unequal_cumulative_compute", "setup_exceeds_import_export"])
+def test_chained_profile_uses_cumulative_max_and_full_overhead(tmp_path, case):
+    from test_campaign import setup_lock
+    req, task = setup_lock(tmp_path)
+    result_path = tmp_path / "profile/result.json"
+    result = coverage.read_json(result_path)
+    for record in result["records"]:
+        record["wall_seconds"] = 10.  # Last-leaf time is not cumulative compute.
+    write(result_path, result)
+    path = tmp_path / "profile/timing.json"
+    timing = coverage.read_json(path)
+    if case == "unequal_cumulative_compute":
+        leaves = [{"task_id": f"profile-{i}", "step": i, "compute_seconds": compute,
+            "setup_seconds": 1., "import_seconds": 0., "export_seconds": 0., "publication_seconds": 0.,
+            "wall_seconds": compute + 1.} for i, compute in enumerate((90., 20.))]
+        timing.update(wall_seconds=112., setup_seconds=2., admitted_budget_seconds=100.)
+    else:
+        leaves = [{"task_id": "profile-0", "step": 0, "compute_seconds": 110., "setup_seconds": 10.,
+            "import_seconds": 2., "export_seconds": 2., "publication_seconds": 1., "wall_seconds": 125.}]
+        timing.update(wall_seconds=125., setup_seconds=10., admitted_budget_seconds=600.)
+    timing.update(measurement_scope="complete_chain_return", leaves=leaves, complete_repetition_seconds=[100., 10.])
+    write(path, timing)
+    req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    profile = campaign._profile(req, json.loads(Path(req.config_path).read_text()),
+        {"dependency": "profile", "path": "result.json"}, result["scenario"], task["parameters"]["recipe"], STAMPS)
+    assert profile["seconds_per_repetition"] == 100.
+    if case == "unequal_cumulative_compute":
+        assert campaign.slice_count(profile, 1, 100., 1.) == 2
+    else:
+        assert profile["leaf_overheads"] == {"setup_seconds": 10., "import_seconds": 2.,
+                                            "export_seconds": 2., "publication_seconds": 1.}
