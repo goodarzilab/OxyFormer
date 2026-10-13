@@ -456,12 +456,17 @@ export and publication measurements, outcome counts, and chain totals.
 `coverage_measurements.json` is worker input to finalization, with no downstream
 authority. `result.json`, `timing.json` and `runtime.json` remain diagnostics and
 scientific payloads; their budget flags cannot authorize work.
+Execution and finalization classify a chain from the producer task's archive
+output or predecessor, preserving the archive-free generic step-zero path.
+The same task supplies the effective compute contract, including a bootstrap
+ceiling; worker scope tags and copied contracts cannot enlarge that allowance.
 
 `coverage.load_budget` is the only budget-evidence loader. It requires a
 passing terminal result and the existing independent publication seal, verifies
 the declared producer request/task and record hash, checks the wall/bindings,
 and recomputes eligibility from measurements and counts. Within this same loader,
-the hashed scientific repetition outcomes must agree with the finalized counts;
+the recorded chain mode and per-leaf contracts must match the producer task,
+and the hashed scientific recipe and outcomes must agree with the binding and counts;
 diagnostic summary flags remain irrelevant. Missing, truncated,
 pre-seal, over-budget and reused evidence is refused. Stored eligibility,
 complete and success flags are not trusted. Scientific payload reads follow

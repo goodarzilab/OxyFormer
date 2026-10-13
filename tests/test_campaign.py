@@ -49,6 +49,7 @@ def seal_budget_fixture(root, unit, task=None):
             'wall_seconds': timing.get('admitted_budget_seconds', 14400)}}
         if chain is not None:
             task['continuation'] = chain
+            task['outputs'] = ['result.json', 'continuation.tar']
     config = write(root / '_execution/config.json', {})
     task_path = write(root / '_execution/task.json', task)
     producer = StageRequest(stage=task['stage'], config_path=str(config), config_hash=file_hash(config),
@@ -56,7 +57,7 @@ def seal_budget_fixture(root, unit, task=None):
         output_dir=str(root), code_identity='c' * 40)
     (root / '_execution/request.json').write_text(producer.to_json())
     wall = task['parameters']['wall_seconds']
-    chained = timing.get('measurement_scope') == 'complete_chain_return'
+    chained = coverage.uses_continuation(task)
     elapsed = timing.get('wall_seconds', runtime.get('wall_seconds', 100.))
     leaf = {'task_id': unit, 'step': 0, 'compute_seconds': sum(timing.get('complete_repetition_seconds', [elapsed])),
         'setup_seconds': timing.get('setup_seconds', 0.), 'import_seconds': 0., 'export_seconds': 0.}
@@ -66,6 +67,9 @@ def seal_budget_fixture(root, unit, task=None):
     leaves[-1]['task_id'] = unit
     for row in leaves:
         row['post_check_reserve_seconds'] = coverage.publication_reserve(wall)
+        if chained:
+            row.setdefault('leaf_budget', coverage.task_leaf_budget(task))
+            row.setdefault('measured_overheads', 'leaf_budget' in task['parameters'])
     # Older regression fixtures explicitly model unsuccessful/partial profiling.
     # Their scientific outcomes must agree with their finalized counters.
     for flag, status in (('complete', 'incomplete'), ('all_successful', 'numerical_failure')):
@@ -665,6 +669,13 @@ def test_collection_counts_chained_terminal_records_once(tmp_path, incomplete):
             "draws": params["draws"], "records": selected, "terminal": terminal, "chain": leaf["continuation"]})
         write(destination / "runtime.json", {"batch_id": params["batch_id"], "lock_hash": coverage.digest(lock),
             "admitted_budget_seconds": params["wall_seconds"], "wall_seconds": 500., "measurement_scope": "complete_batch_return"})
+        predecessor = leaf['continuation']['predecessor']
+        history = coverage.read_json(dependencies[predecessor] / coverage.BUDGET_RECORD)['leaves'] if predecessor else []
+        measured = {'task_id': leaf['id'], 'step': leaf['continuation']['step'], 'compute_seconds': 100.,
+            'setup_seconds': 1., 'import_seconds': 2., 'export_seconds': 2., 'publication_seconds': 1.,
+            'wall_seconds': 106.}
+        write(destination / 'timing.json', {'measurement_scope': 'complete_chain_return',
+            'leaves': [*history, measured]})
         seal_budget_fixture(destination, leaf["id"], leaf)
         dependencies[leaf["id"]] = destination
     collector = request(tmp_path / "collector", plan["tasks"][-1], dependencies)
@@ -1046,3 +1057,131 @@ def test_nonchain_gpu_lock_already_refuses_four_hour_overrun(tmp_path, monkeypat
     assert result.status == 'blocked'
     assert result.message == 'leaf exceeds four GPU-hours'
     assert not list(Path(req.output_dir).glob('*.json'))
+
+
+def finalize_profile_fixture(req, task, payload, timing, elapsed, monkeypatch, *, status='pass'):
+    """Exercise actual runner finalization and the independent publication seal."""
+    import tarfile
+    from oxyformer.execution import runner, integrity
+    from oxyformer.provenance import ArtifactRecord
+    root = profile_directory(req)
+    task_path = root / '_execution/task.json'
+    write(task_path, task)
+    producer = StageRequest.from_json((root / '_execution/request.json').read_text())
+    producer = replace(producer, task_hash=file_hash(task_path))
+    (root / '_execution/request.json').write_text(producer.to_json())
+    for name in ('result.json', 'timing.json', coverage.MEASUREMENTS, coverage.BUDGET_RECORD):
+        (root / name).unlink(missing_ok=True)
+    completed = coverage.publish(producer, {'result.json': payload, 'timing.json': timing},
+        status='pass', message='synthetic request-bound producer')
+    if 'continuation.tar' in task.get('outputs', []):
+        with tarfile.open(root / 'continuation.tar', 'w'):
+            pass
+        completed = replace(completed, artifacts=(*completed.artifacts,
+            ArtifactRecord(path='continuation.tar', sha256=file_hash(root / 'continuation.tar'),
+                kind='fixture', lineage=completed.artifacts[0].lineage)))
+    timing.setdefault('environment', {'fixture': 'synthetic'})
+    summary = coverage.summarize(payload['records'], task['parameters']['draws'],
+        production_equivalent=True, null_scenario=True)
+    measured = coverage.record_measurements(producer, completed, 0., task, timing, summary)
+    with monkeypatch.context() as clock:
+        clock.setattr(runner.time, 'monotonic', lambda: elapsed)
+        final = runner.finalize_coverage_budget(producer, measured, 0.)
+    for name in (integrity.RESULT, integrity.FINGERPRINT):
+        (root / name).unlink(missing_ok=True)
+    sealed = integrity.publish_result(root, final)
+    assert sealed.status == status, sealed.message
+    return replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+
+
+def profile_leaf(unit, step, compute, overheads, budget):
+    return {'task_id': unit, 'step': step, 'compute_seconds': compute, **overheads,
+        'wall_seconds': compute + sum(overheads.values()), 'leaf_budget': budget,
+        'measured_overheads': False, 'post_check_reserve_seconds': 30.}
+
+
+def test_stale_scope_cannot_release_single_slice_lock(tmp_path, monkeypatch):
+    req, consumer_task = setup_lock(tmp_path, wall_seconds=604, profile_safety_factor=1.2,
+        cpu_wall_hours_budget=12.)
+    req = fork_profile(req, measurements=False)
+    root = profile_directory(req)
+    payload = coverage.read_json(root / 'result.json')
+    draws, records = successful_records(25)
+    payload.update(draws=draws, records=records)
+    task = coverage.read_json(root / '_execution/task.json')
+    task['parameters'].update(wall_seconds=600, draws=draws, compute_ceiling_seconds=390.,
+        recipe=consumer_task['parameters']['recipe'])
+    task.update(outputs=['result.json', 'continuation.tar'],
+        continuation={'owner': 'profile-chain', 'step': 1, 'predecessor': 'profile-previous'})
+    zeros = {k: 0. for k in coverage.OVERHEAD_PHASES}
+    budget = {**coverage.leaf_budget(600, 1., zeros), 'compute_seconds': 390.}
+    timing = coverage.read_json(root / 'timing.json')
+    timing.update(measurement_scope='complete_stage_return', admitted_budget_seconds=600,
+        complete_repetition_seconds=[16.] * 25, setup_seconds=0., wall_seconds=500.,
+        leaves=[profile_leaf('profile-previous', 0, 200., {**zeros, 'publication_seconds': 60.}, budget),
+                profile_leaf('profile', 1, 200., {**zeros, 'publication_seconds': 40.}, budget)])
+    req = finalize_profile_fixture(req, task, payload, timing, 500., monkeypatch)
+    result = campaign.run_stage(req)
+    assert result.status != 'pass', result.message
+    assert not (Path(req.output_dir) / 'recipe_lock.json').exists()
+    assert not (Path(req.output_dir) / 'expanded_units.json').exists()
+
+
+def test_record_contract_must_match_authorized_task(tmp_path, monkeypatch):
+    req, consumer_task = setup_lock(tmp_path, wall_seconds=14400, cpu_wall_hours_budget=200.)
+    req = fork_profile(req, measurements=False)
+    root = profile_directory(req)
+    payload = coverage.read_json(root / 'result.json')
+    task = coverage.read_json(root / '_execution/task.json')
+    phases = dict(zip(coverage.OVERHEAD_PHASES, (20., 30., 40., 10.)))
+    authorized = coverage.leaf_budget(600, 1.2, phases)
+    substituted = coverage.leaf_budget(600, 1., {k: 0. for k in coverage.OVERHEAD_PHASES})
+    assert authorized['compute_seconds'] == 350. and substituted['compute_seconds'] == 540.
+    task['parameters'].update(wall_seconds=600, leaf_budget=authorized,
+        recipe=consumer_task['parameters']['recipe'])
+    task.update(outputs=['result.json', 'continuation.tar'],
+        continuation={'owner': 'profile', 'step': 0, 'predecessor': None})
+    timing = coverage.read_json(root / 'timing.json')
+    timing.update(measurement_scope='complete_chain_return', admitted_budget_seconds=600,
+        complete_repetition_seconds=[200., 200.], setup_seconds=20., wall_seconds=500.,
+        leaves=[profile_leaf('profile', 0, 400., phases, substituted)])
+    req = finalize_profile_fixture(req, task, payload, timing, 500., monkeypatch, status='fail')
+    result = campaign.run_stage(req)
+    assert result.status != 'pass', result.message
+    assert not (Path(req.output_dir) / 'recipe_lock.json').exists()
+
+
+def test_scientific_recipe_must_match_profile_recipe(tmp_path, monkeypatch):
+    req, consumer_task = setup_lock(tmp_path)
+    req = fork_profile(req, measurements=False)
+    root = profile_directory(req)
+    payload = coverage.read_json(root / 'result.json')
+    task = coverage.read_json(root / '_execution/task.json')
+    task['parameters']['recipe'] = consumer_task['parameters']['recipe']
+    cheaper = deepcopy(task['parameters']['recipe'])
+    cheaper['nested_cv'].update(ssl_epochs=1, frozen_epochs=1, synthetic=True)
+    payload['recipe_hash'] = coverage.digest(cheaper)
+    timing = coverage.read_json(root / 'timing.json')
+    req = finalize_profile_fixture(req, task, payload, timing, 25., monkeypatch)
+    result = campaign.run_stage(req)
+    assert result.status != 'pass', result.message
+    assert not (Path(req.output_dir) / 'recipe_lock.json').exists()
+
+
+@pytest.mark.parametrize('stale', ['chained', 'compute_ceiling'])
+def test_loader_reconciles_sealed_record_with_producer_task(tmp_path, stale):
+    req, _ = setup_chain_lock(tmp_path)
+    req = fork_profile(req, measurements=False)
+    root = profile_directory(req)
+    record = coverage.read_json(root / coverage.BUDGET_RECORD)
+    if stale == 'chained':
+        record['chained'] = False
+    else:
+        # Internally valid but never authorized by this producer task.
+        for leaf in record['leaves']:
+            leaf['leaf_budget']['compute_seconds'] -= 1.
+    write(root / coverage.BUDGET_RECORD, record)
+    assert reseal_budget_fixture(root).status == 'pass'
+    req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    with pytest.raises(ContractError, match='execution mode mismatch|differs from producer task'):
+        coverage.load_budget(req, coverage.read_json(req.config_path), 'profile')

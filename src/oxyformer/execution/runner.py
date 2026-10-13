@@ -435,7 +435,7 @@ def finalize_coverage_budget(request, result, started):
     if request.stage not in ('coverage', 'simulation-smoke'):
         return result
     from oxyformer.validation.coverage import (BUDGET_RECORD, MEASUREMENTS, OVERHEAD_PHASES,
-        budget_binding, finite, publication_reserve, remaining_compute)
+        budget_binding, finite, publication_reserve, remaining_compute, uses_continuation, task_leaf_budget)
     from oxyformer.provenance import ArtifactRecord
     artifacts = [a for a in result.artifacts if a.path == MEASUREMENTS]
     if not artifacts:
@@ -449,10 +449,11 @@ def finalize_coverage_budget(request, result, started):
     timing = raw['timing']
     binding = budget_binding(request, task, timing['recipe_hash'])
     require(raw['binding'] == binding, 'coverage measurement binding mismatch')
-    chained = timing.get('measurement_scope') == 'complete_chain_return'
+    chained = uses_continuation(task)
     history = timing['leaves'][:-1] if chained else []
     if chained:
         leaf = dict(timing['leaves'][-1])
+        leaf['leaf_budget'] = task_leaf_budget(task)
         leaf['measured_overheads'] = 'leaf_budget' in task['parameters']
     else:
         leaf = {'task_id': task['id'], 'step': 0, 'compute_seconds': sum(timing['complete_repetition_seconds']),
