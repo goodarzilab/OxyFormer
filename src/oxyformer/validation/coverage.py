@@ -733,6 +733,7 @@ def _run_chain(request, started):
     completed = publish(request, {"result.json": result}, status="pass",
         message="Coverage work complete" if summary["complete"] else "Coverage slice checkpointed; repetition incomplete",
         extra_artifacts=(archive_record,))
+    environment = dict(fit_environment(device))
     elapsed = time.monotonic() - started
     # Attribute final aggregation, archive hashing and publication together;
     # every measured second belongs to exactly one phase.
@@ -743,7 +744,7 @@ def _run_chain(request, started):
     leaves = [*history, leaf]
     timing = {"chain": chain, "leaves": leaves, "wall_seconds": math.fsum(v["wall_seconds"] for v in leaves),
         "gpu_seconds": math.fsum(v["wall_seconds"] for v in leaves) if device.type == "cuda" else 0.,
-        "device": str(device), "environment": dict(fit_environment(device)),
+        "device": str(device), "environment": environment,
         "measurement_scope": "complete_chain_return", "excluded": ["timing/runtime receipt publication", "outer executor and scheduler"],
         "setup_seconds": math.fsum(v["setup_seconds"] for v in leaves),
         "publication_verification_seconds": math.fsum(v["publication_seconds"] for v in leaves),
