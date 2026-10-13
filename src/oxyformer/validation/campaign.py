@@ -113,7 +113,8 @@ def _profile(request, config, reference, scenario, recipe, stamps):
     timing = read_json(timing_path)
     require(result["mode"] == "profile" and result["scenario"] == scenario, "profile scenario mismatch")
     require(result["recipe_hash"] == timing["recipe_hash"] == digest(recipe), "profile recipe drift")
-    require(timing.get("measurement_scope") == "complete_stage_return",
+    chained = timing.get("measurement_scope") == "complete_chain_return"
+    require(chained or timing.get("measurement_scope") == "complete_stage_return",
             "profiling must include final publication and verification")
     require(timing["production_equivalent"] is True and timing["complete"] is True
             and timing["all_successful"] is True, "complete production profiling required")
@@ -133,10 +134,37 @@ def _profile(request, config, reference, scenario, recipe, stamps):
     setup = finite(timing["setup_seconds"], "profile setup seconds")
     overhead = wall - math.fsum(measured)
     require(0 <= setup <= overhead, "invalid profile setup/finalization accounting")
-    return {"seconds_per_repetition": max(measured), "setup_seconds": setup,
+    extra = {}
+    if chained:
+        leaves = timing["leaves"]
+        require(bool(leaves) and [v["step"] for v in leaves] == list(range(len(leaves))),
+                "partial profile chain")
+        require(len({v["task_id"] for v in leaves}) == len(leaves), "repeated profile leaf")
+        names = ("compute_seconds", "setup_seconds", "import_seconds", "export_seconds", "publication_seconds")
+        for leaf in leaves:
+            require(all(finite(leaf[k], "profile leaf " + k) >= 0 for k in names), "negative profile leaf time")
+            require(math.isclose(math.fsum(leaf[k] for k in names), leaf["wall_seconds"], rel_tol=1e-6, abs_tol=.01),
+                    "profile leaf accounting mismatch")
+            require(leaf["wall_seconds"] <= timing["admitted_budget_seconds"] <= 14400,
+                    "profile leaf exceeds slice budget")
+        require(math.isclose(math.fsum(v["wall_seconds"] for v in leaves), wall, rel_tol=1e-12),
+                "profile chain total mismatch")
+        extra = {"leaf_overheads": {k: max(v[k] for v in leaves) for k in names[1:]},
+                 "leaf_measurements": leaves}
+    return {**extra, "seconds_per_repetition": max(measured), "setup_seconds": setup,
             "publication_verification_seconds": overhead - setup,
             "profile_repetitions": len(declared), "result_hash": file_hash(result_path),
             "timing_hash": file_hash(timing_path), "draws": declared}
+
+
+def slice_count(profile, repetitions, seconds, factor):
+    """Conservative compute capacity after paying every leaf's measured costs."""
+    overhead = math.fsum(profile["leaf_overheads"].values())
+    capacity = (seconds - min(120., seconds / 10)) / factor - overhead
+    require(capacity > 0, "infeasible batch budget: leaf overhead consumes slice")
+    count = max(1, math.ceil(profile["seconds_per_repetition"] * repetitions / capacity))
+    require(count <= 40, "infeasible batch budget: campaign instance exceeds forty leaves")
+    return count
 
 
 def _admit_locked_leaves(request, config, lock, plans):
@@ -191,7 +219,14 @@ def _admit_locked_leaves(request, config, lock, plans):
                 setup = time.monotonic() - started
                 profile = lock["budget"]["profiles"][name]
                 publication = profile["publication_verification_seconds"] * max(1., size / profile["profile_repetitions"])
-                estimated = (setup + size * profile["seconds_per_repetition"] + publication) * lock["budget"]["profile_safety_factor"]
+                if "leaf_overheads" in profile:
+                    overheads = profile["leaf_overheads"]
+                    publication = overheads["publication_seconds"]
+                    estimated = min(120., parameters["wall_seconds"] / 10) + (max(setup, overheads["setup_seconds"]) + overheads["import_seconds"]
+                        + overheads["export_seconds"] + publication
+                        + size * profile["seconds_per_repetition"] / parameters["slices"]) * lock["budget"]["profile_safety_factor"]
+                else:
+                    estimated = (setup + size * profile["seconds_per_repetition"] + publication) * lock["budget"]["profile_safety_factor"]
                 measurements.append({"mode": parameters["mode"], "scenario": name, "repetitions": size,
                     "locked_setup_seconds": setup, "publication_verification_seconds": publication,
                     "estimated_seconds": estimated, "admitted_budget_seconds": parameters["wall_seconds"]})
@@ -260,21 +295,25 @@ def build_lock(request, config, task):
         mode_leaves = 0
         for scenario in scenarios:
             profile = profiles[scenario["name"]]
-            require((profile["publication_verification_seconds"] * max(1., min(batch_size, repetitions) / profile["profile_repetitions"])
+            require("leaf_overheads" in profile or (profile["publication_verification_seconds"] * max(1., min(batch_size, repetitions) / profile["profile_repetitions"])
                      + profile["seconds_per_repetition"] * min(batch_size, repetitions)) * factor <= wall_seconds,
                     "infeasible batch budget: measured complete repetitions do not fit")
             draws = repetition_plan(seed_namespace + ":" + mode, scenario["name"], repetitions)
             for start in range(0, repetitions, batch_size):
                 concrete = draws[start:start + batch_size]
+                slices = (slice_count(profile, len(concrete), wall_seconds, factor)
+                          if "leaf_overheads" in profile else 1)
+                extra = {"slices": slices} if "leaf_overheads" in profile else {}
                 batches.append({"batch_id": digest([campaign_id, namespace, mode, scenario["name"], start])[:24],
-                    "mode": mode, "scenario": scenario, "draws": concrete, "wall_seconds": wall_seconds, "gpus": gpus})
-                mode_leaves += 1
+                    "mode": mode, "scenario": scenario, "draws": concrete, "wall_seconds": wall_seconds, "gpus": gpus, **extra})
+                mode_leaves += slices
         require(mode_leaves <= 40, "campaign instance exceeds forty leaves; profile a feasible batching plan")
     draws = [d for batch in batches for d in batch["draws"]]
     validate_draws(draws)
     require(not prior_seeds.intersection(d["seed"] for d in draws), "evaluation draws overlap prior lock or profiling")
-    budget = {"gpu_hours": gpus * len(batches) * math.ceil(wall_seconds / 60) / 60, "gpu_hours_per_leaf_max": 4., "leaves_per_instance_max": 40,
-              "cpu_wall_hours_ceiling": (len(batches) * math.ceil(wall_seconds / 60) + 20) / 60,
+    total_leaves = sum(b.get("slices", 1) for b in batches)
+    budget = {"gpu_hours": gpus * total_leaves * math.ceil(wall_seconds / 60) / 60, "gpu_hours_per_leaf_max": 4., "leaves_per_instance_max": 40,
+              "cpu_wall_hours_ceiling": (total_leaves * math.ceil(wall_seconds / 60) + 20) / 60,
               "profile_safety_factor": factor, "profiles": profiles,
               "admission_model": "measure locked setup at each leaf size; scale complete profile finalization by repetition count",
               "budget_semantics": "planning estimate; report overruns and retain draws; scheduler enforces binding limits",
@@ -311,7 +350,8 @@ def build_lock(request, config, task):
             if screening_gate:
                 parameters_for_leaf["screening_gate"] = screening_gate
             work.append({"id": batch["batch_id"], "stage": "coverage", "parameters": parameters_for_leaf,
-                "outputs": LEAF_OUTPUTS, "slices": [{"gpus": gpus, "wall_seconds": wall_seconds}]})
+                "outputs": LEAF_OUTPUTS + (["continuation.tar"] if "slices" in batch else []),
+                "slices": [{"gpus": gpus, "wall_seconds": wall_seconds}] * batch.get("slices", 1)})
         spec = {"schema_version": 1, "id": lock["instances"][mode],
             "kind": "screening" if mode == "screening" else "final-coverage",
             "prerequisites": [], "inputs": stage_inputs, "recipe_lock": lock_ref, "work": work,
@@ -339,7 +379,8 @@ def _plan_for_task(request, config, task, lock):
             require(batch["batch_id"] in by_batch, "locked batch missing")
             actual = by_batch[batch["batch_id"]]
             require(all(actual["parameters"].get(k) == v for k, v in batch.items()), "locked batch drift")
-            require(actual["slices"] == [{"gpus": batch.get("gpus", 0), "wall_seconds": batch["wall_seconds"]}], "locked resources drift")
+            require(actual["slices"] == [{"gpus": batch.get("gpus", 0), "wall_seconds": batch["wall_seconds"]}]
+                    * batch.get("slices", 1), "locked resources drift")
         if plan["spec"]["id"] == task["campaign"]:
             require(task in plan["tasks"], "task is not the prospectively expanded task")
             selected = plan
@@ -388,9 +429,13 @@ def collect(request, config, task):
         runtimes.append({"leaf_id": leaf["id"], "batch_id": parameters["batch_id"],
             "scenario": parameters["scenario"]["name"], "wall_seconds": measured,
             "admitted_budget_seconds": budget_seconds, "overrun_seconds": max(0., measured - budget_seconds)})
+        if "slices" in parameters:
+            require(result["chain"] == leaf["continuation"], "leaf continuation drift")
+            if leaf["continuation"]["step"] + 1 != parameters["slices"]:
+                continue
         results.append(result)
-    records = [r for result in results for r in result["records"]]
-    declarations = [d for result in results for d in result["draws"]]
+    records = [r for result in results for r in result["records"] if r["status"] != "incomplete"]
+    declarations = [d for b in lock["batches"] if b["mode"] == mode for d in b["draws"]]
     validate_draws(declarations)
     require(len({r["draw"]["repetition_id"] for r in records}) == len(records), "duplicate collected repetition")
     summaries = {}
@@ -407,6 +452,7 @@ def collect(request, config, task):
             "certifies_production_coverage": bool(passing and mode == "final"),
             "expected_leaves": plan["expected_leaves"], "received_leaves": [t["id"] for t in plan["tasks"][:-1]],
             "scenario_summaries": summaries, "retry_rules": lock["retry_rules"],
+            "incomplete_chains": [r["batch_id"] for r in results if not r.get("terminal", True)],
             "leaf_runtimes": runtimes, "budget_overruns": [r for r in runtimes if r["overrun_seconds"] > 0]}
     return {"result.json": {"records": records, "gate": gate}, "gate.json": gate}, passing
 
