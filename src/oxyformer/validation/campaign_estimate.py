@@ -12,10 +12,56 @@ from oxyformer.validation.coverage import dependency, digest, finite, integer, p
 from oxyformer.validation.scm import CovariateFrame
 
 
+def screening_plan(profiles, decision, wall, factor):
+    """Uniform breadth reduction with separate leaf feasibility reporting.
+
+    Round projected leaves up to scheduler minutes. An overlong repetition
+    still gets an honest cost estimate; it never becomes an admitted leaf.
+    """
+    require(set(profiles) == set(decision["scenarios"]), "all four screening profiles required")
+    count = decision["repetitions_per_scenario"]
+    integer(wall, "screening leaf wall", 1)
+    require(math.ceil(wall / 60) * 60 <= 14400, "leaf exceeds four GPU-hours")
+    require(finite(factor, "profile safety factor") >= 1, "profile safety factor must be at least one")
+    def seconds(profile, n):
+        return factor * (profile["setup_seconds"] + n * profile["seconds_per_repetition"]
+            + profile["publication_verification_seconds"] * max(1., n / profile["profile_repetitions"]))
+    capacities = {name: max((n for n in range(1, count + 1) if seconds(p, n) <= wall), default=0)
+                  for name, p in profiles.items()}
+    common = min(capacities.values())
+    batch = max(1, common)
+    def costs(n):
+        full, remainder = divmod(n, batch)
+        return {name: (full * math.ceil(seconds(p, batch) / 60)
+                      + (math.ceil(seconds(p, remainder) / 60) if remainder else 0)) / 60
+                for name, p in profiles.items()}
+    requested_hours = math.fsum(costs(count).values())
+    while count and math.fsum(costs(count).values()) > decision["budget_h100_hours"]:
+        count -= 1
+    rows = costs(count)
+    leaves = len(profiles) * math.ceil(count / batch)
+    feasible = count > 0 and common > 0 and leaves <= 40
+    return {"repetitions_requested_per_scenario": decision["repetitions_per_scenario"],
+        "repetitions_per_scenario": count, "total_repetitions": len(profiles) * count,
+        "repetitions_reduced": count < decision["repetitions_per_scenario"],
+        "reduction_reason": "uniform reduction to 3,600 H100-hour ceiling" if count < 25 else None,
+        "requested_screening_gpu_hours": requested_hours,
+        "screening_gpu_hours": math.fsum(rows.values()), "scenario_gpu_hours": rows,
+        "repetitions_per_leaf": batch, "common_feasible_repetitions_per_leaf": common,
+        "feasible_repetitions_per_leaf": capacities, "projected_leaf_count": leaves,
+        "feasible_under_requested_wall_and_leaf_cap": feasible,
+        "projected_required_leaf_wall_seconds": max(seconds(p, min(count, batch)) for p in profiles.values()) if count else 0.,
+        "limits": {"gpu_hours_per_leaf": 4, "leaves_per_instance": 40, "run_gpu_hours": 3600,
+                   "concurrent_gpu_units": 4, "concurrent_cpu_units": 6},
+        "concurrency_plan": {"gpu_pool_required": 4, "gpus_per_leaf": 1, "max_gpu_leaves_running": 4,
+                             "schedule": "four dependency chains; coordinator gpu pool capped at four",
+                             "exempt_partitions": decision["gpu_concurrency_exempt_partitions"]},
+        "infeasibility": None if feasible else "No feasible complete-repetition plan within four-hour leaves and forty leaves; continuation or new measurements required."}
+
+
 def estimate_budget(request):
     request.verify_inputs()
-    # This envelope also carries dispatcher approvals. Estimation deliberately
-    # never consults them; allocation remains the unchanged lock's concern.
+    # Screening requires its owner decision; registered estimates need no allocation.
     config = read_mapping(request.config_path)
     task = json.loads(Path(request.task_path).read_text())
     require(request.stage == task['stage'] == 'campaign-estimate', 'stage mismatch')
@@ -30,11 +76,18 @@ def estimate_budget(request):
         inputs[key] = record
     scenarios = campaign.registered_scenarios(inputs['endpoint_input'], inputs['frame_input'])
     require(set(p['profiles']) == {s['name'] for s in scenarios}, 'all registered final profiles required')
-    count = integer(p['final_repetitions'], 'final repetitions', 1000)
+    screening = bool(campaign.screening_metadata(recipe))
+    decision = campaign.validate_screening(recipe, config.get('approvals', {})) if screening else None
+    if screening:
+        require('final_repetitions' not in p, 'screening cannot request final cells')
+        count = decision['repetitions_per_scenario']
+    else:
+        count = integer(p['final_repetitions'], 'final repetitions', 1000)
     wall = integer(p['wall_seconds'], 'leaf wall seconds', 1)
     cpus = integer(p['cpus_per_task'], 'CPUs per task', 1)
     gpus = p['gpus']
     require(type(gpus) is int and gpus in (0, 1), 'nested estimator supports zero or one GPU')
+    require(not screening or gpus == 1, 'screening requires single-GPU leaves')
     require(gpus == int(campaign.resolve_device().type == 'cuda'), 'estimate device/resource mismatch')
     require(gpus * math.ceil(wall / 60) * 60 <= 14400, 'leaf exceeds four GPU-hours')
     factor = finite(p['profile_safety_factor'], 'profile safety factor')
@@ -42,6 +95,18 @@ def estimate_budget(request):
     stamps = campaign.fingerprint()
     profiles = {s['name']: campaign._profile(request, config, p['profiles'][s['name']], s, recipe, stamps)
                 for s in scenarios}
+
+    if screening:
+        return {'schema_version': 1, 'estimate_only': True, 'admitted': False,
+            'submission_performed': False, 'certifies_production_coverage': False,
+            'recipe_hash': digest(recipe), 'recipe': recipe, **stamps,
+            **campaign.screening_metadata(recipe), 'profiles': profiles,
+            'requested_leaf_wall_seconds': wall, 'profile_safety_factor': factor,
+            'cpus_per_task': cpus, 'gpus': gpus,
+            **screening_plan(profiles, decision, wall, factor),
+            'limitations': ['Planning estimate; campaign-lock measures locked setup before admission.',
+                           'Complete repetitions only; overlong repetitions cannot be split by this adapter.',
+                           'No release criterion is certified; final cells require a separate month-2 allocation.']}
 
     def seconds(profile, n):
         return factor * (profile['setup_seconds'] + n * profile['seconds_per_repetition']

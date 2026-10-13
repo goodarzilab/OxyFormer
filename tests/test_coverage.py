@@ -591,3 +591,14 @@ def test_failed_publication_does_not_expose_success_estimates(tmp_path, monkeypa
     assert record["estimates"] == {}
     assert "truth" not in record
     assert "injected publication fault" in record["reason"]
+
+
+def test_screening_procedure_equivalence_does_not_certify_release():
+    from oxyformer.validation.coverage import summarize, MIN_REPETITIONS
+    for count in (25, MIN_REPETITIONS):
+        draws, records = successful_records(count)
+        summary = summarize(records, draws, production_equivalent=True, null_scenario=True, screening=True)
+        assert summary['production_equivalent'] is True
+        assert summary['passing'] is False and summary['coverage_pass'] is False
+    draws, records = successful_records(MIN_REPETITIONS)
+    assert summarize(records, draws, production_equivalent=True, null_scenario=True)['coverage_pass']

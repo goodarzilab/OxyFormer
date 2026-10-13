@@ -116,7 +116,7 @@ def test_real_frame_refuses_missing_atlas_and_failed_primary_gate():
 
 def test_generated_tasks_use_all_registered_scenarios_and_no_lock(built):
     _, (endpoint, frame, _, _) = built
-    tasks = real_frame.profile_tasks(endpoint, frame)['tasks']
+    tasks = real_frame.profile_tasks(endpoint, frame, campaign_mode='registered')['tasks']
     profiles, estimate = tasks[:4], tasks[4]
     assert len(profiles) == 4
     assert {p['parameters']['scenario']['name'] for p in profiles} == {
@@ -141,7 +141,7 @@ def test_generated_tasks_use_all_registered_scenarios_and_no_lock(built):
 def estimate_request(tmp_path, monkeypatch):
     monkeypatch.setattr(campaign, 'fingerprint', lambda: deepcopy(STAMPS))
     endpoint, frame = smoke_inputs.build_inputs()
-    tasks = real_frame.profile_tasks(endpoint, frame)['tasks']
+    tasks = real_frame.profile_tasks(endpoint, frame, campaign_mode='registered')['tasks']
     deps = {'real-frame-inputs': tmp_path / 'inputs'}
     write(deps['real-frame-inputs'] / 'endpoint.json', endpoint.to_dict())
     write(deps['real-frame-inputs'] / 'frame.json', frame.to_dict())
@@ -248,7 +248,7 @@ def test_estimate_cannot_lower_minimum(estimate_request):
 
 
 def test_profile_resources_are_explicit_and_match_estimate():
-    tasks = real_frame.profile_tasks(*smoke_inputs.build_inputs())['tasks']
+    tasks = real_frame.profile_tasks(*smoke_inputs.build_inputs(), campaign_mode='registered')['tasks']
     estimate = tasks[4]['parameters']
     expected = {k: estimate[k] for k in ('cpus_per_task', 'gpus', 'wall_seconds')}
     assert expected == {'cpus_per_task': 8, 'gpus': 0, 'wall_seconds': 41400}
@@ -267,11 +267,11 @@ def test_profile_task_bytes_pin_smoke_and_amended_real_frame(fixture_name, built
         'smoke': '1fb64eaf6987e8fb62c6df3c95b53f0482e2fe7cfcc07e5db214a20fd35e7377',
         'real_fixture': 'ec44a0c499cfd354bc3a617661514bcd3d96779d284a73f9b7ea158fefbc15d3',
     }
-    assert coverage.digest(real_frame.profile_tasks(*pair)['tasks'][:5]) == expected[fixture_name]
+    assert coverage.digest(real_frame.profile_tasks(*pair, campaign_mode='registered')['tasks'][:5]) == expected[fixture_name]
 
 
 def test_gpu_probe_appends_identical_work_with_explicit_cuda_and_bounded_resources(built):
-    tasks = real_frame.profile_tasks(*built[1][:2])['tasks']
+    tasks = real_frame.profile_tasks(*built[1][:2], campaign_mode='registered')['tasks']
     assert len(tasks) == 6
     cpu, estimate, gpu = tasks[0], tasks[4], tasks[5]
     assert gpu['id'] == 'profile-null-effect-gpu'
@@ -292,7 +292,7 @@ def test_gpu_probe_appends_identical_work_with_explicit_cuda_and_bounded_resourc
 def gpu_profile_request(tmp_path, monkeypatch):
     monkeypatch.setattr(campaign, 'fingerprint', lambda: deepcopy(STAMPS))
     endpoint, frame = smoke_inputs.build_inputs()
-    task = real_frame.profile_tasks(endpoint, frame)['tasks'][-1]
+    task = real_frame.profile_tasks(endpoint, frame, campaign_mode='registered')['tasks'][-1]
     inputs = tmp_path / 'inputs'
     write(inputs / 'endpoint.json', endpoint.to_dict())
     write(inputs / 'frame.json', frame.to_dict())
@@ -431,7 +431,7 @@ def test_real_frame_reports_fixed_training_rows_and_binds_their_atlas_exposure(b
     wrong = replace(observed, a=tuple(a + 1 if i == oid else a for i, a in zip(frame.original_ids, observed.a)))
     with pytest.raises(ContractError, match='fixed exposure differs from atlas value'):
         coverage.bind_observations(endpoint, wrong)
-    locations = real_frame.profile_tasks(endpoint, frame)['tasks'][0]['parameters']['recipe']['inference']['county_locations']
+    locations = real_frame.profile_tasks(endpoint, frame, campaign_mode='registered')['tasks'][0]['parameters']['recipe']['inference']['county_locations']
     geo = {r.original_id: r for r in endpoint.geography.rows}
     for county, location in locations.items():
         rows = [geo[i] for i in endpoint.outer.original_ids if geo[i].county == county]
@@ -459,7 +459,7 @@ def test_real_frame_declarations_derive_sampled_facts_and_keep_synthetic_explici
     assert len(facts['gap_ids']) == len(facts['no_positive_width_shift_ids']) == len(fixed) == 1
     assert not set(fixed).intersection(facts['sampled_ids'])
     original_policy = endpoint.policy.to_json()
-    profiles = real_frame.profile_tasks(endpoint, frame)['tasks'][:4]
+    profiles = real_frame.profile_tasks(endpoint, frame, campaign_mode='registered')['tasks'][:4]
     for task, scenario in zip(profiles, campaign.registered_scenarios(endpoint, frame)):
         assert task['parameters']['scenario'] == scenario
         assert scenario['support_gaps'] and scenario['heterogeneous_eligibility']
@@ -479,7 +479,7 @@ def test_real_frame_declarations_derive_sampled_facts_and_keep_synthetic_explici
 def test_estimate_and_lock_compare_derived_real_frame_scenarios(built, tmp_path, monkeypatch):
     from test_campaign import setup_lock
     endpoint, frame = derived_support_fixture(built)
-    tasks = real_frame.profile_tasks(endpoint, frame)['tasks']
+    tasks = real_frame.profile_tasks(endpoint, frame, campaign_mode='registered')['tasks']
     deps = {'real-frame-inputs': tmp_path / 'real-inputs'}
     write(deps['real-frame-inputs'] / 'endpoint.json', endpoint.to_dict())
     write(deps['real-frame-inputs'] / 'frame.json', frame.to_dict())
@@ -518,3 +518,232 @@ def test_estimate_and_lock_compare_derived_real_frame_scenarios(built, tmp_path,
     req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
     with pytest.raises(ContractError, match='profile scenario mismatch'):
         campaign_estimate.estimate_budget(req)
+
+
+def screening_approvals():
+    return read_mapping(ROOT / 'configs/approvals.yaml')
+
+
+@pytest.mark.parametrize('change', ['absent', 'null', 'cell', 'count', 'budget', 'gpu', 'scenarios', 'deferral', 'boolean'])
+def test_screening_requires_complete_owner_decision(tmp_path, monkeypatch, change):
+    approvals = screening_approvals()
+    decision = approvals['owner_decisions']['screening_campaign']
+    if change == 'absent':
+        del approvals['owner_decisions']['screening_campaign']
+    elif change == 'null':
+        approvals['owner_decisions']['screening_campaign'] = None
+    elif change == 'cell':
+        decision['recipe']['reference_cap'] = 64
+    elif change == 'count':
+        decision['repetitions_per_scenario'] = 1000
+    elif change == 'budget':
+        decision['budget_h100_hours'] = 3601
+    elif change == 'gpu':
+        decision['gpu_concurrency_max'] = 5
+    elif change == 'scenarios':
+        decision['scenarios'].pop()
+    elif change == 'deferral':
+        decision['final_cells'] = 'approved'
+    else:
+        decision['recipe']['seed_count'] = True
+    path = write(tmp_path / 'approvals.json', approvals)
+    monkeypatch.setattr(campaign, 'OWNER_APPROVALS', path)
+    with pytest.raises(ContractError, match='screening'):
+        real_frame.profile_tasks(*smoke_inputs.build_inputs())
+    # Registered callers remain opt-in and do not consume screening overrides.
+    registered = real_frame.profile_tasks(*smoke_inputs.build_inputs(), campaign_mode='registered')
+    assert 'study' not in registered['tasks'][0]['parameters']['recipe']
+
+
+def test_screening_profiles_bind_exact_cell_without_changing_registered_values():
+    endpoint, frame = smoke_inputs.build_inputs()
+    manifest = real_frame.profile_tasks(endpoint, frame)
+    assert manifest['campaign_label'] == campaign.SCREENING_LABEL
+    assert len(manifest['tasks']) == 5
+    for task in manifest['tasks']:
+        recipe = task['parameters']['recipe']
+        assert recipe['study'] == dict(reference_cap=32, frozen_epochs=30, grid_points=2, seed_count=1)
+        assert recipe['nested_cv'] == dict(ssl_epochs=30, frozen_epochs=150, batch_size=256, precision='fp32')
+        assert task['resources'] == dict(cpus_per_task=8, gpus=1, wall_seconds=14400)
+        campaign.validate_recipe(recipe)
+    assert campaign._registry()['minimum_final_repetitions'] == coverage.MIN_REPETITIONS == 1000
+    assert 'final_repetitions' not in manifest['tasks'][-1]['parameters']
+
+
+@pytest.fixture
+def screening_request(tmp_path, monkeypatch):
+    import torch
+    from oxyformer.training import fit
+    monkeypatch.setattr(campaign, 'fingerprint', lambda: deepcopy(STAMPS))
+    monkeypatch.setattr(campaign, 'resolve_device', lambda: torch.device('cuda:0'))
+    monkeypatch.setattr(fit, 'resolve_device', lambda device='auto': torch.device('cuda:0'))
+    endpoint, frame = smoke_inputs.build_inputs()
+    tasks = real_frame.profile_tasks(endpoint, frame)['tasks']
+    deps = {'real-frame-inputs': tmp_path / 'inputs'}
+    write(deps['real-frame-inputs'] / 'endpoint.json', endpoint.to_dict())
+    write(deps['real-frame-inputs'] / 'frame.json', frame.to_dict())
+    for task in tasks[:4]:
+        p = task['parameters']
+        metadata = campaign.screening_metadata(p['recipe'])
+        _, records = successful_records(1)
+        records[0]['draw'] = p['draws'][0]
+        root = deps[task['id']] = tmp_path / task['id']
+        write(root / 'result.json', {**metadata, 'mode': 'profile', 'scenario': p['scenario'],
+            'recipe_hash': coverage.digest(p['recipe']), 'draws': p['draws'], 'records': records})
+        write(root / 'timing.json', {**metadata, 'production_equivalent': True, 'complete': True, 'all_successful': True,
+            'recipe_hash': coverage.digest(p['recipe']), 'device': 'cuda:0', 'gpu_seconds': 1005.,
+            'complete_repetition_seconds': [1000.], 'wall_seconds': 1005., 'setup_seconds': 4.,
+            'measurement_scope': 'complete_stage_return', **STAMPS})
+    return request(tmp_path / 'screen-estimate', tasks[-1], deps, approvals=screening_approvals())
+
+
+def test_screening_estimate_reports_100_draws_and_exact_cell(screening_request):
+    result = campaign_estimate.run_stage(screening_request)
+    assert result.status == 'pass', result.message
+    result.verify(screening_request)
+    estimate = coverage.read_json(Path(screening_request.output_dir) / 'budget_estimate.json')
+    assert estimate['total_repetitions'] == 100
+    assert estimate['repetitions_per_scenario'] == 25
+    assert estimate['repetitions_per_leaf'] == 7
+    assert estimate['projected_leaf_count'] == 16
+    assert estimate['screening_gpu_hours'] <= 3600
+    assert estimate['feasible_under_requested_wall_and_leaf_cap']
+    assert estimate['study'] == campaign.SCREENING_CELL
+    assert not estimate['certifies_production_coverage'] and not estimate['admitted']
+    for path in Path(screening_request.output_dir).glob('*.json'):
+        assert coverage.read_json(path)['campaign_label'] == campaign.SCREENING_LABEL
+
+
+@pytest.mark.parametrize('hours,expected', [(36, 25), (40, 22), (900, 1), (901, 0)])
+def test_screening_uniform_reduction_never_raises_ceiling(hours, expected):
+    decision = campaign.screening_decision()
+    profiles = {name: dict(setup_seconds=0., seconds_per_repetition=hours * 3600,
+        publication_verification_seconds=0., profile_repetitions=1) for name in decision['scenarios']}
+    result = campaign_estimate.screening_plan(profiles, decision, 14400, 1.)
+    assert result['repetitions_per_scenario'] == expected
+    assert result['total_repetitions'] == 4 * expected
+    assert result['screening_gpu_hours'] <= 3600
+    assert result['limits']['run_gpu_hours'] == 3600
+    assert result['repetitions_reduced'] == (expected < 25)
+    assert set(result['scenario_gpu_hours'].values()) == {hours * expected}
+    assert not result['feasible_under_requested_wall_and_leaf_cap']
+    if expected < 25:
+        assert 4 * hours * (expected + 1) > 3600
+
+
+@pytest.mark.parametrize('drift', ['approval', 'cell', 'profile_cell'])
+def test_screening_estimate_refuses_unapproved_or_mismatched_cell(screening_request, drift):
+    req = screening_request
+    if drift == 'approval':
+        value = coverage.read_json(req.config_path)
+        value['approvals'] = {}
+        write(Path(req.config_path), value)
+        req = replace(req, config_hash=file_hash(req.config_path))
+    elif drift == 'cell':
+        req = update_task(req, lambda p: p['recipe']['study'].update(grid_points=4))
+    else:
+        config = coverage.read_json(req.config_path)
+        path = Path(config['dependencies']['profile-null-effect']) / 'timing.json'
+        value = coverage.read_json(path)
+        value['study']['seed_count'] = 3
+        write(path, value)
+        req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    result = campaign_estimate.run_stage(req)
+    assert result.status == 'blocked' and not result.artifacts
+
+
+def screening_lock_request(screening_request, tmp_path):
+    task = coverage.read_json(screening_request.task_path)
+    p = task['parameters']
+    # Use named inputs, not dependency ordering.
+    config = coverage.read_json(screening_request.config_path)
+    root = Path(config['dependencies']['real-frame-inputs'])
+    endpoint = nested_cv.PreparedEndpoint.from_json((root / 'endpoint.json').read_text())
+    from oxyformer.validation.scm import CovariateFrame
+    frame = CovariateFrame.from_json((root / 'frame.json').read_text())
+    p.update(campaign_id='approved-screen', scenario_family=campaign.registered_scenarios(endpoint, frame),
+        evaluation_namespace='screening-only-test', retry_rules=deepcopy(coverage.RETRY_RULES),
+        prior_locks=[], cpu_wall_hours_budget=200)
+    task.update(id='campaign-lock', stage='campaign-lock')
+    return request(tmp_path / 'screen-lock', task,
+        {k: Path(v) for k, v in config['dependencies'].items()}, approvals=config['approvals'])
+
+
+def test_screening_lock_only_expands_bounded_screening_and_four_lanes(screening_request, tmp_path):
+    req = screening_lock_request(screening_request, tmp_path)
+    result = campaign.run_stage(req)
+    assert result.status == 'pass', result.message
+    result.verify(req)
+    root = Path(req.output_dir)
+    lock = coverage.read_json(root / 'recipe_lock.json')
+    plans = coverage.read_json(root / 'expanded_units.json')['plans']
+    assert list(lock['instances']) == ['screening'] and len(plans) == 1
+    assert sum(len(b['draws']) for b in lock['batches']) == 100
+    assert {b['mode'] for b in lock['batches']} == {'screening'}
+    assert lock['study'] == campaign.SCREENING_CELL
+    assert lock['budget']['run_gpu_hours_ceiling'] == 3600
+    assert lock['budget']['concurrency_limits']['gpu'] == 4
+    plan = plans[0]
+    gpu = plan['units'][:-1]
+    assert len(gpu) == 16
+    assert all(u['gpu_hours'] <= 4 and '--gpus=1' in u['sbatch'] and u['pool'] == 'gpu' for u in gpu)
+    ids = {u['id'] for u in gpu}
+    for index, unit in enumerate(gpu):
+        local_needs = set(unit['needs']) & ids
+        assert local_needs == ({gpu[index - 4]['id']} if index >= 4 else set())
+    # Explore every possible completed prefix in the four independent chains.
+    from itertools import product
+    for finished in product(range(5), repeat=4):
+        done = {gpu[lane + step * 4]['id'] for lane, length in enumerate(finished) for step in range(length)}
+        ready = [u for u in gpu if u['id'] not in done and (set(u['needs']) & ids) <= done]
+        assert len(ready) <= 4
+    for path in root.glob('*.json'):
+        assert coverage.read_json(path)['campaign_label'] == campaign.SCREENING_LABEL
+    # Removing a scheduling edge is detectable by the independent plan rederivation.
+    from oxyformer.execution.campaign import validate_plan
+    broken = deepcopy(plan)
+    broken['units'][4]['needs'].remove(gpu[0]['id'])
+    with pytest.raises(ContractError, match='dependency drift'):
+        validate_plan(broken, screening_approvals())
+
+
+def test_screening_lock_refuses_overlong_repetitions(screening_request, tmp_path):
+    req = screening_lock_request(screening_request, tmp_path)
+    config = coverage.read_json(req.config_path)
+    for name, directory in config['dependencies'].items():
+        if name.startswith('profile-'):
+            path = Path(directory) / 'timing.json'
+            value = coverage.read_json(path)
+            value.update(complete_repetition_seconds=[40 * 3600], wall_seconds=40 * 3600 + 5,
+                         gpu_seconds=40 * 3600 + 5)
+            write(path, value)
+    req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    assert campaign.run_stage(req).status == 'blocked'
+    assert not list(Path(req.output_dir).glob('*.json'))
+
+
+def test_screening_draw_passes_exact_cell_to_production_fitting(tmp_path, monkeypatch):
+    from oxyformer.training.fit import RecipeStudy
+    endpoint, frame = smoke_inputs.build_inputs()
+    task = real_frame.profile_tasks(endpoint, frame)['tasks'][0]
+    p = task['parameters']
+    observed = []
+    def estimate(bound, recipe, root, deadline, *, study=None):
+        observed.append(study)
+        assert type(study) is RecipeStudy
+        assert (study.reference_cap, study.frozen_epochs, study.grid_points, study.seed_count) == (32, 30, 2, 1)
+        assert study.seeds == (1103,)
+        for fold in range(5):
+            config = bound.configuration(fold, root / str(fold), study=study,
+                **nested_cv._settings(recipe, bound))
+            assert config.frozen_epochs == 30
+            assert len(config.grid) == 2
+            assert config.study.reference_cap == 32
+            assert config.ssl_epochs == 30
+        return None
+    monkeypatch.setattr(coverage, 'estimate_repetition', estimate)
+    record = coverage.execute_draw(p['draws'][0], frame, SCMConfig(**p['scenario']), endpoint,
+                                  p['recipe'], tmp_path, float('inf'))
+    assert observed, record
+    assert record['status'] == 'incomplete'
+    assert record['reason'] == 'budget exhausted', record

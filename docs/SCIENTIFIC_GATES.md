@@ -181,6 +181,34 @@ release criteria and flag-1-only sensitivity remain fixed. Structural county
 counts are proxies, not the fitted influence-concentration release checks;
 ratio p99 and ESS on the moved target portion remain required downstream.
 
+### Screening campaign (owner decision 2026-10-12)
+
+The declared screening campaign uses the four registered scenarios, initially
+25 independent repetitions each, under `RecipeStudy(reference_cap=32,
+frozen_epochs=30, grid_points=2, seed_count=1)`. The owner-originated
+`owner_decisions.screening_campaign` block is required and validated; units
+never write it. Profile measurements, estimates and locks bind this exact cell.
+The fit retains the production nested procedure and reports
+`production_equivalent=True`; screening summaries report `passing=False` and
+`coverage_pass=False` for release. Execution success is not release passage.
+
+Every campaign record carries:
+“screening; final 1,000-repetition cells deferred (owner decision 2026-10-12)”.
+The 3,600 H100-hour planning ceiling cannot increase. Estimates above it reduce
+repetitions uniformly across all four scenarios, potentially to zero with no
+admission. Registered recipe values, `minimum_final_repetitions=1000`, and all
+final criteria remain unchanged. Final cells require a separate month-2
+allocation; no final instance is expanded from a screening lock.
+
+Single-GPU leaves retain the four GPU-hour bound and forty-leaf instance bound.
+The planner reports leaf infeasibility independently of the total budget: a
+36-hour repetition cannot be made into a four-hour leaf by reducing the count.
+Coverage currently requires complete repetitions; an infeasible measured plan
+is refused pending continuation support or new measurements. Four dependency
+chains bound screening GPU concurrency, with the coordinator GPU pool also
+required to stay at four. The standing preemptible exception does not authorize
+a partition change; these plans use `standard` and account `root`.
+
 ### A2 validation-harness ruling (orchestrator, 2026-10-11)
 
 The semi-synthetic frame includes the target and its labelled training rows.

@@ -226,9 +226,9 @@ batch semantics, profile budgets or the four-GPU-hour leaf cap.
 `oxyformer.training.fit.RecipeStudy` is an explicit study parameter object for
 `FitConfig(study=...)` and `PreparedEndpoint.configuration(..., study=...)`.
 These are candidate amendments for an owner decision, not registered values.
-Campaign configuration, approvals, profiles, scenarios and allocation caps do
-not consume these overrides. `coverage.estimate_repetition(..., study=...)` is
-available to a separately invoked study; registered callers omit it.
+Registered callers omit these overrides. The owner-approved screening mode
+below explicitly supplies its approved cell to
+`coverage.estimate_repetition(..., study=...)`; other studies remain opt-in.
 
 | Parameter | Default (existing behavior) | Study choices |
 | --- | --- | --- |
@@ -416,3 +416,51 @@ Report the 5,400/1,700 H100-hour comparisons and
 `floor(5400 / (scenario_count * repetition_hours))` for 4, 2 and 1 scenarios.
 This arithmetic does not amend the frozen minimum of 1,000 repetitions per final
 scenario or authorize a campaign or a larger leaf.
+
+
+### Declared screening execution (2026-10-12 owner decision)
+
+`configs/execution/tasks/campaign.yaml` declares `campaign_mode: screening` for
+`real_frame.profile_tasks`. It emits four single-GPU profile tasks and one
+estimate task, binding the four registered scenarios and the approved
+32-reference / 30-frozen-epoch / two-grid-point / one-seed cell. The synthetic
+smoke tasks retain their separate recipe. Direct callers needing registered
+profiles explicitly pass `campaign_mode="registered"`. Missing or malformed
+screening approval blocks fail before fitting or admission. Dispatcher and
+repository approvals must agree. Units never modify approvals.
+
+Screening recipes retain the registered nested settings and record the opt-in
+`study` separately, so the existing RecipeStudy implementation applies the
+cell identically to profiles and locked repetitions. Result, timing, estimate,
+lock, budget, runtime, expansion and manifest records carry the exact cell and
+“screening; final 1,000-repetition cells deferred (owner decision 2026-10-12)”.
+Typed endpoint/frame/support inputs retain their immutable schemas; their
+campaign manifest carries the designation.
+
+A screening `campaign-lock` uses the estimate task's recipe, profile references,
+input references, GPU/wall settings and safety factor, plus `campaign_id`, the
+full registered `scenario_family`, `evaluation_namespace`, `retry_rules`,
+`prior_locks` and `cpu_wall_hours_budget`. Omit caller-selected
+`final_repetitions`, `screening_repetitions` and `repetitions_per_leaf`:
+screening counts and batch sizes are derived from the same measured-cost
+planner used by `campaign-estimate`. Complete GPU profiles must match the
+recipe, cell, scientific fingerprint and environment. Lock admission also
+measures setup on the actual expanded leaf shapes.
+
+The planner includes setup, complete repetitions and scaled publication cost,
+multiplies by the safety factor, and rounds projected GPU allocations up to
+scheduler minutes. It reduces the initial 25 repetitions per scenario uniformly
+until the estimate is at most 3,600 H100-hours. It reports both requested and
+reduced costs, count, reason and a separate feasibility flag. A zero count or a
+complete repetition that cannot fit the requested at-most-four-hour leaf never
+produces an admitted lock. There is no implicit interrupted-repetition resume.
+The pre-existing forty-leaf instance cap also remains binding.
+
+Expansion emits only the screening instance, with one GPU per leaf and four
+dependency chains. The coordinator `pools.gpu` must be four (already four in the
+current owner plan), bounding all simultaneous GPU work across campaigns.
+Profiles number four and use the same GPU pool when wired by the coordinator.
+The recorded preemptible exemption is informational here: generated units still
+request `standard` / `root`. Neither a passing execution receipt nor successful
+screening collection certifies any release criterion. The final 1,000-repetition
+cells and registered final recipe are unchanged and deferred to month 2.

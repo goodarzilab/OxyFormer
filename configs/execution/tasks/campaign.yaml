@@ -1,4 +1,7 @@
 schema_version: 1
+# Real-frame profile_tasks binds this declared mode to the owner approval.
+# Artificial smoke tasks below retain their independent synthetic recipe.
+campaign_mode: screening
 # Artificial execution smoke only, not the fixed-real-covariate Suite A of
 # plan section 6.2. Content hashes pin smoke_inputs.build_inputs() exactly.
 # Eight allocated CPU threads measured about 254 s through the stage launcher.

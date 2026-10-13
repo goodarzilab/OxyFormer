@@ -105,7 +105,7 @@ def validate_success(record, *, null_scenario):
         require(abs(record["truth"]) <= error, "null scenario has nonzero observed-law truth")
 
 
-def summarize(records, declared, *, production_equivalent, null_scenario, expected_rejection=False):
+def summarize(records, declared, *, production_equivalent, null_scenario, expected_rejection=False, screening=False):
     """Never infer the denominator from the successful subset.
 
     Missing/incomplete draws forbid passage. Failed/rejected draws count as
@@ -155,11 +155,11 @@ def summarize(records, declared, *, production_equivalent, null_scenario, expect
             "bias_investigation_required": ratio is None or ratio > .20,
             "pass": lower >= .925 and (upper is None or upper <= .075)
                 and ratio is not None and ratio <= .20 and se_ratio is not None and .90 <= se_ratio <= 1.10}
-    passing = bool(production_equivalent and n >= MIN_REPETITIONS and complete and failure_upper <= .01
+    passing = bool(not screening and production_equivalent and n >= MIN_REPETITIONS and complete and failure_upper <= .01
                    and not expected_rejection and all(v["pass"] for v in summaries.values()))
     return {"declared_repetitions": n, "received_repetitions": len(records), "missing_repetitions": missing,
         "counts": counts, "complete": complete, "production_equivalent": bool(production_equivalent),
-        "numerical_failure_upper": failure_upper, "methods": summaries, "coverage_pass": passing,
+        "numerical_failure_upper": failure_upper, "methods": summaries, "coverage_pass": passing, "passing": passing,
         "expected_eligibility_rejection": bool(expected_rejection),
         "eligibility_test_pass": bool(expected_rejection and complete and counts["eligibility_rejection"] == n),
         "conditional_summary_count": len(successes),
@@ -182,8 +182,12 @@ def publish(request, values, *, status, message, extra_artifacts=()):
         unit_ids=(request.content_hash,), parent_hashes=request.dependency_hashes,
         split_hash=None, config_hash=request.config_hash, model_hash=None,
         environment=(("code_identity", request.code_identity),), seed=None, parameter_count=None)
+    metadata = next(({k: v[k] for k in ("campaign_mode", "study", "campaign_label", "certifies_release_criteria")}
+                     for v in values.values() if isinstance(v, dict) and v.get("campaign_mode") == "screening"), {})
     records = []
     for name, value in values.items():
+        if metadata and "payload" not in value:
+            value = {**value, **metadata}
         path = atomic_json(root, name, value)
         records.append(ArtifactRecord(path=name, kind=name.removesuffix(".json"), sha256=file_hash(path), lineage=lineage))
     # Individually published repetition records are explicitly hash-bound too.
@@ -193,7 +197,7 @@ def publish(request, values, *, status, message, extra_artifacts=()):
     records.extend(extra_artifacts)
     if "artifact_manifest.json" not in values:
         path = atomic_json(root, "artifact_manifest.json", {"request_hash": request.content_hash,
-            "artifacts": [r.to_dict() for r in records]})
+            "artifacts": [r.to_dict() for r in records], **metadata})
         records.append(ArtifactRecord(path="artifact_manifest.json", kind="artifact_manifest", sha256=file_hash(path), lineage=lineage))
     result = StageResult(request_hash=request.content_hash, status=status, artifacts=tuple(records), message=message)
     result.verify(request)
@@ -357,7 +361,11 @@ def execute_draw(draw, frame, scenario, template, recipe, root, deadline):
                 ("observed_absolute_difference", "quadrature_tail_absolute_bound", "truth_serialization_absolute_bound")]
             require(all(value >= 0 for value in components), "negative truth-integration error component")
             error = numerical_call(math.fsum, components)
-            estimates = numerical_call(estimate_repetition, endpoint, recipe, root, deadline)
+            options = {}
+            if recipe.get("campaign_mode") == "screening":
+                from oxyformer.training.fit import RecipeStudy
+                options["study"] = RecipeStudy(**recipe["study"])
+            estimates = numerical_call(estimate_repetition, endpoint, recipe, root, deadline, **options)
             successful = None
             if estimates is not None:
                 require(set(estimates) == set(METHODS), "incomplete estimator results")
@@ -415,6 +423,10 @@ def prepare_batch(request: StageRequest):
         lock = None
     production = mode != "smoke"
     validate_recipe(recipe, production=production)
+    if recipe.get("campaign_mode") == "screening":
+        from oxyformer.validation.campaign import validate_screening
+        validate_screening(recipe, config.get("approvals", {}))
+        require(mode != "final", "screening study cannot certify final cells")
     template_path = dependency(request, config, parameters["endpoint_input"])
     frame_path = dependency(request, config, parameters["frame_input"])
     template = nested_cv.PreparedEndpoint.from_json(template_path.read_text())
@@ -442,6 +454,8 @@ def _run_batch(request: StageRequest, started: float) -> StageResult:
         parameters = task["parameters"]
         mode, draws = parameters["mode"], parameters["draws"]
         production = mode != "smoke"
+        from oxyformer.validation.campaign import screening_metadata
+        metadata = screening_metadata(recipe)
         from oxyformer.training.fit import resolve_device, fit_environment
         device = resolve_device()
         bounded_profile = mode == "profile" and device.type == "cuda"
@@ -457,14 +471,15 @@ def _run_batch(request: StageRequest, started: float) -> StageResult:
             # CUDA probes must finish within their bounded GPU allocation.
             deadline = started + seconds if mode == "smoke" or bounded_profile else math.inf
             record = execute_draw(draw, frame, scenario, template, recipe, destination, deadline)
+            record.update(metadata)
             atomic_json(destination, "result.json", record)
             repetition_seconds.append(time.monotonic() - draw_started)
             records.append(record)
         summary = summarize(records, draws, production_equivalent=production,
-            null_scenario=scenario.effect == "null", expected_rejection=scenario.assignment == "atoms")
+            null_scenario=scenario.effect == "null", expected_rejection=scenario.assignment == "atoms", screening=bool(metadata))
         # A leaf reports completed execution and its honest failures. Campaign
         # coverage is evaluated only after the full declared fan-in is present.
-        result = {"schema_version": 1, "mode": mode, "recipe_hash": digest(recipe),
+        result = {**metadata, "schema_version": 1, "mode": mode, "recipe_hash": digest(recipe),
             "lock_hash": digest(lock) if lock else None, "batch_id": parameters.get("batch_id"),
             "scenario": scenario.to_dict()["payload"], "draws": draws, "records": records, "summary": summary,
             "certifies_production_coverage": False}
@@ -472,7 +487,7 @@ def _run_batch(request: StageRequest, started: float) -> StageResult:
             import torch
             torch.cuda.synchronize(device)
         elapsed = time.monotonic() - started
-        timing = {"wall_seconds": elapsed, "gpu_seconds": elapsed if device.type == "cuda" else 0.,
+        timing = {**metadata, "wall_seconds": elapsed, "gpu_seconds": elapsed if device.type == "cuda" else 0.,
             "device": str(device), "environment": dict(fit_environment(device)),
             "gpu_seconds_scope": "single_device_elapsed_not_kernel_utilization",
             "measurement_scope": "before_final_publication", "setup_seconds": setup_seconds,
@@ -502,7 +517,9 @@ def record_runtime(request, completed, started, task):
     budget = finite(parameters["wall_seconds"], "admitted budget")
     aggregate = read_json(Path(request.output_dir) / "result.json")
     elapsed = time.monotonic() - started
-    runtime = {"measurement_scope": "complete_batch_return", "wall_seconds": elapsed,
+    metadata = {k: aggregate[k] for k in ("campaign_mode", "study", "campaign_label", "certifies_release_criteria")
+                if k in aggregate}
+    runtime = {**metadata, "measurement_scope": "complete_batch_return", "wall_seconds": elapsed,
         "admitted_budget_seconds": budget, "budget_exceeded": elapsed > budget,
         "overrun_seconds": max(0., elapsed - budget), "batch_id": parameters.get("batch_id"),
         "lock_hash": aggregate["lock_hash"], "request_hash": completed.request_hash,

@@ -188,13 +188,17 @@ def build_inputs(values, design):
     return endpoint, frame, frozen, audit
 
 
-def profile_tasks(endpoint, frame):
+def profile_tasks(endpoint, frame, *, campaign_mode=None):
     """Concrete hash-bound tasks, generated once after real inputs exist.
 
     ``resources`` is the scheduler request consumed by coordinator plan wiring;
     the merged stage runner executes inside that allocation and submits no job.
     Profile and projection resources share one declaration.
     """
+    if campaign_mode is None:
+        campaign_mode = read_mapping(ROOT / 'configs/execution/tasks/campaign.yaml')['campaign_mode']
+    require(campaign_mode in ('screening', 'registered'), 'unknown campaign mode')
+    decision = campaign.screening_decision() if campaign_mode == 'screening' else None
     locations = {}
     targets = set(endpoint.outer.original_ids)
     target_locations = [(c, p) for i, c, p in zip(frame.original_ids, frame.region_ids, frame.coordinates)
@@ -205,6 +209,8 @@ def profile_tasks(endpoint, frame):
     recipe = {'endpoint_hash': endpoint.content_hash, 'frame_hash': frame.content_hash,
         'nested_cv': {'ssl_epochs': 30, 'frozen_epochs': 150, 'batch_size': 256, 'precision': 'fp32'},
         'inference': {'primary_bandwidth_km': 100, 'county_locations': locations}}
+    if decision:
+        recipe.update(campaign_mode='screening', study=decision['recipe'])
     campaign.validate_recipe(recipe)
     common = {'endpoint_input': {'dependency': 'real-frame-inputs', 'path': 'endpoint.json'},
               'frame_input': {'dependency': 'real-frame-inputs', 'path': 'frame.json'}, 'recipe': recipe}
@@ -212,6 +218,8 @@ def profile_tasks(endpoint, frame):
     # CPU leaves: 11.5 h of work within the 12 h scheduler limit. The four
     # GPU-hour mandate applies only to leaves that request GPUs.
     resources = {'cpus_per_task': 8, 'gpus': 0, 'wall_seconds': 41400}
+    if decision:
+        resources = {'cpus_per_task': 8, 'gpus': 1, 'wall_seconds': 14400}
     tasks, profiles = [], {}
     for scenario in campaign.registered_scenarios(endpoint, frame):
         task_id = 'profile-' + scenario['name'].replace('_', '-')
@@ -229,6 +237,11 @@ def profile_tasks(endpoint, frame):
         'outputs': ['budget_estimate.json', 'artifact_manifest.json'],
         'parameters': {**common, 'profiles': profiles, 'final_repetitions': 1000,
             **resources, 'profile_safety_factor': 2.}})
+    if decision:
+        tasks[4]['parameters'].pop('final_repetitions')
+        for task in tasks[:4]:
+            task['parameters']['device'] = 'cuda'
+        return {'schema_version': 1, **campaign.screening_metadata(recipe), 'tasks': tasks}
     # A paired hardware probe, deliberately outside the CPU estimate fan-in.
     # Copy the already-declared draw, rather than assigning a new seed namespace.
     probe = deepcopy(next(task for task in tasks if task['id'] == 'profile-null-effect'))

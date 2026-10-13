@@ -104,6 +104,13 @@ def _spec_check(spec, approvals):
         require(isinstance(paths, list) and paths and len(set(paths)) == len(paths), 'invalid input files')
         for path in paths:
             relative_artifact_path(path)
+    if spec.get('campaign_mode') == 'screening':
+        from oxyformer.validation.campaign import screening_decision, SCREENING_LABEL
+        decision = screening_decision(approvals)
+        require(spec['kind'] == 'screening' and spec.get('study') == decision['recipe']
+                and spec.get('campaign_label') == SCREENING_LABEL, 'screening specification drift')
+        require(spec.get('gpu_concurrency_max') == 4, 'screening concurrency must be four')
+        require(all(s['gpus'] == 1 for w in spec['work'] for s in w['slices']), 'screening requires single-GPU leaves')
     count = sum(len(w['slices']) for w in spec['work'])
     require(0 < count <= 40, 'campaign exceeds forty leaves')
     total_gpu_seconds = 0
@@ -146,6 +153,9 @@ def _unit(spec, task, prerequisites, gpus, seconds, role):
 
 def _build(spec):
     units, tasks, leaves = [], [], []
+    # Each lane is a dependency chain, limiting even an unconstrained scheduler.
+    lanes = [None] * 4 if spec.get('campaign_mode') == 'screening' else []
+    gpu_index = 0
     for work in spec['work']:
         previous = None
         owner = sha256(canonical_json({'campaign': spec['id'], 'work': work,
@@ -161,7 +171,17 @@ def _build(spec):
                 'outputs': work['outputs'], 'recipe_lock': spec['recipe_lock'],
                 'continuation': {'owner': owner, 'step': step, 'predecessor': previous}}
             tasks.append(task)
-            units.append(_unit(spec, task, spec['prerequisites'], segment['gpus'], segment['wall_seconds'], 'leaf'))
+            prerequisites = list(spec['prerequisites'])
+            if lanes:
+                lane = gpu_index % len(lanes)
+                if lanes[lane]:
+                    prerequisites.append(lanes[lane])
+                lanes[lane] = unit_id
+                gpu_index += 1
+            unit = _unit(spec, task, prerequisites, segment['gpus'], segment['wall_seconds'], 'leaf')
+            if lanes:
+                unit['title'] += ': ' + spec['campaign_label']
+            units.append(unit)
             leaves.append(unit_id)
             previous = unit_id
     needs = deepcopy(spec['inputs'])
