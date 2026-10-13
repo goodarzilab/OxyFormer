@@ -21,12 +21,12 @@ from oxyformer.execution.campaign import expand_campaign, validate_plan, concret
 from oxyformer.provenance import ContractError, file_hash, require
 from oxyformer.validation.coverage import (MIN_REPETITIONS, RETRY_RULES, dependency, digest,
     finite, integer, publish, read_json, repetition_plan, summarize, validate_draws, prepare_batch, atomic_json, fixed_exposures,
-    leaf_budget, remaining_compute)
+    leaf_budget, remaining_compute, load_budget, BUDGET_RECORD)
 from oxyformer.validation.scm import SCMConfig, CovariateFrame, sampled_support_facts
 
 REGISTRY = Path(__file__).parents[3] / "configs/validation/final_scenarios.yaml"
 REPOSITORY = Path(__file__).parents[3]
-LEAF_OUTPUTS = ["result.json", "timing.json", "artifact_manifest.json", "runtime.json"]
+LEAF_OUTPUTS = [BUDGET_RECORD, "result.json", "timing.json", "artifact_manifest.json", "runtime.json"]
 COLLECT_OUTPUTS = ["result.json", "gate.json", "artifact_manifest.json"]
 
 
@@ -108,29 +108,28 @@ def registered_scenarios(endpoint, frame):
 
 
 def _profile(request, config, reference, scenario, recipe, stamps):
+    record = load_budget(request, config, reference["dependency"])
+    require(record["complete"] and record["all_successful"] and record["profile"]["production_equivalent"] is True,
+            "complete production profiling required")
     result_path = dependency(request, config, reference)
     result = read_json(result_path)
-    timing_path = dependency(request, config, {"dependency": reference["dependency"], "path": "timing.json"})
-    timing = read_json(timing_path)
-    require(result["mode"] == "profile" and result["scenario"] == scenario, "profile scenario mismatch")
-    require(result["recipe_hash"] == timing["recipe_hash"] == digest(recipe), "profile recipe drift")
-    chained = timing.get("measurement_scope") == "complete_chain_return"
-    require(chained or timing.get("measurement_scope") == "complete_stage_return",
-            "profiling must include final publication and verification")
-    require(timing["production_equivalent"] is True and timing["complete"] is True
-            and timing["all_successful"] is True, "complete production profiling required")
-    require(not timing.get("budget_exceeded", False), "profile exceeded budget")
-    if not chained and "admitted_budget_seconds" in timing:
-        require(timing["wall_seconds"] <= timing["admitted_budget_seconds"], "profile exceeded budget")
+    binding = record["binding"]
+    require(binding["mode"] == "profile" and binding["scenario"] == scenario, "profile scenario mismatch")
+    require(binding["recipe_hash"] == digest(recipe), "profile recipe drift")
+    chained = record["chained"]
+    timing = {**record["profile"], "leaves": record["leaves"], "wall_seconds": record["wall_seconds"],
+        "setup_seconds": math.fsum(leaf["setup_seconds"] for leaf in record["leaves"]),
+        "admitted_budget_seconds": binding["wall_seconds"]}
+    timing["gpu_seconds"] = timing["wall_seconds"] if timing["device"].startswith("cuda") else 0.
     selected = resolve_device()
     require(timing["device"] == str(selected), "profile device differs from selected runtime")
     gpu_seconds = finite(timing["gpu_seconds"], "profile GPU seconds")
     require((selected.type == "cpu" and gpu_seconds == 0) or
             (selected.type == "cuda" and gpu_seconds > 0), "profile GPU accounting mismatch")
     require(all(timing.get(k) == v for k, v in stamps.items()), "profile scientific/environment drift")
-    declared, records = result["draws"], result["records"]
+    declared, records = binding["draws"], result["records"]
+    require(result["draws"] == declared, "profile scientific draw mismatch")
     summary = summarize(records, declared, production_equivalent=True, null_scenario=scenario["effect"] == "null")
-    require(summary["complete"] and summary["counts"]["success"] == len(declared), "profile omitted or failed repetitions")
     measured = timing["complete_repetition_seconds"]
     require(len(measured) == len(declared) and all(finite(t, "profile time") > 0 for t in measured), "invalid profile times")
     wall = finite(timing["wall_seconds"], "profile wall seconds")
@@ -147,7 +146,6 @@ def _profile(request, config, reference, scenario, recipe, stamps):
         require(len({v["task_id"] for v in leaves}) == len(leaves), "repeated profile leaf")
         names = ("compute_seconds", "setup_seconds", "import_seconds", "export_seconds", "publication_seconds")
         for leaf in leaves:
-            require(not leaf.get("budget_exceeded", False), "profile leaf exceeded budget")
             require(all(finite(leaf[k], "profile leaf " + k) >= 0 for k in names), "negative profile leaf time")
             require(math.isclose(math.fsum(leaf[k] for k in names), leaf["wall_seconds"], rel_tol=1e-6, abs_tol=.01),
                     "profile leaf accounting mismatch")
@@ -163,7 +161,7 @@ def _profile(request, config, reference, scenario, recipe, stamps):
     return {**extra, "seconds_per_repetition": rate, "setup_seconds": setup,
             "publication_verification_seconds": overhead - setup,
             "profile_repetitions": len(declared), "result_hash": file_hash(result_path),
-            "timing_hash": file_hash(timing_path), "draws": declared}
+            "budget_record_hash": record["record_hash"], "draws": declared}
 
 
 def slice_count(profile, repetitions, seconds, factor):
@@ -430,29 +428,21 @@ def collect(request, config, task):
                 "screening did not admit final collection")
     results, runtimes = [], []
     for leaf in plan["tasks"][:-1]:
+        budget = load_budget(request, config, leaf["id"], expected_task=leaf)
         path = dependency(request, config, {"dependency": leaf["id"], "path": "result.json"})
         result = read_json(path)
         parameters = leaf["parameters"]
-        require(result["lock_hash"] == digest(lock) and result["recipe_hash"] == digest(lock["recipe"]), "leaf recipe drift")
+        require(result["lock_hash"] == digest(lock) and budget["binding"]["recipe_hash"] == digest(lock["recipe"]), "leaf recipe drift")
         require(result["batch_id"] == parameters["batch_id"] and result["mode"] == mode
                 and result["scenario"] == parameters["scenario"] and result["draws"] == parameters["draws"], "leaf identity drift")
-        runtime = read_json(dependency(request, config, {"dependency": leaf["id"], "path": "runtime.json"}))
-        require(runtime["batch_id"] == parameters["batch_id"] and runtime["lock_hash"] == digest(lock),
-                "leaf runtime identity drift")
-        require(runtime["measurement_scope"] == "complete_batch_return", "incomplete runtime measurement")
-        budget_seconds = finite(runtime["admitted_budget_seconds"], "leaf admitted budget")
-        require(budget_seconds == parameters["wall_seconds"], "leaf runtime budget drift")
-        measured = finite(runtime["wall_seconds"], "leaf measured runtime")
-        require(measured >= 0, "negative leaf runtime")
+        measured = budget["leaves"][-1]["wall_seconds"]
+        budget_seconds = parameters["wall_seconds"]
         runtimes.append({"leaf_id": leaf["id"], "batch_id": parameters["batch_id"],
             "scenario": parameters["scenario"]["name"], "wall_seconds": measured,
             "admitted_budget_seconds": budget_seconds, "overrun_seconds": max(0., measured - budget_seconds)})
-        if "slices" in parameters:
-            require(not runtime.get("budget_exceeded", False) and measured <= budget_seconds,
-                    "coverage leaf exceeded admitted budget")
-            require(result["chain"] == leaf["continuation"], "leaf continuation drift")
-            if leaf["continuation"]["step"] + 1 != parameters["slices"]:
-                continue
+        if "slices" in parameters and leaf["continuation"]["step"] + 1 != parameters["slices"]:
+            continue
+        result = {**result, "terminal": budget["complete"]}
         results.append(result)
     records = [r for result in results for r in result["records"] if r["status"] != "incomplete"]
     declarations = [d for b in lock["batches"] if b["mode"] == mode for d in b["draws"]]
