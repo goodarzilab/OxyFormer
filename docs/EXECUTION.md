@@ -449,7 +449,8 @@ measures setup on the actual expanded leaf shapes.
 
 The planner includes setup, complete repetitions and scaled publication cost,
 multiplies by the safety factor, and rounds projected GPU allocations up to
-scheduler minutes. It reduces the initial 25 repetitions per scenario uniformly
+scheduler minutes. It also reserves ten GPU-minutes for collection, which
+validates the same device-bound fingerprint as the lock. It reduces the initial 25 repetitions per scenario uniformly
 until the estimate is at most 3,600 H100-hours. It reports both requested and
 reduced costs, count, reason and a separate feasibility flag. A zero count or a
 complete repetition that cannot fit the requested at-most-four-hour leaf never
@@ -457,7 +458,11 @@ produces an admitted lock. There is no implicit interrupted-repetition resume.
 The pre-existing forty-leaf instance cap also remains binding.
 
 Expansion emits only the screening instance, with one GPU per leaf and four
-dependency chains. The coordinator `pools.gpu` must be four (already four in the
+dependency chains. Generated leaf and collector commands explicitly export
+`OXYFORMER_DEVICE=cuda` and request the same eight CPUs as profiling; the
+single-GPU collector waits for all leaves. Run the
+real-frame profile, estimate and lock tasks in that same CUDA environment
+(`OXYFORMER_DEVICE=cuda`), as required by their GPU resource declarations. The coordinator `pools.gpu` must be four (already four in the
 current owner plan), bounding all simultaneous GPU work across campaigns.
 Profiles number four and use the same GPU pool when wired by the coordinator.
 The recorded preemptible exemption is informational here: generated units still

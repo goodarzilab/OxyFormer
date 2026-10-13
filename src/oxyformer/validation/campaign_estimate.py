@@ -35,8 +35,9 @@ def screening_plan(profiles, decision, wall, factor):
         return {name: (full * math.ceil(seconds(p, batch) / 60)
                       + (math.ceil(seconds(p, remainder) / 60) if remainder else 0)) / 60
                 for name, p in profiles.items()}
-    requested_hours = math.fsum(costs(count).values())
-    while count and math.fsum(costs(count).values()) > decision["budget_h100_hours"]:
+    collector_hours = 600 / 3600
+    requested_hours = math.fsum(costs(count).values()) + collector_hours
+    while count and math.fsum(costs(count).values()) + collector_hours > decision["budget_h100_hours"]:
         count -= 1
     rows = costs(count)
     leaves = len(profiles) * math.ceil(count / batch)
@@ -46,7 +47,8 @@ def screening_plan(profiles, decision, wall, factor):
         "repetitions_reduced": count < decision["repetitions_per_scenario"],
         "reduction_reason": "uniform reduction to 3,600 H100-hour ceiling" if count < 25 else None,
         "requested_screening_gpu_hours": requested_hours,
-        "screening_gpu_hours": math.fsum(rows.values()), "scenario_gpu_hours": rows,
+        "screening_gpu_hours": math.fsum(rows.values()) + (collector_hours if count else 0.),
+        "collector_gpu_hours": collector_hours if count else 0., "scenario_gpu_hours": rows,
         "repetitions_per_leaf": batch, "common_feasible_repetitions_per_leaf": common,
         "feasible_repetitions_per_leaf": capacities, "projected_leaf_count": leaves,
         "feasible_under_requested_wall_and_leaf_cap": feasible,

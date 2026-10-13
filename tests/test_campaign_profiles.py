@@ -614,7 +614,7 @@ def test_screening_estimate_reports_100_draws_and_exact_cell(screening_request):
         assert coverage.read_json(path)['campaign_label'] == campaign.SCREENING_LABEL
 
 
-@pytest.mark.parametrize('hours,expected', [(36, 25), (40, 22), (900, 1), (901, 0)])
+@pytest.mark.parametrize('hours,expected', [(35, 25), (36, 24), (40, 22), (899, 1), (900, 0), (901, 0)])
 def test_screening_uniform_reduction_never_raises_ceiling(hours, expected):
     decision = campaign.screening_decision()
     profiles = {name: dict(setup_seconds=0., seconds_per_repetition=hours * 3600,
@@ -628,7 +628,7 @@ def test_screening_uniform_reduction_never_raises_ceiling(hours, expected):
     assert set(result['scenario_gpu_hours'].values()) == {hours * expected}
     assert not result['feasible_under_requested_wall_and_leaf_cap']
     if expected < 25:
-        assert 4 * hours * (expected + 1) > 3600
+        assert 4 * hours * (expected + 1) + 600 / 3600 > 3600
 
 
 @pytest.mark.parametrize('drift', ['approval', 'cell', 'profile_cell'])
@@ -685,6 +685,12 @@ def test_screening_lock_only_expands_bounded_screening_and_four_lanes(screening_
     assert lock['budget']['concurrency_limits']['gpu'] == 4
     plan = plans[0]
     gpu = plan['units'][:-1]
+    assert all('export OXYFORMER_DEVICE=cuda' in u['command'] for u in plan['units'])
+    assert all('--cpus-per-task=8' in u['sbatch'] for u in plan['units'])
+    collector = plan['units'][-1]
+    assert collector['pool'] == 'gpu' and '--gpus=1' in collector['sbatch']
+    assert lock['budget']['gpu_hours'] == pytest.approx(sum(u['gpu_hours'] for u in plan['units']))
+    assert lock['budget']['collector_gpu_hours'] == pytest.approx(1/6)
     assert len(gpu) == 16
     assert all(u['gpu_hours'] <= 4 and '--gpus=1' in u['sbatch'] and u['pool'] == 'gpu' for u in gpu)
     ids = {u['id'] for u in gpu}
@@ -697,6 +703,8 @@ def test_screening_lock_only_expands_bounded_screening_and_four_lanes(screening_
         done = {gpu[lane + step * 4]['id'] for lane, length in enumerate(finished) for step in range(length)}
         ready = [u for u in gpu if u['id'] not in done and (set(u['needs']) & ids) <= done]
         assert len(ready) <= 4
+        collector_ready = (set(collector['needs']) & ids) <= done
+        assert len(ready) + int(collector_ready) <= 4
     for path in root.glob('*.json'):
         assert coverage.read_json(path)['campaign_label'] == campaign.SCREENING_LABEL
     # Removing a scheduling edge is detectable by the independent plan rederivation.

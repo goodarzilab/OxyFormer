@@ -194,7 +194,8 @@ The fit retains the production nested procedure and reports
 
 Every campaign record carries:
 “screening; final 1,000-repetition cells deferred (owner decision 2026-10-12)”.
-The 3,600 H100-hour planning ceiling cannot increase. Estimates above it reduce
+The 3,600 H100-hour planning ceiling includes the ten-GPU-minute collector
+reservation and cannot increase. Estimates above it reduce
 repetitions uniformly across all four scenarios, potentially to zero with no
 admission. Registered recipe values, `minimum_final_repetitions=1000`, and all
 final criteria remain unchanged. Final cells require a separate month-2

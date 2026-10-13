@@ -351,6 +351,9 @@ def build_lock(request, config, task):
               "budget_semantics": "planning estimate; report overruns and retain draws; scheduler enforces binding limits",
               "concurrency_limits": {"gpu": 8, "cpu": 6}, "run_gpu_hours_ceiling": 2500}
     if screening:
+        # The collector validates the same device-bound environment as its lock.
+        budget["gpu_hours"] += 600 / 3600
+        budget["collector_gpu_hours"] = 600 / 3600
         budget.update(sizing, **screening_metadata(recipe), run_gpu_hours_ceiling=decision["budget_h100_hours"],
                       concurrency_limits={"gpu": 4, "cpu": 6})
         require(budget["gpu_hours"] <= decision["budget_h100_hours"], "screening reservation exceeds ceiling")
@@ -396,6 +399,7 @@ def build_lock(request, config, task):
             "collector": {"stage": "campaign-collect", "outputs": COLLECT_OUTPUTS, "wall_seconds": 600}}
         if screening:
             spec.update(screening_metadata(recipe), gpu_concurrency_max=4)
+            spec["collector"]["gpus"] = 1
         plans.append(expand_campaign(spec, config["approvals"]))
     measurements = _admit_locked_leaves(request, config, lock, plans)
     return lock, plans, {**budget, "lock_hash": digest(lock), "admission_measurements": measurements}
