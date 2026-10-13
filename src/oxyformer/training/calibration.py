@@ -157,19 +157,30 @@ def _pair_metrics(z, y, w):
 
 def _weighted_median(values, mass):
     """Return the lower median of validated, positive raw masses exactly."""
-    order = values.argsort(stable=True)
-    # Binary floating-point denominators are powers of two. A common integer
-    # denominator therefore preserves every bit, including subnormal mass,
-    # without an overflowing total or a rounded logarithmic halfway threshold.
-    ratios = [weight.as_integer_ratio() for weight in mass.detach().cpu().tolist()]
-    denominator = max(divisor for _, divisor in ratios)
-    integers = [numerator * (denominator // divisor) for numerator, divisor in ratios]
-    total = sum(integers)
+    order = values.argsort(stable=True).detach().cpu()
+    mass = mass.detach().cpu()
+
+    def integer_mass(weight):
+        # Every binary64 mass is an integer multiple of 2**-1074. Keep a
+        # single exact unit even when normal and subnormal masses coexist.
+        numerator, denominator = weight.as_integer_ratio()
+        return numerator << (1075 - denominator.bit_length())
+
+    # Bound Python-object storage independently of the number of observations.
+    # Retaining an expanded integer for every mass can cost hundreds of bytes
+    # per row when one subnormal mass shares support with ordinary masses.
+    chunk_size = 4096
+    total = 0
+    for start in range(0, mass.numel(), chunk_size):
+        total += sum(integer_mass(weight)
+                     for weight in mass[start:start + chunk_size].tolist())
     cumulative = 0
-    for index in order.detach().cpu().tolist():
-        cumulative += integers[index]
-        if 2 * cumulative >= total:
-            return values[index]
+    for start in range(0, order.numel(), chunk_size):
+        indices = order[start:start + chunk_size]
+        for index, weight in zip(indices.tolist(), mass[indices].tolist()):
+            cumulative += integer_mass(weight)
+            if 2 * cumulative >= total:
+                return values[index]
 
 
 def _comparison_loss(coordinates, z, labels, mass):

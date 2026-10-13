@@ -543,6 +543,24 @@ def test_weighted_median_resolves_sub_ulp_mass(weights, expected):
     assert torch.equal(_weighted_median(values, mass), values[expected])
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_weighted_median_keeps_subnormal_mass_across_chunks(device):
+    from oxyformer.training.calibration import _weighted_median
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA device unavailable")
+    # Half the unit mass is at rank 4095. A tiny mass in a later chunk makes
+    # that prefix strictly too small, so exact selection must advance to 4096.
+    values = torch.arange(8193, dtype=torch.float64, device=device)
+    mass = torch.ones_like(values)
+    mass[-1] = 5e-324
+    expected = _fraction_median_index(values.cpu().tolist(), mass.cpu().tolist())
+    assert expected == 4096
+    # Reverse input order to exercise chunked gathering through sorted indices.
+    result = _weighted_median(values.flip(0), mass.flip(0))
+    assert result.dtype == values.dtype and result.device == values.device
+    assert float(result).hex() == float(values[expected]).hex()
+
+
 @pytest.mark.parametrize("overrides", MEDIAN_DISPATCH_ENVIRONMENTS,
                          ids=["normal", "aten", "dnnl", "mkl", "combined"])
 def test_weighted_median_dispatch_subprocess(overrides):
