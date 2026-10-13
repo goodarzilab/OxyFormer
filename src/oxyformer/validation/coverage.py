@@ -59,6 +59,17 @@ def publication_reserve(seconds):
     return min(30., seconds / 20)
 
 
+def reserved_wall_limit(seconds):
+    """One pre-publication wall limit for worker, runner and budget consumers."""
+    return seconds - publication_reserve(seconds)
+
+
+def check_worker_wall(completed, started, task):
+    if time.monotonic() - started > reserved_wall_limit(task["parameters"]["wall_seconds"]):
+        return replace(completed, status="fail", message="Coverage publication exceeded wall budget")
+    return completed
+
+
 OVERHEAD_PHASES = ("setup_seconds", "import_seconds", "export_seconds", "publication_seconds")
 
 
@@ -120,9 +131,10 @@ def record_measurements(request, completed, started, task, timing, summary):
         "started_monotonic": started, "timing": timing,
         "counts": summary["counts"], "received": summary["received_repetitions"]}
     path = atomic_json(request.output_dir, MEASUREMENTS, value)
-    return replace(completed, artifacts=(*completed.artifacts,
+    completed = replace(completed, artifacts=(*completed.artifacts,
         ArtifactRecord(path=MEASUREMENTS, kind="coverage_measurements", sha256=file_hash(path),
             lineage=completed.artifacts[0].lineage)))
+    return check_worker_wall(completed, started, task)
 
 
 def load_budget(request, config, unit, *, expected_task=None):
@@ -182,10 +194,10 @@ def load_budget(request, config, unit, *, expected_task=None):
         require(math.isclose(math.fsum(leaf[k] for k in names), elapsed, rel_tol=1e-6, abs_tol=.01),
             "budget accounting mismatch")
         require(leaf["post_check_reserve_seconds"] == publication_reserve(wall), "publication reserve drift")
-        require(elapsed + publication_reserve(wall) <= wall, "coverage leaf exceeded admitted budget")
+        require(elapsed <= reserved_wall_limit(wall), "coverage leaf exceeded admitted budget")
         require(leaf.get("leaf_budget") == contract, "budget contract differs from producer task")
         if contract is not None:
-            phases = {k: leaf[k] for k in OVERHEAD_PHASES} if "leaf_budget" in task["parameters"] else {
+            phases = {k: leaf[k] for k in OVERHEAD_PHASES} if task["parameters"].get("leaf_budget") is not None else {
                 k: leaf[k] for k in ("setup_seconds", "import_seconds")}
             require(leaf["compute_seconds"] <= remaining_compute(contract, **phases),
                 "coverage compute exceeded admitted budget")
@@ -203,6 +215,9 @@ def load_budget(request, config, unit, *, expected_task=None):
     # never with diagnostic summary flags. This check belongs to the same
     # loader so admission, continuation and reuse have one consistent verdict.
     scientific = read_json(payload_path)
+    require(scientific["scenario"] == SCMConfig(**binding["scenario"]).to_dict()["payload"],
+        "budget scientific scenario mismatch")
+    require(scientific["mode"] == binding["mode"], "budget scientific mode mismatch")
     require(scientific["recipe_hash"] == binding["recipe_hash"], "budget scientific recipe mismatch")
     scientific_records = scientific["records"]
     scientific_counts = {status: sum(row["status"] == status for row in scientific_records)
@@ -660,7 +675,7 @@ def _run_batch(request: StageRequest, started: float) -> StageResult:
             destination.mkdir(parents=True)
             # CPU profiles and locked leaves retain planning-only budgets.
             # CUDA probes must finish within their bounded GPU allocation.
-            deadline = started + seconds if mode == "smoke" or bounded_profile else math.inf
+            deadline = started + reserved_wall_limit(seconds) if mode == "smoke" or bounded_profile else math.inf
             record = execute_draw(draw, frame, scenario, template, recipe, destination, deadline)
             atomic_json(destination, "result.json", record)
             repetition_seconds.append(time.monotonic() - draw_started)
@@ -855,7 +870,7 @@ def _run_chain(request, started):
     compute_at = time.monotonic()
     import_seconds = compute_at - imported_at
     capacity = remaining_compute(budget, setup_seconds=setup, import_seconds=import_seconds)
-    deadline = compute_at + capacity
+    deadline = min(compute_at + capacity, started + reserved_wall_limit(seconds))
     for draw, state, destination in zip(parameters["draws"], states, destinations):
         if state["record"] is not None:
             require(state["record"]["draw"] == draw and state["record"]["status"] != "incomplete",
@@ -939,8 +954,6 @@ def _run_chain(request, started):
     if exceeded:
         completed = replace(completed, status="fail", message="Coverage budget exceeded; no usable profile or leaf")
     completed = record_runtime(request, completed, started, task, budget_exceeded=exceeded)
-    if time.monotonic() - started > seconds:
-        completed = replace(completed, status="fail", message="Coverage publication exceeded wall budget")
     return record_measurements(request, completed, started, task, timing, summary)
 
 
@@ -962,7 +975,7 @@ def run_stage(request: StageRequest) -> StageResult:
             return _run_chain(request, started)
         if task.get("parameters", {}).get("mode") != "profile":
             completed = _run_batch(request, started)
-            return record_runtime(request, completed, started, task)
+            return check_worker_wall(record_runtime(request, completed, started, task), started, task)
         root = Path(request.output_dir)
         root.mkdir(parents=True, exist_ok=True)
         destination = output_path(root, "_profiled")

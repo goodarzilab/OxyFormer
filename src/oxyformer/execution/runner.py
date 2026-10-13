@@ -435,7 +435,7 @@ def finalize_coverage_budget(request, result, started):
     if request.stage not in ('coverage', 'simulation-smoke'):
         return result
     from oxyformer.validation.coverage import (BUDGET_RECORD, MEASUREMENTS, OVERHEAD_PHASES,
-        budget_binding, finite, publication_reserve, remaining_compute, uses_continuation, task_leaf_budget)
+        budget_binding, finite, publication_reserve, reserved_wall_limit, remaining_compute, uses_continuation, task_leaf_budget)
     from oxyformer.provenance import ArtifactRecord
     artifacts = [a for a in result.artifacts if a.path == MEASUREMENTS]
     if not artifacts:
@@ -454,7 +454,7 @@ def finalize_coverage_budget(request, result, started):
     if chained:
         leaf = dict(timing['leaves'][-1])
         leaf['leaf_budget'] = task_leaf_budget(task)
-        leaf['measured_overheads'] = 'leaf_budget' in task['parameters']
+        leaf['measured_overheads'] = task['parameters'].get('leaf_budget') is not None
     else:
         leaf = {'task_id': task['id'], 'step': 0, 'compute_seconds': sum(timing['complete_repetition_seconds']),
             'setup_seconds': timing['setup_seconds'], 'import_seconds': 0., 'export_seconds': 0.}
@@ -466,7 +466,7 @@ def finalize_coverage_budget(request, result, started):
         ('setup_seconds', 'import_seconds', 'compute_seconds', 'export_seconds'))
     wall = finite(binding['wall_seconds'], 'coverage wall')
     leaf['post_check_reserve_seconds'] = publication_reserve(wall)
-    exceeded = elapsed + publication_reserve(wall) > wall
+    exceeded = elapsed > reserved_wall_limit(wall)
     if chained:
         phases = OVERHEAD_PHASES if leaf['measured_overheads'] else ('setup_seconds', 'import_seconds')
         exceeded |= leaf['compute_seconds'] > remaining_compute(leaf['leaf_budget'], **{k: leaf[k] for k in phases})

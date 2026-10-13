@@ -1041,3 +1041,76 @@ def test_compute_overrun_cannot_publish_a_usable_chain(tmp_path, monkeypatch):
     assert result.status == 'blocked' and 'compute exceeded' in result.message
     assert not result.artifacts
     assert not (Path(req.output_dir) / 'continuation.tar').exists()
+
+
+@pytest.mark.parametrize('chained', [False, True])
+@pytest.mark.parametrize('elapsed,expected', [(570., 'pass'), (571., 'fail')])
+def test_worker_and_runner_share_reserved_wall_limit(tmp_path, monkeypatch, chained, elapsed, expected):
+    from oxyformer.execution.runner import finalize_coverage_budget
+    from test_campaign import STAMPS
+    task, inputs = chain_fixture(tmp_path)
+    task['parameters']['wall_seconds'] = 600
+    if not chained:
+        task['outputs'].remove('continuation.tar')
+    clock, deadlines = [0.], []
+    monkeypatch.setattr(coverage.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(campaign, 'fingerprint', lambda: deepcopy(STAMPS))
+    def estimate(endpoint, recipe, root, deadline, **kw):
+        deadlines.append(deadline)
+        clock[0] += 100.
+        return {m: {'value': 0., 'se': 1.} for m in coverage.METHODS}
+    monkeypatch.setattr(coverage, 'estimate_repetition', estimate)
+    original_publish = coverage.publish
+    def publish(*args, **kwargs):
+        result = original_publish(*args, **kwargs)
+        clock[0] = elapsed
+        return result
+    monkeypatch.setattr(coverage, 'publish', publish)
+    req = chain_request(tmp_path / 'boundary', task, {'inputs': inputs})
+    worker = coverage.run_stage(req)
+    # Reset only the status to test the runner's own boundary independently.
+    terminal = finalize_coverage_budget(req, replace(worker, status='pass'), 0.)
+    assert terminal.status == expected, terminal.message
+    assert worker.status == expected, worker.message
+    assert deadlines == [540. if chained else 570.]
+
+
+@pytest.mark.parametrize('explicit_null', [False, True])
+def test_bootstrap_null_budget_execution_and_chain_routing(tmp_path, monkeypatch, explicit_null):
+    from test_campaign import STAMPS
+    task, inputs = chain_fixture(tmp_path)
+    task['parameters']['wall_seconds'] = 600
+    if explicit_null:
+        task['parameters']['leaf_budget'] = None
+    clock = [0.]
+    monkeypatch.setattr(coverage.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(campaign, 'fingerprint', lambda: deepcopy(STAMPS))
+    original_prepare = coverage.prepare_batch
+    def prepare(*args):
+        result = original_prepare(*args)
+        clock[0] += 20.
+        return result
+    monkeypatch.setattr(coverage, 'prepare_batch', prepare)
+    def estimate(endpoint, recipe, root, deadline, **kw):
+        assert deadline - clock[0] == 520.
+        clock[0] += 420.
+        return {m: {'value': 0., 'se': 1.} for m in coverage.METHODS}
+    monkeypatch.setattr(coverage, 'estimate_repetition', estimate)
+    original_write, original_publish = coverage._write_continuation, coverage.publish
+    def export(*args, **kwargs):
+        clock[0] += 100.
+        return original_write(*args, **kwargs)
+    def publish(*args, **kwargs):
+        result = original_publish(*args, **kwargs)
+        clock[0] += 10.
+        return result
+    monkeypatch.setattr(coverage, '_write_continuation', export)
+    monkeypatch.setattr(coverage, 'publish', publish)
+    req = chain_request(tmp_path / 'bootstrap', task, {'inputs': inputs})
+    result = run_coverage(req)
+    assert result.status == 'pass', result.message
+    assert (Path(req.output_dir) / 'continuation.tar').is_file()
+    record = coverage.read_json(Path(req.output_dir) / coverage.BUDGET_RECORD)
+    assert record['chained'] and record['complete']
+    assert record['leaves'][0]['wall_seconds'] == 550.
+    assert record['leaves'][0]['compute_seconds'] == 420.

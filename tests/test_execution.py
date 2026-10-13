@@ -4308,7 +4308,8 @@ def test_runner_finalizes_coverage_before_terminal_seal(runtime, tmp_path, monke
     draws, records = successful_records(1)
     task = {'id': 'profile', 'stage': 'simulation-smoke', 'needs': {}, 'outputs': ['result.json'],
         'parameters': {'mode': 'profile', 'wall_seconds': wall, 'draws': draws,
-            'scenario': {'name': 'null_effect'}, 'recipe': {'fixture': True}}}
+            'scenario': {'name': 'null_effect', 'effect': 'null', 'active_mechanisms': ['null']},
+            'recipe': {'fixture': True}}}
     path = tmp_path / 'coverage-task.json'
     path.write_text(json.dumps(task))
     clock = [0.]
@@ -4322,7 +4323,9 @@ def test_runner_finalizes_coverage_before_terminal_seal(runtime, tmp_path, monke
             'setup_seconds': 0., 'device': 'cpu', 'environment': {'fixture': True},
             'production_equivalent': True, 'scientific_fingerprint': {}, 'environment_hash': 'a' * 64}
         completed = coverage.publish(request, {'result.json': {
-            'records': records, 'recipe_hash': timing['recipe_hash']}},
+            'records': records, 'recipe_hash': timing['recipe_hash'],
+            'mode': task['parameters']['mode'],
+            'scenario': coverage.SCMConfig(**task['parameters']['scenario']).to_dict()['payload']}},
             status='pass', message='synthetic coverage worker')
         summary = coverage.summarize(records, draws, production_equivalent=True, null_scenario=True)
         return coverage.record_measurements(request, completed, 0., task, timing, summary)

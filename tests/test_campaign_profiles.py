@@ -338,7 +338,7 @@ def test_gpu_profile_timing_and_budget_are_honest(gpu_profile_request, monkeypat
     monkeypatch.setattr(fit, 'fit_environment', lambda device='auto': tuple(environment.items()))
     monkeypatch.setattr(torch.cuda, 'synchronize', lambda device: None)
     def execute(draw, frame, scenario, template, recipe, root, deadline):
-        assert deadline == 13500
+        assert deadline == 13470  # 13500 seconds minus the publication reserve.
         clock[0] += 13501 if outcome == 'late_fit' else 10
         _, records = successful_records(1)
         record = {**records[0], 'draw': draw, 'wall_seconds': clock[0]}

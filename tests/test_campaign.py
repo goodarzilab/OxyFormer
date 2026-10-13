@@ -1083,9 +1083,9 @@ def finalize_profile_fixture(req, task, payload, timing, elapsed, monkeypatch, *
     timing.setdefault('environment', {'fixture': 'synthetic'})
     summary = coverage.summarize(payload['records'], task['parameters']['draws'],
         production_equivalent=True, null_scenario=True)
-    measured = coverage.record_measurements(producer, completed, 0., task, timing, summary)
     with monkeypatch.context() as clock:
         clock.setattr(runner.time, 'monotonic', lambda: elapsed)
+        measured = coverage.record_measurements(producer, completed, 0., task, timing, summary)
         final = runner.finalize_coverage_budget(producer, measured, 0.)
     for name in (integrity.RESULT, integrity.FINGERPRINT):
         (root / name).unlink(missing_ok=True)
@@ -1185,3 +1185,76 @@ def test_loader_reconciles_sealed_record_with_producer_task(tmp_path, stale):
     req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
     with pytest.raises(ContractError, match='execution mode mismatch|differs from producer task'):
         coverage.load_budget(req, coverage.read_json(req.config_path), 'profile')
+
+
+@pytest.mark.parametrize('stale', ['scenario', 'mode', 'recipe', None])
+def test_profile_payload_identity_matches_producer_and_lock(tmp_path, monkeypatch, stale):
+    req, consumer = setup_lock(tmp_path, wall_seconds=14400, cpu_wall_hours_budget=200.)
+    req = fork_profile(req, measurements=False)
+    root = profile_directory(req)
+    task = coverage.read_json(root / '_execution/task.json')
+    payload = coverage.read_json(root / 'result.json')
+    timing = coverage.read_json(root / 'timing.json')
+    task['parameters'].update(wall_seconds=600, recipe=consumer['parameters']['recipe'])
+    if stale == 'scenario':
+        scenario = SCMConfig(name='nonlinear', effect='nonlinear', active_mechanisms=('nonlinear',)).to_dict()['payload']
+        consumer['parameters'].update(scenario_family=[scenario],
+            profiles={'nonlinear': {'dependency': 'profile', 'path': 'result.json'}})
+        write(Path(req.task_path), consumer)
+        req = replace(req, task_hash=file_hash(req.task_path))
+        task['parameters']['scenario'] = scenario
+        draws = coverage.repetition_plan('payload-identity', 'nonlinear', 2)
+        task['parameters']['draws'] = payload['draws'] = draws
+        for record, draw in zip(payload['records'], draws):
+            record['draw'] = draw
+        assert payload['scenario']['name'] == 'null_effect'
+    elif stale == 'mode':
+        payload['mode'] = 'smoke'
+    elif stale == 'recipe':
+        cheaper = deepcopy(task['parameters']['recipe'])
+        cheaper['nested_cv'].update(ssl_epochs=1, frozen_epochs=1, synthetic=True)
+        payload['recipe_hash'] = coverage.digest(cheaper)
+    timing.update(complete_repetition_seconds=[10., 10.], setup_seconds=20., wall_seconds=50.)
+    req = finalize_profile_fixture(req, task, payload, timing, 50., monkeypatch)
+    config = coverage.read_json(req.config_path)
+    if stale is not None:
+        with pytest.raises(ContractError, match='scientific .* mismatch'):
+            coverage.load_budget(req, config, 'profile')
+    else:
+        assert coverage.load_budget(req, config, 'profile')['all_successful']
+    result = campaign.run_stage(req)
+    assert (result.status == 'pass') == (stale is None), result.message
+    for name in ('recipe_lock.json', 'expanded_units.json'):
+        assert (Path(req.output_dir) / name).exists() == (stale is None)
+
+
+@pytest.mark.parametrize('explicit_null', [False, True])
+@pytest.mark.parametrize('finalize', [False, True])
+def test_null_leaf_budget_is_bootstrap_in_finalizer_and_loader(tmp_path, monkeypatch, explicit_null, finalize):
+    req, consumer = setup_lock(tmp_path)
+    req = fork_profile(req, measurements=False)
+    root = profile_directory(req)
+    task = coverage.read_json(root / '_execution/task.json')
+    payload = coverage.read_json(root / 'result.json')
+    timing = coverage.read_json(root / 'timing.json')
+    task['parameters'].update(wall_seconds=600, recipe=consumer['parameters']['recipe'])
+    if explicit_null:
+        task['parameters']['leaf_budget'] = None
+    task.update(outputs=['result.json', 'continuation.tar'],
+        continuation={'owner': 'profile', 'step': 0, 'predecessor': None})
+    budget = coverage.task_leaf_budget(task)
+    assert coverage.remaining_compute(budget, setup_seconds=20., import_seconds=0.) == 520.
+    phases = dict(zip(coverage.OVERHEAD_PHASES, (20., 0., 100., 10.)))
+    timing.update(measurement_scope='complete_chain_return', admitted_budget_seconds=600,
+        complete_repetition_seconds=[210., 210.], setup_seconds=20., wall_seconds=550.,
+        leaves=[profile_leaf('profile', 0, 420., phases, budget)])
+    assert 420 <= 520 and 550 + coverage.publication_reserve(600) == 580 <= 600
+    if finalize:
+        req = finalize_profile_fixture(req, task, payload, timing, 550., monkeypatch)
+    else:
+        write(root / 'timing.json', timing)
+        seal_budget_fixture(root, 'profile', task)
+        req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    record = coverage.load_budget(req, coverage.read_json(req.config_path), 'profile')
+    assert record['complete'] and record['all_successful']
+    assert record['leaves'][0]['compute_seconds'] == 420.

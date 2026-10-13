@@ -536,3 +536,19 @@ post-check duration is not claimed as measured in a record written before it.
 Slurm enforces the allocation's hard limit. Publication first writes provisional
 bytes and then the independent seal; no terminal result is changed after that
 seal. A provisional passing result without the seal admits nothing.
+
+The worker's bounded deadline and final wall check, the runner's finalization,
+and the sealed-budget loader share the pre-publication limit
+`wall_seconds - min(30, wall_seconds / 20)`. At a 600-second wall, elapsed 570
+passes the wall check and 571 fails; the reserved publication time remains inside
+the existing checkpoint reserve. This does not change the compute formula or its
+350-second capacity for wall 600, factor 1.2, and 100 seconds of overhead. Legacy
+CPU profiles retain their planning-only training deadline and must pass the same
+final budget check to supply usable measurements.
+
+An omitted or explicitly null `leaf_budget` selects bootstrap accounting in
+execution, finalization and loading. Only a non-null measured contract charges
+export/publication phase overruns against compute. The sealed scientific payload's
+scenario (with registered defaults expanded), mode and recipe hash must match the
+producer task's identities; profile admission then requires those same identities
+to match the scenario and recipe being locked.
