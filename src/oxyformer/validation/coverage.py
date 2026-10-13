@@ -648,7 +648,7 @@ def _run_chain(request, started):
     binding = {"draws": parameters["draws"], "scenario": scenario.to_dict()["payload"],
         "endpoint_hash": template.content_hash, "frame_hash": frame.content_hash,
         "recipe_hash": digest(recipe), "study": study.to_dict(), "lock_hash": digest(lock) if lock else None,
-        "code_identity": request.code_identity, "mode": parameters["mode"], **stamps}
+        "code_identity": request.code_identity, "mode": parameters["mode"], "wall_seconds": seconds, **stamps}
     for name in ("continuation.tar", "repetitions", "result.json", "timing.json"):
         require(not output_path(root, name).exists(), "coverage attempt already exists: " + name)
     setup = time.monotonic() - started

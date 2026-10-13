@@ -753,7 +753,7 @@ def saved_coverage_chain(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("field", ["draws", "scenario", "endpoint_hash", "frame_hash", "recipe_hash", "study",
-                                    "lock_hash", "code_identity", "mode", "scientific_fingerprint", "environment_hash"])
+                                    "lock_hash", "code_identity", "mode", "wall_seconds", "scientific_fingerprint", "environment_hash"])
 def test_coverage_binding_refuses_each_field(saved_coverage_chain, field):
     req, task, _, header = saved_coverage_chain
     binding = deepcopy(header["binding"])
@@ -895,3 +895,24 @@ def test_nested_checkpoint_import_is_inside_import_timer(saved_coverage_chain, t
     assert leaf["import_seconds"] == 90.
     assert leaf["publication_seconds"] == 0.
     assert leaf["wall_seconds"] == 90.
+
+
+def test_profile_continuation_refuses_changed_wall_budget(tmp_path, monkeypatch):
+    from test_campaign import STAMPS
+    monkeypatch.setattr(campaign, "fingerprint", lambda: deepcopy(STAMPS))
+    task, inputs = chain_fixture(tmp_path)
+    task["parameters"].update(mode="profile", wall_seconds=600)
+    task["parameters"]["recipe"]["nested_cv"] = {}
+    task["parameters"].pop("study")
+    monkeypatch.setattr(coverage, "estimate_repetition", lambda *a, **k: None)
+    first = chain_request(tmp_path / "first", task, {"inputs": inputs})
+    result = coverage.run_stage(first)
+    assert result.status == "pass", result.message
+    task = deepcopy(task)
+    task.update(id="chain-1", continuation={"owner": "coverage-test", "step": 1, "predecessor": "chain-0"})
+    task["parameters"]["wall_seconds"] = 14400
+    next_req = chain_request(tmp_path / "larger-budget", task, {"inputs": inputs, "chain-0": Path(first.output_dir)})
+    result = coverage.run_stage(next_req)
+    assert result.status == "blocked", result.message
+    assert "binding mismatch" in result.message
+    assert not (Path(next_req.output_dir) / "continuation.tar").exists()

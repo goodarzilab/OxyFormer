@@ -427,8 +427,8 @@ come from the generic expansion; no new instance type or scheduler is involved.
 Legacy single-leaf profiles and locks retain their existing interface.
 
 The coverage archive binds draw IDs and simulation seeds, scenario payload,
-endpoint/frame/observation hashes, recipe, study cell, lock, code identity and
-scientific/environment fingerprints. Import resolves only the named predecessor
+endpoint/frame/observation hashes, recipe, study cell, lock, code identity, wall
+budget and scientific/environment fingerprints. Import resolves only the named predecessor
 from `StageRequest.dependency_paths`; the executor authenticates its declared
 outputs. Digest-named archive members carry the original observations/truth
 receipts, completed `(fold, seed)` prediction parts and the unfinished fold's
