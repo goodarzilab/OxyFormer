@@ -658,6 +658,30 @@ def _write_continuation(path, states, *, binding, chain, task_id):
 
 
 def _run_chain(request, started):
+    """Leave consumer inputs only after the entire leaf returns successfully.
+
+    Timing precedes its own receipt write and cannot attest the final return.
+    A later overrun or write failure must therefore withdraw the publication,
+    including the archive, instead of leaving apparently usable evidence.
+    Draw diagnostics remain local to this attempt and are never retried here.
+    """
+    root = Path(request.output_dir)
+    outputs = ("continuation.tar", "result.json", "timing.json", "runtime.json", "artifact_manifest.json")
+    # Check before entering cleanup: a refused repeat invocation must never
+    # remove a prior successful attempt's files.
+    for name in (*outputs, "repetitions"):
+        require(not output_path(root, name).exists(), "coverage attempt already exists: " + name)
+    completed = None
+    try:
+        completed = _run_chain_attempt(request, started)
+        return completed if completed.status == "pass" else replace(completed, artifacts=())
+    finally:
+        if completed is None or completed.status != "pass":
+            for name in outputs:
+                output_path(root, name).unlink(missing_ok=True)
+
+
+def _run_chain_attempt(request, started):
     """One bounded leaf of a prospectively declared coverage work item."""
     from oxyformer.training.fit import RecipeStudy, resolve_device, fit_environment
     task, recipe, lock, template, frame, scenario, seconds, stamps = prepare_batch(request)
@@ -688,8 +712,6 @@ def _run_chain(request, started):
         "recipe_hash": digest(recipe), "study": study.to_dict(), "lock_hash": digest(lock) if lock else None,
         "code_identity": request.code_identity, "mode": parameters["mode"], "wall_seconds": seconds,
         "leaf_budget": budget, **stamps}
-    for name in ("continuation.tar", "repetitions", "result.json", "timing.json"):
-        require(not output_path(root, name).exists(), "coverage attempt already exists: " + name)
     config = yaml.safe_load(Path(request.config_path).read_text())
     imported_at = time.monotonic()
     setup = imported_at - started

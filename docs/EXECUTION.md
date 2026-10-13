@@ -494,6 +494,14 @@ refuses over-budget chained leaves. Checkpoint boundaries are cooperative;
 uninterruptible operations that overrun are detected, not certified as within
 budget. The scheduler remains the hard wall limit.
 
+A chain attempt that fails, including while writing timing/runtime receipts,
+withdraws its root result, timing, runtime, manifest and continuation archive.
+It returns no artifacts, so admission and successor import cannot consume
+apparently successful files from that failed attempt. Per-draw diagnostics stay
+in its repetition directory. Refusing a repeat invocation leaves an existing
+successful attempt unchanged; retries use a fresh attempt and its declared
+predecessor.
+
 Bootstrap chain profiles need no prior measurement. They may declare an
 immutable `compute_ceiling_seconds` below the wall minus checkpoint reserve;
 otherwise that bound applies. Their separate phase measurements supply the
