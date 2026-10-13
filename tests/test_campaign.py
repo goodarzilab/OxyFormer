@@ -471,3 +471,87 @@ def test_late_locked_draws_remain_complete_and_reported(tmp_path, monkeypatch):
     assert runtime["overrun_seconds"] == 150.
     records = coverage.read_json(Path(req.output_dir) / "result.json")["records"]
     assert len(records) == 5 and all(r["status"] == "success" for r in records)
+
+
+def setup_chain_lock(tmp_path, **changes):
+    req, task = setup_lock(tmp_path, repetitions_per_leaf=50, wall_seconds=660, **changes)
+    path = tmp_path / "profile/timing.json"
+    timing = coverage.read_json(path)
+    leaves = [{"task_id": f"profile-{i}", "step": i, "compute_seconds": seconds,
+        "setup_seconds": 1., "import_seconds": 2., "export_seconds": 2., "publication_seconds": 1.,
+        "wall_seconds": seconds + 6.} for i, seconds in enumerate((10., 11.))]
+    timing.update(measurement_scope="complete_chain_return", leaves=leaves,
+                  admitted_budget_seconds=60, wall_seconds=33., setup_seconds=2.)
+    write(path, timing)
+    return replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths))), task
+
+
+def test_chained_profile_sizes_slices_without_changing_instances_or_limits(tmp_path):
+    req, _ = setup_chain_lock(tmp_path)
+    result = campaign.run_stage(req)
+    assert result.status == "pass", result.message
+    root = Path(req.output_dir)
+    lock = coverage.read_json(root / "recipe_lock.json")
+    plans = coverage.read_json(root / "expanded_units.json")["plans"]
+    assert lock["instances"] == {"screening": "test-screen", "final": "test-final"}
+    assert [len(p["expected_leaves"]) for p in plans] == [1, 40]
+    assert all(len(w["slices"]) == 2 for w in plans[1]["spec"]["work"])
+    assert all("continuation.tar" in t["outputs"] for p in plans for t in p["tasks"][:-1])
+    assert all("--partition=standard" in u["sbatch"] and u["gpu_hours"] <= 4 for p in plans for u in p["units"])
+    assert lock["budget"]["cpu_wall_hours_ceiling"] == pytest.approx((41 * 11 + 20) / 60)
+
+
+def test_chained_profile_still_refuses_forty_one_leaves(tmp_path):
+    req, task = setup_chain_lock(tmp_path)
+    task["parameters"]["wall_seconds"] = 360
+    write(Path(req.task_path), task)
+    result = campaign.run_stage(replace(req, task_hash=file_hash(req.task_path)))
+    assert result.status == "blocked" and "forty leaves" in result.message
+
+
+def test_slicing_pays_each_leaf_overhead_safety_factor_and_checkpoint_reserve():
+    profile = {"seconds_per_repetition": 24000., "leaf_overheads": {
+        "setup_seconds": 100., "import_seconds": 100., "export_seconds": 100., "publication_seconds": 100.}}
+    assert campaign.slice_count(profile, 1, 14400, 1.2) == 3
+    with pytest.raises(ContractError, match="overhead"):
+        campaign.slice_count(profile, 1, 300, 1.)
+
+
+@pytest.mark.parametrize("incomplete", [False, True])
+def test_collection_counts_chained_terminal_records_once(tmp_path, incomplete):
+    req, _ = setup_chain_lock(tmp_path)
+    result = campaign.run_stage(req)
+    assert result.status == "pass", result.message
+    root = Path(req.output_dir)
+    lock = coverage.read_json(root / "recipe_lock.json")
+    plans = coverage.read_json(root / "expanded_units.json")["plans"]
+    plan = plans[1]
+    screen = tmp_path / "screen"
+    write(screen / "gate.json", {"pass": True, "mode": "screening", "lock_hash": coverage.digest(lock)})
+    dependencies = {"campaign-lock": root, plans[0]["tasks"][-1]["id"]: screen}
+    _, records = successful_records(1000)
+    draws = [d for b in lock["batches"] if b["mode"] == "final" for d in b["draws"]]
+    by_id = {}
+    for record, draw in zip(records, draws):
+        record["draw"] = draw
+        by_id[draw["repetition_id"]] = record
+    for index, leaf in enumerate(plan["tasks"][:-1]):
+        destination = tmp_path / leaf["id"]
+        params = leaf["parameters"]
+        selected = [by_id[d["repetition_id"]] for d in params["draws"]]
+        terminal = not (incomplete and index < 2)
+        if not terminal:
+            selected = selected[:-1]
+        write(destination / "result.json", {"lock_hash": coverage.digest(lock), "recipe_hash": coverage.digest(lock["recipe"]),
+            "batch_id": params["batch_id"], "mode": "final", "scenario": params["scenario"],
+            "draws": params["draws"], "records": selected, "terminal": terminal, "chain": leaf["continuation"]})
+        write(destination / "runtime.json", {"batch_id": params["batch_id"], "lock_hash": coverage.digest(lock),
+            "admitted_budget_seconds": params["wall_seconds"], "wall_seconds": 500., "measurement_scope": "complete_batch_return"})
+        dependencies[leaf["id"]] = destination
+    collector = request(tmp_path / "collector", plan["tasks"][-1], dependencies)
+    result = campaign.run_stage(collector)
+    assert result.status == ("fail" if incomplete else "pass"), result.message
+    value = coverage.read_json(Path(collector.output_dir) / "result.json")
+    assert len(value["records"]) == (999 if incomplete else 1000)
+    assert len(value["gate"]["incomplete_chains"]) == int(incomplete)
+    assert value["gate"]["scenario_summaries"]["null_effect"]["missing_repetitions"] == int(incomplete)
