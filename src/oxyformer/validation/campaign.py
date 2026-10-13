@@ -146,7 +146,8 @@ def _profile(request, config, reference, scenario, recipe, stamps):
             require(all(finite(leaf[k], "profile leaf " + k) >= 0 for k in names), "negative profile leaf time")
             require(math.isclose(math.fsum(leaf[k] for k in names), leaf["wall_seconds"], rel_tol=1e-6, abs_tol=.01),
                     "profile leaf accounting mismatch")
-            require(leaf["wall_seconds"] <= timing["admitted_budget_seconds"] <= 14400,
+            require(not leaf.get("budget_exceeded", False)
+                    and leaf["wall_seconds"] <= timing["admitted_budget_seconds"] <= 14400,
                     "profile leaf exceeds slice budget")
         require(math.isclose(math.fsum(v["wall_seconds"] for v in leaves), wall, rel_tol=1e-12),
                 "profile chain total mismatch")
@@ -161,11 +162,31 @@ def _profile(request, config, reference, scenario, recipe, stamps):
             "timing_hash": file_hash(timing_path), "draws": declared}
 
 
+def leaf_budget(seconds, factor, overheads):
+    """One allocation contract for sizing, admission and bounded execution."""
+    seconds, factor = finite(seconds, "leaf wall seconds"), finite(factor, "safety factor")
+    require(0 < seconds <= 14400 and factor >= 1, "invalid coverage leaf budget")
+    names = ("setup_seconds", "import_seconds", "export_seconds", "publication_seconds")
+    require(set(overheads) == set(names), "incomplete leaf overhead budget")
+    costs = {name: finite(overheads[name], name) for name in names}
+    require(all(value >= 0 for value in costs.values()), "negative leaf overhead budget")
+    reserve = min(120., seconds / 10)
+    capacity = (seconds - reserve) / factor - math.fsum(costs.values())
+    require(capacity > 0, "infeasible batch budget: leaf overhead consumes slice")
+    return {"wall_seconds": seconds, "profile_safety_factor": factor,
+            "checkpoint_reserve_seconds": reserve, "leaf_overheads": costs, "compute_seconds": capacity}
+
+
+def compute_allowance(budget, setup, imported):
+    """Charge each preparation phase once; underruns never enlarge compute."""
+    costs = budget["leaf_overheads"]
+    return max(0., budget["compute_seconds"] - max(0., setup - costs["setup_seconds"])
+               - max(0., imported - costs["import_seconds"]))
+
+
 def slice_count(profile, repetitions, seconds, factor):
     """Conservative compute capacity after paying every leaf's measured costs."""
-    overhead = math.fsum(profile["leaf_overheads"].values())
-    capacity = (seconds - min(120., seconds / 10)) / factor - overhead
-    require(capacity > 0, "infeasible batch budget: leaf overhead consumes slice")
+    capacity = leaf_budget(seconds, factor, profile["leaf_overheads"])["compute_seconds"]
     count = max(1, math.ceil(profile["seconds_per_repetition"] * repetitions / capacity))
     require(count <= 40, "infeasible batch budget: campaign instance exceeds forty leaves")
     return count
@@ -226,9 +247,11 @@ def _admit_locked_leaves(request, config, lock, plans):
                 if "leaf_overheads" in profile:
                     overheads = profile["leaf_overheads"]
                     publication = overheads["publication_seconds"]
-                    estimated = min(120., parameters["wall_seconds"] / 10) + (max(setup, overheads["setup_seconds"]) + overheads["import_seconds"]
-                        + overheads["export_seconds"] + publication
-                        + size * profile["seconds_per_repetition"] / parameters["slices"]) * lock["budget"]["profile_safety_factor"]
+                    allocation = parameters["leaf_budget"]
+                    available = compute_allowance(allocation, setup, overheads["import_seconds"])
+                    required = size * profile["seconds_per_repetition"] / parameters["slices"]
+                    require(available > 0, "infeasible batch budget: locked setup consumes compute")
+                    estimated = parameters["wall_seconds"] + (required - available) * allocation["profile_safety_factor"]
                 else:
                     estimated = (setup + size * profile["seconds_per_repetition"] + publication) * lock["budget"]["profile_safety_factor"]
                 measurements.append({"mode": parameters["mode"], "scenario": name, "repetitions": size,
@@ -309,7 +332,8 @@ def build_lock(request, config, task):
                 concrete = draws[start:start + batch_size]
                 slices = (slice_count(profile, len(concrete), wall_seconds, factor)
                           if "leaf_overheads" in profile else 1)
-                extra = {"slices": slices} if "leaf_overheads" in profile else {}
+                extra = ({"slices": slices, "leaf_budget": leaf_budget(wall_seconds, factor, profile["leaf_overheads"])}
+                         if "leaf_overheads" in profile else {})
                 batches.append({"batch_id": digest([campaign_id, namespace, mode, scenario["name"], start])[:24],
                     "mode": mode, "scenario": scenario, "draws": concrete, "wall_seconds": wall_seconds, "gpus": gpus, **extra})
                 mode_leaves += slices

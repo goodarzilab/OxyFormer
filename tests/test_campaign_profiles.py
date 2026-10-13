@@ -608,3 +608,46 @@ def test_chained_profile_uses_cumulative_max_and_full_overhead(tmp_path, case):
     else:
         assert profile["leaf_overheads"] == {"setup_seconds": 10., "import_seconds": 2.,
                                             "export_seconds": 2., "publication_seconds": 1.}
+
+
+def test_profile_carries_receipt_overrun_and_cannot_justify_lock(tmp_path, monkeypatch):
+    from test_coverage import chain_fixture, chain_request
+    task, inputs = chain_fixture(tmp_path)
+    task['parameters'].update(mode='profile', wall_seconds=600)
+    task['parameters']['recipe']['nested_cv'] = {}
+    task['parameters'].pop('study')
+    clock = [0.]
+    monkeypatch.setattr(coverage.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(campaign, 'fingerprint', lambda: deepcopy(STAMPS))
+    def estimate(*a, **k):
+        clock[0] += 1.
+        return {m: {'value': 0., 'se': 1.} for m in coverage.METHODS}
+    monkeypatch.setattr(coverage, 'estimate_repetition', estimate)
+    original_write = coverage.atomic_json
+    delayed = [False]
+    def receipt(*a, **k):
+        path = original_write(*a, **k)
+        if a[1] == 'timing.json' and not delayed[0]:
+            clock[0] += 600.
+            delayed[0] = True
+        return path
+    monkeypatch.setattr(coverage, 'atomic_json', receipt)
+    first = chain_request(tmp_path / 'first', task, {'inputs': inputs})
+    done = coverage.run_stage(first)
+    assert done.status == 'pass', done.message
+    done.verify(first)
+    timing = coverage.read_json(Path(first.output_dir) / 'timing.json')
+    assert not timing['complete'] and timing['leaves'][0]['budget_exceeded']
+    # A later cheap leaf must not erase its predecessor's known overrun.
+    task = deepcopy(task)
+    task.update(id='chain-1', continuation={'owner': 'coverage-test', 'step': 1, 'predecessor': 'chain-0'})
+    second = chain_request(tmp_path / 'second', task, {'inputs': inputs, 'chain-0': Path(first.output_dir)})
+    done = coverage.run_stage(second)
+    assert done.status == 'pass', done.message
+    done.verify(second)
+    result = coverage.read_json(Path(second.output_dir) / 'result.json')
+    reader = chain_request(tmp_path / 'reader', task, {'profile': Path(second.output_dir)})
+    config = json.loads(Path(reader.config_path).read_text())
+    with pytest.raises(ContractError, match='profile leaf exceeds slice budget'):
+        campaign._profile(reader, config, {'dependency': 'profile', 'path': 'result.json'},
+                          result['scenario'], task['parameters']['recipe'], STAMPS)

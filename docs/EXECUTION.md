@@ -428,7 +428,8 @@ Legacy single-leaf profiles and locks retain their existing interface.
 
 The coverage archive binds draw IDs and simulation seeds, scenario payload,
 endpoint/frame/observation hashes, recipe, study cell, lock, code identity, wall
-budget and scientific/environment fingerprints. Import resolves only the named predecessor
+budget, the admitted leaf allocation (including overheads and safety factor), any
+bootstrap compute ceiling, and scientific/environment fingerprints. Import resolves only the named predecessor
 from `StageRequest.dependency_paths`; the executor authenticates its declared
 outputs. Digest-named archive members carry the original observations/truth
 receipts, completed `(fold, seed)` prediction parts and the unfinished fold's
@@ -436,10 +437,30 @@ nested-CV continuation. Embedded old checkpoint paths are never opened. Each
 predecessor must have the same owner and exactly the preceding step. Binding
 drift, gaps, reordered parts and corrupt blobs are refusals, never new draws.
 
-A bounded coverage leaf reserves `min(120 seconds, wall_seconds / 10)` for
-publication and uses the remaining deadline with nested-CV's existing checkpoint
-margin. The 14,400-second bound applies to a slice, not to a fold's cumulative
-training. Epochs, tuning, seeds and estimators are unchanged. Only after all
+Sizing, admission and locked execution share one leaf budget. With wall allocation
+`W`, reserve `R = min(120 seconds, W / 10)`, safety factor `f` and maximum measured
+setup/import/export/publication costs `S, I, E, P`, its compute allowance is
+`C = (W - R) / f - (S + I + E + P)`. The lock and every expanded leaf carry this
+allocation; execution reconstructs it from the authenticated lock and refuses
+drift before computing. The whole leaf receives at most `C`, shared across all
+its draws and folds. Positive setup/import overruns reduce `C` separately;
+ordinary setup/import are already paid, and underruns do not increase compute.
+The absolute deadline also protects `E + P + R` for finalization. The existing
+nested-CV checkpoint margin (at most one second at this caller) stays inside
+that compute window.
+
+First-time smoke/profile chains do not yet have measured overheads. They retain
+the finite wall-derived deadline and reserve, with an optional positive
+`bootstrap_compute_seconds` ceiling that can only shorten computation. That
+ceiling is bound across the chain and cannot substitute for measured costs or
+be supplied to locked work. Bootstrap failures, partial chains and known wall
+overruns cannot justify a lock. Known overruns during receipt publication are
+carried in leaf timing even though receipt writes are excluded from phase costs.
+Generic step-zero metadata also exists on honest archive-free legacy leaves;
+archive declaration opts into coverage-owned continuation, while any actual
+predecessor must import and may never fall back to legacy execution.
+
+The 14,400-second bound applies to a slice, not to a fold's cumulative training. Epochs, tuning, seeds and estimators are unchanged. Only after all
 prediction parts exist does the usual terminal aggregation run. Incomplete
 repetitions have no `repetitions/<id>/result.json`; a valid checkpointed slice
 passes execution while its batch summary remains incomplete. If a leaf crashes
@@ -452,11 +473,10 @@ as the chain total and accumulated compute per completed repetition. Timing and
 runtime receipt writes and the outer executor/scheduler are explicitly excluded.
 A partial or unsuccessful chain cannot justify a lock. For a chained profile,
 lock sizing pays the maximum measured cost of each overhead phase on every
-slice and applies the declared safety factor. Usable compute per slice is
-`(wall_seconds - checkpoint_reserve) / safety_factor - sum(max_phase_overheads)`;
-the slice count is the ceiling of measured repetition compute divided by this
-capacity. Admission also measures actual locked setup and refuses if it exceeds
-the allocation. Collection counts the last leaf's accumulated terminal records
+slice and applies the declared safety factor through the shared allocation above.
+The slice count is the ceiling of measured batch compute divided by `C`.
+Admission also measures actual locked setup and applies the same overrun debit
+as execution before checking that the batch fits its allocated slices. Collection counts the last leaf's accumulated terminal records
 once, retains all declared draws in denominators, and lists incomplete chains.
 
 The bounds remain 4 GPU-hours per leaf and 40 leaves **per campaign spec**.

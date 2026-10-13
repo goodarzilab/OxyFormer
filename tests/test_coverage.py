@@ -753,7 +753,7 @@ def saved_coverage_chain(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("field", ["draws", "scenario", "endpoint_hash", "frame_hash", "recipe_hash", "study",
-                                    "lock_hash", "code_identity", "mode", "wall_seconds", "scientific_fingerprint", "environment_hash"])
+                                    "lock_hash", "code_identity", "mode", "wall_seconds", "leaf_budget", "bootstrap_compute_seconds", "scientific_fingerprint", "environment_hash"])
 def test_coverage_binding_refuses_each_field(saved_coverage_chain, field):
     req, task, _, header = saved_coverage_chain
     binding = deepcopy(header["binding"])
@@ -916,3 +916,37 @@ def test_profile_continuation_refuses_changed_wall_budget(tmp_path, monkeypatch)
     assert result.status == "blocked", result.message
     assert "binding mismatch" in result.message
     assert not (Path(next_req.output_dir) / "continuation.tar").exists()
+
+
+def test_bootstrap_ceiling_is_bounded_and_bound_across_leaves(tmp_path, monkeypatch):
+    from test_campaign import STAMPS
+    monkeypatch.setattr(campaign, 'fingerprint', lambda: deepcopy(STAMPS))
+    task, inputs = chain_fixture(tmp_path)
+    task['parameters'].update(wall_seconds=600, bootstrap_compute_seconds=200.)
+    clock = [0.]
+    monkeypatch.setattr(coverage.time, 'monotonic', lambda: clock[0])
+    def consume(endpoint, recipe, root, deadline, **kwargs):
+        assert deadline == 200.
+        clock[0] = deadline
+        return None
+    monkeypatch.setattr(coverage, 'estimate_repetition', consume)
+    first = chain_request(tmp_path / 'first', task, {'inputs': inputs})
+    assert coverage.run_stage(first).status == 'pass'
+    task = deepcopy(task)
+    task.update(id='chain-1', continuation={'owner': 'coverage-test', 'step': 1, 'predecessor': 'chain-0'})
+    task['parameters']['bootstrap_compute_seconds'] = 250.
+    next_req = chain_request(tmp_path / 'next', task, {'inputs': inputs, 'chain-0': Path(first.output_dir)})
+    result = coverage.run_stage(next_req)
+    assert result.status == 'blocked' and 'binding mismatch' in result.message
+
+
+def test_legacy_step_zero_without_archive_remains_valid(tmp_path, monkeypatch):
+    from test_campaign import STAMPS
+    monkeypatch.setattr(campaign, 'fingerprint', lambda: deepcopy(STAMPS))
+    task, inputs = chain_fixture(tmp_path)
+    task['outputs'].remove('continuation.tar')
+    monkeypatch.setattr(coverage, 'estimate_repetition', lambda *a, **k:
+        {m: {'value': 0., 'se': 1.} for m in coverage.METHODS})
+    req = chain_request(tmp_path / 'legacy', task, {'inputs': inputs})
+    assert coverage.run_stage(req).status == 'pass'
+    assert not (Path(req.output_dir) / 'continuation.tar').exists()

@@ -555,3 +555,120 @@ def test_collection_counts_chained_terminal_records_once(tmp_path, incomplete):
     assert len(value["records"]) == (999 if incomplete else 1000)
     assert len(value["gate"]["incomplete_chains"]) == int(incomplete)
     assert value["gate"]["scenario_summaries"]["null_effect"]["missing_repetitions"] == int(incomplete)
+
+
+@pytest.mark.parametrize('costs,actual_setup,actual_import,capacity', [
+    ((0., 0., 100., 0.), 0., 0., 350.),
+    ((0., 0., 0., 200.), 0., 0., 250.),
+    ((10., 20., 50., 50.), 10., 20., 320.),
+    ((10., 20., 50., 50.), 25., 35., 320.),
+])
+def test_generated_chain_enforces_admitted_compute_and_finalization(
+        tmp_path, monkeypatch, costs, actual_setup, actual_import, capacity):
+    """Real lock/expansion/import/collection, synthetic elapsed work only.
+
+    A batch of 100 eight-second repetitions costs 800 seconds. This exercises
+    the 600/1.2/800/100 regression while retaining the 1000-draw final instance
+    and its forty-leaf cap; no admission limits or producers are replaced.
+    """
+    from test_coverage import chain_request
+    req, task = setup_lock(tmp_path, screening_repetitions=100, repetitions_per_leaf=100,
+                           profile_safety_factor=1.2)
+    profile_path = tmp_path / 'profile/timing.json'
+    timing = coverage.read_json(profile_path)
+    names = ('setup_seconds', 'import_seconds', 'export_seconds', 'publication_seconds')
+    overheads = dict(zip(names, costs))
+    timing.update(measurement_scope='complete_chain_return', complete_repetition_seconds=[8., 8.],
+        admitted_budget_seconds=600, wall_seconds=16. + sum(costs), setup_seconds=costs[0],
+        leaves=[{'task_id': 'profile-0', 'step': 0, 'compute_seconds': 16.,
+                 **overheads, 'wall_seconds': 16. + sum(costs)}])
+    write(profile_path, timing)
+    req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    clock = [0.]
+    monkeypatch.setattr(coverage.time, 'monotonic', lambda: clock[0])
+    locked_result = campaign.run_stage(req)
+    assert locked_result.status == 'pass', locked_result.message
+    root = Path(req.output_dir)
+    lock = coverage.read_json(root / 'recipe_lock.json')
+    plans = coverage.read_json(root / 'expanded_units.json')['plans']
+    plan = plans[0]
+    assert len(plan['expected_leaves']) == (4 if capacity == 250. else 3)
+    assert all(len(p['expected_leaves']) <= 40 for p in plans)
+    assert lock['batches'][0]['leaf_budget']['compute_seconds'] == capacity
+    assert all('continuation.tar' in t['outputs'] for p in plans for t in p['tasks'][:-1])
+    prepare, read, export, publish = (coverage.prepare_batch, coverage._read_continuation,
+                                     coverage._write_continuation, coverage.publish)
+    def measured_prepare(*a, **k):
+        result = prepare(*a, **k)
+        clock[0] += actual_setup
+        return result
+    def measured_import(*a, **k):
+        result = read(*a, **k)
+        clock[0] += actual_import
+        return result
+    def measured_export(*a, **k):
+        clock[0] += costs[2]
+        return export(*a, **k)
+    def measured_publish(*a, **k):
+        clock[0] += costs[3]
+        return publish(*a, **k)
+    monkeypatch.setattr(coverage, 'prepare_batch', measured_prepare)
+    monkeypatch.setattr(coverage, '_read_continuation', measured_import)
+    monkeypatch.setattr(coverage, '_write_continuation', measured_export)
+    monkeypatch.setattr(coverage, 'publish', measured_publish)
+    completed = set()
+    def consume(draw, frame, scenario, template, recipe, destination, deadline, **kwargs):
+        assert draw['repetition_id'] not in completed, 're-executed completed draw'
+        remaining = deadline - clock[0]
+        if remaining < 8.:
+            clock[0] = deadline
+            return {'draw': draw, 'status': 'incomplete', 'reason': 'budget exhausted'}
+        clock[0] += 8.
+        completed.add(draw['repetition_id'])
+        return {'draw': draw, 'status': 'success', 'truth': 0., 'causal_truth': 0.,
+                'truth_integration_error': 0.,
+                'estimates': {m: {'value': 0., 'se': 1.} for m in coverage.METHODS}}
+    monkeypatch.setattr(coverage, 'execute_draw', consume)
+    dependencies = {'campaign-lock': root, 'inputs': tmp_path / 'inputs'}
+    for index, leaf_task in enumerate(plan['tasks'][:-1]):
+        assert leaf_task['parameters']['leaf_budget'] == lock['batches'][0]['leaf_budget']
+        leaf_req = chain_request(tmp_path / ('leaf-' + str(index)), leaf_task, dependencies)
+        result = coverage.run_stage(leaf_req)
+        assert result.status == 'pass', result.message
+        result.verify(leaf_req)
+        output = Path(leaf_req.output_dir)
+        assert (output / 'continuation.tar').is_file()
+        leaf = coverage.read_json(output / 'timing.json')['leaves'][-1]
+        expected = capacity - max(0., actual_setup - costs[0])
+        if index:
+            expected -= max(0., actual_import - costs[1])
+        assert leaf['compute_seconds'] <= expected
+        if index + 1 < len(plan['expected_leaves']):
+            assert leaf['compute_seconds'] == expected  # Exercise the offered deadline.
+        assert leaf['wall_seconds'] <= 600.
+        dependencies[leaf_task['id']] = output
+    collector = chain_request(tmp_path / 'collected', plan['tasks'][-1], dependencies)
+    result = campaign.run_stage(collector)
+    assert result.status == 'pass', result.message
+    collected = coverage.read_json(Path(collector.output_dir) / 'result.json')
+    assert len(collected['records']) == len(completed) == 100
+    assert collected['gate']['incomplete_chains'] == []
+
+
+@pytest.mark.parametrize('field', ['wall_seconds', 'profile_safety_factor', 'checkpoint_reserve_seconds',
+                                  'compute_seconds', 'setup_seconds', 'import_seconds',
+                                  'export_seconds', 'publication_seconds', 'missing'])
+def test_locked_leaf_refuses_allocation_drift_before_compute(tmp_path, monkeypatch, field):
+    req, _ = setup_chain_lock(tmp_path)
+    assert campaign.run_stage(req).status == 'pass'
+    root = Path(req.output_dir)
+    leaf = coverage.read_json(root / 'expanded_units.json')['plans'][0]['tasks'][0]
+    if field == 'missing':
+        leaf['parameters'].pop('leaf_budget')
+    elif field in leaf['parameters']['leaf_budget']['leaf_overheads']:
+        leaf['parameters']['leaf_budget']['leaf_overheads'][field] += 1.
+    else:
+        leaf['parameters']['leaf_budget'][field] += 1.
+    monkeypatch.setattr(coverage, 'execute_draw', lambda *a, **k: pytest.fail('computed after budget drift'))
+    leaf_req = request(tmp_path / 'drift', leaf, {'campaign-lock': root, 'inputs': tmp_path / 'inputs'})
+    assert coverage.run_stage(leaf_req).status == 'blocked'

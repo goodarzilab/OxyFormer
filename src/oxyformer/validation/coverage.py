@@ -638,6 +638,7 @@ def _write_continuation(path, states, *, binding, chain, task_id):
 def _run_chain(request, started):
     """One bounded leaf of a prospectively declared coverage work item."""
     from oxyformer.training.fit import RecipeStudy, resolve_device, fit_environment
+    from oxyformer.validation.campaign import leaf_budget, compute_allowance
     task, recipe, lock, template, frame, scenario, seconds, stamps = prepare_batch(request)
     chain = _chain(task)
     parameters, root = task["parameters"], Path(request.output_dir)
@@ -645,10 +646,21 @@ def _run_chain(request, started):
     require(seconds <= 14400, "coverage slice exceeds four hours")
     study = RecipeStudy(**parameters.get("study", {}))
     require(parameters["mode"] != "final" or study == RecipeStudy(), "final recipe cannot use study overrides")
+    allocation = None
+    ceiling = parameters.get("bootstrap_compute_seconds")
+    if lock is not None:
+        profile = lock["budget"]["profiles"][scenario.name]
+        allocation = leaf_budget(seconds, lock["budget"]["profile_safety_factor"], profile["leaf_overheads"])
+        require(parameters.get("leaf_budget") == allocation, "locked leaf budget missing or changed")
+        require(ceiling is None, "bootstrap ceiling is not a locked allocation")
+    elif ceiling is not None:
+        ceiling = finite(ceiling, "bootstrap compute seconds")
+        require(0 < ceiling <= seconds - min(120., seconds / 10), "invalid bootstrap compute ceiling")
     binding = {"draws": parameters["draws"], "scenario": scenario.to_dict()["payload"],
         "endpoint_hash": template.content_hash, "frame_hash": frame.content_hash,
         "recipe_hash": digest(recipe), "study": study.to_dict(), "lock_hash": digest(lock) if lock else None,
-        "code_identity": request.code_identity, "mode": parameters["mode"], "wall_seconds": seconds, **stamps}
+        "code_identity": request.code_identity, "mode": parameters["mode"], "wall_seconds": seconds,
+        "leaf_budget": allocation, "bootstrap_compute_seconds": ceiling, **stamps}
     for name in ("continuation.tar", "repetitions", "result.json", "timing.json"):
         require(not output_path(root, name).exists(), "coverage attempt already exists: " + name)
     setup = time.monotonic() - started
@@ -685,8 +697,18 @@ def _run_chain(request, started):
                 binding=state["binding"], chain=chain)
     import_seconds = time.monotonic() - imported_at
     compute_at = time.monotonic()
-    # The existing checkpoint margin reserves time for checkpoint publication.
+    # Bootstrap profiles have no measured costs yet. Locked execution consumes
+    # exactly the allocation used to size its chain, including its safety factor.
     deadline = started + seconds - min(120., seconds / 10)
+    if allocation is not None:
+        available = compute_allowance(allocation, setup, import_seconds)
+        costs = allocation["leaf_overheads"]
+        tail = costs["export_seconds"] + costs["publication_seconds"] + allocation["checkpoint_reserve_seconds"]
+        deadline = min(compute_at + available, started + seconds - tail)
+    elif ceiling is not None:
+        deadline = min(deadline, compute_at + ceiling)
+    require(deadline > compute_at or all(state["record"] is not None for state in states),
+            "infeasible batch budget: preparation consumes compute window")
     for draw, state, destination in zip(parameters["draws"], states, destinations):
         if state["record"] is not None:
             require(state["record"]["draw"] == draw and state["record"]["status"] != "incomplete",
@@ -758,7 +780,16 @@ def _run_chain(request, started):
     path = atomic_json(root, "timing.json", timing)
     completed = replace(completed, artifacts=(*completed.artifacts,
         ArtifactRecord(path="timing.json", kind="timing", sha256=file_hash(path), lineage=lineage)))
-    return record_runtime(request, completed, started, task)
+    completed = record_runtime(request, completed, started, task)
+    # Receipt writes are excluded from phase measurements, but a known overrun
+    # during them must survive into the next leaf and forbid profile admission.
+    if time.monotonic() - started > seconds:
+        leaf["budget_exceeded"] = True
+        timing["complete"] = False
+        path = atomic_json(root, "timing.json", timing)
+        completed = replace(completed, artifacts=tuple(
+            replace(a, sha256=file_hash(path)) if a.path == "timing.json" else a for a in completed.artifacts))
+    return completed
 
 
 def run_stage(request: StageRequest) -> StageResult:
