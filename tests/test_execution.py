@@ -4321,7 +4321,8 @@ def test_runner_finalizes_coverage_before_terminal_seal(runtime, tmp_path, monke
             'measurement_scope': 'complete_stage_return', 'complete_repetition_seconds': [5.],
             'setup_seconds': 0., 'device': 'cpu', 'environment': {'fixture': True},
             'production_equivalent': True, 'scientific_fingerprint': {}, 'environment_hash': 'a' * 64}
-        completed = coverage.publish(request, {'result.json': {'records': records}},
+        completed = coverage.publish(request, {'result.json': {
+            'records': records, 'recipe_hash': timing['recipe_hash']}},
             status='pass', message='synthetic coverage worker')
         summary = coverage.summarize(records, draws, production_equivalent=True, null_scenario=True)
         return coverage.record_measurements(request, completed, 0., task, timing, summary)

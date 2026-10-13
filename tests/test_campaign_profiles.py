@@ -601,7 +601,8 @@ def test_chained_profile_uses_cumulative_max_and_full_overhead(tmp_path, case):
         leaves = [{"task_id": f"profile-{i}", "step": i, "compute_seconds": compute,
             "setup_seconds": 1., "import_seconds": 0., "export_seconds": 0., "publication_seconds": 0.,
             "wall_seconds": compute + 1.} for i, compute in enumerate((90., 20.))]
-        timing.update(wall_seconds=112., setup_seconds=2., admitted_budget_seconds=100.)
+        # Bootstrap capacity also pays setup: 90 compute + 1 setup fits 110.
+        timing.update(wall_seconds=112., setup_seconds=2., admitted_budget_seconds=110.)
     else:
         leaves = [{"task_id": "profile-0", "step": 0, "compute_seconds": 110., "setup_seconds": 10.,
             "import_seconds": 2., "export_seconds": 2., "publication_seconds": 1., "wall_seconds": 125.}]

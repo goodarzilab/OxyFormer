@@ -81,6 +81,30 @@ def remaining_compute(budget, **measured):
         max(0., seconds - budget["overheads"][phase]) for phase, seconds in measured.items()))
 
 
+def uses_continuation(task):
+    """Match execution routing, including archive-free generic step zero."""
+    return ("continuation.tar" in task.get("outputs", ()) or
+            task.get("continuation", {}).get("predecessor") is not None)
+
+
+def task_leaf_budget(task):
+    """The producer task authorizes the contract; measurements cannot replace it."""
+    parameters = task["parameters"]
+    seconds = parameters["wall_seconds"]
+    budget = parameters.get("leaf_budget")
+    locked = bool(task.get("recipe_lock"))
+    require(not locked or budget is not None, "locked chain requires leaf budget")
+    if budget is not None:
+        require(budget == leaf_budget(seconds, budget["safety_factor"], budget["overheads"]),
+                "leaf budget drift")
+    else:
+        budget = leaf_budget(seconds, 1., {k: 0. for k in OVERHEAD_PHASES})
+    ceiling = parameters.get("compute_ceiling_seconds", budget["compute_seconds"])
+    require(0 < finite(ceiling, "compute ceiling") <= budget["compute_seconds"], "invalid compute ceiling")
+    require(not locked or ceiling == budget["compute_seconds"], "locked compute ceiling drift")
+    return {**budget, "compute_seconds": ceiling}
+
+
 def budget_binding(request, task, recipe_hash):
     parameters = task["parameters"]
     return {"request_hash": request.content_hash, "wall_seconds": parameters["wall_seconds"],
@@ -141,10 +165,16 @@ def load_budget(request, config, unit, *, expected_task=None):
     leaves = value["leaves"]
     require(bool(leaves), "missing budget measurements")
     chain = binding["chain"]
-    if value["chained"]:
+    chained = uses_continuation(task)
+    require(value["chained"] is chained, "budget execution mode mismatch")
+    contract = task_leaf_budget(task) if chained else None
+    if chained:
         require(chain is not None and len(leaves) == chain["step"] + 1
             and [row["step"] for row in leaves] == list(range(len(leaves)))
             and leaves[-1]["task_id"] == task["id"], "partial budget chain")
+    else:
+        require(len(leaves) == 1 and leaves[0]["task_id"] == task["id"]
+            and leaves[0]["step"] == 0, "invalid single-leaf budget")
     for leaf in leaves:
         names = ("compute_seconds", *OVERHEAD_PHASES)
         require(all(finite(leaf[k], k) >= 0 for k in names), "negative budget measurement")
@@ -153,13 +183,9 @@ def load_budget(request, config, unit, *, expected_task=None):
             "budget accounting mismatch")
         require(leaf["post_check_reserve_seconds"] == publication_reserve(wall), "publication reserve drift")
         require(elapsed + publication_reserve(wall) <= wall, "coverage leaf exceeded admitted budget")
-        contract = leaf.get("leaf_budget")
+        require(leaf.get("leaf_budget") == contract, "budget contract differs from producer task")
         if contract is not None:
-            require(contract == {**leaf_budget(wall, contract["safety_factor"], contract["overheads"]),
-                "compute_seconds": contract["compute_seconds"]}, "budget contract drift")
-            require(0 < contract["compute_seconds"] <= leaf_budget(wall, contract["safety_factor"], contract["overheads"])["compute_seconds"],
-                "invalid budget compute ceiling")
-            phases = {k: leaf[k] for k in OVERHEAD_PHASES} if leaf["measured_overheads"] else {
+            phases = {k: leaf[k] for k in OVERHEAD_PHASES} if "leaf_budget" in task["parameters"] else {
                 k: leaf[k] for k in ("setup_seconds", "import_seconds")}
             require(leaf["compute_seconds"] <= remaining_compute(contract, **phases),
                 "coverage compute exceeded admitted budget")
@@ -176,7 +202,9 @@ def load_budget(request, config, unit, *, expected_task=None):
     # Reconcile the finalized counters with the actual scientific outcomes,
     # never with diagnostic summary flags. This check belongs to the same
     # loader so admission, continuation and reuse have one consistent verdict.
-    scientific_records = read_json(payload_path)["records"]
+    scientific = read_json(payload_path)
+    require(scientific["recipe_hash"] == binding["recipe_hash"], "budget scientific recipe mismatch")
+    scientific_records = scientific["records"]
     scientific_counts = {status: sum(row["status"] == status for row in scientific_records)
         for status in STATUSES}
     require(counts == scientific_counts and value["received"] == len(scientific_records),
@@ -787,18 +815,7 @@ def _run_chain(request, started):
     # expansion. Bootstrap profiles need no measurements: their checkpoint
     # reserve covers finalization, and an optional fixed ceiling can cut them
     # earlier. Neither mode may grow its compute allowance across successors.
-    budget = parameters.get("leaf_budget")
-    if lock:
-        require(budget is not None, "locked chain requires leaf budget")
-    if budget is not None:
-        require(budget == leaf_budget(seconds, budget["safety_factor"], budget["overheads"]),
-                "leaf budget drift")
-    else:
-        budget = leaf_budget(seconds, 1., {k: 0. for k in OVERHEAD_PHASES})
-    ceiling = parameters.get("compute_ceiling_seconds", budget["compute_seconds"])
-    require(0 < finite(ceiling, "compute ceiling") <= budget["compute_seconds"], "invalid compute ceiling")
-    require(not lock or ceiling == budget["compute_seconds"], "locked compute ceiling drift")
-    budget = {**budget, "compute_seconds": ceiling}
+    budget = task_leaf_budget(task)
     binding = {"draws": parameters["draws"], "scenario": scenario.to_dict()["payload"],
         "endpoint_hash": template.content_hash, "frame_hash": frame.content_hash,
         "recipe_hash": digest(recipe), "study": study.to_dict(), "lock_hash": digest(lock) if lock else None,
@@ -941,8 +958,7 @@ def run_stage(request: StageRequest) -> StageResult:
         request.verify_inputs()
         started = read_json(request.config_path).get("coverage_started_monotonic", started)
         task = read_json(request.task_path)
-        if ("continuation.tar" in task.get("outputs", ()) or
-                task.get("continuation", {}).get("predecessor") is not None):
+        if uses_continuation(task):
             return _run_chain(request, started)
         if task.get("parameters", {}).get("mode") != "profile":
             completed = _run_batch(request, started)
