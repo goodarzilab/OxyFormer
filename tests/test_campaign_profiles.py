@@ -14,11 +14,16 @@ from oxyformer.provenance import ContractError, file_hash
 from oxyformer.training import nested_cv
 from oxyformer.validation import campaign, campaign_estimate, coverage, real_frame, smoke_inputs
 from oxyformer.validation.scm import SCMConfig
-from test_campaign import STAMPS, request, write
-from test_coverage import successful_records
+from test_campaign import STAMPS, request, write, seal_budget_fixture, refresh_profile, profile_directory
+from test_coverage import successful_records, run_coverage
 from test_design import make_inputs
 
 ROOT = Path(__file__).parents[1]
+
+
+@pytest.fixture(autouse=True)
+def profile_publication_store(tmp_path, monkeypatch):
+    monkeypatch.setenv('OXYFORMER_PUBLICATION_STORE', str(tmp_path / '.publications'))
 
 
 def real_fixture():
@@ -139,6 +144,7 @@ def test_generated_tasks_use_all_registered_scenarios_and_no_lock(built):
 
 @pytest.fixture
 def estimate_request(tmp_path, monkeypatch):
+    monkeypatch.setenv("OXYFORMER_PUBLICATION_STORE", str(tmp_path / ".publications"))
     monkeypatch.setattr(campaign, 'fingerprint', lambda: deepcopy(STAMPS))
     endpoint, frame = smoke_inputs.build_inputs()
     tasks = real_frame.profile_tasks(endpoint, frame)['tasks']
@@ -158,6 +164,7 @@ def estimate_request(tmp_path, monkeypatch):
             'recipe_hash': coverage.digest(p['recipe']), 'device': 'cpu', 'gpu_seconds': 0,
             'complete_repetition_seconds': [10.], 'wall_seconds': 13., 'setup_seconds': 2.,
             'measurement_scope': 'complete_stage_return', **STAMPS})
+        seal_budget_fixture(root, task['id'], task)
     req = request(tmp_path / 'estimate', tasks[4], deps)
     # There is deliberately no approvals or allocation key at all.
     config = json.loads(Path(req.config_path).read_text())
@@ -228,7 +235,7 @@ def test_estimate_rejects_incomplete_or_mismatched_profiles(estimate_request, ch
     else:
         value['production_equivalent'] = False
     write(path, value)
-    req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    req = refresh_profile(req)
     result = campaign_estimate.run_stage(req)
     assert result.status == 'blocked' and not result.artifacts
     assert not list(Path(req.output_dir).iterdir())
@@ -304,7 +311,7 @@ def test_gpu_probe_refuses_unavailable_cuda_before_fitting(gpu_profile_request, 
     monkeypatch.setenv('OXYFORMER_DEVICE', 'cuda')
     monkeypatch.setattr(torch.cuda, 'is_available', lambda: False)
     monkeypatch.setattr(coverage, 'execute_draw', lambda *args: pytest.fail('started draw without CUDA'))
-    result = coverage.run_stage(gpu_profile_request)
+    result = run_coverage(gpu_profile_request)
     assert result.status == 'blocked' and 'unavailable' in result.message
     assert not result.artifacts
 
@@ -315,7 +322,7 @@ def test_gpu_probe_refuses_cpu_runtime_before_fitting(gpu_profile_request, monke
     monkeypatch.setattr(fit, 'resolve_device', lambda device='auto':
                         torch.device('cuda:0' if device == 'cuda' else 'cpu'))
     monkeypatch.setattr(coverage, 'execute_draw', lambda *args: pytest.fail('started CPU draw'))
-    result = coverage.run_stage(gpu_profile_request)
+    result = run_coverage(gpu_profile_request)
     assert result.status == 'blocked' and 'required device' in result.message
     assert not result.artifacts
 
@@ -346,7 +353,7 @@ def test_gpu_profile_timing_and_budget_are_honest(gpu_profile_request, monkeypat
         return result
     monkeypatch.setattr(coverage, 'execute_draw', execute)
     monkeypatch.setattr(coverage, 'publish', publish)
-    result = coverage.run_stage(gpu_profile_request)
+    result = run_coverage(gpu_profile_request)
     assert result.status == ('pass' if outcome == 'success' else 'fail'), result.message
     result.verify(gpu_profile_request)
     timing = coverage.read_json(Path(gpu_profile_request.output_dir) / 'timing.json')
@@ -495,6 +502,7 @@ def test_estimate_and_lock_compare_derived_real_frame_scenarios(built, tmp_path,
             'recipe_hash': coverage.digest(p['recipe']), 'device': 'cpu', 'gpu_seconds': 0,
             'complete_repetition_seconds': [10.], 'wall_seconds': 13., 'setup_seconds': 2.,
             'measurement_scope': 'complete_stage_return', **STAMPS})
+        seal_budget_fixture(root, task['id'], task)
     req = request(tmp_path / 'estimate-derived', tasks[4], deps)
     assert campaign_estimate.estimate_budget(req)['total_repetitions'] == 4000
     # Exercise registry admission without fitting or timing this policy-only fixture.
@@ -515,7 +523,7 @@ def test_estimate_and_lock_compare_derived_real_frame_scenarios(built, tmp_path,
     stale = coverage.read_json(deps['profile-null-effect'] / 'result.json')
     stale['scenario'] = explicit
     write(deps['profile-null-effect'] / 'result.json', stale)
-    req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    req = refresh_profile(req)
     with pytest.raises(ContractError, match='profile scenario mismatch'):
         campaign_estimate.estimate_budget(req)
 
@@ -552,22 +560,23 @@ def test_profile_chain_accounts_for_every_leaf_and_refuses_partial(tmp_path, mon
         return None if len(calls) == 1 else {m: {"value": 0., "se": 1.} for m in coverage.METHODS}
     monkeypatch.setattr(coverage, "estimate_repetition", estimate)
     first = chain_request(tmp_path / "first", task, {"inputs": inputs})
-    assert coverage.run_stage(first).status == "pass"
+    assert run_coverage(first).status == "pass"
     timing = coverage.read_json(Path(first.output_dir) / "timing.json")
     assert not timing["complete"]
     def profile(req):
         config = json.loads(Path(req.config_path).read_text())
         result = coverage.read_json(Path(req.output_dir) / "result.json")
-        reader = chain_request(tmp_path / ("reader-" + str(len(calls))), task, {"profile": Path(req.output_dir)})
+        unit = coverage.read_json(req.task_path)["id"]
+        reader = chain_request(tmp_path / ("reader-" + str(len(calls))), task, {unit: Path(req.output_dir)})
         config = json.loads(Path(reader.config_path).read_text())
-        return campaign._profile(reader, config, {"dependency": "profile", "path": "result.json"},
+        return campaign._profile(reader, config, {"dependency": unit, "path": "result.json"},
                                  result["scenario"], task["parameters"]["recipe"], STAMPS)
     with pytest.raises(ContractError, match="complete production"):
         profile(first)
     task = deepcopy(task)
     task.update(id="chain-1", continuation={"owner": "coverage-test", "step": 1, "predecessor": "chain-0"})
     second = chain_request(tmp_path / "second", task, {"inputs": inputs, "chain-0": Path(first.output_dir)})
-    assert coverage.run_stage(second).status == "pass"
+    assert run_coverage(second).status == "pass"
     timing = coverage.read_json(Path(second.output_dir) / "timing.json")
     assert timing["complete"] and timing["wall_seconds"] == 45.
     assert timing["complete_repetition_seconds"] == [20.]
@@ -586,7 +595,7 @@ def test_chained_profile_uses_cumulative_max_and_full_overhead(tmp_path, case):
     for record in result["records"]:
         record["wall_seconds"] = 10.  # Last-leaf time is not cumulative compute.
     write(result_path, result)
-    path = tmp_path / "profile/timing.json"
+    path = profile_directory(req) / "timing.json"
     timing = coverage.read_json(path)
     if case == "unequal_cumulative_compute":
         leaves = [{"task_id": f"profile-{i}", "step": i, "compute_seconds": compute,
@@ -599,7 +608,7 @@ def test_chained_profile_uses_cumulative_max_and_full_overhead(tmp_path, case):
         timing.update(wall_seconds=125., setup_seconds=10., admitted_budget_seconds=600.)
     timing.update(measurement_scope="complete_chain_return", leaves=leaves, complete_repetition_seconds=[100., 10.])
     write(path, timing)
-    req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    req = refresh_profile(req)
     profile = campaign._profile(req, json.loads(Path(req.config_path).read_text()),
         {"dependency": "profile", "path": "result.json"}, result["scenario"], task["parameters"]["recipe"], STAMPS)
     assert profile["seconds_per_repetition"] == 100.

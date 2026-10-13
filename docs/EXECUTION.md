@@ -424,7 +424,8 @@ uses chained profiling declares `continuation.tar` on **every** slice, including
 the terminal slice. Its immutable parameters retain the draws, recipe, scenario,
 wall budget and optional `RecipeStudy` cell. The owner/step/predecessor fields
 come from the generic expansion; no new instance type or scheduler is involved.
-Legacy single-leaf profiles and locks retain their existing interface.
+Archive-free single-leaf execution remains available. Budget evidence from both
+legacy and chained producers must now pass the runner-finalized loader.
 
 The coverage archive binds draw IDs and simulation seeds, scenario payload,
 endpoint/frame/observation hashes, recipe, study cell, lock, code identity, wall
@@ -447,10 +448,26 @@ passes execution while its batch summary remains incomplete. If a leaf crashes
 before export, retry in a fresh attempt root with the same task and exported
 predecessor. Never consume partial files in the failed root.
 
-Chained `timing.json` uses `measurement_scope: complete_chain_return`. It lists
-per-leaf compute, setup, import, export, publication and total seconds, as well
-as the chain total and accumulated compute per completed repetition. Timing and
-runtime receipt writes and the outer executor/scheduler are explicitly excluded.
+The runner finalizes exactly one `budget_record.json` after the final wall
+check. Its terminal `StageResult` lists that record and its SHA256. The record
+binds the request, declared wall, task and continuation owner/step, recipe, lock,
+scenario and draws. It contains reconciled per-leaf compute, setup, import,
+export and publication measurements, outcome counts, and chain totals.
+`coverage_measurements.json` is worker input to finalization, with no downstream
+authority. `result.json`, `timing.json` and `runtime.json` remain diagnostics and
+scientific payloads; their budget flags cannot authorize work.
+
+`coverage.load_budget` is the only budget-evidence loader. It requires a
+passing terminal result and the existing independent publication seal, verifies
+the declared producer request/task and record hash, checks the wall/bindings,
+and recomputes eligibility from measurements and counts. Missing, truncated,
+pre-seal, over-budget and reused evidence is refused. Stored eligibility,
+complete and success flags are not trusted. Scientific payload reads follow
+this gate. Profiles, lock sizing and admission, leaf deadlines, predecessor
+import, collection, and dependency reuse/retry all use the same loader. A lock
+carries the profile record identity and declares its original sealed inputs so
+a leaf can revalidate the measurements before spending its compute allowance.
+
 A partial or unsuccessful chain cannot justify a lock. For a chained profile,
 lock sizing pays the maximum measured cost of each overhead phase on every
 slice and applies the declared safety factor. Usable compute per slice is
@@ -490,7 +507,7 @@ once; each positive overrun reduces C and underruns never increase it. Export
 and publication remain reserved, along with the checkpoint margin and safety
 factor. A compute overrun refuses usable publication. Observed finalization or
 wall overruns fail the leaf and cannot justify a profile lock. The collector
-refuses over-budget chained leaves. Checkpoint boundaries are cooperative;
+refuses over-budget leaves. Checkpoint boundaries are cooperative;
 uninterruptible operations that overrun are detected, not certified as within
 budget. The scheduler remains the hard wall limit.
 
@@ -502,3 +519,13 @@ lock. Existing archive-free single-leaf producers retain their legacy behavior:
 generic step-zero metadata alone does not promise an archive. New locks built
 from chained profiles explicitly declare `continuation.tar`. Malformed archive
 declaration hardening is deferred to a follow-up.
+
+The final wall measurement includes worker return and runner verification.
+Post-check record writing and terminal publication use `min(30 seconds,
+wall_seconds / 20)` of the existing checkpoint/finalization reserve; the final
+check requires elapsed plus that reserved interval to fit the wall. This
+allocation does not enlarge compute or change the shared C formula. Actual
+post-check duration is not claimed as measured in a record written before it.
+Slurm enforces the allocation's hard limit. Publication first writes provisional
+bytes and then the independent seal; no terminal result is changed after that
+seal. A provisional passing result without the seal admits nothing.

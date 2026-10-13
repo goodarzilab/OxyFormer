@@ -2,22 +2,25 @@
 from copy import deepcopy
 from dataclasses import replace
 import json
+import shutil
+from tempfile import mkdtemp
 from pathlib import Path
 
 import pytest
 
-from oxyformer.contracts import StageRequest
+from oxyformer.contracts import StageRequest, StageResult
 from oxyformer.provenance import ContractError, canonical_json, file_hash
 from oxyformer.validation import campaign, coverage
 from oxyformer.validation.scm import SCMConfig
-from test_coverage import successful_records, synthetic_endpoint
+from test_coverage import successful_records, synthetic_endpoint, run_coverage
 
 STAMPS = {"scientific_fingerprint": {"algorithm": "tracked-science-v2", "sha256": "a" * 64},
           "environment_hash": "b" * 64}
 
 
 @pytest.fixture(autouse=True)
-def frozen_fingerprint(monkeypatch):
+def frozen_fingerprint(monkeypatch, tmp_path):
+    monkeypatch.setenv("OXYFORMER_PUBLICATION_STORE", str(tmp_path / ".publications"))
     # Scientific fingerprinting itself is tested by the execution unit; this
     # unit verifies binding/drift while its own checkout is being edited.
     monkeypatch.setattr(campaign, "fingerprint", lambda: deepcopy(STAMPS))
@@ -29,13 +32,125 @@ def write(path, value):
     return path
 
 
+def seal_budget_fixture(root, unit, task=None):
+    """Publish synthetic measurements through the real immutable sealing path."""
+    from oxyformer.execution.integrity import publish_result, RESULT, FINGERPRINT
+    from oxyformer.provenance import ArtifactRecord, ArtifactLineage
+    result = coverage.read_json(root / 'result.json')
+    timing = coverage.read_json(root / 'timing.json') if (root / 'timing.json').exists() else {}
+    runtime = coverage.read_json(root / 'runtime.json') if (root / 'runtime.json').exists() else {}
+    if task is None:
+        chain = timing.get('chain')
+        if timing.get('measurement_scope') == 'complete_chain_return' and chain is None:
+            chain = {'owner': unit, 'step': len(timing['leaves']) - 1,
+                'predecessor': timing['leaves'][-2]['task_id'] if len(timing['leaves']) > 1 else None}
+        task = {'id': unit, 'stage': 'simulation-smoke', 'parameters': {
+            'mode': result['mode'], 'scenario': result['scenario'], 'draws': result['draws'],
+            'wall_seconds': timing.get('admitted_budget_seconds', 14400)}}
+        if chain is not None:
+            task['continuation'] = chain
+    config = write(root / '_execution/config.json', {})
+    task_path = write(root / '_execution/task.json', task)
+    producer = StageRequest(stage=task['stage'], config_path=str(config), config_hash=file_hash(config),
+        task_path=str(task_path), task_hash=file_hash(task_path), dependency_paths=(), dependency_hashes=(),
+        output_dir=str(root), code_identity='c' * 40)
+    (root / '_execution/request.json').write_text(producer.to_json())
+    wall = task['parameters']['wall_seconds']
+    chained = timing.get('measurement_scope') == 'complete_chain_return'
+    elapsed = timing.get('wall_seconds', runtime.get('wall_seconds', 100.))
+    leaf = {'task_id': unit, 'step': 0, 'compute_seconds': sum(timing.get('complete_repetition_seconds', [elapsed])),
+        'setup_seconds': timing.get('setup_seconds', 0.), 'import_seconds': 0., 'export_seconds': 0.}
+    leaf['publication_seconds'] = elapsed - sum(leaf[k] for k in ('compute_seconds', 'setup_seconds'))
+    leaf['wall_seconds'] = elapsed
+    leaves = deepcopy(timing['leaves']) if chained else [leaf]
+    leaves[-1]['task_id'] = unit
+    for row in leaves:
+        row['post_check_reserve_seconds'] = coverage.publication_reserve(wall)
+    counts = {status: sum(r['status'] == status for r in result['records']) for status in coverage.STATUSES}
+    # Older regression fixtures explicitly model unsuccessful/partial profiling.
+    if timing.get('complete') is False:
+        counts['success'] = max(0, counts['success'] - 1)
+        counts['incomplete'] += 1
+    if timing.get('all_successful') is False and counts['success']:
+        counts['success'] -= 1
+        counts['numerical_failure'] += 1
+    binding = coverage.budget_binding(producer, task, timing.get('recipe_hash', result['recipe_hash']))
+    value = {'schema_version': 1, 'binding': binding, 'chained': chained, 'leaves': leaves,
+        'counts': counts, 'received': sum(counts.values()),
+        'profile': {k: timing.get(k) for k in ('device', 'environment', 'production_equivalent',
+            'complete_repetition_seconds', 'scientific_fingerprint', 'environment_hash')}}
+    # These mutations describe failed producers, not authoritative stored flags.
+    failed = timing.get('budget_exceeded', False) or any(v.get('budget_exceeded', False) for v in leaves)
+    write(root / coverage.BUDGET_RECORD, value)
+    lineage = ArtifactLineage(source_hashes=(producer.config_hash,), unit_ids=(producer.content_hash,),
+        parent_hashes=(), split_hash=None, config_hash=producer.config_hash, model_hash=None,
+        environment=(("fixture", "synthetic"),), seed=None, parameter_count=None)
+    artifacts = tuple(ArtifactRecord(path=p.name, sha256=file_hash(p), kind='fixture', lineage=lineage)
+        for p in sorted(root.glob('*.json')))
+    terminal = StageResult(request_hash=producer.content_hash, status='fail' if failed else 'pass',
+        artifacts=artifacts, message='synthetic measured fixture')
+    for name in (RESULT, FINGERPRINT):
+        (root / name).unlink(missing_ok=True)
+    sealed = publish_result(root, terminal)
+    assert sealed.status == terminal.status, sealed.message
+    return producer
+
+
+def profile_directory(req, unit='profile'):
+    return Path(coverage.read_json(req.config_path)['dependencies'][unit])
+
+
+def fork_profile(req, unit='profile', *, measurements=True):
+    """A new attempt for revised fixture measurements; never overwrite a seal."""
+    config = coverage.read_json(req.config_path)
+    source = Path(config['dependencies'][unit])
+    root = Path(mkdtemp(prefix=unit + '-revision-', dir=source.parent))
+    shutil.copytree(source, root, dirs_exist_ok=True)
+    if measurements:
+        seal_budget_fixture(root, unit)
+    else:
+        from oxyformer.execution.integrity import RESULT, FINGERPRINT
+        producer = StageRequest.from_json((root / '_execution/request.json').read_text())
+        producer = replace(producer, output_dir=str(root), config_path=str(root / '_execution/config.json'),
+            task_path=str(root / '_execution/task.json'))
+        (root / '_execution/request.json').write_text(producer.to_json())
+        value = coverage.read_json(root / coverage.BUDGET_RECORD)
+        value['binding']['request_hash'] = producer.content_hash
+        write(root / coverage.BUDGET_RECORD, value)
+        terminal = StageResult.from_json((root / RESULT).read_text())
+        (root / RESULT).write_text(replace(terminal, request_hash=producer.content_hash).to_json())
+        (root / FINGERPRINT).unlink(missing_ok=True)
+    config['dependencies'][unit] = str(root)
+    write(Path(req.config_path), config)
+    paths = tuple(str(p) for name in config['dependencies'].values() for p in sorted([
+        *Path(name).glob('*.json'), *(Path(name) / '_execution').glob('*.json')]))
+    return replace(req, config_hash=file_hash(req.config_path), dependency_paths=paths,
+        dependency_hashes=tuple(map(file_hash, paths)))
+
+
+def refresh_profile(req):
+    task = coverage.read_json(req.task_path)
+    for reference in task['parameters']['profiles'].values():
+        req = fork_profile(req, reference['dependency'])
+    return req
+
+
 def request(root, task, dependencies, approvals=None):
     root.mkdir(parents=True, exist_ok=True)
+    dependencies = dict(dependencies)
+    for source in list(dependencies.values()):
+        config_path = source.parent / 'config.json'
+        if config_path.exists():
+            upstream = coverage.read_json(config_path).get('dependencies', {})
+            for unit in task.get('needs', {}):
+                if unit not in dependencies and unit in upstream:
+                    dependencies[unit] = Path(upstream[unit])
     config = write(root / "config.json", {"dependencies": {k: str(v) for k, v in dependencies.items()},
         "approvals": approvals or {"owner_decisions": {"campaign_allocations": {
             "test-final": {"kind": "final-coverage", "gpu_hours": 0}}}}})
     task_path = write(root / "task.json", task)
-    paths = tuple(str(p) for directory in dependencies.values() for p in sorted(directory.glob("*.json")))
+    paths = tuple(str(p) for directory in dependencies.values()
+        for p in sorted([*directory.glob("*.json"), *(directory / '_execution').glob('*.json')]))
     output = root / "out"
     output.mkdir()
     return StageRequest(stage=task["stage"], config_path=str(config), config_hash=file_hash(config),
@@ -68,6 +183,7 @@ def setup_lock(tmp_path, **changes):
         "frame_input": {"dependency": "inputs", "path": "frame.json"}, "cpu_wall_hours_budget": 10.}
     parameters.update(changes)
     task = {"id": "campaign-lock", "stage": "campaign-lock", "parameters": parameters}
+    seal_budget_fixture(profile, "profile")
     req = request(tmp_path / "lock-request", task, {"inputs": inputs, "profile": profile})
     return req, task
 
@@ -113,11 +229,11 @@ def test_infeasible_or_weakened_campaign_is_blocked(tmp_path, changes, reason):
 
 def test_smoke_profile_cannot_justify_final_batching(tmp_path):
     req, _ = setup_lock(tmp_path)
-    path = tmp_path / "profile/timing.json"
+    path = profile_directory(req) / "timing.json"
     data = coverage.read_json(path)
     data["production_equivalent"] = False
     write(path, data)
-    req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    req = refresh_profile(req)
     assert "production profiling" in campaign.run_stage(req).message
 
 
@@ -160,6 +276,7 @@ def collection_request(tmp_path, *, missing_leaf=False, missing_repetition=False
         write(destination / "runtime.json", {"batch_id": params["batch_id"],
             "lock_hash": coverage.digest(lock), "admitted_budget_seconds": params["wall_seconds"],
             "wall_seconds": 100., "measurement_scope": "complete_batch_return"})
+        seal_budget_fixture(destination, leaf["id"], leaf)
         dependencies[leaf["id"]] = destination
     return request(tmp_path / "collection-request", task, dependencies), lock, plans
 
@@ -235,7 +352,7 @@ def test_final_execution_is_blocked_by_failed_screening(tmp_path):
     screening = tmp_path / "screening"
     write(screening / "gate.json", {"pass": False, "mode": "screening", "lock_hash": coverage.digest(lock)})
     req = request(tmp_path / "leaf-request", leaf, {"campaign-lock": root, "inputs": tmp_path / "inputs", screen_id: screening})
-    result = coverage.run_stage(req)
+    result = run_coverage(req)
     assert result.status == "blocked" and "screening did not admit" in result.message
     assert not list(Path(req.output_dir).glob("repetitions/*"))
 
@@ -249,12 +366,13 @@ def test_lock_accepts_authenticated_noncanonical_input_serialization(tmp_path):
     recipe = task["parameters"]["recipe"]
     recipe.update(endpoint_hash=endpoint.content_hash, frame_hash=frame.content_hash)
     for name in ("result.json", "timing.json"):
-        path = tmp_path / "profile" / name
+        path = profile_directory(req) / name
         value = coverage.read_json(path)
         value["recipe_hash"] = coverage.digest(recipe)
         write(path, value)
     write(Path(req.task_path), task)
     req = replace(req, task_hash=file_hash(req.task_path), dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    req = refresh_profile(req)
     result = campaign.run_stage(req)
     assert result.status == "pass", result.message
     result.verify(req)
@@ -263,11 +381,11 @@ def test_lock_accepts_authenticated_noncanonical_input_serialization(tmp_path):
 @pytest.mark.parametrize("seconds,status", [(270, "blocked"), (294, "pass")])
 def test_lock_scales_publication_cost_with_leaf_size(tmp_path, monkeypatch, seconds, status):
     req, _ = setup_lock(tmp_path, profile_safety_factor=1., wall_seconds=seconds)
-    path = tmp_path / "profile/timing.json"
+    path = profile_directory(req) / "timing.json"
     timing = coverage.read_json(path)
     timing.update(wall_seconds=40., setup_seconds=18., complete_repetition_seconds=[10., 10.])
     write(path, timing)
-    req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    req = refresh_profile(req)
     clock = [0.]
     monkeypatch.setattr(coverage.time, "monotonic", lambda: clock[0])
     def fingerprint():
@@ -295,7 +413,7 @@ def test_locked_leaf_profiles_the_environment_only_once(tmp_path, monkeypatch):
     monkeypatch.setattr(campaign, "fingerprint", stamp)
     monkeypatch.setattr(coverage, "estimate_repetition", lambda *args:
         {method: {"value": 0., "se": 1.} for method in coverage.METHODS})
-    result = coverage.run_stage(req)
+    result = run_coverage(req)
     assert result.status == "pass", result.message
     assert calls == [1]  # Same single fingerprint cost as the production profile.
 
@@ -321,17 +439,17 @@ def test_review_round_three_admission_matches_complete_locked_leaf(tmp_path, mon
     budget = 271 if case == "locked_preflight" else 293
     req, task = setup_lock(tmp_path, profile_safety_factor=1., wall_seconds=budget)
     profile_count = 25 if case == "locked_preflight" else 2
-    profile_path = tmp_path / "profile/result.json"
+    profile_path = profile_directory(req) / "result.json"
     profile = coverage.read_json(profile_path)
     profile["draws"], profile["records"] = successful_records(profile_count)
     write(profile_path, profile)
-    timing_path = tmp_path / "profile/timing.json"
+    timing_path = profile_directory(req) / "timing.json"
     timing = coverage.read_json(timing_path)
     timing.update(wall_seconds=20. + profile_count * 10.,
                   setup_seconds=20. if case == "locked_preflight" else 18.,
                   complete_repetition_seconds=[10.] * profile_count)
     write(timing_path, timing)
-    req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    req = refresh_profile(req)
     clock = [0.]
     monkeypatch.setattr(coverage.time, "monotonic", lambda: clock[0])
     def fingerprint():
@@ -376,11 +494,11 @@ def test_review_round_three_admission_matches_complete_locked_leaf(tmp_path, mon
     monkeypatch.setattr(coverage, "execute_draw", draw_result)
     monkeypatch.setattr(coverage, "publish", publish)
     clock[0] = 0.
-    result = coverage.run_stage(leaf_request)
+    result = run_coverage(leaf_request)
     result.verify(leaf_request)
     data = coverage.read_json(Path(leaf_request.output_dir) / "result.json")
     runtime = coverage.read_json(Path(leaf_request.output_dir) / "runtime.json")
-    assert result.status == "pass", result.message
+    assert result.status == "fail", result.message
     assert data["summary"]["counts"]["success"] == 25
     assert data["summary"]["counts"]["incomplete"] == 0
     assert runtime["wall_seconds"] == clock[0] == (271 if case == "locked_preflight" else 296)
@@ -389,7 +507,7 @@ def test_review_round_three_admission_matches_complete_locked_leaf(tmp_path, mon
     assert runtime["budget_exceeded"] == (case == "scaled_publication")
 
 
-def test_collection_reports_all_overruns_without_discarding_draws(tmp_path):
+def test_collection_ignores_diagnostic_overruns_without_discarding_draws(tmp_path):
     req, _, plans = collection_request(tmp_path)
     leaves = plans[1]["tasks"][:-1]
     for leaf, extra in zip(leaves[:2], [3., 7.]):
@@ -401,25 +519,24 @@ def test_collection_reports_all_overruns_without_discarding_draws(tmp_path):
     result = campaign.run_stage(req)
     assert result.status == "pass", result.message
     gate = coverage.read_json(Path(req.output_dir) / "gate.json")
-    assert [row["leaf_id"] for row in gate["budget_overruns"]] == [leaf["id"] for leaf in leaves[:2]]
-    assert [row["overrun_seconds"] for row in gate["budget_overruns"]] == [3., 7.]
+    assert gate["budget_overruns"] == []
     assert len(gate["leaf_runtimes"]) == 40
     assert gate["scenario_summaries"]["null_effect"]["declared_repetitions"] == 1000
     assert len(coverage.read_json(Path(req.output_dir) / "result.json")["records"]) == 1000
 
 
 @pytest.mark.parametrize("change", ["missing", "budget", "identity"])
-def test_collection_requires_bound_runtime_evidence(tmp_path, change):
+def test_collection_requires_bound_final_budget_evidence(tmp_path, change):
     req, _, plans = collection_request(tmp_path)
     leaf = plans[1]["tasks"][0]
-    path = tmp_path / "leaves" / leaf["id"] / "runtime.json"
+    path = tmp_path / "leaves" / leaf["id"] / coverage.BUDGET_RECORD
     if change == "missing":
         path.unlink()
         paths = tuple(p for p in req.dependency_paths if p != str(path))
         req = replace(req, dependency_paths=paths, dependency_hashes=tuple(map(file_hash, paths)))
     else:
         runtime = coverage.read_json(path)
-        runtime["admitted_budget_seconds" if change == "budget" else "batch_id"] = 1
+        runtime["binding"]["wall_seconds" if change == "budget" else "task_id"] = 1
         write(path, runtime)
         req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
     assert campaign.run_stage(req).status == "blocked"
@@ -463,8 +580,8 @@ def test_late_locked_draws_remain_complete_and_reported(tmp_path, monkeypatch):
             "truth": 0., "causal_truth": 0., "truth_integration_error": 0.,
             "estimates": {m: {"value": 0., "se": 1.} for m in coverage.METHODS}}
     monkeypatch.setattr(coverage, "execute_draw", draw_result)
-    result = coverage.run_stage(req)
-    assert result.status == "pass", result.message
+    result = run_coverage(req)
+    assert result.status == "fail", result.message
     runtime = coverage.read_json(Path(req.output_dir) / "runtime.json")
     assert runtime["wall_seconds"] == 750.
     assert runtime["admitted_budget_seconds"] == 600.
@@ -475,7 +592,7 @@ def test_late_locked_draws_remain_complete_and_reported(tmp_path, monkeypatch):
 
 def setup_chain_lock(tmp_path, **changes):
     req, task = setup_lock(tmp_path, repetitions_per_leaf=50, wall_seconds=660, **changes)
-    path = tmp_path / "profile/timing.json"
+    path = profile_directory(req) / "timing.json"
     timing = coverage.read_json(path)
     leaves = [{"task_id": f"profile-{i}", "step": i, "compute_seconds": seconds,
         "setup_seconds": 1., "import_seconds": 2., "export_seconds": 2., "publication_seconds": 1.,
@@ -483,7 +600,7 @@ def setup_chain_lock(tmp_path, **changes):
     timing.update(measurement_scope="complete_chain_return", leaves=leaves,
                   admitted_budget_seconds=60, wall_seconds=33., setup_seconds=2.)
     write(path, timing)
-    return replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths))), task
+    return refresh_profile(req), task
 
 
 def test_chained_profile_sizes_slices_without_changing_instances_or_limits(tmp_path):
@@ -547,6 +664,7 @@ def test_collection_counts_chained_terminal_records_once(tmp_path, incomplete):
             "draws": params["draws"], "records": selected, "terminal": terminal, "chain": leaf["continuation"]})
         write(destination / "runtime.json", {"batch_id": params["batch_id"], "lock_hash": coverage.digest(lock),
             "admitted_budget_seconds": params["wall_seconds"], "wall_seconds": 500., "measurement_scope": "complete_batch_return"})
+        seal_budget_fixture(destination, leaf["id"], leaf)
         dependencies[leaf["id"]] = destination
     collector = request(tmp_path / "collector", plan["tasks"][-1], dependencies)
     result = campaign.run_stage(collector)
@@ -566,7 +684,7 @@ def test_producer_budget_600_120_percent_800_compute_100_overhead(tmp_path, monk
     from test_coverage import chain_request
     req, task = setup_lock(tmp_path, screening_repetitions=1000, repetitions_per_leaf=1000,
                            wall_seconds=600, profile_safety_factor=1.2)
-    profile_root = tmp_path / 'profile'
+    profile_root = profile_directory(req)
     data = coverage.read_json(profile_root / 'result.json')
     data['draws'], data['records'] = successful_records(1000)
     write(profile_root / 'result.json', data)
@@ -578,7 +696,7 @@ def test_producer_budget_600_120_percent_800_compute_100_overhead(tmp_path, monk
                  'publication_seconds': 0., 'wall_seconds': c + 100.}
                 for i, c in enumerate([350., 350., 100.])])
     write(profile_root / 'timing.json', timing)
-    req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    req = refresh_profile(req)
     clock = [0.]
     monkeypatch.setattr(coverage.time, 'monotonic', lambda: clock[0])
     result = campaign.run_stage(req)
@@ -616,7 +734,7 @@ def test_producer_budget_600_120_percent_800_compute_100_overhead(tmp_path, monk
     for index, leaf in enumerate(plans[0]['tasks'][:-1]):
         clock[0] = 0.
         leaf_req = chain_request(tmp_path / f'leaf-{index}', leaf, dependencies)
-        done = coverage.run_stage(leaf_req)
+        done = run_coverage(leaf_req)
         assert done.status == 'pass', done.message
         done.verify(leaf_req)
         directory = Path(leaf_req.output_dir)
@@ -647,7 +765,7 @@ def test_locked_budget_refuses_executor_parameter_drift(tmp_path, field):
     leaf = deepcopy(plans[0]['tasks'][0])
     leaf['parameters']['leaf_budget'][field] = 999
     leaf_req = chain_request(tmp_path / 'changed', leaf, {'campaign-lock': lock_root, 'inputs': tmp_path / 'inputs'})
-    result = coverage.run_stage(leaf_req)
+    result = run_coverage(leaf_req)
     assert result.status == 'blocked', result.message
     assert not result.artifacts
     assert not list(Path(leaf_req.output_dir).glob('repetitions/*'))
@@ -656,7 +774,7 @@ def test_locked_budget_refuses_executor_parameter_drift(tmp_path, field):
 @pytest.mark.parametrize('case', ['partial', 'unsuccessful', 'known_overrun', 'earlier_leaf_overrun', 'legacy_overrun'])
 def test_partial_unsuccessful_or_overrun_profile_cannot_lock(tmp_path, case):
     req, _ = setup_chain_lock(tmp_path)
-    path = tmp_path / 'profile/timing.json'
+    path = profile_directory(req) / 'timing.json'
     timing = coverage.read_json(path)
     if case == 'partial':
         timing['complete'] = False
@@ -669,7 +787,203 @@ def test_partial_unsuccessful_or_overrun_profile_cannot_lock(tmp_path, case):
     else:
         timing.update(measurement_scope='complete_stage_return', admitted_budget_seconds=30.)
     write(path, timing)
-    req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    req = refresh_profile(req)
     result = campaign.run_stage(req)
     assert result.status == 'blocked', result.message
     assert not result.artifacts
+
+
+def reseal_budget_fixture(root, status='pass'):
+    """Construct disagreements before sealing, as a faulty producer could."""
+    from oxyformer.execution.integrity import publish_result, RESULT, FINGERPRINT
+    terminal = StageResult.from_json((root / RESULT).read_text())
+    terminal = replace(terminal, status=status,
+        artifacts=tuple(replace(a, sha256=file_hash(root / a.path))
+            for a in terminal.artifacts if a.path != FINGERPRINT))
+    for name in (RESULT, FINGERPRINT):
+        (root / name).unlink(missing_ok=True)
+    return publish_result(root, terminal)
+
+
+@pytest.mark.parametrize('timing_bad', [False, True])
+@pytest.mark.parametrize('runtime_bad', [False, True])
+@pytest.mark.parametrize('terminal_bad', [False, True])
+@pytest.mark.parametrize('record_bad', [False, True])
+def test_budget_divergence_matrix(tmp_path, timing_bad, runtime_bad, terminal_bad, record_bad):
+    req, _ = setup_lock(tmp_path)
+    req = fork_profile(req, measurements=False)
+    root = profile_directory(req)
+    # Diagnostic disagreements are present at seal time. Only the terminal
+    # status and finalized measured record determine eligibility.
+    timing = coverage.read_json(root / 'timing.json')
+    timing.update(wall_seconds=601. if timing_bad else 599., complete=not timing_bad,
+        all_successful=not timing_bad, budget_exceeded=timing_bad)
+    write(root / 'timing.json', timing)
+    write(root / 'runtime.json', {'wall_seconds': 601. if runtime_bad else 599.,
+        'budget_exceeded': runtime_bad, 'overrun_seconds': 1. if runtime_bad else 0.})
+    record = coverage.read_json(root / coverage.BUDGET_RECORD)
+    # The fixture's producer declared 14,400 s. Bind both sides to 600 s.
+    task_path = root / '_execution/task.json'
+    task = coverage.read_json(task_path)
+    task['parameters']['wall_seconds'] = 600
+    write(task_path, task)
+    producer = StageRequest.from_json((root / '_execution/request.json').read_text())
+    producer = replace(producer, task_hash=file_hash(task_path))
+    (root / '_execution/request.json').write_text(producer.to_json())
+    record['binding'] = coverage.budget_binding(producer, task, record['binding']['recipe_hash'])
+    row = record['leaves'][0]
+    row.update(wall_seconds=601. if record_bad else 500., post_check_reserve_seconds=30.,
+        publication_seconds=(601. if record_bad else 500.) - row['compute_seconds'] - row['setup_seconds'])
+    record.update(complete=False, success=False, eligible=False)  # Not authoritative flags.
+    write(root / coverage.BUDGET_RECORD, record)
+    from oxyformer.execution.integrity import RESULT
+    terminal = StageResult.from_json((root / RESULT).read_text())
+    (root / RESULT).write_text(replace(terminal, request_hash=producer.content_hash).to_json())
+    reseal_budget_fixture(root, 'fail' if terminal_bad else 'pass')
+    req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    config = coverage.read_json(req.config_path)
+    if terminal_bad or record_bad:
+        with pytest.raises(ContractError):
+            coverage.load_budget(req, config, 'profile')
+        refused = campaign.run_stage(req)
+        assert refused.status != 'pass'
+        assert not (Path(req.output_dir) / 'recipe_lock.json').exists()
+    else:
+        loaded = coverage.load_budget(req, config, 'profile')
+        assert loaded['complete'] and loaded['all_successful']
+        assert loaded['wall_seconds'] == 500.
+
+
+@pytest.mark.parametrize('change', ['missing', 'truncated', 'hash', 'pre_seal', 'wall', 'request'])
+def test_budget_refuses_unsealed_damaged_or_reused_record(tmp_path, change):
+    from oxyformer.execution.integrity import publication_receipt
+    req, _ = setup_lock(tmp_path)
+    req = fork_profile(req, measurements=False)
+    root = profile_directory(req)
+    path = root / coverage.BUDGET_RECORD
+    if change in ('missing', 'truncated', 'hash'):
+        reseal_budget_fixture(root)
+    if change == 'missing':
+        path.unlink()
+    elif change == 'truncated':
+        path.write_text('{')
+    elif change == 'pre_seal':
+        publication_receipt(root).unlink(missing_ok=True)
+    else:
+        value = coverage.read_json(path)
+        if change == 'hash':
+            value['leaves'][0]['wall_seconds'] += 1.
+        elif change == 'wall':
+            value['binding']['wall_seconds'] = 600
+        else:
+            value['binding']['request_hash'] = 'f' * 64
+        write(path, value)
+        if change != 'hash':
+            reseal_budget_fixture(root)
+    paths = tuple(p for p in req.dependency_paths if Path(p).exists())
+    req = replace(req, dependency_paths=paths, dependency_hashes=tuple(map(file_hash, paths)))
+    result = campaign.run_stage(req)
+    assert result.status != 'pass'
+    assert not (Path(req.output_dir) / 'recipe_lock.json').exists()
+
+
+def test_pre_record_read_admits_no_lock_or_slices(tmp_path):
+    req, _ = setup_lock(tmp_path)
+    req = fork_profile(req, measurements=False)
+    root = profile_directory(req)
+    (root / coverage.BUDGET_RECORD).unlink()
+    from oxyformer.execution.integrity import RESULT
+    (root / RESULT).unlink()
+    result = campaign.run_stage(req)
+    assert result.status != 'pass'
+    assert not list(Path(req.output_dir).glob('*.json'))
+
+
+def test_receipt_overrun_599_601_cannot_justify_lock(tmp_path, monkeypatch):
+    from test_coverage import chain_request
+    monkeypatch.setattr(campaign, 'fingerprint', lambda: deepcopy(STAMPS))
+    _, lock_task = setup_lock(tmp_path, repetitions_per_leaf=1000,
+        screening_repetitions=1000, wall_seconds=600, profile_safety_factor=1.2)
+    parameters = lock_task['parameters']
+    profile_task = {'id': 'profile', 'stage': 'simulation-smoke',
+        'outputs': ['result.json', 'timing.json', 'runtime.json', 'artifact_manifest.json', 'continuation.tar'],
+        'continuation': {'owner': 'profile', 'step': 0, 'predecessor': None},
+        'parameters': {'mode': 'profile', 'recipe': parameters['recipe'],
+            'scenario': parameters['scenario_family'][0],
+            'draws': coverage.repetition_plan('receipt-overrun-reproduction', 'null_effect', 1000),
+            'wall_seconds': 600, 'endpoint_input': parameters['endpoint_input'],
+            'frame_input': parameters['frame_input']}}
+    clock = [0.]
+    monkeypatch.setattr(coverage.time, 'monotonic', lambda: clock[0])
+    def execute(draw, frame, scenario, template, recipe, root, deadline, **kw):
+        clock[0] += .5
+        return {'draw': draw, 'status': 'success', 'reason': 'synthetic completed draw',
+            'wall_seconds': .5, 'truth': 0., 'causal_truth': 0., 'truth_integration_error': 0.,
+            'estimates': {m: {'value': 0., 'se': 1.} for m in coverage.METHODS}}
+    monkeypatch.setattr(coverage, 'execute_draw', execute)
+    original_export, original_publish, original_json = coverage._write_continuation, coverage.publish, coverage.atomic_json
+    def export(*a, **kw):
+        clock[0] += 90.
+        return original_export(*a, **kw)
+    def publish(*a, **kw):
+        result = original_publish(*a, **kw)
+        clock[0] += 9.
+        return result
+    def atomic_json(root, name, data):
+        path = original_json(root, name, data)
+        if name == 'timing.json':
+            clock[0] += 2.
+        return path
+    monkeypatch.setattr(coverage, '_write_continuation', export)
+    monkeypatch.setattr(coverage, 'publish', publish)
+    monkeypatch.setattr(coverage, 'atomic_json', atomic_json)
+    profile = chain_request(tmp_path / 'profile-producer', profile_task, {'inputs': tmp_path / 'inputs'})
+    result = run_coverage(profile)
+    result.verify(profile)
+    profile_root = Path(profile.output_dir)
+    timing = coverage.read_json(profile_root / 'timing.json')
+    runtime = coverage.read_json(profile_root / 'runtime.json')
+    assert result.status == 'fail'
+    assert timing['complete'] and not timing['budget_exceeded']
+    assert timing['wall_seconds'] == 599.
+    assert runtime['wall_seconds'] == 601. and runtime['budget_exceeded']
+    monkeypatch.setattr(coverage, 'publish', original_publish)
+    monkeypatch.setattr(coverage, 'atomic_json', original_json)
+    lock_request = request(tmp_path / 'admission', lock_task,
+        {'inputs': tmp_path / 'inputs', 'profile': profile_root})
+    admitted = campaign.run_stage(lock_request)
+    assert admitted.status != 'pass', admitted.message
+    assert 'budget stage did not pass' in admitted.message
+    assert not (Path(lock_request.output_dir) / 'recipe_lock.json').exists()
+    assert not (Path(lock_request.output_dir) / 'expanded_units.json').exists()
+
+
+@pytest.mark.parametrize('change', ['wall', 'request'])
+def test_genuine_budget_record_cannot_be_reused_for_another_request(tmp_path, change):
+    from oxyformer.execution.integrity import RESULT
+    req, _ = setup_lock(tmp_path)
+    original = (profile_directory(req) / coverage.BUDGET_RECORD).read_bytes()
+    req = fork_profile(req, measurements=False)
+    root = profile_directory(req)
+    producer = StageRequest.from_json((root / '_execution/request.json').read_text())
+    task_path = root / '_execution/task.json'
+    if change == 'wall':
+        task = coverage.read_json(task_path)
+        task['parameters']['wall_seconds'] = 600
+        write(task_path, task)
+        producer = replace(producer, task_hash=file_hash(task_path))
+    else:
+        config_path = root / '_execution/config.json'
+        write(config_path, {'different_request': True})
+        producer = replace(producer, config_hash=file_hash(config_path))
+    (root / '_execution/request.json').write_text(producer.to_json())
+    # Preserve the genuine finalized bytes and their original artifact hash.
+    (root / coverage.BUDGET_RECORD).write_bytes(original)
+    terminal = StageResult.from_json((root / RESULT).read_text())
+    (root / RESULT).write_text(replace(terminal, request_hash=producer.content_hash).to_json())
+    reseal_budget_fixture(root)
+    assert (root / coverage.BUDGET_RECORD).read_bytes() == original
+    req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    result = campaign.run_stage(req)
+    assert result.status == 'blocked' and 'budget binding mismatch' in result.message
+    assert not (Path(req.output_dir) / 'recipe_lock.json').exists()

@@ -69,6 +69,10 @@ def load_lock(request, config, task):
     require(file_hash(path) == reference["sha256"], "recipe lock hash mismatch")
     lock = read_json(path)
     require(lock["schema_version"] == 1 and lock["retry_rules"] == RETRY_RULES, "lock schema or retry drift")
+    for profile in lock["budget"]["profiles"].values():
+        measured = load_budget(request, config, profile["source_unit"])
+        require(measured["record_hash"] == profile["budget_record_hash"]
+            and measured["complete"] and measured["all_successful"], "locked profile budget drift")
     current = fingerprint()
     require(all(lock[k] == v for k, v in current.items()), "scientific code/environment recipe drift")
     validate_recipe(lock["recipe"])
@@ -112,9 +116,10 @@ def _profile(request, config, reference, scenario, recipe, stamps):
     require(record["complete"] and record["all_successful"] and record["profile"]["production_equivalent"] is True,
             "complete production profiling required")
     result_path = dependency(request, config, reference)
+    require(file_hash(result_path) == record["payload_hash"], "profile scientific payload hash mismatch")
     result = read_json(result_path)
     binding = record["binding"]
-    require(binding["mode"] == "profile" and binding["scenario"] == scenario, "profile scenario mismatch")
+    require(binding["mode"] == "profile" and SCMConfig(**binding["scenario"]).to_dict()["payload"] == scenario, "profile scenario mismatch")
     require(binding["recipe_hash"] == digest(recipe), "profile recipe drift")
     chained = record["chained"]
     timing = {**record["profile"], "leaves": record["leaves"], "wall_seconds": record["wall_seconds"],
@@ -161,7 +166,7 @@ def _profile(request, config, reference, scenario, recipe, stamps):
     return {**extra, "seconds_per_repetition": rate, "setup_seconds": setup,
             "publication_verification_seconds": overhead - setup,
             "profile_repetitions": len(declared), "result_hash": file_hash(result_path),
-            "budget_record_hash": record["record_hash"], "draws": declared}
+            "budget_record_hash": record["record_hash"], "source_unit": reference["dependency"], "draws": declared}
 
 
 def slice_count(profile, repetitions, seconds, factor):
@@ -345,6 +350,9 @@ def build_lock(request, config, task):
         inputs.setdefault(reference["dependency"], [])
         if reference["path"] not in inputs[reference["dependency"]]:
             inputs[reference["dependency"]].append(reference["path"])
+    for reference in parameters["profiles"].values():
+        inputs[reference["dependency"]] = ["_execution/task.json", "_execution/request.json",
+            "_execution/result.json", BUDGET_RECORD]
     plans = []
     for mode in ("screening", "final"):
         stage_inputs = deepcopy(inputs)
@@ -430,6 +438,7 @@ def collect(request, config, task):
     for leaf in plan["tasks"][:-1]:
         budget = load_budget(request, config, leaf["id"], expected_task=leaf)
         path = dependency(request, config, {"dependency": leaf["id"], "path": "result.json"})
+        require(file_hash(path) == budget["payload_hash"], "leaf scientific payload hash mismatch")
         result = read_json(path)
         parameters = leaf["parameters"]
         require(result["lock_hash"] == digest(lock) and budget["binding"]["recipe_hash"] == digest(lock["recipe"]), "leaf recipe drift")
@@ -444,7 +453,7 @@ def collect(request, config, task):
             continue
         result = {**result, "terminal": budget["complete"]}
         results.append(result)
-    records = [r for result in results for r in result["records"] if r["status"] != "incomplete"]
+    records = [r for result in results for r in result["records"]]
     declarations = [d for b in lock["batches"] if b["mode"] == mode for d in b["draws"]]
     validate_draws(declarations)
     require(len({r["draw"]["repetition_id"] for r in records}) == len(records), "duplicate collected repetition")

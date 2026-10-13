@@ -4292,3 +4292,94 @@ def test_archived_acquisition_keeps_upstream_publication_checks(
         result = run_task(repo, out, needs={'middle': ['value.json']})
         assert result.status == 'fail', result.message
         assert not publication_receipt(out).exists()
+
+
+@pytest.mark.parametrize('wall,status', [(600, 'pass'), (6, 'fail')])
+def test_runner_finalizes_coverage_before_terminal_seal(runtime, tmp_path, monkeypatch, wall, status):
+    from oxyformer.execution import runner, integrity
+    from oxyformer.validation import coverage
+    from test_coverage import successful_records
+    repo, out = runtime
+    registry = repo / 'configs/execution/stages.yaml'
+    registry.write_text(yaml.safe_dump({'schema_version': 1, 'stages': {
+        'simulation-smoke': {'module': 'oxyformer.validation.coverage'}}}))
+    commit(repo)
+    (out / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD') + '\n')
+    draws, records = successful_records(1)
+    task = {'id': 'profile', 'stage': 'simulation-smoke', 'needs': {}, 'outputs': ['result.json'],
+        'parameters': {'mode': 'profile', 'wall_seconds': wall, 'draws': draws,
+            'scenario': {'name': 'null_effect'}, 'recipe': {'fixture': True}}}
+    path = tmp_path / 'coverage-task.json'
+    path.write_text(json.dumps(task))
+    clock = [0.]
+    monkeypatch.setattr(coverage.time, 'monotonic', lambda: clock[0])
+    captured = {}
+    def execute(request, *args):
+        captured['request'] = request
+        clock[0] = 5.
+        timing = {'recipe_hash': coverage.digest(task['parameters']['recipe']),
+            'measurement_scope': 'complete_stage_return', 'complete_repetition_seconds': [5.],
+            'setup_seconds': 0., 'device': 'cpu', 'environment': {'fixture': True},
+            'production_equivalent': True, 'scientific_fingerprint': {}, 'environment_hash': 'a' * 64}
+        completed = coverage.publish(request, {'result.json': {'records': records}},
+            status='pass', message='synthetic coverage worker')
+        summary = coverage.summarize(records, draws, production_equivalent=True, null_scenario=True)
+        return coverage.record_measurements(request, completed, 0., task, timing, summary)
+    original_verify = runner.verify_result
+    def verify(*args):
+        value = original_verify(*args)
+        clock[0] += 2.
+        return value
+    monkeypatch.setattr(runner, 'verify_result', verify)
+    events = []
+    original_seal = integrity.record_publication
+    def consumer():
+        request = captured['request']
+        paths = tuple(str(out / name) for name in (
+            '_execution/request.json', '_execution/task.json', '_execution/result.json', coverage.BUDGET_RECORD))
+        return replace(request, dependency_paths=paths, dependency_hashes=tuple(map(file_hash, paths)))
+    def seal(*args, **kwargs):
+        events.append('pre-seal')
+        # This read belongs to another consumer process. A refusal inside the
+        # producer's own observation scope would correctly poison its seal.
+        candidate = tmp_path / 'pre-seal-consumer.json'
+        candidate.write_text(consumer().to_json())
+        code = """import sys
+from pathlib import Path
+from oxyformer.contracts import StageRequest
+from oxyformer.validation.coverage import load_budget
+from oxyformer.provenance import ContractError
+request = StageRequest.from_json(Path(sys.argv[1]).read_text())
+try:
+    load_budget(request, {'dependencies': {'profile': request.output_dir}}, 'profile')
+except (ContractError, OSError):
+    pass
+else:
+    raise AssertionError('pre-seal budget admitted')
+"""
+        env = fixture_env(ROOT)
+        env.pop(integrity._OBSERVATION_ENV, None)
+        process = subprocess.run([sys.executable, '-B', '-c', code, str(candidate)],
+            env=env, capture_output=True, text=True, timeout=60)
+        assert_exit(process, 0)
+        value = original_seal(*args, **kwargs)
+        events.append('sealed')
+        return value
+    monkeypatch.setattr(integrity, 'record_publication', seal)
+    result = runner.run('simulation-smoke', out, repo, task_file=path, execute=execute)
+    assert result.status == status, result.message
+    record = read_json(out / coverage.BUDGET_RECORD)
+    assert record['leaves'][0]['wall_seconds'] == 7.
+    assert record['leaves'][0]['publication_seconds'] == 2.
+    assert sum(a.path == coverage.BUDGET_RECORD for a in result.artifacts) == 1
+    before = (out / RESULT).read_bytes()
+    if status == 'pass':
+        assert events == ['pre-seal', 'sealed']
+        budget = coverage.load_budget(consumer(), {'dependencies': {'profile': str(out)}}, 'profile')
+        assert budget['complete'] and budget['all_successful']
+        verify_dependency_result(out)
+    else:
+        assert events == []
+        with raises(ContractError, match='did not pass'):
+            coverage.load_budget(consumer(), {'dependencies': {'profile': str(out)}}, 'profile')
+    assert (out / RESULT).read_bytes() == before
