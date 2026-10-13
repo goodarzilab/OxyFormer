@@ -846,9 +846,21 @@ def test_coverage_prediction_parts_must_be_consecutive(saved_coverage_chain, tmp
         parts.append(OOFNuisances(spec=endpoint.data.manifest.spec, original_ids=ids, fold_ids=(fold,) * len(ids),
             seed_ids=(1103,) * len(ids), mu_a=(0.,) * len(ids), mu_d=(0.,) * len(ids),
             r_a=(1.,) * len(ids), r_d=(1.,) * len(ids), origin_weights=(1.,) * len(ids),
-            lineage=replace(endpoint.data.manifest.lineage, unit_ids=ids)).to_json())
+            lineage=replace(endpoint.data.manifest.lineage, unit_ids=ids,
+                            split_hash=endpoint.outer.content_hash)).to_json())
     states[0]["parts"] = parts
     path = tmp_path / "reordered.tar"
     coverage._write_continuation(path, states, binding=header["binding"], chain=task["continuation"], task_id=task["id"])
     with pytest.raises(ContractError, match="reordered prediction"):
         coverage._read_continuation(path, header["binding"], chain)
+
+
+def test_predecessor_cannot_fall_back_to_legacy_redraw(saved_coverage_chain, tmp_path, monkeypatch):
+    req, task, inputs, _ = saved_coverage_chain
+    task = deepcopy(task)
+    task["outputs"].remove("continuation.tar")
+    task.update(id="chain-1", continuation={"owner": "coverage-test", "step": 1, "predecessor": "chain-0"})
+    monkeypatch.setattr(coverage, "generate_suite_a", lambda *a, **k: pytest.fail("redrew predecessor"))
+    next_req = chain_request(tmp_path / "omitted-output", task, {"inputs": inputs, "chain-0": Path(req.output_dir)})
+    result = coverage.run_stage(next_req)
+    assert result.status == "blocked" and "must be declared" in result.message
