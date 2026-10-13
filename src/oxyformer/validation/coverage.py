@@ -169,9 +169,12 @@ def load_budget(request, config, unit, *, expected_task=None):
     require(sum(counts.values()) == value["received"] <= len(binding["draws"]), "budget outcome count mismatch")
     complete = value["received"] == len(binding["draws"]) and counts["incomplete"] == 0
     successful = complete and counts["success"] == len(binding["draws"])
+    payloads = [a.sha256 for a in terminal.artifacts if a.path == "result.json"]
+    require(len(payloads) == 1, "coverage scientific payload missing")
     # Stored complete/success/eligibility flags are never consulted.
     return {**value, "complete": complete, "all_successful": successful,
-        "wall_seconds": math.fsum(row["wall_seconds"] for row in leaves), "record_hash": file_hash(path)}
+        "wall_seconds": math.fsum(row["wall_seconds"] for row in leaves),
+        "record_hash": file_hash(path), "payload_hash": payloads[0]}
 
 
 def binomial_bound(events, total, *, side):
@@ -887,7 +890,7 @@ def _run_chain(request, started):
             compute_seconds > remaining_compute(budget, setup_seconds=setup, import_seconds=import_seconds,
                 export_seconds=export_seconds, publication_seconds=publication_seconds))}
     leaves = [*history, leaf]
-    exceeded = any(v.get("budget_exceeded", False) for v in leaves)
+    exceeded = leaf["budget_exceeded"]
     timing = {"chain": chain, "leaves": leaves, "wall_seconds": math.fsum(v["wall_seconds"] for v in leaves),
         "gpu_seconds": math.fsum(v["wall_seconds"] for v in leaves) if device.type == "cuda" else 0.,
         "device": str(device), "environment": environment,
@@ -925,6 +928,7 @@ def run_stage(request: StageRequest) -> StageResult:
     started = time.monotonic()
     try:
         request.verify_inputs()
+        started = read_json(request.config_path).get("coverage_started_monotonic", started)
         task = read_json(request.task_path)
         if ("continuation.tar" in task.get("outputs", ()) or
                 task.get("continuation", {}).get("predecessor") is not None):

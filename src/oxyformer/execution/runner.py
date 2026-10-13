@@ -608,6 +608,8 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     config = {'stage': stage, 'settings': settings, 'approvals': approvals_value,
         'input_sources': sources, 'dependencies': {k: str(v) for k, v in deps.items()},
         'acquisitions': acquisitions, 'yaml_timestamp_policy': 'preserve_scalar_text'}
+    if stage in ('coverage', 'simulation-smoke'):
+        config['coverage_started_monotonic'] = started
     config_path = atomic_json(out, '_execution/config.json', config)
     task_path = atomic_json(out, '_execution/task.json', task)
     tree_path = atomic_json(out, '_execution/dependencies.json', dependency_trees)
