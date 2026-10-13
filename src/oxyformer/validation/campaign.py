@@ -135,6 +135,7 @@ def _profile(request, config, reference, scenario, recipe, stamps):
     overhead = wall - math.fsum(measured)
     require(0 <= setup <= overhead, "invalid profile setup/finalization accounting")
     extra = {}
+    rate = max(measured)
     if chained:
         leaves = timing["leaves"]
         require(bool(leaves) and [v["step"] for v in leaves] == list(range(len(leaves))),
@@ -149,9 +150,12 @@ def _profile(request, config, reference, scenario, recipe, stamps):
                     "profile leaf exceeds slice budget")
         require(math.isclose(math.fsum(v["wall_seconds"] for v in leaves), wall, rel_tol=1e-12),
                 "profile chain total mismatch")
+        # Include synchronization and between-draw compute bookkeeping as
+        # well as the maximum individually measured repetition.
+        rate = max(rate, math.fsum(v["compute_seconds"] for v in leaves) / len(declared))
         extra = {"leaf_overheads": {k: max(v[k] for v in leaves) for k in names[1:]},
                  "leaf_measurements": leaves}
-    return {**extra, "seconds_per_repetition": max(measured), "setup_seconds": setup,
+    return {**extra, "seconds_per_repetition": rate, "setup_seconds": setup,
             "publication_verification_seconds": overhead - setup,
             "profile_repetitions": len(declared), "result_hash": file_hash(result_path),
             "timing_hash": file_hash(timing_path), "draws": declared}
@@ -290,6 +294,8 @@ def build_lock(request, config, task):
     for scenario in scenarios:
         profiles[scenario["name"]] = _profile(request, config, parameters["profiles"][scenario["name"]], scenario, recipe, stamps)
         prior_seeds.update(d["seed"] for d in profiles[scenario["name"]]["draws"])
+    require(not any("leaf_overheads" in p for p in profiles.values()) or wall_seconds <= 14400,
+            "coverage slice exceeds four hours")
     batches = []
     for mode, repetitions in (("screening", screen_count), ("final", count)):
         mode_leaves = 0
