@@ -363,7 +363,8 @@ def _verify_dependency_result(root, *, expected_hash, trees, active, verified, o
                     _verify_publication_result(result, request, recorded_inputs)
                     if request.stage in ('coverage', 'simulation-smoke'):
                         from oxyformer.validation.coverage import load_budget
-                        names = ('_execution/request.json', '_execution/task.json', '_execution/result.json', 'budget_record.json')
+                        names = ('_execution/request.json', '_execution/task.json', '_execution/result.json',
+                            'budget_record.json', 'result.json')
                         paths = tuple(str(current / name) for name in names)
                         consumer = replace(request, dependency_paths=paths,
                             dependency_hashes=tuple(file_hash(p) for p in paths))
@@ -691,7 +692,9 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
                     require(all(not a.path.startswith('_execution/') for a in result.artifacts), 'reserved execution artifact')
                     declared = set(task.get('outputs', []))
                     if result.status == 'pass':
-                        require(declared - {'budget_record.json'} <= {a.path for a in result.artifacts}, 'stage omitted declared outputs')
+                        runner_outputs = ({'budget_record.json'}
+                            if request.stage in ('coverage', 'simulation-smoke') else set())
+                        require(declared - runner_outputs <= {a.path for a in result.artifacts}, 'stage omitted declared outputs')
                     for path, digest in sources.items():
                         require(file_hash(path) == digest, f'input source changed: {path}')
                     observed_head = code_identity(repo, out)
