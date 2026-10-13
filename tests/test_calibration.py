@@ -477,3 +477,124 @@ def test_fitting_domain_includes_its_boundary_and_checks_before_fp32_rounding(va
     assert float(z.float()[0, 0]) == value
     with pytest.raises(ContractError, match='calibration fitting.*1000000'):
         fit_affine(z, [0., 1., 1., 1.], **inputs())
+
+
+MEDIAN_WEIGHT_SCALES = (1., 1e-311, 1e-300, 1e300, 1e307)
+MEDIAN_DISPATCH_ENVIRONMENTS = (
+    {},
+    {"ATEN_CPU_CAPABILITY": "default"},
+    {"DNNL_MAX_CPU_ISA": "SSE41"},
+    {"MKL_CBWR": "COMPATIBLE"},
+    {"ATEN_CPU_CAPABILITY": "default", "DNNL_MAX_CPU_ISA": "SSE41",
+     "MKL_CBWR": "COMPATIBLE"},
+)
+
+
+def _fraction_median_index(values, weights):
+    """Independent reference, using rational arithmetic and Python sorting."""
+    from fractions import Fraction
+    masses = [Fraction(float(weight)) for weight in weights]
+    half = sum(masses) / 2
+    cumulative = Fraction()
+    for index in sorted(range(len(values)), key=lambda i: values[i]):
+        cumulative += masses[index]
+        if cumulative >= half:
+            return index
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("scale", MEDIAN_WEIGHT_SCALES)
+@pytest.mark.parametrize("weights,expected", [
+    ([1., 1., 1., 1.], 1),       # Exact halfway: choose the lower observation.
+    ([1., 3., 2., 2.], 1),       # Unequal masses, also exactly halfway.
+    ([1., 4., 2., 1.], 1),       # Strictly inside one observation's mass.
+])
+def test_weighted_median_exact_scale_grid(device, dtype, scale, weights, expected):
+    from oxyformer.training.calibration import _weighted_median
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA device unavailable")
+    # Permute input order; values distinguish indices and exercise value fidelity.
+    values = torch.tensor([-3.125, -.25, .375, 8.5], dtype=dtype, device=device)
+    mass = torch.tensor([w * scale for w in weights], dtype=torch.float64, device=device)
+    assert _fraction_median_index(values.cpu().tolist(), mass.cpu().tolist()) == expected
+    permutation = torch.tensor([2, 0, 3, 1], device=device)
+    selected = _weighted_median(values[permutation], mass[permutation])
+    assert selected.dtype == dtype and selected.device == values.device
+    assert torch.equal(selected, values[expected])
+
+
+@pytest.mark.parametrize("weights,expected", [
+    ([1., 2.**-54, 1.], 1),
+    ([1., 1., 2.**-54], 1),
+    ([1., 5e-324, 1.], 1),      # Even the smallest positive binary64 matters.
+    ([1e308, 1e308, 1e308], 1), # Total overflows binary64; exact total does not.
+])
+def test_weighted_median_resolves_sub_ulp_mass(weights, expected):
+    from oxyformer.training.calibration import _weighted_median
+    values = torch.tensor([-.125, .25, 7.], dtype=torch.float64)
+    mass = torch.tensor(weights, dtype=torch.float64)
+    assert _fraction_median_index(values.tolist(), weights) == expected
+    assert torch.equal(_weighted_median(values, mass), values[expected])
+
+
+@pytest.mark.parametrize("overrides", MEDIAN_DISPATCH_ENVIRONMENTS,
+                         ids=["normal", "aten", "dnnl", "mkl", "combined"])
+def test_weighted_median_dispatch_subprocess(overrides):
+    import json
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    # Each process imports torch only after its dispatch environment is set.
+    script = r'''
+import json
+import torch
+from oxyformer.training.calibration import _weighted_median
+torch.set_num_threads(1)
+result = {}
+for device in (['cpu', 'cuda'] if torch.cuda.is_available() else ['cpu']):
+    indices = []
+    for scale in (1., 1e-311, 1e-300, 1e300, 1e307):
+        for raw in ([1., 1., 1., 1.], [1., 3., 2., 2.], [1., 4., 2., 1.]):
+            values = torch.arange(4, dtype=torch.float64, device=device)
+            mass = torch.tensor([w * scale for w in raw], dtype=torch.float64, device=device)
+            indices.append(int(_weighted_median(values, mass)))
+    result[device] = indices
+print(json.dumps(result))
+'''
+    env = os.environ.copy()
+    for name in MEDIAN_DISPATCH_ENVIRONMENTS[-1]:
+        env.pop(name, None)
+    env.update(overrides)
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    result = subprocess.run([sys.executable, "-c", script], env=env,
+                            capture_output=True, text=True, timeout=60, check=True)
+    selected = json.loads(result.stdout)
+    assert selected["cpu"] == [1] * 15
+    if "cuda" in selected:
+        assert selected["cuda"] == selected["cpu"]
+
+
+def test_affine_coefficients_unchanged_when_median_selections_agree(monkeypatch):
+    import math
+    import oxyformer.training.calibration as calibration
+    z = torch.tensor([[-2., 1.], [2., -.5], [-1., 2.], [.7, -.8]])
+    weights = [8., 1., 5., 2.]
+    exact = calibration._weighted_median
+    comparisons = []
+
+    def old_median(values, mass):
+        order = values.argsort()
+        cumulative = torch.logcumsumexp(calibration._log_weights(mass)[order], 0)
+        index = torch.searchsorted(cumulative, cumulative[-1] - math.log(2))
+        selected = values[order[index]]
+        comparisons.append(torch.equal(selected, exact(values, mass)))
+        return selected
+
+    after = fit_affine(z, weights, **inputs())
+    monkeypatch.setattr(calibration, "_weighted_median", old_median)
+    before = fit_affine(z, weights, **inputs())
+    assert len(comparisons) == 3 and all(comparisons)
+    for field in ("slope", "intercept", "input_offset", "input_scale"):
+        assert getattr(after, field).hex() == getattr(before, field).hex()

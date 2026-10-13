@@ -6,6 +6,12 @@ transfer statistics are diagnostics only and never update the calibration.
 Alignment, ownership, finiteness and nonnegative weights cover every original
 row. Weighted arithmetic uses only raw positive-weight rows, without replacing
 excluded observations by placeholders. Public logits/ratios remain unweighted.
+
+Coordinate medians use exact binary64 masses and the lower-median rule: the
+first sorted element whose cumulative mass is at least half the total, with
+an exact comparison. The returned value is that element, without averaging.
+Common scaling that preserves the mass ratios preserves this selection;
+rounding the input weights to binary64 can itself change those ratios.
 """
 from dataclasses import dataclass, replace
 import math
@@ -149,11 +155,20 @@ def _pair_metrics(z, y, w):
 
 
 def _weighted_median(values, mass):
-    """Choose an observed coordinate without averaging away small contrasts."""
-    order = values.argsort()
-    cumulative = torch.logcumsumexp(_log_weights(mass)[order], 0)
-    index = torch.searchsorted(cumulative, cumulative[-1] - math.log(2))
-    return values[order[index]]
+    """Return the lower median of validated, positive raw masses exactly."""
+    order = values.argsort(stable=True)
+    # Binary floating-point denominators are powers of two. A common integer
+    # denominator therefore preserves every bit, including subnormal mass,
+    # without an overflowing total or a rounded logarithmic halfway threshold.
+    ratios = [weight.as_integer_ratio() for weight in mass.detach().cpu().tolist()]
+    denominator = max(divisor for _, divisor in ratios)
+    integers = [numerator * (denominator // divisor) for numerator, divisor in ratios]
+    total = sum(integers)
+    cumulative = 0
+    for index in order.detach().cpu().tolist():
+        cumulative += integers[index]
+        if 2 * cumulative >= total:
+            return values[index]
 
 
 def _comparison_loss(coordinates, z, labels, mass):
