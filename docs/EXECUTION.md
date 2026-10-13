@@ -460,7 +460,9 @@ scientific payloads; their budget flags cannot authorize work.
 `coverage.load_budget` is the only budget-evidence loader. It requires a
 passing terminal result and the existing independent publication seal, verifies
 the declared producer request/task and record hash, checks the wall/bindings,
-and recomputes eligibility from measurements and counts. Missing, truncated,
+and recomputes eligibility from measurements and counts. Within this same loader,
+the hashed scientific repetition outcomes must agree with the finalized counts;
+diagnostic summary flags remain irrelevant. Missing, truncated,
 pre-seal, over-budget and reused evidence is refused. Stored eligibility,
 complete and success flags are not trusted. Scientific payload reads follow
 this gate. Profiles, lock sizing and admission, leaf deadlines, predecessor

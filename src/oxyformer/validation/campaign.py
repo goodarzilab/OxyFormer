@@ -352,7 +352,7 @@ def build_lock(request, config, task):
             inputs[reference["dependency"]].append(reference["path"])
     for reference in parameters["profiles"].values():
         inputs[reference["dependency"]] = ["_execution/task.json", "_execution/request.json",
-            "_execution/result.json", BUDGET_RECORD]
+            "_execution/result.json", BUDGET_RECORD, "result.json"]
     plans = []
     for mode in ("screening", "final"):
         stage_inputs = deepcopy(inputs)

@@ -4336,7 +4336,7 @@ def test_runner_finalizes_coverage_before_terminal_seal(runtime, tmp_path, monke
     def consumer():
         request = captured['request']
         paths = tuple(str(out / name) for name in (
-            '_execution/request.json', '_execution/task.json', '_execution/result.json', coverage.BUDGET_RECORD))
+            '_execution/request.json', '_execution/task.json', '_execution/result.json', coverage.BUDGET_RECORD, 'result.json'))
         return replace(request, dependency_paths=paths, dependency_hashes=tuple(map(file_hash, paths)))
     def seal(*args, **kwargs):
         events.append('pre-seal')
@@ -4383,3 +4383,18 @@ else:
         with raises(ContractError, match='did not pass'):
             coverage.load_budget(consumer(), {'dependencies': {'profile': str(out)}}, 'profile')
     assert (out / RESULT).read_bytes() == before
+
+
+def test_noncoverage_budget_named_output_is_required(runtime, monkeypatch):
+    from oxyformer.execution.integrity import publication_receipt
+    repo, out = runtime
+    def omit_budget(request):
+        path = atomic_json(request.output_dir, 'result.json', {'fixture': True})
+        artifact = ArtifactRecord(path='result.json', sha256=file_hash(path),
+            lineage=lineage_for(request, 'dummy'), kind='fixture')
+        return StageResult(request_hash=request.content_hash, status='pass', artifacts=(artifact,), message='fixture')
+    install_stage(monkeypatch, repo, omit_budget)
+    result = run_task(repo, out, outputs=['result.json', 'budget_record.json'])
+    assert result.status == 'fail', result.message
+    assert 'stage omitted declared outputs' in result.message
+    assert not publication_receipt(out).exists()

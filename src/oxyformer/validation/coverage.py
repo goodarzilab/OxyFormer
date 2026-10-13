@@ -171,6 +171,16 @@ def load_budget(request, config, unit, *, expected_task=None):
     successful = complete and counts["success"] == len(binding["draws"])
     payloads = [a.sha256 for a in terminal.artifacts if a.path == "result.json"]
     require(len(payloads) == 1, "coverage scientific payload missing")
+    payload_path = declared("result.json")
+    require(file_hash(payload_path) == payloads[0], "coverage scientific payload hash mismatch")
+    # Reconcile the finalized counters with the actual scientific outcomes,
+    # never with diagnostic summary flags. This check belongs to the same
+    # loader so admission, continuation and reuse have one consistent verdict.
+    scientific_records = read_json(payload_path)["records"]
+    scientific_counts = {status: sum(row["status"] == status for row in scientific_records)
+        for status in STATUSES}
+    require(counts == scientific_counts and value["received"] == len(scientific_records),
+        "budget counts disagree with scientific outcomes")
     # Stored complete/success/eligibility flags are never consulted.
     return {**value, "complete": complete, "all_successful": successful,
         "wall_seconds": math.fsum(row["wall_seconds"] for row in leaves),

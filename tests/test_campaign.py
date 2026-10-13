@@ -66,14 +66,15 @@ def seal_budget_fixture(root, unit, task=None):
     leaves[-1]['task_id'] = unit
     for row in leaves:
         row['post_check_reserve_seconds'] = coverage.publication_reserve(wall)
-    counts = {status: sum(r['status'] == status for r in result['records']) for status in coverage.STATUSES}
     # Older regression fixtures explicitly model unsuccessful/partial profiling.
-    if timing.get('complete') is False:
-        counts['success'] = max(0, counts['success'] - 1)
-        counts['incomplete'] += 1
-    if timing.get('all_successful') is False and counts['success']:
-        counts['success'] -= 1
-        counts['numerical_failure'] += 1
+    # Their scientific outcomes must agree with their finalized counters.
+    for flag, status in (('complete', 'incomplete'), ('all_successful', 'numerical_failure')):
+        if timing.get(flag) is False:
+            successful = next((r for r in result['records'] if r['status'] == 'success'), None)
+            if successful is not None:
+                successful.update(status=status, reason='synthetic unsuccessful profile', estimates={})
+    write(root / 'result.json', result)
+    counts = {status: sum(r['status'] == status for r in result['records']) for status in coverage.STATUSES}
     binding = coverage.budget_binding(producer, task, timing.get('recipe_hash', result['recipe_hash']))
     value = {'schema_version': 1, 'binding': binding, 'chained': chained, 'leaves': leaves,
         'counts': counts, 'received': sum(counts.values()),
@@ -1016,3 +1017,32 @@ def test_profile_diagnostics_do_not_replace_worker_measurements(tmp_path, monkey
     record = coverage.load_budget(consumer, coverage.read_json(consumer.config_path), 'profile')
     assert record['complete'] and record['all_successful']
     assert record['leaves'][0]['setup_seconds'] < 600
+
+
+def test_final_budget_counts_must_match_scientific_records(tmp_path):
+    req, _ = setup_lock(tmp_path)
+    req = fork_profile(req, measurements=False)
+    root = profile_directory(req)
+    payload = coverage.read_json(root / 'result.json')
+    payload['records'][0].update(status='numerical_failure', reason='synthetic producer inconsistency', estimates={})
+    write(root / 'result.json', payload)
+    # Preserve the genuine all-success budget counters; publish a fresh seal
+    # over the inconsistent scientific payload and unchanged measurements.
+    reseal_budget_fixture(root)
+    req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    admitted = campaign.run_stage(req)
+    assert admitted.status != 'pass', admitted.message
+    assert not (Path(req.output_dir) / 'recipe_lock.json').exists()
+    assert not (Path(req.output_dir) / 'expanded_units.json').exists()
+
+
+@pytest.mark.parametrize('wall', [14401, 20000])
+def test_nonchain_gpu_lock_already_refuses_four_hour_overrun(tmp_path, monkeypatch, wall):
+    from types import SimpleNamespace
+    req, _ = setup_lock(tmp_path, gpus=1, wall_seconds=wall, cpu_wall_hours_budget=500.)
+    # Exercise GPU declaration admission on a CPU allocation, without any fit.
+    monkeypatch.setattr(campaign, 'resolve_device', lambda: SimpleNamespace(type='cuda'))
+    result = campaign.run_stage(req)
+    assert result.status == 'blocked'
+    assert result.message == 'leaf exceeds four GPU-hours'
+    assert not list(Path(req.output_dir).glob('*.json'))
