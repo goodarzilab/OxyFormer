@@ -8,6 +8,8 @@ whole, prospectively declared campaign. Smoke output never certifies coverage.
 from __future__ import annotations
 
 from dataclasses import replace
+from io import BytesIO
+import tarfile
 from hashlib import sha256
 import json
 import math
@@ -271,7 +273,7 @@ def bind_observations(template, observations):
                    geography=replace(template.geography, data_manifest_hash=manifest.content_hash))
 
 
-def estimate_repetition(endpoint, recipe, root, deadline, *, study=None):
+def estimate_repetition(endpoint, recipe, root, deadline, *, study=None, continuation=None):
     """All five folds with nested tuning; study overrides require explicit use."""
     from oxyformer.estimation.mtp import one_step
     from oxyformer.estimation.targeting import cv_tmle
@@ -283,26 +285,46 @@ def estimate_repetition(endpoint, recipe, root, deadline, *, study=None):
     seeds = study.seeds
     scoring_split = endpoint.outer if study.seed_count == 3 else replace(endpoint.outer, seed_ids=seeds)
     options = nested_cv._settings(recipe, endpoint)
-    parts = []
+    parts = ([] if continuation is None else
+             [OOFNuisances.from_json(value) for value in continuation["parts"]])
+    require(len(parts) <= 5 * len(seeds), "too many prediction parts")
+    position = 0
     for fold in range(5):
         for neural_seed in seeds:
+            position += 1
+            if position <= len(parts):
+                part = parts[position - 1]
+                require(set(part.fold_ids) == {fold} and set(part.seed_ids) == {neural_seed},
+                        "reordered prediction parts")
+                continue
             remaining = min(14400., deadline - time.monotonic())
             if remaining <= 0:
                 return None
+            predecessor = None if continuation is None else continuation.get("predecessor")
             config = endpoint.configuration(fold, root / f"fold-{fold}-seed-{neural_seed}",
-                **options, study=study, slice_seconds=remaining, checkpoint_margin_seconds=min(1., remaining / 10))
+                **options, study=study, predecessor=predecessor,
+                slice_seconds=remaining, checkpoint_margin_seconds=min(1., remaining / 10))
             artifact = nested_cv.run_fold(config, endpoint.outer, neural_seed, geography=endpoint.geography)
             if not artifact.complete:
+                if continuation is not None:
+                    continuation["predecessor"] = artifact
                 return None
+            if continuation is not None:
+                continuation["pending"] = None
+                continuation["predecessor"] = None
             view = subset(endpoint.data.covariates(tuple(n for n, _ in endpoint.feature_kinds)),
                           artifact.prediction_inputs.original_ids)
             parts.append(nested_cv.predict(artifact, view, endpoint.policy))
+            if continuation is not None:
+                continuation["parts"].append(parts[-1].to_json())
     names = ("original_ids", "fold_ids", "seed_ids", "mu_a", "mu_d", "r_a", "r_d", "origin_weights")
     values = {name: tuple(v for part in parts for v in getattr(part, name)) for name in names}
     lineage = replace(parts[0].lineage, unit_ids=endpoint.outer.original_ids,
         split_hash=scoring_split.content_hash, parent_hashes=(endpoint.data.manifest.content_hash,
         *(part.content_hash for part in parts)), model_hash=None, seed=None, parameter_count=None)
     nuisances = OOFNuisances(spec=endpoint.data.manifest.spec, lineage=lineage, **values)
+    if continuation is not None:
+        atomic_write(root, "nuisances.json", nuisances.to_json())
     weights = dict(zip(endpoint.data.manifest.original_ids,
         (1.,) * len(endpoint.data.rows) if endpoint.data.manifest.weight_field is None
         else endpoint.data.column(endpoint.data.manifest.weight_field)))
@@ -335,7 +357,7 @@ def numerical_call(operation, *args, **kwargs):
         raise NumericalFailure(f"{type(exc).__name__}: {exc}") from exc
 
 
-def execute_draw(draw, frame, scenario, template, recipe, root, deadline):
+def execute_draw(draw, frame, scenario, template, recipe, root, deadline, *, continuation=None, study=None):
     started = time.monotonic()
     record = {"draw": draw, "status": "incomplete", "reason": "budget exhausted", "estimates": {}}
     if started >= deadline:
@@ -343,7 +365,24 @@ def execute_draw(draw, frame, scenario, template, recipe, root, deadline):
     try:
         fixed = fixed_exposures(template, frame)
         options = {"fixed_exposures": fixed} if fixed else {}
-        sample = numerical_call(generate_suite_a, frame, scenario, template.policy, seed=draw["seed"], **options)
+        if continuation is not None and continuation.get("sample"):
+            from oxyformer.validation.generators import (GeneratedSample, ObservedRecords,
+                TruthArtifact, IntegrationUncertainty)
+            saved = continuation["sample"]
+            sample = GeneratedSample(ObservedRecords.from_json(saved["observations"]),
+                TruthArtifact.from_json(saved["observed_law_truth"]),
+                TruthArtifact.from_json(saved["structural_causal_truth"]),
+                IntegrationUncertainty.from_json(saved["integration_uncertainty"]))
+        else:
+            sample = numerical_call(generate_suite_a, frame, scenario, template.policy, seed=draw["seed"], **options)
+            if continuation is not None:
+                continuation["sample"] = {name: getattr(sample, name).to_json() for name in
+                    ("observations", "observed_law_truth", "structural_causal_truth", "integration_uncertainty")}
+        if continuation is not None:
+            expected = {**continuation["base_binding"], "draw": draw,
+                "observation_hash": sample.observations.content_hash}
+            require(continuation.get("binding", expected) == expected, "draw/observation binding drift")
+            continuation["binding"] = expected
         if sample.observed_law_truth.status in ("design_rejected", "empty_target"):
             record.update(status="eligibility_rejection", reason=sample.observed_law_truth.reason)
         else:
@@ -357,7 +396,8 @@ def execute_draw(draw, frame, scenario, template, recipe, root, deadline):
                 ("observed_absolute_difference", "quadrature_tail_absolute_bound", "truth_serialization_absolute_bound")]
             require(all(value >= 0 for value in components), "negative truth-integration error component")
             error = numerical_call(math.fsum, components)
-            estimates = numerical_call(estimate_repetition, endpoint, recipe, root, deadline)
+            extra = {} if continuation is None else {"continuation": continuation, "study": study}
+            estimates = numerical_call(estimate_repetition, endpoint, recipe, root, deadline, **extra)
             successful = None
             if estimates is not None:
                 require(set(estimates) == set(METHODS), "incomplete estimator results")
@@ -484,7 +524,7 @@ def _run_batch(request: StageRequest, started: float) -> StageResult:
             status="pass" if summary["complete"] else "fail",
             message="Declared repetitions accounted for; production coverage requires complete campaign collection"
                 if summary["complete"] else "Incomplete batch; all declared draws retained")
-    except (ContractError, KeyError, TypeError, ValueError, OSError) as exc:
+    except (ContractError, KeyError, TypeError, ValueError, OSError, tarfile.TarError) as exc:
         return StageResult(request_hash=request.content_hash, status="blocked", artifacts=(), message=str(exc) or type(exc).__name__)
 
 
@@ -516,6 +556,210 @@ def record_runtime(request, completed, started, task):
     return replace(completed, artifacts=(*completed.artifacts, artifact), message=message)
 
 
+
+def _chain(task):
+    chain = task["continuation"]
+    require(type(chain) is dict and set(chain) == {"owner", "step", "predecessor"}
+            and isinstance(chain["owner"], str) and bool(chain["owner"])
+            and type(chain["step"]) is int and chain["step"] >= 0, "invalid coverage chain")
+    require((chain["step"] == 0) == (chain["predecessor"] is None), "missing coverage predecessor")
+    return chain
+
+
+def _read_continuation(path, binding, chain):
+    """Read only digest-named blobs; never follow paths from an earlier attempt."""
+    with tarfile.open(path, "r:") as archive:
+        members = archive.getmembers()
+        require(len({m.name for m in members}) == len(members), "duplicate coverage member")
+        require(sum(m.size for m in members) <= 10 * 1024**3, "coverage continuation exceeds byte limit")
+        require(all(m.isfile() and (m.name == "coverage.json" or
+                    (m.name.startswith("blobs/") and len(m.name) == 70 and
+                     all(c in "0123456789abcdef" for c in m.name[6:]))) for m in members),
+                "unexpected coverage member")
+        blobs = {m.name: archive.extractfile(m).read() for m in members}
+    header = json.loads(blobs.pop("coverage.json"))
+    require(header["version"] == 1 and header["binding"] == binding, "coverage binding mismatch")
+    previous = header["chain"]
+    require(header["task_id"] == chain["predecessor"] and previous["owner"] == chain["owner"]
+            and previous["step"] + 1 == chain["step"], "nonconsecutive coverage predecessor")
+    require(all(sha256(value).hexdigest() == name[6:] for name, value in blobs.items()),
+            "tampered coverage blob")
+    used = set()
+    def read(key):
+        name = "blobs/" + key
+        used.add(name)
+        return blobs[name]
+    states = header["states"]
+    require(len(states) == len(binding["draws"]), "coverage draw count drift")
+    from oxyformer.validation.generators import ObservedRecords
+    from oxyformer.training.fit import RecipeStudy
+    study = RecipeStudy.from_json(canonical_json(binding["study"]))
+    order = [(fold, seed) for fold in range(5) for seed in study.seeds]
+    for draw, state in zip(binding["draws"], states):
+        state["parts"] = [read(key).decode() for key in state["parts"]]
+        state["sample"] = {name: read(key).decode() for name, key in state["sample"].items()}
+        state["pending"] = read(state["pending"]) if state["pending"] else None
+        require(len(state["parts"]) <= len(order), "too many prediction parts")
+        for value, (fold, seed) in zip(state["parts"], order):
+            part = OOFNuisances.from_json(value)
+            require(set(part.fold_ids) == {fold} and set(part.seed_ids) == {seed}, "reordered prediction parts")
+        if state["sample"]:
+            observations = ObservedRecords.from_json(state["sample"]["observations"])
+            expected = {**binding, "draw": draw, "observation_hash": observations.content_hash}
+            require(state["binding"] == expected, "draw/observation binding drift")
+        else:
+            require(not state["parts"] and not state["pending"], "missing saved observations")
+    require(used == set(blobs), "unreferenced coverage blob")
+    return states
+
+
+def _write_continuation(path, states, *, binding, chain, task_id):
+    blobs, saved = {}, []
+    def add(value):
+        value = value.encode() if isinstance(value, str) else value
+        key = sha256(value).hexdigest()
+        blobs["blobs/" + key] = value
+        return key
+    for state in states:
+        saved.append({"parts": [add(value) for value in state["parts"]],
+            "sample": {name: add(value) for name, value in state["sample"].items()},
+            "pending": add(state["pending"]) if state["pending"] else None,
+            "binding": state.get("binding"), "record": state.get("record"),
+            "compute_seconds": state["compute_seconds"]})
+    header = {"version": 1, "binding": binding, "task_id": task_id, "chain": chain, "states": saved}
+    blobs["coverage.json"] = canonical_json(header).encode()
+    with Path(path).open("xb") as stream, tarfile.open(fileobj=stream, mode="w") as archive:
+        for name, value in sorted(blobs.items()):
+            member = tarfile.TarInfo(name)
+            member.size, member.mode, member.mtime = len(value), 0o400, 0
+            archive.addfile(member, BytesIO(value))
+
+
+def _run_chain(request, started):
+    """One bounded leaf of a prospectively declared coverage work item."""
+    from oxyformer.training.fit import RecipeStudy, resolve_device, fit_environment
+    task, recipe, lock, template, frame, scenario, seconds, stamps = prepare_batch(request)
+    chain = _chain(task)
+    parameters, root = task["parameters"], Path(request.output_dir)
+    require("continuation.tar" in task["outputs"], "coverage continuation must be declared")
+    require(seconds <= 14400, "coverage slice exceeds four hours")
+    study = RecipeStudy(**parameters.get("study", {}))
+    require(parameters["mode"] != "final" or study == RecipeStudy(), "final recipe cannot use study overrides")
+    binding = {"draws": parameters["draws"], "scenario": scenario.to_dict()["payload"],
+        "endpoint_hash": template.content_hash, "frame_hash": frame.content_hash,
+        "recipe_hash": digest(recipe), "study": study.to_dict(), "lock_hash": digest(lock) if lock else None,
+        "code_identity": request.code_identity, "mode": parameters["mode"], **stamps}
+    for name in ("continuation.tar", "repetitions", "result.json", "timing.json"):
+        require(not output_path(root, name).exists(), "coverage attempt already exists: " + name)
+    setup = time.monotonic() - started
+    config = yaml.safe_load(Path(request.config_path).read_text())
+    imported_at = time.monotonic()
+    history = []
+    if chain["predecessor"] is None:
+        states = [{"parts": [], "sample": {}, "pending": None, "record": None, "compute_seconds": 0.}
+                  for _ in parameters["draws"]]
+    else:
+        archive = dependency(request, config, {"dependency": chain["predecessor"], "path": "continuation.tar"})
+        states = _read_continuation(archive, binding, chain)
+        previous_timing = read_json(dependency(request, config,
+            {"dependency": chain["predecessor"], "path": "timing.json"}))
+        require(previous_timing["chain"] == {**chain, "step": chain["step"] - 1,
+                "predecessor": previous_timing["chain"]["predecessor"]}, "timing chain drift")
+        history = previous_timing["leaves"]
+        require(previous_timing["measurement_scope"] == "complete_chain_return"
+                and len(history) == chain["step"] and history[-1]["task_id"] == chain["predecessor"]
+                and [row["step"] for row in history] == list(range(chain["step"])), "partial profile chain")
+    destinations = []
+    for draw, state in zip(parameters["draws"], states):
+        destination = output_path(root, "repetitions/" + draw["repetition_id"])
+        destination.mkdir(parents=True)
+        destinations.append(destination)
+        state.update(base_binding=binding, chain=chain, task_id=task["id"], predecessor=None)
+        if state.get("binding") is None:
+            state.pop("binding", None)
+        if state["pending"]:
+            imported = destination / "imported-fold"
+            imported.mkdir()
+            (destination / "pending.tar").write_bytes(state["pending"])
+            state["predecessor"] = nested_cv.import_continuation(destination / "pending.tar", imported,
+                binding=state["binding"], chain=chain)
+    import_seconds = time.monotonic() - imported_at
+    compute_at = time.monotonic()
+    # The existing checkpoint margin reserves time for checkpoint publication.
+    deadline = started + seconds - min(120., seconds / 10)
+    for draw, state, destination in zip(parameters["draws"], states, destinations):
+        if state["record"] is not None:
+            require(state["record"]["draw"] == draw and state["record"]["status"] != "incomplete",
+                    "terminal draw drift")
+            continue
+        draw_at = time.monotonic()
+        record = execute_draw(draw, frame, scenario, template, recipe, destination, deadline,
+                              continuation=state, study=study)
+        state["compute_seconds"] += time.monotonic() - draw_at
+        if record["status"] == "incomplete":
+            require(record["reason"] == "budget exhausted", record["reason"])
+            break
+        state["record"] = record
+        atomic_json(destination, "result.json", record)
+    device = resolve_device()
+    if device.type == "cuda":
+        import torch
+        torch.cuda.synchronize(device)
+    compute_seconds = time.monotonic() - compute_at
+    export_at = time.monotonic()
+    for state, destination in zip(states, destinations):
+        if state["predecessor"] is not None:
+            path = destination / "next-fold.tar"
+            nested_cv.export_continuation(state["predecessor"], path, binding=state["binding"],
+                task_id=task["id"], chain=chain, allowed_root=root)
+            state["pending"] = path.read_bytes()
+    _write_continuation(root / "continuation.tar", states, binding=binding, chain=chain, task_id=task["id"])
+    export_seconds = time.monotonic() - export_at
+    records = [s["record"] for s in states if s["record"] is not None]
+    summary = summarize(records, parameters["draws"],
+        production_equivalent=parameters["mode"] != "smoke" and study == RecipeStudy(),
+        null_scenario=scenario.effect == "null", expected_rejection=scenario.assignment == "atoms")
+    result = {"schema_version": 1, "mode": parameters["mode"], "recipe_hash": digest(recipe),
+        "lock_hash": binding["lock_hash"], "batch_id": parameters.get("batch_id"),
+        "scenario": binding["scenario"], "draws": parameters["draws"], "records": records,
+        "summary": summary, "chain": chain, "terminal": summary["complete"],
+        "certifies_production_coverage": False}
+    lineage = ArtifactLineage(source_hashes=(request.config_hash, request.task_hash),
+        unit_ids=(request.content_hash,), parent_hashes=request.dependency_hashes, split_hash=None,
+        config_hash=request.config_hash, model_hash=None, environment=(("code_identity", request.code_identity),),
+        seed=None, parameter_count=None)
+    archive_record = ArtifactRecord(path="continuation.tar", kind="coverage_continuation",
+        sha256=file_hash(root / "continuation.tar"), lineage=lineage)
+    completed = publish(request, {"result.json": result}, status="pass",
+        message="Coverage work complete" if summary["complete"] else "Coverage slice checkpointed; repetition incomplete",
+        extra_artifacts=(archive_record,))
+    elapsed = time.monotonic() - started
+    # Attribute final aggregation, archive hashing and publication together;
+    # every measured second belongs to exactly one phase.
+    publication_seconds = elapsed - setup - import_seconds - compute_seconds - export_seconds
+    leaf = {"task_id": task["id"], "step": chain["step"], "compute_seconds": compute_seconds,
+        "setup_seconds": setup, "import_seconds": import_seconds, "export_seconds": export_seconds,
+        "publication_seconds": publication_seconds, "wall_seconds": elapsed}
+    leaves = [*history, leaf]
+    timing = {"chain": chain, "leaves": leaves, "wall_seconds": math.fsum(v["wall_seconds"] for v in leaves),
+        "gpu_seconds": math.fsum(v["wall_seconds"] for v in leaves) if device.type == "cuda" else 0.,
+        "device": str(device), "environment": dict(fit_environment(device)),
+        "measurement_scope": "complete_chain_return", "excluded": ["timing/runtime receipt publication", "outer executor and scheduler"],
+        "setup_seconds": math.fsum(v["setup_seconds"] for v in leaves),
+        "publication_verification_seconds": math.fsum(v["publication_seconds"] for v in leaves),
+        "admitted_budget_seconds": seconds,
+        "production_equivalent": parameters["mode"] != "smoke" and study == RecipeStudy(),
+        "study": study.to_dict(),
+        "complete_repetition_seconds": [s["compute_seconds"] for s in states if s["record"] is not None
+                                        and s["record"]["status"] == "success"],
+        "complete": summary["complete"], "all_successful": summary["counts"]["success"] == len(states),
+        "recipe_hash": digest(recipe), **stamps}
+    path = atomic_json(root, "timing.json", timing)
+    completed = replace(completed, artifacts=(*completed.artifacts,
+        ArtifactRecord(path="timing.json", kind="timing", sha256=file_hash(path), lineage=lineage)))
+    return record_runtime(request, completed, started, task)
+
+
 def run_stage(request: StageRequest) -> StageResult:
     """Time profiling from outside the normal batch handler's complete return.
 
@@ -529,6 +773,8 @@ def run_stage(request: StageRequest) -> StageResult:
     try:
         request.verify_inputs()
         task = read_json(request.task_path)
+        if "continuation.tar" in task.get("outputs", ()):
+            return _run_chain(request, started)
         if task.get("parameters", {}).get("mode") != "profile":
             completed = _run_batch(request, started)
             return record_runtime(request, completed, started, task)
@@ -566,6 +812,6 @@ def run_stage(request: StageRequest) -> StageResult:
             "profile_receipt.json": {"request": profiled_request.to_dict(), "result": completed.to_dict()}},
             status=completed.status, message="Production profile measured through complete stage return; " + completed.message,
             extra_artifacts=extra)
-    except (ContractError, KeyError, TypeError, ValueError, OSError) as exc:
+    except (ContractError, KeyError, TypeError, ValueError, OSError, tarfile.TarError) as exc:
         return StageResult(request_hash=request.content_hash, status="blocked", artifacts=(),
                            message=str(exc) or type(exc).__name__)

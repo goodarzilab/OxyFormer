@@ -518,3 +518,60 @@ def test_estimate_and_lock_compare_derived_real_frame_scenarios(built, tmp_path,
     req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
     with pytest.raises(ContractError, match='profile scenario mismatch'):
         campaign_estimate.estimate_budget(req)
+
+
+def test_profile_chain_accounts_for_every_leaf_and_refuses_partial(tmp_path, monkeypatch):
+    from test_coverage import chain_fixture, chain_request
+    task, inputs = chain_fixture(tmp_path)
+    task["parameters"]["mode"] = "profile"
+    task["parameters"]["recipe"]["nested_cv"] = {}
+    task["parameters"].pop("study")
+    clock = [0.]
+    monkeypatch.setattr(coverage.time, "monotonic", lambda: clock[0])
+    def stamp():
+        clock[0] += 2.
+        return deepcopy(STAMPS)
+    monkeypatch.setattr(campaign, "fingerprint", stamp)
+    original_read, original_write, original_publish = coverage._read_continuation, coverage._write_continuation, coverage.publish
+    def read(*a, **k):
+        clock[0] += 3.
+        return original_read(*a, **k)
+    def write(*a, **k):
+        clock[0] += 4.
+        return original_write(*a, **k)
+    def publish(*a, **k):
+        clock[0] += 5.
+        return original_publish(*a, **k)
+    monkeypatch.setattr(coverage, "_read_continuation", read)
+    monkeypatch.setattr(coverage, "_write_continuation", write)
+    monkeypatch.setattr(coverage, "publish", publish)
+    calls = []
+    def estimate(*a, **k):
+        calls.append(1)
+        clock[0] += 10.
+        return None if len(calls) == 1 else {m: {"value": 0., "se": 1.} for m in coverage.METHODS}
+    monkeypatch.setattr(coverage, "estimate_repetition", estimate)
+    first = chain_request(tmp_path / "first", task, {"inputs": inputs})
+    assert coverage.run_stage(first).status == "pass"
+    timing = coverage.read_json(Path(first.output_dir) / "timing.json")
+    assert not timing["complete"]
+    def profile(req):
+        config = json.loads(Path(req.config_path).read_text())
+        result = coverage.read_json(Path(req.output_dir) / "result.json")
+        reader = chain_request(tmp_path / ("reader-" + str(len(calls))), task, {"profile": Path(req.output_dir)})
+        config = json.loads(Path(reader.config_path).read_text())
+        return campaign._profile(reader, config, {"dependency": "profile", "path": "result.json"},
+                                 result["scenario"], task["parameters"]["recipe"], STAMPS)
+    with pytest.raises(ContractError, match="complete production"):
+        profile(first)
+    task = deepcopy(task)
+    task.update(id="chain-1", continuation={"owner": "coverage-test", "step": 1, "predecessor": "chain-0"})
+    second = chain_request(tmp_path / "second", task, {"inputs": inputs, "chain-0": Path(first.output_dir)})
+    assert coverage.run_stage(second).status == "pass"
+    timing = coverage.read_json(Path(second.output_dir) / "timing.json")
+    assert timing["complete"] and timing["wall_seconds"] == 45.
+    assert timing["complete_repetition_seconds"] == [20.]
+    assert [leaf["wall_seconds"] for leaf in timing["leaves"]] == [21., 24.]
+    measured = profile(second)
+    assert measured["seconds_per_repetition"] == 20.
+    assert measured["leaf_overheads"] == {"setup_seconds": 2., "import_seconds": 3., "export_seconds": 4., "publication_seconds": 5.}
