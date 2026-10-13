@@ -436,9 +436,10 @@ nested-CV continuation. Embedded old checkpoint paths are never opened. Each
 predecessor must have the same owner and exactly the preceding step. Binding
 drift, gaps, reordered parts and corrupt blobs are refusals, never new draws.
 
-A bounded coverage leaf reserves `min(120 seconds, wall_seconds / 10)` for
-publication and uses the remaining deadline with nested-CV's existing checkpoint
-margin. The 14,400-second bound applies to a slice, not to a fold's cumulative
+A bounded coverage leaf uses the shared compute budget described below,
+reserving measured export/publication costs, the safety factor, and
+`min(120 seconds, wall_seconds / 10)`. Nested-CV retains its checkpoint margin.
+The 14,400-second bound applies to a slice, not to a fold's cumulative
 training. Epochs, tuning, seeds and estimators are unchanged. Only after all
 prediction parts exist does the usual terminal aggregation run. Incomplete
 repetitions have no `repetitions/<id>/result.json`; a valid checkpointed slice
