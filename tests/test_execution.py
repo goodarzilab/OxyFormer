@@ -645,12 +645,12 @@ def test_campaign_lock_uses_unit_id_distinct_from_stage_name(runtime, tmp_path, 
     assert 'tract-support-gate' not in lock_settings['needs']
     lock_settings['module'] = 'oxyformer.dummy'
     stages = {'campaign-lock': lock_settings}
-    for stage, unit in [('tract-support-gate', 'tract-gate'), ('simulation-smoke', 'simulation-smoke')]:
+    for stage, unit in [('tract-support-gate', 'tract-gate'), ('fixture-smoke', 'simulation-smoke')]:
         stages[stage] = {'unit_id': unit, 'module': 'oxyformer.dummy', 'outputs': lock_settings['needs'][unit]}
     (repo / 'configs/execution/stages.yaml').write_text(yaml.safe_dump({'schema_version': 1, 'stages': stages}))
     head = commit(repo)
     (out / 'code_commit.txt').write_text(head)
-    for stage, unit in [('tract-support-gate', 'tract-gate'), ('simulation-smoke', 'simulation-smoke')]:
+    for stage, unit in [('tract-support-gate', 'tract-gate'), ('fixture-smoke', 'simulation-smoke')]:
         upstream = tmp_path / unit
         upstream.mkdir()
         (upstream / 'code_commit.txt').write_text(head)

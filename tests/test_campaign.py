@@ -987,3 +987,32 @@ def test_genuine_budget_record_cannot_be_reused_for_another_request(tmp_path, ch
     result = campaign.run_stage(req)
     assert result.status == 'blocked' and 'budget binding mismatch' in result.message
     assert not (Path(req.output_dir) / 'recipe_lock.json').exists()
+
+
+def test_profile_diagnostics_do_not_replace_worker_measurements(tmp_path, monkeypatch):
+    from test_coverage import chain_request
+    _, lock_task = setup_lock(tmp_path)
+    params = lock_task['parameters']
+    task = {'id': 'profile', 'stage': 'simulation-smoke', 'outputs': ['result.json', 'timing.json'],
+        'parameters': {'mode': 'profile', 'wall_seconds': 600, 'recipe': params['recipe'],
+            'scenario': params['scenario_family'][0],
+            'draws': coverage.repetition_plan('diagnostic-authority', 'null_effect', 1),
+            'endpoint_input': params['endpoint_input'], 'frame_input': params['frame_input']}}
+    producer = chain_request(tmp_path / 'producer', task, {'inputs': tmp_path / 'inputs'})
+    monkeypatch.setattr(coverage, 'estimate_repetition', lambda *a, **k:
+        {m: {'value': 0., 'se': 1.} for m in coverage.METHODS})
+    original_json = coverage.atomic_json
+    def corrupt_diagnostic(root, name, value):
+        if name == 'timing.json':
+            value = {**value, 'wall_seconds': 1e9, 'setup_seconds': 1e9,
+                'complete': False, 'all_successful': False, 'budget_exceeded': True}
+        return original_json(root, name, value)
+    monkeypatch.setattr(coverage, 'atomic_json', corrupt_diagnostic)
+    result = run_coverage(producer)
+    assert result.status == 'pass', result.message
+    assert coverage.read_json(Path(producer.output_dir) / 'timing.json')['setup_seconds'] == 1e9
+    consumer = request(tmp_path / 'consumer', {'id': 'reader', 'stage': 'campaign-lock'},
+        {'profile': Path(producer.output_dir)})
+    record = coverage.load_budget(consumer, coverage.read_json(consumer.config_path), 'profile')
+    assert record['complete'] and record['all_successful']
+    assert record['leaves'][0]['setup_seconds'] < 600
