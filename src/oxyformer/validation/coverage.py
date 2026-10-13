@@ -773,7 +773,8 @@ def run_stage(request: StageRequest) -> StageResult:
     try:
         request.verify_inputs()
         task = read_json(request.task_path)
-        if "continuation.tar" in task.get("outputs", ()):
+        if ("continuation.tar" in task.get("outputs", ()) or
+                task.get("continuation", {}).get("predecessor") is not None):
             return _run_chain(request, started)
         if task.get("parameters", {}).get("mode") != "profile":
             completed = _run_batch(request, started)
