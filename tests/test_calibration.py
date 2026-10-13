@@ -477,3 +477,176 @@ def test_fitting_domain_includes_its_boundary_and_checks_before_fp32_rounding(va
     assert float(z.float()[0, 0]) == value
     with pytest.raises(ContractError, match='calibration fitting.*1000000'):
         fit_affine(z, [0., 1., 1., 1.], **inputs())
+
+
+MEDIAN_EXACT_SCALES = (1., 2.**-1000, 2.**-500, 2.**500, 2.**1000)
+MEDIAN_ROUNDED_SCALES = (1e-311, 1e-300, 1e300, 1e307)
+MEDIAN_WEIGHT_SCALES = MEDIAN_EXACT_SCALES + MEDIAN_ROUNDED_SCALES
+MEDIAN_DISPATCH_ENVIRONMENTS = (
+    {},
+    {"ATEN_CPU_CAPABILITY": "default"},
+    {"DNNL_MAX_CPU_ISA": "SSE41"},
+    {"MKL_CBWR": "COMPATIBLE"},
+    {"ATEN_CPU_CAPABILITY": "default", "DNNL_MAX_CPU_ISA": "SSE41",
+     "MKL_CBWR": "COMPATIBLE"},
+)
+
+
+def _fraction_median_index(values, weights):
+    """Independent reference, using rational arithmetic and Python sorting."""
+    from fractions import Fraction
+    masses = [Fraction(float(weight)) for weight in weights]
+    half = sum(masses) / 2
+    cumulative = Fraction()
+    for index in sorted(range(len(values)), key=lambda i: values[i]):
+        cumulative += masses[index]
+        if cumulative >= half:
+            return index
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+@pytest.mark.parametrize("scale", MEDIAN_WEIGHT_SCALES)
+@pytest.mark.parametrize("weights,expected", [
+    ([1., 1., 1., 1.], 1),       # Exact halfway: choose the lower observation.
+    ([1., 3., 2., 2.], 1),       # Unequal masses, also exactly halfway.
+    ([1., 4., 2., 1.], 1),       # Strictly inside one observation's mass.
+])
+def test_weighted_median_fraction_reference_and_exact_scale_invariance(device, dtype, scale, weights, expected):
+    from oxyformer.training.calibration import _weighted_median
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA device unavailable")
+    # Permute input order; values distinguish indices and exercise value fidelity.
+    values = torch.tensor([-3.125, -.25, .375, 8.5], dtype=dtype, device=device)
+    mass = torch.tensor([w * scale for w in weights], dtype=torch.float64, device=device)
+    reference = _fraction_median_index(values.cpu().tolist(), mass.cpu().tolist())
+    if scale in MEDIAN_EXACT_SCALES:
+        assert reference == expected
+    permutation = torch.tensor([2, 0, 3, 1], device=device)
+    selected = _weighted_median(values[permutation], mass[permutation])
+    assert selected.dtype == dtype and selected.device == values.device
+    assert float(selected).hex() == float(values[reference]).hex()
+
+
+@pytest.mark.parametrize("weights,expected", [
+    ([1., 2.**-54, 1.], 1),
+    ([1., 2.**-100, 1.], 1),
+    ([1., 1., 2.**-54], 1),
+    ([1., 5e-324, 1.], 1),      # Even the smallest positive binary64 matters.
+    ([1e308, 1e308, 1e308], 1), # Total overflows binary64; exact total does not.
+])
+def test_weighted_median_resolves_sub_ulp_mass(weights, expected):
+    from oxyformer.training.calibration import _weighted_median
+    values = torch.tensor([-.125, .25, 7.], dtype=torch.float64)
+    mass = torch.tensor(weights, dtype=torch.float64)
+    assert _fraction_median_index(values.tolist(), weights) == expected
+    assert torch.equal(_weighted_median(values, mass), values[expected])
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_weighted_median_keeps_subnormal_mass_across_chunks(device):
+    from oxyformer.training.calibration import _weighted_median
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA device unavailable")
+    # Half the unit mass is at rank 4095. A tiny mass in a later chunk makes
+    # that prefix strictly too small, so exact selection must advance to 4096.
+    values = torch.arange(8193, dtype=torch.float64, device=device)
+    mass = torch.ones_like(values)
+    mass[-1] = 5e-324
+    expected = _fraction_median_index(values.cpu().tolist(), mass.cpu().tolist())
+    assert expected == 4096
+    # Reverse input order to exercise chunked gathering through sorted indices.
+    result = _weighted_median(values.flip(0), mass.flip(0))
+    assert result.dtype == values.dtype and result.device == values.device
+    assert float(result).hex() == float(values[expected]).hex()
+
+
+@pytest.mark.parametrize("overrides", MEDIAN_DISPATCH_ENVIRONMENTS,
+                         ids=["normal", "aten", "dnnl", "mkl", "combined"])
+def test_weighted_median_dispatch_subprocess(overrides):
+    import json
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    # Each process imports torch only after its dispatch environment is set.
+    script = r'''
+import json
+import torch
+from oxyformer.training.calibration import _weighted_median
+torch.set_num_threads(1)
+fixtures = json.loads(__import__('sys').argv[1])
+result = {}
+for device in (['cpu', 'cuda'] if torch.cuda.is_available() else ['cpu']):
+    selections = []
+    for dtype in (torch.float32, torch.float64):
+        for weights in fixtures:
+            values = torch.tensor([.375, -3.125, 8.5, -.25], dtype=dtype, device=device)
+            mass = torch.tensor(weights, dtype=torch.float64, device=device)
+            value = _weighted_median(values, mass)
+            index = int((values == value).nonzero()[0, 0])
+            assert value.dtype == dtype and value.device == values.device
+            selections.append([index, float(value).hex()])
+    result[device] = selections
+print(json.dumps(result))
+'''
+    raw_weights = ([1., 1., 1., 1.], [1., 3., 2., 2.], [1., 4., 2., 1.])
+    permutation = (2, 0, 3, 1)
+    fixtures = [[raw[i] * scale for i in permutation]
+                for scale in MEDIAN_WEIGHT_SCALES for raw in raw_weights]
+    fixtures += [[1., 2.**-100, 1., 2.**-100], [5e-324, 1., 1., 5e-324]]
+    values = [.375, -3.125, 8.5, -.25]
+    expected = []
+    for weights in fixtures:
+        index = _fraction_median_index(values, weights)
+        expected.append([index, values[index].hex()])
+    env = os.environ.copy()
+    for name in MEDIAN_DISPATCH_ENVIRONMENTS[-1]:
+        env.pop(name, None)
+    env.update(overrides)
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    result = subprocess.run([sys.executable, "-c", script, json.dumps(fixtures)], env=env,
+                            capture_output=True, text=True, timeout=60, check=True)
+    selected = json.loads(result.stdout)
+    assert selected["cpu"] == expected * 2
+    if "cuda" in selected:
+        assert selected["cuda"] == selected["cpu"]
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_weighted_median_stable_tie_preserves_selected_bits(device, dtype):
+    from oxyformer.training.calibration import _weighted_median
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA device unavailable")
+    # Signed zero distinguishes equal coordinates; stable order must retain -0.
+    values = torch.tensor([-0., 0., 2., 3.], dtype=dtype, device=device)
+    mass = torch.tensor([3., 1., 1., 1.], dtype=torch.float64, device=device)
+    result = _weighted_median(values, mass)
+    assert result.dtype == dtype and result.device == values.device
+    assert float(result).hex() == (-0.).hex()
+
+
+
+def test_affine_coefficients_unchanged_when_median_selections_agree(monkeypatch):
+    import math
+    import oxyformer.training.calibration as calibration
+    z = torch.tensor([[-2., 1.], [2., -.5], [-1., 2.], [.7, -.8]])
+    weights = [8., 1., 5., 2.]
+    exact = calibration._weighted_median
+    comparisons = []
+
+    def old_median(values, mass):
+        order = values.argsort()
+        cumulative = torch.logcumsumexp(calibration._log_weights(mass)[order], 0)
+        index = torch.searchsorted(cumulative, cumulative[-1] - math.log(2))
+        selected = values[order[index]]
+        comparisons.append(torch.equal(selected, exact(values, mass)))
+        return selected
+
+    after = fit_affine(z, weights, **inputs())
+    monkeypatch.setattr(calibration, "_weighted_median", old_median)
+    before = fit_affine(z, weights, **inputs())
+    assert len(comparisons) == 3 and all(comparisons)
+    for field in ("slope", "intercept", "input_offset", "input_scale"):
+        assert getattr(after, field).hex() == getattr(before, field).hex()

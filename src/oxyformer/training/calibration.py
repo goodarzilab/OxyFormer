@@ -6,6 +6,13 @@ transfer statistics are diagnostics only and never update the calibration.
 Alignment, ownership, finiteness and nonnegative weights cover every original
 row. Weighted arithmetic uses only raw positive-weight rows, without replacing
 excluded observations by placeholders. Public logits/ratios remain unweighted.
+
+Coordinate medians use exact binary64 masses and the lower-median rule: the
+first sorted element whose cumulative mass is at least half the total, with
+an exact comparison. The returned value is that element, without averaging.
+Common scaling that preserves the mass ratios preserves this selection;
+rounding the input weights to binary64 can itself change those ratios. At an
+exact tie, a non-exact common rescale can move the selection by one index.
 """
 from dataclasses import dataclass, replace
 import math
@@ -149,11 +156,31 @@ def _pair_metrics(z, y, w):
 
 
 def _weighted_median(values, mass):
-    """Choose an observed coordinate without averaging away small contrasts."""
-    order = values.argsort()
-    cumulative = torch.logcumsumexp(_log_weights(mass)[order], 0)
-    index = torch.searchsorted(cumulative, cumulative[-1] - math.log(2))
-    return values[order[index]]
+    """Return the lower median of validated, positive raw masses exactly."""
+    order = values.argsort(stable=True).detach().cpu()
+    mass = mass.detach().cpu()
+
+    def integer_mass(weight):
+        # Every binary64 mass is an integer multiple of 2**-1074. Keep a
+        # single exact unit even when normal and subnormal masses coexist.
+        numerator, denominator = weight.as_integer_ratio()
+        return numerator << (1075 - denominator.bit_length())
+
+    # Bound Python-object storage independently of the number of observations.
+    # Retaining an expanded integer for every mass can cost hundreds of bytes
+    # per row when one subnormal mass shares support with ordinary masses.
+    chunk_size = 4096
+    total = 0
+    for start in range(0, mass.numel(), chunk_size):
+        total += sum(integer_mass(weight)
+                     for weight in mass[start:start + chunk_size].tolist())
+    cumulative = 0
+    for start in range(0, order.numel(), chunk_size):
+        indices = order[start:start + chunk_size]
+        for index, weight in zip(indices.tolist(), mass[indices].tolist()):
+            cumulative += integer_mass(weight)
+            if 2 * cumulative >= total:
+                return values[index]
 
 
 def _comparison_loss(coordinates, z, labels, mass):
