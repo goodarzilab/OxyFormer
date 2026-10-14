@@ -614,7 +614,7 @@ def test_chained_profile_uses_cumulative_max_and_full_overhead(tmp_path, case):
         {"dependency": "profile", "path": "result.json"}, result["scenario"], task["parameters"]["recipe"], STAMPS)
     assert profile["seconds_per_repetition"] == 100.
     if case == "unequal_cumulative_compute":
-        assert campaign.slice_count(profile, 1, 100., 1.) == 2
+        assert campaign.slice_count(profile, 1, 390., 1.) == 2
     else:
         assert profile["leaf_overheads"] == {"setup_seconds": 10., "import_seconds": 2.,
                                             "export_seconds": 2., "publication_seconds": 1.}
@@ -908,7 +908,7 @@ def test_month1_estimate_refuses_completed_nonterminal_profile_slot(screening_re
 @pytest.mark.parametrize('screening_rates', [(10000.,) * 4], indirect=True)
 def test_month1_estimate_refuses_shortened_wall_that_reduces_maximal_count(screening_request):
     estimate = campaign_estimate.estimate_budget(screening_request)
-    assert all(r == {'repetitions': 25, 'leaves': 36, 'gpu_hours': 144.}
+    assert all(r == {'repetitions': 25, 'leaves': 37, 'gpu_hours': 148.}
                for r in estimate['per_scenario'].values())
     req = update_task(screening_request, lambda p: p.update(wall_seconds=3600))
     result = campaign_estimate.run_stage(req)
@@ -961,8 +961,8 @@ def test_month1_shorter_wall_preserves_owner_maximal_count(screening_request, tm
     req = update_task(screening_request, lambda p: p.update(wall_seconds=3600))
     lock_req = screening_lock_request(req, tmp_path)
     report = coverage.read_json(Path(req.output_dir) / 'budget_estimate.json')
-    assert report['gpu_hours'] == 8.
-    assert all(row == {'repetitions': 25, 'leaves': 2, 'gpu_hours': 2.}
+    assert report['gpu_hours'] == pytest.approx(8. * 3900 / 3600)
+    assert all(row == {'repetitions': 25, 'leaves': 2, 'gpu_hours': 2. * 3900 / 3600}
                for row in report['per_scenario'].values())
     locked = campaign.run_stage(lock_req)
     assert locked.status == 'pass', locked.message

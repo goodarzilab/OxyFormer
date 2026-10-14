@@ -506,8 +506,12 @@ def estimate_repetition(endpoint, recipe, root, deadline, *, study=None, continu
                 require(set(part.fold_ids) == {fold} and set(part.seed_ids) == {neural_seed},
                         "reordered prediction parts")
                 continue
+            # Include configuration/identity/predecessor preparation in the
+            # interval up to the nested controller's first cooperative check.
+            timing.boundary("nuisance")
             remaining = min(14400., deadline - time.monotonic())
             if remaining <= timing.margin_seconds:
+                timing.finish_unit()
                 return None
             predecessor = None if continuation is None else continuation.get("predecessor")
             config = endpoint.configuration(fold, root / f"fold-{fold}-seed-{neural_seed}",

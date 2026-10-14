@@ -337,7 +337,7 @@ def test_complete_controller_counts_fifteen_fits_as_one_repetition(tmp_path, mon
     monkeypatch.setattr(coverage.nested_cv, "predict", fake_predict)
     from oxyformer.training.fit import RecipeStudy
     result = coverage.estimate_repetition(prepared, smoke_recipe(endpoint, frame), tmp_path,
-        coverage.time.monotonic() + 60, study=RecipeStudy(seed_count=seed_count))
+        coverage.time.monotonic() + 1200, study=RecipeStudy(seed_count=seed_count))
     assert calls == [(fold, seed) for fold in range(5) for seed in coverage.nested_cv.SEEDS[:seed_count]]
     assert prepared.outer.seed_ids == coverage.nested_cv.SEEDS
     assert set(result) == set(coverage.METHODS)
@@ -961,7 +961,7 @@ def test_generic_step_zero_preserves_archive_free_legacy_path(tmp_path, monkeypa
 def test_chain_deadline_charges_phase_overruns_once(tmp_path, monkeypatch, setup, imported, expected):
     from test_campaign import STAMPS
     task, inputs = chain_fixture(tmp_path)
-    task['parameters'].update(wall_seconds=600, leaf_budget=coverage.leaf_budget(600, 1.2,
+    task['parameters'].update(wall_seconds=840, leaf_budget=coverage.leaf_budget(840, 1.2,
         {'setup_seconds': 20., 'import_seconds': 30., 'export_seconds': 40., 'publication_seconds': 10.}))
     clock = [0.]
     monkeypatch.setattr(coverage.time, 'monotonic', lambda: clock[0])
@@ -1006,7 +1006,7 @@ def test_chain_deadline_charges_phase_overruns_once(tmp_path, monkeypatch, setup
     assert calls == [expected]
     leaf = coverage.read_json(Path(req.output_dir) / 'timing.json')['leaves'][-1]
     assert leaf['compute_seconds'] == expected - 1.
-    assert leaf['wall_seconds'] == setup + imported + expected - 1. + 50. <= 600.
+    assert leaf['wall_seconds'] == setup + imported + expected - 1. + 50. <= 840.
     assert leaf['compute_capacity_seconds'] == expected
 
 
@@ -1072,14 +1072,14 @@ def test_worker_and_runner_share_reserved_wall_limit(tmp_path, monkeypatch, chai
     terminal = finalize_coverage_budget(req, replace(worker, status='pass'), 0.)
     assert terminal.status == expected, terminal.message
     assert worker.status == expected, worker.message
-    assert deadlines == [540. if chained else 570.]
+    assert deadlines == [300. if chained else 570.]
 
 
 @pytest.mark.parametrize('explicit_null', [False, True])
 def test_bootstrap_null_budget_execution_and_chain_routing(tmp_path, monkeypatch, explicit_null):
     from test_campaign import STAMPS
     task, inputs = chain_fixture(tmp_path)
-    task['parameters']['wall_seconds'] = 600
+    task['parameters']['wall_seconds'] = 840
     if explicit_null:
         task['parameters']['leaf_budget'] = None
     clock = [0.]
