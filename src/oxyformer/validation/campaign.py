@@ -134,7 +134,12 @@ def load_lock(request, config, task):
         require(measured["record_hash"] == profile["budget_record_hash"]
             and measured["complete"] and measured["all_successful"], "locked profile budget drift")
     current = fingerprint()
-    require(all(lock[k] == v for k, v in current.items()), "scientific code/environment recipe drift")
+    # A screening collector only verifies receipts and aggregates terminal
+    # records. It runs on CPU; fitting leaves still require the exact measured
+    # accelerator environment. Profile receipt hashes remain checked above.
+    screening_collector = request.stage == "campaign-collect" and bool(screening_metadata(lock["recipe"]))
+    require(all(lock[k] == v for k, v in current.items()
+                if not screening_collector or k == "scientific_fingerprint"), "scientific code/environment recipe drift")
     validate_recipe(lock["recipe"])
     if screening_metadata(lock["recipe"]):
         decision = validate_screening(lock["recipe"], config.get("approvals"))
@@ -242,11 +247,11 @@ def _profile(request, config, reference, scenario, recipe, stamps):
             "budget_record_hash": record["record_hash"], "source_unit": reference["dependency"], "draws": declared}
 
 
-def slice_count(profile, repetitions, seconds, factor):
+def slice_count(profile, repetitions, seconds, factor, *, enforce_limit=True):
     """Conservative compute capacity after paying every leaf's measured costs."""
     capacity = leaf_budget(seconds, factor, profile["leaf_overheads"])["compute_seconds"]
     count = max(1, math.ceil(profile["seconds_per_repetition"] * repetitions / capacity))
-    require(count <= 40, "infeasible batch budget: campaign instance exceeds forty leaves")
+    require(not enforce_limit or count <= 40, "infeasible batch budget: campaign instance exceeds forty leaves")
     return count
 
 
@@ -291,8 +296,7 @@ def screening_estimate(request, config, parameters):
         # below to construct the lock: there is no second cost approximation.
         count = 0
         for candidate in range(decision["month1_sizing"]["repetitions_per_scenario_max"], 0, -1):
-            capacity = leaf_budget(wall, factor, profile["leaf_overheads"])["compute_seconds"]
-            if math.ceil(profile["seconds_per_repetition"] * candidate / capacity) <= 40:
+            if slice_count(profile, candidate, wall, factor, enforce_limit=False) <= 40:
                 count = candidate
                 break
         require(count > 0, "one screening repetition cannot fit forty leaves: " + name)
@@ -311,7 +315,7 @@ def screening_estimate(request, config, parameters):
         "profile_safety_factor": factor, "gpu_concurrency_max": decision["gpu_concurrency_max"],
         "budget_h100_hours": decision["budget_h100_hours"],
         "limitations": ["Planning estimate only; report per-scenario counts to owner before separate campaign-lock.",
-            "GPU hours reserve whole leaves; profiles, collectors and reruns are separate accounting.",
+            "GPU hours reserve whole leaves; collectors use CPU; profiles and reruns are separate accounting.",
             "Lock measures its expanded setup and refuses if measured overhead exceeds the profile allowance."]}
 
 
@@ -355,7 +359,7 @@ def build_screening_lock(request, config, task):
         "leaves_per_instance_max": 40, "per_scenario": estimate["per_scenario"],
         "profile_safety_factor": p["profile_safety_factor"], "profiles": profiles,
         "concurrency_limits": {"gpu": 4, "cpu": 6}, "run_gpu_hours_ceiling": 3600,
-        "collector_gpu_hours": 4 * 600 / 3600,
+        "collector_gpu_hours": 0,
         "cpu_wall_hours_ceiling": (estimate["projected_leaf_count"] * math.ceil(p["wall_seconds"] / 60) + 40) / 60}
     require(budget["gpu_hours"] + budget["collector_gpu_hours"] <= 3600, "screening allocation exceeded")
     require(finite(p["cpu_wall_hours_budget"], "CPU hours budget") >= budget["cpu_wall_hours_ceiling"],
@@ -385,7 +389,7 @@ def build_screening_lock(request, config, task):
         spec = {"schema_version": 1, "id": lock["instances"][batch["scenario"]["name"]],
             "kind": "screening", **metadata, "partition": "standard", "gpu_concurrency_max": 4,
             "prerequisites": [], "inputs": inputs, "recipe_lock": lock_ref, "work": [work],
-            "collector": {"stage": "campaign-collect", "outputs": COLLECT_OUTPUTS, "wall_seconds": 600, "gpus": 1}}
+            "collector": {"stage": "campaign-collect", "outputs": COLLECT_OUTPUTS, "wall_seconds": 600, "gpus": 0}}
         plans.append(expand_campaign(spec, config["approvals"]))
     measurements = _admit_locked_leaves(request, config, lock, plans)
     return lock, plans, {**budget, **metadata, "lock_hash": digest(lock), "estimate_hash": lock["estimate_hash"],

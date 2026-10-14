@@ -662,7 +662,12 @@ def test_month1_decision_refuses_malformed_sizing(field, value):
 
 
 @pytest.fixture
-def screening_request(tmp_path, monkeypatch):
+def screening_rates(request):
+    return getattr(request, 'param', (100., 15000., 50000., 200000.))
+
+
+@pytest.fixture
+def screening_request(tmp_path, monkeypatch, screening_rates):
     import torch
     monkeypatch.setattr(campaign, 'fingerprint', lambda: deepcopy(STAMPS))
     monkeypatch.setattr(campaign, 'resolve_device', lambda: torch.device('cuda:0'))
@@ -672,7 +677,7 @@ def screening_request(tmp_path, monkeypatch):
     deps = {'real-frame-inputs': tmp_path / 'inputs'}
     write(deps['real-frame-inputs'] / 'endpoint.json', endpoint.to_dict())
     write(deps['real-frame-inputs'] / 'frame.json', frame.to_dict())
-    for index, rate in zip((39, 79, 119, 159), (100., 15000., 50000., 200000.)):
+    for index, rate in zip((39, 79, 119, 159), screening_rates):
         task = tasks[index]
         p = task['parameters']
         _, records = successful_records(1)
@@ -742,12 +747,15 @@ def test_month1_lock_matches_estimate_instances_and_global_concurrency(screening
     assert lock['budget']['per_scenario'] == estimate['per_scenario']
     # Each instance is a single path including its collector: four disjoint
     # paths imply at most four simultaneous GPUs under any topological schedule.
-    for name, plan in zip(estimate['per_scenario'], plans):
+    for plan in plans:
+        name = plan['spec']['work'][0]['parameters']['scenario']['name']
         assert len(plan['expected_leaves']) == estimate['per_scenario'][name]['leaves']
         assert len(plan['spec']['work']) == 1
         assert all(t['parameters']['mode'] == 'screening' for t in plan['tasks'][:-1])
         assert all(u['gpu_hours'] <= 4 and '--partition=standard' in u['sbatch'] and '--gpus=1' in u['sbatch']
-                   and 'export OXYFORMER_DEVICE=cuda' in u['command'] for u in plan['units'])
+                   and 'export OXYFORMER_DEVICE=cuda' in u['command'] for u in plan['units'][:-1])
+        assert plan['units'][-1]['gpu_hours'] == 0
+        assert 'export OXYFORMER_DEVICE=cuda' not in plan['units'][-1]['command']
         for previous, following in zip(plan['units'], plan['units'][1:]):
             assert previous['id'] in following['needs']
     for name in ('recipe_lock.json', 'expanded_units.json', 'task_manifest.json', 'budget.json', 'gate.json', 'artifact_manifest.json'):
@@ -788,3 +796,74 @@ def test_month1_lock_requires_unchanged_prior_estimate(screening_request, tmp_pa
     result = campaign.run_stage(req)
     assert result.status == 'blocked' and not result.artifacts
     assert not list(Path(req.output_dir).iterdir())
+
+
+def test_month1_bound_cell_executes_and_cpu_collector_scopes_one_scenario(screening_request, tmp_path, monkeypatch):
+    from test_coverage import chain_request
+    from oxyformer.training.fit import RecipeStudy
+    req = screening_lock_request(screening_request, tmp_path)
+    result = campaign.run_stage(req)
+    assert result.status == 'pass', result.message
+    root = Path(req.output_dir)
+    lock = coverage.read_json(root / 'recipe_lock.json')
+    plans = coverage.read_json(root / 'expanded_units.json')['plans']
+    plan = next(p for p in plans if p['spec']['work'][0]['parameters']['scenario']['name'] == 'null_effect')
+    assert len(plan['expected_leaves']) == 1
+    config = coverage.read_json(req.config_path)
+    deps = {k: Path(v) for k, v in config['dependencies'].items()}
+    deps['campaign-lock'] = root
+    calls = []
+    def execute(draw, frame, scenario, template, recipe, destination, deadline, *, continuation, study):
+        assert study == RecipeStudy(**campaign.SCREENING_CELL)
+        assert recipe['study'] == campaign.SCREENING_CELL
+        calls.append(draw)
+        _, records = successful_records(1)
+        return {**records[0], 'draw': draw, 'wall_seconds': .001}
+    monkeypatch.setattr(coverage, 'execute_draw', execute)
+    leaf = plan['tasks'][0]
+    leaf_req = chain_request(tmp_path / 'month1-leaf', leaf, deps)
+    cfg = coverage.read_json(leaf_req.config_path)
+    cfg['approvals'] = config['approvals']
+    write(Path(leaf_req.config_path), cfg)
+    leaf_req = replace(leaf_req, config_hash=file_hash(leaf_req.config_path))
+    result = run_coverage(leaf_req)
+    assert result.status == 'pass', result.message
+    assert calls == lock['batches'][0]['draws']
+    value = coverage.read_json(Path(leaf_req.output_dir) / 'result.json')
+    assert not value['certifies_release_criteria'] and not value['summary']['production_equivalent']
+    deps[leaf['id']] = Path(leaf_req.output_dir)
+    collector = request(tmp_path / 'month1-collector', plan['tasks'][-1], deps, config['approvals'])
+    # CPU collection has a different hardware environment, but verifies the
+    # unchanged scientific fingerprint and bound profile receipt identities.
+    monkeypatch.setattr(campaign, 'fingerprint', lambda: {**deepcopy(STAMPS), 'environment_hash': 'd' * 64})
+    collected = campaign.run_stage(collector)
+    assert collected.status == 'pass', collected.message
+    gate = coverage.read_json(Path(collector.output_dir) / 'gate.json')
+    assert set(gate['scenario_summaries']) == {'null_effect'}
+    assert not gate['certifies_production_coverage'] and not gate['certifies_release_criteria']
+    assert gate['scenario_summaries']['null_effect']['declared_repetitions'] == 25
+
+
+def test_month1_profile_binds_study_and_refuses_wrong_cell_before_fitting(tmp_path, monkeypatch):
+    from test_coverage import chain_request
+    endpoint, frame = smoke_inputs.build_inputs()
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    task = real_frame.screening_profile_tasks(endpoint, frame, approvals)['tasks'][0]
+    task['parameters'].pop('device')  # CPU synthetic preflight, no fit is allowed.
+    task['parameters']['study']['seed_count'] = 3
+    deps = {'real-frame-inputs': tmp_path / 'inputs'}
+    write(deps['real-frame-inputs'] / 'endpoint.json', endpoint.to_dict())
+    write(deps['real-frame-inputs'] / 'frame.json', frame.to_dict())
+    req = request(tmp_path / 'wrong-study', task, deps, approvals)
+    monkeypatch.setattr(coverage, 'execute_draw', lambda *a, **k: pytest.fail('wrong study was fitted'))
+    result = run_coverage(req)
+    assert result.status == 'blocked' and 'study' in result.message
+
+
+@pytest.mark.parametrize('screening_rates', [(100., 15000., 50000., 300000.)], indirect=True)
+def test_month1_refuses_when_one_complete_profile_cannot_fit_one_evaluation_repetition(screening_request):
+    # A 300,000 s bootstrap measurement fits forty unsafetied profile slots,
+    # but one evaluation repetition cannot fit the declared 2x safety factor.
+    result = campaign_estimate.run_stage(screening_request)
+    assert result.status == 'blocked' and 'one screening repetition' in result.message
+    assert not result.artifacts and not list(Path(screening_request.output_dir).iterdir())

@@ -579,9 +579,9 @@ profile allowance is refused and requires new measurements.
 
 The resulting four campaign specs each contain one sequential continuation
 chain and its collector. Their combined dependency graph holds at most four
-GPUs, including collectors. Leaf reservations sum to at most 640 GPU-hours;
-collectors are accounted separately (four ten-minute single-GPU reservations)
-and checked with leaves against the 3,600-hour ceiling. Profiles and retries
+GPUs. Collectors use CPU and verify the locked scientific code and sealed
+profile receipts; they do not fit or require the accelerator environment. Leaf
+reservations sum to at most 640 GPU-hours, checked against the 3,600-hour ceiling. Profiles and retries
 remain separately accounted work. All task resources and expanded Slurm units
 use `standard` / `root`; preemptible and all other partitions are refused.
 Screening publications carry the recorded final-cell deferral and certify no

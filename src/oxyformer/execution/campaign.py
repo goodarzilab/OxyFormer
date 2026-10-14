@@ -130,6 +130,8 @@ def _spec_check(spec, approvals):
     collector = spec['collector']
     concrete_id(collector['stage'])
     outputs_valid(collector['outputs'])
+    if spec.get('campaign_mode') == 'screening':
+        require(collector.get('gpus') == 0, 'screening collection requires CPU only')
     resources(collector.get('gpus', 0), collector['wall_seconds'])
     if spec['kind'] in {'final-coverage', 'anchor', 'refit-audit'}:
         allocation = approvals.get('owner_decisions', {}).get('campaign_allocations', {}).get(spec['id'])
@@ -156,7 +158,7 @@ def _unit(spec, task, prerequisites, gpus, seconds, role):
         'outputs': ['code_commit.txt', 'run.log', '_execution/result.json', *task['outputs']],
         'inputs': [PYTHON], 'sbatch': flags, 'gpu_hours': hours,
         'pool': 'gpu' if gpus else 'cpu', 'write_scopes': [task['id'] + '/**'],
-        'command': stage_command(task, cuda=spec.get('campaign_mode') == 'screening'), 'max_attempts': 1}
+        'command': stage_command(task, cuda=spec.get('campaign_mode') == 'screening' and gpus > 0), 'max_attempts': 1}
 
 
 def _build(spec):
