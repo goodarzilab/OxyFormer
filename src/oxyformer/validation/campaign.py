@@ -30,8 +30,69 @@ LEAF_OUTPUTS = [BUDGET_RECORD, "result.json", "timing.json", "artifact_manifest.
 COLLECT_OUTPUTS = ["result.json", "gate.json", "artifact_manifest.json"]
 
 
+SCREENING_LABEL = "screening; final 1,000-repetition cells deferred (owner decision 2026-10-12)"
+SCREENING_CELL = {"reference_cap": 32, "frozen_epochs": 30, "grid_points": 2, "seed_count": 1}
+OWNER_APPROVALS = REPOSITORY / "configs/approvals.yaml"
+_REPOSITORY_APPROVALS = object()
+
+
+def screening_decision(approvals=_REPOSITORY_APPROVALS):
+    """Read, never amend, the owner decision. Absence is not an opt-in."""
+    if approvals is _REPOSITORY_APPROVALS:
+        approvals = yaml.safe_load(OWNER_APPROVALS.read_text())
+    require(type(approvals) is dict, "missing screening campaign approval")
+    owner = approvals.get("owner_decisions")
+    require(type(owner) is dict, "missing screening campaign approval")
+    decision = owner.get("screening_campaign")
+    expected = {"scenarios", "repetitions_per_scenario", "recipe", "budget_h100_hours",
+                "final_cells", "gpu_concurrency_max", "gpu_concurrency_exempt_partitions", "month1_sizing"}
+    require(type(decision) is dict and set(decision) == expected, "missing or malformed screening campaign approval")
+    require(decision["scenarios"] == [s["name"] for s in _registry()["scenarios"]],
+            "screening approval must name the four registered scenarios")
+    for name, value in (("repetitions_per_scenario", 25), ("budget_h100_hours", 3600), ("gpu_concurrency_max", 4)):
+        require(type(decision[name]) is int and decision[name] == value, "malformed screening approval: " + name)
+    require(type(decision["recipe"]) is dict and decision["recipe"] == SCREENING_CELL
+            and all(type(v) is int for v in decision["recipe"].values()), "malformed screening study cell")
+    require(decision["gpu_concurrency_exempt_partitions"] == ["preemptible"], "malformed screening partition exemption")
+    require(decision["final_cells"] == "the 1,000-repetition final cells (minimum_final_repetitions) are deferred to month 2 with a separate allocation; this screening campaign certifies no release criterion",
+            "malformed screening final-cell deferral")
+    sizing = decision["month1_sizing"]
+    expected_sizing = {
+        "leaf_bound_scope": "per_scenario", "leaves_per_scenario_max": 40,
+        "gpu_hours_per_leaf_max": 4, "repetitions_per_scenario_max": 25,
+        "sizing_rule": "repetitions per scenario = the largest count, at most 25, whose measured cost fits 40 leaves of at most 4 GPU-hours per scenario; the count is fixed from the measured screening-cell profiles and reported to the owner before campaign-lock admits any leaf",
+        "continuation": "a repetition may span several leaves through a coverage-owned continuation; every leaf stays at or under 4 GPU-hours",
+        "deferred": "more repetitions, any further change to the leaf bounds, and use of the preemptible partition are separate owner decisions taken with measured numbers",
+    }
+    require(type(sizing) is dict and sizing == expected_sizing
+            and all(type(sizing[k]) is type(v) for k, v in expected_sizing.items()),
+            "missing or malformed screening month1_sizing")
+    return deepcopy(decision)
+
+
+def screening_metadata(recipe):
+    if recipe.get("campaign_mode") != "screening":
+        return {}
+    return {"campaign_mode": "screening", "study": deepcopy(recipe["study"]),
+            "campaign_label": SCREENING_LABEL, "certifies_release_criteria": False,
+            "final_cells": screening_decision()["final_cells"]}
+
+
+def validate_screening(recipe, approvals):
+    decision = screening_decision(approvals)
+    require(decision == screening_decision(), "dispatched screening approval differs from repository")
+    require(recipe.get("study") == decision["recipe"], "screening study differs from approval")
+    return decision
+
+
 def validate_recipe(recipe, *, production=True):
-    require(set(recipe) == {"endpoint_hash", "frame_hash", "nested_cv", "inference"}, "unknown recipe fields")
+    screening = recipe.get("campaign_mode") == "screening"
+    extra = {"campaign_mode", "study"} if screening else set()
+    require(set(recipe) == {"endpoint_hash", "frame_hash", "nested_cv", "inference"} | extra, "unknown recipe fields")
+    if screening:
+        require(production, "screening study cannot be a smoke recipe")
+        require(recipe["study"] == screening_decision()["recipe"], "screening study differs from approval")
+        require(all(type(v) is int for v in recipe["study"].values()), "malformed screening study cell")
     from oxyformer.provenance import check_hash
     check_hash(recipe["endpoint_hash"])
     check_hash(recipe["frame_hash"])
@@ -56,7 +117,6 @@ def validate_recipe(recipe, *, production=True):
         lat, lon = (finite(v, "coordinate") for v in location)
         require(-90 <= lat <= 90 and -180 <= lon <= 180, "coordinate outside degree bounds")
 
-
 def fingerprint():
     return {"scientific_fingerprint": identity.scientific_fingerprint(REPOSITORY),
             "environment_hash": digest([identity.environment_record(), fit_environment()])}
@@ -76,6 +136,11 @@ def load_lock(request, config, task):
     current = fingerprint()
     require(all(lock[k] == v for k, v in current.items()), "scientific code/environment recipe drift")
     validate_recipe(lock["recipe"])
+    if screening_metadata(lock["recipe"]):
+        decision = validate_screening(lock["recipe"], config.get("approvals"))
+        require(set(lock["instances"]) == set(decision["scenarios"])
+                and all(b["mode"] == "screening" for b in lock["batches"]),
+                "screening study cannot authorize final cells")
     require(lock["nested_cv"] == lock["recipe"]["nested_cv"], "production nested recipe drift")
     draws = [draw for batch in lock["batches"] for draw in batch["draws"]]
     validate_draws(draws)
@@ -113,8 +178,16 @@ def registered_scenarios(endpoint, frame):
 
 def _profile(request, config, reference, scenario, recipe, stamps):
     record = load_budget(request, config, reference["dependency"])
-    require(record["complete"] and record["all_successful"] and record["profile"]["production_equivalent"] is True,
+    screening = bool(screening_metadata(recipe))
+    require(record["complete"] and record["all_successful"]
+            and (screening or record["profile"]["production_equivalent"] is True),
             "complete production profiling required")
+    if screening:
+        producer = read_json(dependency(request, config,
+            {"dependency": reference["dependency"], "path": "_execution/task.json"}))
+        require(record["chained"] and producer["parameters"].get("study") == recipe["study"]
+                and record["profile"]["production_equivalent"] is False,
+                "screening requires measured study continuation profiles")
     result_path = dependency(request, config, reference)
     require(file_hash(result_path) == record["payload_hash"], "profile scientific payload hash mismatch")
     result = read_json(result_path)
@@ -175,6 +248,148 @@ def slice_count(profile, repetitions, seconds, factor):
     count = max(1, math.ceil(profile["seconds_per_repetition"] * repetitions / capacity))
     require(count <= 40, "infeasible batch budget: campaign instance exceeds forty leaves")
     return count
+
+
+def instance_batches(lock, instance):
+    if screening_metadata(lock["recipe"]):
+        return [b for b in lock["batches"] if b["scenario"]["name"] == instance]
+    return [b for b in lock["batches"] if b["mode"] == instance]
+
+
+def screening_estimate(request, config, parameters):
+    """Same measured capacity and whole-minute reservations used by the lock."""
+    recipe = parameters["recipe"]
+    validate_recipe(recipe)
+    decision = validate_screening(recipe, config.get("approvals"))
+    require(parameters.get("partition") == "standard", "screening partition must be standard")
+    require(type(parameters["gpus"]) is int and parameters["gpus"] == 1,
+            "screening requires single-GPU leaves")
+    require(resolve_device().type == "cuda", "screening measurement requires CUDA")
+    require(integer(parameters["cpus_per_task"], "CPUs", 1) == 8, "screening requires eight CPUs")
+    wall = integer(parameters["wall_seconds"], "leaf wall seconds", 1)
+    require(math.ceil(wall / 60) * 60 <= 14400, "leaf exceeds four GPU-hours")
+    factor = finite(parameters["profile_safety_factor"], "profile safety factor")
+    require(factor >= 1, "profiling safety factor must be at least one")
+    require(not {"screening_repetitions", "final_repetitions", "repetitions_per_leaf"}.intersection(parameters),
+            "screening counts come only from measured month1 sizing")
+    records = []
+    for key, cls, expected in (("endpoint_input", PreparedEndpoint, recipe["endpoint_hash"]),
+                                ("frame_input", CovariateFrame, recipe["frame_hash"])):
+        record = cls.from_json(dependency(request, config, parameters[key]).read_text())
+        require(record.content_hash == expected, "screening endpoint/frame hash mismatch")
+        records.append(record)
+    scenarios = registered_scenarios(*records)
+    require([s["name"] for s in scenarios] == decision["scenarios"], "screening scenario family drift")
+    require(set(parameters["profiles"]) == set(decision["scenarios"]), "all registered screening profiles required")
+    stamps = fingerprint()
+    profiles = {s["name"]: _profile(request, config, parameters["profiles"][s["name"]], s, recipe, stamps)
+                for s in scenarios}
+    rows = {}
+    for name, profile in profiles.items():
+        require("leaf_overheads" in profile, "screening requires measured chained costs")
+        # Search the bounded set in descending order. slice_count is also used
+        # below to construct the lock: there is no second cost approximation.
+        count = 0
+        for candidate in range(decision["month1_sizing"]["repetitions_per_scenario_max"], 0, -1):
+            capacity = leaf_budget(wall, factor, profile["leaf_overheads"])["compute_seconds"]
+            if math.ceil(profile["seconds_per_repetition"] * candidate / capacity) <= 40:
+                count = candidate
+                break
+        require(count > 0, "one screening repetition cannot fit forty leaves: " + name)
+        leaves = slice_count(profile, count, wall, factor)
+        rows[name] = {"repetitions": count, "leaves": leaves,
+                      "gpu_hours": leaves * math.ceil(wall / 60) / 60}
+    total = math.fsum(row["gpu_hours"] for row in rows.values())
+    require(total <= 640 and total <= decision["budget_h100_hours"], "screening exceeds owner GPU-hour ceiling")
+    return {"schema_version": 1, **screening_metadata(recipe), "estimate_only": True,
+        "admitted": False, "submission_performed": False, "certifies_production_coverage": False,
+        "recipe": deepcopy(recipe), "recipe_hash": digest(recipe), "owner_decision": decision,
+        "owner_decision_hash": digest(decision), "scenario_family": scenarios, **stamps,
+        "profiles": profiles, "per_scenario": rows, "total_repetitions": sum(r["repetitions"] for r in rows.values()),
+        "projected_leaf_count": sum(r["leaves"] for r in rows.values()), "gpu_hours": total,
+        "partition": "standard", "gpus": 1, "cpus_per_task": 8, "wall_seconds": wall,
+        "profile_safety_factor": factor, "gpu_concurrency_max": decision["gpu_concurrency_max"],
+        "budget_h100_hours": decision["budget_h100_hours"],
+        "limitations": ["Planning estimate only; report per-scenario counts to owner before separate campaign-lock.",
+            "GPU hours reserve whole leaves; profiles, collectors and reruns are separate accounting.",
+            "Lock measures its expanded setup and refuses if measured overhead exceeds the profile allowance."]}
+
+
+def build_screening_lock(request, config, task):
+    p = task["parameters"]
+    estimate = screening_estimate(request, config, p)
+    estimate_path = dependency(request, config, p["estimate_input"])
+    require(read_json(estimate_path) == estimate, "screening estimate changed; report a new estimate before lock")
+    campaign_id = p["campaign_id"]
+    concrete_id(campaign_id)
+    require(len(campaign_id) <= 23, "campaign ID must leave room for scenario suffix")
+    namespace = p["evaluation_namespace"]
+    require(isinstance(namespace, str) and bool(namespace.strip()), "independent evaluation namespace required")
+    require(p["retry_rules"] == RETRY_RULES, "unregistered retry rules")
+    prior_seeds, prior_namespaces = set(), set()
+    for reference in p["prior_locks"]:
+        previous = read_json(dependency(request, config, reference))
+        prior_namespaces.add(previous["evaluation_namespace"])
+        prior_seeds.update(d["seed"] for b in previous["batches"] for d in b["draws"])
+    require(namespace not in prior_namespaces, "evaluation namespace already used")
+    profiles = estimate["profiles"]
+    for profile in profiles.values():
+        prior_seeds.update(d["seed"] for d in profile["draws"])
+    seed_namespace = digest([request.content_hash, namespace, estimate])
+    batches = []
+    metadata = screening_metadata(p["recipe"])
+    for scenario in estimate["scenario_family"]:
+        name = scenario["name"]
+        count = estimate["per_scenario"][name]["repetitions"]
+        profile = profiles[name]
+        slices = slice_count(profile, count, p["wall_seconds"], p["profile_safety_factor"])
+        draws = repetition_plan(seed_namespace + ":screening", name, count)
+        batches.append({"batch_id": digest([campaign_id, namespace, name])[:24], "mode": "screening",
+            "scenario": scenario, "draws": draws, "wall_seconds": p["wall_seconds"], "gpus": 1,
+            "partition": "standard", "slices": slices, **metadata,
+            "leaf_budget": leaf_budget(p["wall_seconds"], p["profile_safety_factor"], profile["leaf_overheads"])})
+    draws = [d for b in batches for d in b["draws"]]
+    validate_draws(draws)
+    require(not prior_seeds.intersection(d["seed"] for d in draws), "evaluation draws overlap prior lock or profiling")
+    budget = {"gpu_hours": estimate["gpu_hours"], "gpu_hours_per_leaf_max": 4,
+        "leaves_per_instance_max": 40, "per_scenario": estimate["per_scenario"],
+        "profile_safety_factor": p["profile_safety_factor"], "profiles": profiles,
+        "concurrency_limits": {"gpu": 4, "cpu": 6}, "run_gpu_hours_ceiling": 3600,
+        "collector_gpu_hours": 4 * 600 / 3600,
+        "cpu_wall_hours_ceiling": (estimate["projected_leaf_count"] * math.ceil(p["wall_seconds"] / 60) + 40) / 60}
+    require(budget["gpu_hours"] + budget["collector_gpu_hours"] <= 3600, "screening allocation exceeded")
+    require(finite(p["cpu_wall_hours_budget"], "CPU hours budget") >= budget["cpu_wall_hours_ceiling"],
+            "infeasible CPU budget")
+    lock = {"schema_version": 1, "campaign_id": campaign_id, **metadata,
+        "recipe": deepcopy(p["recipe"]), "nested_cv": deepcopy(p["recipe"]["nested_cv"]),
+        **{k: estimate[k] for k in ("scientific_fingerprint", "environment_hash", "scenario_family")},
+        "launch_code_identity": request.code_identity, "estimate_hash": file_hash(estimate_path),
+        "estimate_input": deepcopy(p["estimate_input"]), "owner_decision_hash": estimate["owner_decision_hash"],
+        "evaluation_namespace": namespace, "seed_namespace": seed_namespace, "batches": batches, "budget": budget,
+        "retry_rules": deepcopy(RETRY_RULES), "prior_namespaces": sorted(prior_namespaces),
+        "instances": {name: campaign_id + "-s" + str(i) for i, name in enumerate(estimate["per_scenario"])}}
+    lock_ref = {"dependency": task["id"], "path": "recipe_lock.json", "sha256": digest(lock)}
+    inputs = {task["id"]: ["recipe_lock.json", "expanded_units.json"]}
+    for key in ("endpoint_input", "frame_input", "estimate_input"):
+        ref = p[key]
+        inputs.setdefault(ref["dependency"], []).append(ref["path"])
+    for ref in p["profiles"].values():
+        inputs[ref["dependency"]] = ["_execution/task.json", "_execution/request.json", "_execution/result.json",
+                                     BUDGET_RECORD, "result.json"]
+    plans = []
+    for batch in batches:
+        work = {"id": batch["batch_id"], "stage": "coverage",
+            "parameters": {**batch, "endpoint_input": p["endpoint_input"], "frame_input": p["frame_input"]},
+            "outputs": LEAF_OUTPUTS + ["continuation.tar"],
+            "slices": [{"gpus": 1, "wall_seconds": p["wall_seconds"]}] * batch["slices"]}
+        spec = {"schema_version": 1, "id": lock["instances"][batch["scenario"]["name"]],
+            "kind": "screening", **metadata, "partition": "standard", "gpu_concurrency_max": 4,
+            "prerequisites": [], "inputs": inputs, "recipe_lock": lock_ref, "work": [work],
+            "collector": {"stage": "campaign-collect", "outputs": COLLECT_OUTPUTS, "wall_seconds": 600, "gpus": 1}}
+        plans.append(expand_campaign(spec, config["approvals"]))
+    measurements = _admit_locked_leaves(request, config, lock, plans)
+    return lock, plans, {**budget, **metadata, "lock_hash": digest(lock), "estimate_hash": lock["estimate_hash"],
+                         "admission_measurements": measurements}
 
 
 def _admit_locked_leaves(request, config, lock, plans):
@@ -257,6 +472,8 @@ def build_lock(request, config, task):
     prior locks as declared inputs; prior final and profile seeds are excluded.
     """
     parameters = task["parameters"]
+    if screening_metadata(parameters["recipe"]):
+        return build_screening_lock(request, config, task)
     campaign_id = parameters["campaign_id"]
     concrete_id(campaign_id)
     require(len(campaign_id) <= 25, "campaign ID must leave room for instance suffix")
@@ -389,7 +606,7 @@ def _plan_for_task(request, config, task, lock):
     for plan in plans:
         validate_plan(plan, config["approvals"])
         mode = next(k for k, v in lock["instances"].items() if v == plan["spec"]["id"])
-        declared = [b for b in lock["batches"] if b["mode"] == mode]
+        declared = instance_batches(lock, mode)
         work = plan["spec"]["work"]
         require(len(work) == len(declared), "expansion omitted locked batch")
         by_batch = {w["parameters"]["batch_id"]: w for w in work}
@@ -426,7 +643,9 @@ def collect(request, config, task):
     plan = _plan_for_task(request, config, task, lock)
     require(task == plan["tasks"][-1], "collection requires the declared collector")
     require(task["expected_leaves"] == plan["expected_leaves"], "partial collector fan-in")
-    mode = next(k for k, v in lock["instances"].items() if v == task["campaign"])
+    instance = next(k for k, v in lock["instances"].items() if v == task["campaign"])
+    declared_batches = instance_batches(lock, instance)
+    mode = declared_batches[0]["mode"]
     if mode == "final":
         references = [{"dependency": dep, "path": "gate.json"} for dep, paths in plan["spec"]["inputs"].items()
                       if "gate.json" in paths]
@@ -454,15 +673,15 @@ def collect(request, config, task):
         result = {**result, "terminal": budget["complete"]}
         results.append(result)
     records = [r for result in results for r in result["records"]]
-    declarations = [d for b in lock["batches"] if b["mode"] == mode for d in b["draws"]]
+    declarations = [d for b in declared_batches for d in b["draws"]]
     validate_draws(declarations)
     require(len({r["draw"]["repetition_id"] for r in records}) == len(records), "duplicate collected repetition")
     summaries = {}
-    for scenario in lock["scenario_family"]:
+    for scenario in [s for s in lock["scenario_family"] if any(b["scenario"] == s for b in declared_batches)]:
         name = scenario["name"]
         selected = [r for r in records if r["draw"]["scenario"] == name]
-        declared = [d for b in lock["batches"] if b["mode"] == mode and b["scenario"]["name"] == name for d in b["draws"]]
-        summaries[name] = summarize(selected, declared, production_equivalent=True, null_scenario=scenario["effect"] == "null")
+        declared = [d for b in declared_batches if b["scenario"]["name"] == name for d in b["draws"]]
+        summaries[name] = summarize(selected, declared, production_equivalent=not bool(screening_metadata(lock["recipe"])), null_scenario=scenario["effect"] == "null")
     if mode == "final":
         passing = all(s["coverage_pass"] for s in summaries.values())
     else:
@@ -473,7 +692,9 @@ def collect(request, config, task):
             "scenario_summaries": summaries, "retry_rules": lock["retry_rules"],
             "incomplete_chains": [r["batch_id"] for r in results if not r.get("terminal", True)],
             "leaf_runtimes": runtimes, "budget_overruns": [r for r in runtimes if r["overrun_seconds"] > 0]}
-    return {"result.json": {"records": records, "gate": gate}, "gate.json": gate}, passing
+    metadata = screening_metadata(lock["recipe"])
+    gate.update(metadata)
+    return {"result.json": {"records": records, "gate": gate, **metadata}, "gate.json": gate}, passing
 
 
 def run_stage(request: StageRequest) -> StageResult:
@@ -490,6 +711,8 @@ def run_stage(request: StageRequest) -> StageResult:
                 "budget.json": budget, "gate.json": {"pass": True, "admitted": True,
                     "lock_hash": digest(lock), "submission_performed": False, "screening_complete": False,
                     "certifies_production_coverage": False}}
+            metadata = screening_metadata(lock["recipe"])
+            values = {name: {**value, **metadata} for name, value in values.items()}
             return publish(request, values, status="pass", message="Recipe locked prospectively; no jobs submitted")
         require(request.stage == "campaign-collect", "unknown campaign stage")
         values, passing = collect(request, config, task)

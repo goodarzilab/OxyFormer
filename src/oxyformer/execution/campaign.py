@@ -59,13 +59,14 @@ def resources(gpus, seconds):
     return flags, gpu_hours
 
 
-def stage_command(task):
+def stage_command(task, *, cuda=False):
     """All executable shell is fixed; task bytes and identifiers are shell quoted."""
     concrete_id(task['id'])
     concrete_id(task['stage'])
     encoded = shlex.quote(canonical_json(task))
     return '\n'.join([
         'set -euo pipefail',
+        *(['export OXYFORMER_DEVICE=cuda'] if cuda else []),
         ': "${SWARM_UNIT_DIR:?}"',
         'export GIT_NO_REPLACE_OBJECTS=1',
         f'git clone --depth 1 --branch dev {REMOTE} "$SWARM_UNIT_DIR/src"',
@@ -104,6 +105,18 @@ def _spec_check(spec, approvals):
         require(isinstance(paths, list) and paths and len(set(paths)) == len(paths), 'invalid input files')
         for path in paths:
             relative_artifact_path(path)
+    if spec.get('campaign_mode') == 'screening':
+        from oxyformer.validation.campaign import screening_decision, screening_metadata
+        decision = screening_decision(approvals)
+        require(decision == screening_decision(), 'screening approval drift')
+        metadata = screening_metadata({'campaign_mode': 'screening', 'study': decision['recipe']})
+        require(all(spec.get(k) == v for k, v in metadata.items()), 'screening specification drift')
+        require(spec['kind'] == 'screening' and len(spec['work']) == 1,
+                'one sequential screening chain per scenario required')
+        require(spec.get('partition') == 'standard', 'screening partition must be standard')
+        require(spec.get('gpu_concurrency_max') == decision['gpu_concurrency_max'], 'screening concurrency drift')
+        require(all(s['gpus'] == 1 and s.get('partition', 'standard') == 'standard'
+                    for w in spec['work'] for s in w['slices']), 'screening requires standard single-GPU leaves')
     count = sum(len(w['slices']) for w in spec['work'])
     require(0 < count <= 40, 'campaign exceeds forty leaves')
     total_gpu_seconds = 0
@@ -117,7 +130,7 @@ def _spec_check(spec, approvals):
     collector = spec['collector']
     concrete_id(collector['stage'])
     outputs_valid(collector['outputs'])
-    resources(0, collector['wall_seconds'])
+    resources(collector.get('gpus', 0), collector['wall_seconds'])
     if spec['kind'] in {'final-coverage', 'anchor', 'refit-audit'}:
         allocation = approvals.get('owner_decisions', {}).get('campaign_allocations', {}).get(spec['id'])
         require(isinstance(allocation, dict) and allocation.get('kind') == spec['kind'],
@@ -136,12 +149,14 @@ def _id(spec, slot):
 
 def _unit(spec, task, prerequisites, gpus, seconds, role):
     flags, hours = resources(gpus, seconds)
+    if spec.get('campaign_mode') == 'screening':
+        flags[flags.index('--cpus-per-task=4')] = '--cpus-per-task=8'
     return {'id': task['id'], 'kind': 'slurm', 'title': f'{spec["id"]}: {task["id"]}',
         'needs': sorted(set(prerequisites) | set(task['needs'])), 'runtime': 'oxyformer-env',
         'outputs': ['code_commit.txt', 'run.log', '_execution/result.json', *task['outputs']],
         'inputs': [PYTHON], 'sbatch': flags, 'gpu_hours': hours,
         'pool': 'gpu' if gpus else 'cpu', 'write_scopes': [task['id'] + '/**'],
-        'command': stage_command(task), 'max_attempts': 1}
+        'command': stage_command(task, cuda=spec.get('campaign_mode') == 'screening'), 'max_attempts': 1}
 
 
 def _build(spec):
@@ -160,6 +175,8 @@ def _build(spec):
                 'parameters': deepcopy(work.get('parameters', {})), 'needs': needs,
                 'outputs': work['outputs'], 'recipe_lock': spec['recipe_lock'],
                 'continuation': {'owner': owner, 'step': step, 'predecessor': previous}}
+            if spec.get('campaign_mode') == 'screening':
+                task.update({k: spec[k] for k in ('campaign_mode', 'study', 'campaign_label', 'certifies_release_criteria', 'final_cells')})
             tasks.append(task)
             units.append(_unit(spec, task, spec['prerequisites'], segment['gpus'], segment['wall_seconds'], 'leaf'))
             leaves.append(unit_id)
@@ -171,8 +188,10 @@ def _build(spec):
     task = {'id': _id(spec, ['collector']), 'stage': spec['collector']['stage'],
         'campaign': spec['id'], 'needs': needs, 'outputs': spec['collector']['outputs'],
         'recipe_lock': spec['recipe_lock'], 'expected_leaves': leaves}
+    if spec.get('campaign_mode') == 'screening':
+        task.update({k: spec[k] for k in ('campaign_mode', 'study', 'campaign_label', 'certifies_release_criteria', 'final_cells')})
     tasks.append(task)
-    units.append(_unit(spec, task, spec['prerequisites'], 0, spec['collector']['wall_seconds'], 'collector'))
+    units.append(_unit(spec, task, spec['prerequisites'], spec['collector'].get('gpus', 0), spec['collector']['wall_seconds'], 'collector'))
     return units, tasks, leaves
 
 

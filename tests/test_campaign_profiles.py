@@ -618,3 +618,173 @@ def test_chained_profile_uses_cumulative_max_and_full_overhead(tmp_path, case):
     else:
         assert profile["leaf_overheads"] == {"setup_seconds": 10., "import_seconds": 2.,
                                             "export_seconds": 2., "publication_seconds": 1.}
+
+
+def test_month1_profiles_bind_owner_cell_and_four_sequential_standard_chains(built):
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    manifest = real_frame.screening_profile_tasks(*built[1][:2], approvals)
+    tasks = manifest['tasks']
+    assert len(tasks) == 161 and tasks[-1]['stage'] == 'campaign-estimate'
+    assert not manifest['certifies_release_criteria']
+    decision = campaign.screening_decision()
+    for index, task in enumerate(tasks[:-1]):
+        step = index % 40
+        assert task['continuation']['step'] == step
+        assert task['continuation']['predecessor'] == (tasks[index-1]['id'] if step else None)
+        assert task['parameters']['study'] == decision['recipe']
+        assert task['parameters']['recipe']['study'] == decision['recipe']
+        assert task['resources'] == {'cpus_per_task': 8, 'gpus': 1, 'wall_seconds': 14400, 'partition': 'standard'}
+        assert 'continuation.tar' in task['outputs'] and coverage.BUDGET_RECORD in task['outputs']
+        if step:
+            assert set(tasks[index-1]['outputs']) <= set(task['needs'][tasks[index-1]['id']])
+    assert {r['dependency'] for r in tasks[-1]['parameters']['profiles'].values()} == {
+        tasks[i]['id'] for i in (39, 79, 119, 159)}
+    assert not any(t['stage'] in ('campaign-lock', 'coverage') for t in tasks)
+
+
+@pytest.mark.parametrize('field', ['scenarios', 'recipe', 'budget_h100_hours', 'final_cells',
+    'gpu_concurrency_max', 'gpu_concurrency_exempt_partitions', 'month1_sizing'])
+def test_month1_decision_refuses_missing_fields(field):
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    approvals['owner_decisions']['screening_campaign'].pop(field)
+    with pytest.raises(ContractError, match='screening'):
+        campaign.screening_decision(approvals)
+
+
+@pytest.mark.parametrize('field,value', [('leaf_bound_scope', 'all_scenarios'),
+    ('leaves_per_scenario_max', 41), ('gpu_hours_per_leaf_max', True),
+    ('repetitions_per_scenario_max', 26), ('sizing_rule', ''), ('continuation', None), ('deferred', '')])
+def test_month1_decision_refuses_malformed_sizing(field, value):
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    approvals['owner_decisions']['screening_campaign']['month1_sizing'][field] = value
+    with pytest.raises(ContractError, match='month1_sizing'):
+        campaign.screening_decision(approvals)
+
+
+@pytest.fixture
+def screening_request(tmp_path, monkeypatch):
+    import torch
+    monkeypatch.setattr(campaign, 'fingerprint', lambda: deepcopy(STAMPS))
+    monkeypatch.setattr(campaign, 'resolve_device', lambda: torch.device('cuda:0'))
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    endpoint, frame = smoke_inputs.build_inputs()
+    tasks = real_frame.screening_profile_tasks(endpoint, frame, approvals)['tasks']
+    deps = {'real-frame-inputs': tmp_path / 'inputs'}
+    write(deps['real-frame-inputs'] / 'endpoint.json', endpoint.to_dict())
+    write(deps['real-frame-inputs'] / 'frame.json', frame.to_dict())
+    for index, rate in zip((39, 79, 119, 159), (100., 15000., 50000., 200000.)):
+        task = tasks[index]
+        p = task['parameters']
+        _, records = successful_records(1)
+        records[0]['draw'] = p['draws'][0]
+        records[0]['wall_seconds'] = rate
+        root = deps[task['id']] = tmp_path / task['id']
+        write(root / 'result.json', {'mode': 'profile', 'scenario': p['scenario'],
+            'recipe_hash': coverage.digest(p['recipe']), 'draws': p['draws'], 'records': records})
+        leaves = [{'task_id': t['id'], 'step': i, 'compute_seconds': rate / 40,
+            'setup_seconds': 20., 'import_seconds': 2., 'export_seconds': 3.,
+            'publication_seconds': 5., 'wall_seconds': rate / 40 + 30.}
+            for i, t in enumerate(tasks[index-39:index+1])]
+        write(root / 'timing.json', {'production_equivalent': False, 'complete': True, 'all_successful': True,
+            'recipe_hash': coverage.digest(p['recipe']), 'device': 'cuda:0', 'gpu_seconds': rate + 1200.,
+            'complete_repetition_seconds': [rate], 'wall_seconds': rate + 1200., 'setup_seconds': 800.,
+            'measurement_scope': 'complete_chain_return', 'leaves': leaves, **STAMPS})
+        seal_budget_fixture(root, task['id'], task)
+    return request(tmp_path / 'screening-estimate', tasks[-1], deps, approvals)
+
+
+def screening_lock_request(req, tmp_path):
+    outcome = campaign_estimate.run_stage(req)
+    assert outcome.status == 'pass', outcome.message
+    original = coverage.read_json(req.task_path)
+    parameters = {**original['parameters'], 'campaign_id': 'month1',
+        'estimate_input': {'dependency': 'campaign-estimate', 'path': 'budget_estimate.json'},
+        'evaluation_namespace': 'month1-evaluation', 'retry_rules': coverage.RETRY_RULES,
+        'prior_locks': [], 'cpu_wall_hours_budget': 1000.}
+    config = coverage.read_json(req.config_path)
+    deps = {k: Path(v) for k, v in config['dependencies'].items()}
+    deps['campaign-estimate'] = Path(req.output_dir)
+    return request(tmp_path / 'screening-lock', {'id': 'campaign-lock', 'stage': 'campaign-lock',
+        'parameters': parameters}, deps, config['approvals'])
+
+
+def test_month1_estimate_uses_maximal_independent_chained_counts_and_admits_nothing(screening_request, monkeypatch):
+    import math
+    def forbidden(*a, **kw):
+        pytest.fail('estimate admitted or expanded work')
+    for name in ('build_lock', 'expand_campaign', '_admit_locked_leaves'):
+        monkeypatch.setattr(campaign, name, forbidden)
+    estimate = campaign_estimate.estimate_budget(screening_request)
+    assert estimate['estimate_only'] and not estimate['admitted'] and not estimate['certifies_release_criteria']
+    assert len({r['repetitions'] for r in estimate['per_scenario'].values()}) == 4
+    for name, row in estimate['per_scenario'].items():
+        profile = estimate['profiles'][name]
+        capacity = coverage.leaf_budget(14400, 2., profile['leaf_overheads'])['compute_seconds']
+        assert row['leaves'] == math.ceil(profile['seconds_per_repetition'] * row['repetitions'] / capacity)
+        assert row['leaves'] <= 40 and row['gpu_hours'] == row['leaves'] * 4
+        assert row['repetitions'] == 25 or profile['seconds_per_repetition'] * (row['repetitions'] + 1) > 40 * capacity
+    assert estimate['gpu_hours'] <= 640 < estimate['budget_h100_hours']
+    assert not list(Path(screening_request.output_dir).iterdir())
+
+
+def test_month1_lock_matches_estimate_instances_and_global_concurrency(screening_request, tmp_path):
+    req = screening_lock_request(screening_request, tmp_path)
+    result = campaign.run_stage(req)
+    assert result.status == 'pass', result.message
+    result.verify(req)
+    root = Path(req.output_dir)
+    lock = coverage.read_json(root / 'recipe_lock.json')
+    plans = coverage.read_json(root / 'expanded_units.json')['plans']
+    estimate = coverage.read_json(Path(screening_request.output_dir) / 'budget_estimate.json')
+    assert lock['estimate_hash'] == file_hash(Path(screening_request.output_dir) / 'budget_estimate.json')
+    assert len(plans) == 4 and 'final' not in lock['instances']
+    assert lock['budget']['concurrency_limits']['gpu'] == 4
+    assert lock['budget']['per_scenario'] == estimate['per_scenario']
+    # Each instance is a single path including its collector: four disjoint
+    # paths imply at most four simultaneous GPUs under any topological schedule.
+    for name, plan in zip(estimate['per_scenario'], plans):
+        assert len(plan['expected_leaves']) == estimate['per_scenario'][name]['leaves']
+        assert len(plan['spec']['work']) == 1
+        assert all(t['parameters']['mode'] == 'screening' for t in plan['tasks'][:-1])
+        assert all(u['gpu_hours'] <= 4 and '--partition=standard' in u['sbatch'] and '--gpus=1' in u['sbatch']
+                   and 'export OXYFORMER_DEVICE=cuda' in u['command'] for u in plan['units'])
+        for previous, following in zip(plan['units'], plan['units'][1:]):
+            assert previous['id'] in following['needs']
+    for name in ('recipe_lock.json', 'expanded_units.json', 'task_manifest.json', 'budget.json', 'gate.json', 'artifact_manifest.json'):
+        value = coverage.read_json(root / name)
+        assert value['certifies_release_criteria'] is False
+        assert value['final_cells'] == campaign.screening_decision()['final_cells']
+
+
+@pytest.mark.parametrize('partition', ['preemptible', 'large_batch', None])
+def test_month1_lock_and_estimate_refuse_nonstandard_partition(screening_request, tmp_path, partition):
+    req = screening_lock_request(screening_request, tmp_path)
+    req = update_task(req, lambda p: p.update(partition=partition))
+    result = campaign.run_stage(req)
+    assert result.status == 'blocked' and 'partition' in result.message
+    req = update_task(screening_request, lambda p: p.update(partition=partition))
+    assert campaign_estimate.run_stage(req).status == 'blocked'
+
+
+@pytest.mark.parametrize('change', ['missing', 'count', 'safety', 'wall', 'approval', 'manual_count'])
+def test_month1_lock_requires_unchanged_prior_estimate(screening_request, tmp_path, change):
+    req = screening_lock_request(screening_request, tmp_path)
+    if change == 'missing':
+        req = update_task(req, lambda p: p.pop('estimate_input'))
+    elif change == 'count':
+        path = Path(screening_request.output_dir) / 'budget_estimate.json'
+        value = coverage.read_json(path)
+        value['per_scenario']['null_effect']['repetitions'] -= 1
+        write(path, value)
+        req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    elif change == 'approval':
+        config = coverage.read_json(req.config_path)
+        config['approvals']['owner_decisions'].pop('screening_campaign')
+        write(Path(req.config_path), config)
+        req = replace(req, config_hash=file_hash(req.config_path))
+    else:
+        req = update_task(req, lambda p: p.update({'safety': {'profile_safety_factor': 3.},
+            'wall': {'wall_seconds': 13500}, 'manual_count': {'screening_repetitions': 25}}[change]))
+    result = campaign.run_stage(req)
+    assert result.status == 'blocked' and not result.artifacts
+    assert not list(Path(req.output_dir).iterdir())

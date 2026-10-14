@@ -552,3 +552,37 @@ export/publication phase overruns against compute. The sealed scientific payload
 scenario (with registered defaults expanded), mode and recipe hash must match the
 producer task's identities; profile admission then requires those same identities
 to match the scenario and recipe being locked.
+
+Month-1 screening binding (2026-10-13 owner decision): the real-frame stage now
+publishes `screening_profile_tasks`, using the recorded 32/30/2/1 study cell.
+The existing `profile_tasks` helper remains the production profiling interface
+for separately authorized later work. Missing or malformed repository or
+dispatched screening decisions, including `month1_sizing`, are refused; this
+code never writes `configs/approvals.yaml`.
+
+Bootstrap profiling declares one draw per scenario across 40 sequential slots
+of at most four GPU-hours. Once complete, the same terminal record is carried
+through remaining slots without fitting or drawing again. If still incomplete
+at the terminal slot, estimation refuses the profile. Every slot declares the
+coverage-owned continuation archive and finalized budget receipt. Each scenario
+has one sequential chain; at most four single-GPU profiles can run together.
+The estimate task depends on all four terminal receipts and admits nothing.
+
+After reporting the estimate's per-scenario counts to the owner, the
+orchestrator constructs a separate `campaign-lock` task from the estimate task's
+parameters, adding `campaign_id`, `evaluation_namespace`, `retry_rules`,
+`prior_locks`, `cpu_wall_hours_budget` and `estimate_input` (a declared dependency
+reference to `budget_estimate.json`). Do not supply manual repetition counts or
+batch sizes. The lock rechecks the report, records its SHA-256, and measures
+setup on the expanded leaf shapes before admission. Setup beyond the measured
+profile allowance is refused and requires new measurements.
+
+The resulting four campaign specs each contain one sequential continuation
+chain and its collector. Their combined dependency graph holds at most four
+GPUs, including collectors. Leaf reservations sum to at most 640 GPU-hours;
+collectors are accounted separately (four ten-minute single-GPU reservations)
+and checked with leaves against the 3,600-hour ceiling. Profiles and retries
+remain separately accounted work. All task resources and expanded Slurm units
+use `standard` / `root`; preemptible and all other partitions are refused.
+Screening publications carry the recorded final-cell deferral and certify no
+release criterion. Production/final code paths retain their existing gates.

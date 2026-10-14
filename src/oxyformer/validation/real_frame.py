@@ -239,13 +239,61 @@ def profile_tasks(endpoint, frame):
     return {'schema_version': 1, 'tasks': tasks}
 
 
+def screening_profile_tasks(endpoint, frame, approvals):
+    """Bounded bootstrap chains; the final receipts must contain complete draws.
+
+    Each scenario has 40 prospectively declared slots. A completed repetition
+    is carried unchanged through remaining slots, never fitted again. This
+    supplies a concrete terminal dependency without predicting its cost.
+    """
+    from oxyformer.validation.coverage import BUDGET_RECORD
+    decision = campaign.screening_decision(approvals)
+    require(decision == campaign.screening_decision(), 'screening approval drift')
+    legacy = profile_tasks(endpoint, frame)['tasks']
+    recipe = deepcopy(legacy[0]['parameters']['recipe'])
+    recipe.update(campaign_mode='screening', study=deepcopy(decision['recipe']))
+    campaign.validate_recipe(recipe)
+    metadata = campaign.screening_metadata(recipe)
+    resources = {'cpus_per_task': 8, 'gpus': 1, 'wall_seconds': 14400, 'partition': 'standard'}
+    outputs = ['result.json', 'timing.json', 'runtime.json', 'artifact_manifest.json', BUDGET_RECORD, 'continuation.tar']
+    receipt_inputs = ['_execution/task.json', '_execution/request.json', '_execution/result.json', *outputs]
+    tasks, profiles = [], {}
+    for original in legacy[:4]:
+        parameters = {**deepcopy(original['parameters']), 'recipe': recipe, **metadata,
+                      'study': decision['recipe'], 'wall_seconds': resources['wall_seconds'],
+                      'partition': 'standard', 'device': 'cuda'}
+        name = parameters['scenario']['name']
+        parameters['draws'] = repetition_plan(digest(['month1-screening-profile', recipe]), name, 1)
+        owner = digest(['month1-profile-chain', parameters])
+        predecessor = None
+        for step in range(decision['month1_sizing']['leaves_per_scenario_max']):
+            task_id = original['id'] + '-' + str(step)
+            needs = deepcopy(original['needs'])
+            if predecessor:
+                needs[predecessor] = list(receipt_inputs)
+            tasks.append({'id': task_id, 'stage': 'simulation-smoke', **metadata,
+                'resources': dict(resources), 'needs': needs, 'outputs': list(outputs),
+                'parameters': deepcopy(parameters),
+                'continuation': {'owner': owner, 'step': step, 'predecessor': predecessor}})
+            predecessor = task_id
+        profiles[name] = {'dependency': predecessor, 'path': 'result.json'}
+    tasks.append({'id': 'campaign-estimate', 'stage': 'campaign-estimate', **metadata,
+        'resources': dict(resources),
+        'needs': {**deepcopy(legacy[0]['needs']),
+                  **{ref['dependency']: receipt_inputs for ref in profiles.values()}},
+        'outputs': ['budget_estimate.json', 'artifact_manifest.json'],
+        'parameters': {**{k: deepcopy(legacy[4]['parameters'][k]) for k in ('endpoint_input', 'frame_input')},
+            'recipe': recipe, 'profiles': profiles, **resources, 'profile_safety_factor': 2.}})
+    return {'schema_version': 1, **metadata, 'gpu_concurrency_max': 4, 'tasks': tasks}
+
+
 def run_stage(request: StageRequest) -> StageResult:
     try:
         values, design = prepare_inputs(request)
         endpoint, frame, support, audit = build_inputs(values, design)
         return publish(request, {'endpoint.json': endpoint.to_dict(), 'frame.json': frame.to_dict(),
             'support.json': support.to_dict(), 'input_audit.json': audit,
-            'profile_tasks.json': profile_tasks(endpoint, frame)}, status='pass',
+            'profile_tasks.json': screening_profile_tasks(endpoint, frame, values['approvals'])}, status='pass',
             message='Real covariates and frozen primary design prepared for simulated outcomes; no campaign admitted')
     except (ContractError, KeyError, TypeError, ValueError, OSError) as exc:
         return StageResult(request_hash=request.content_hash, status='blocked', artifacts=(),
