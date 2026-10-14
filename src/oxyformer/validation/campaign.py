@@ -12,7 +12,7 @@ import time
 import yaml
 import torch
 
-from oxyformer.training.fit import fit_environment, resolve_device
+from oxyformer.training.fit import checkpoint_margin_seconds, fit_environment, resolve_device
 from oxyformer.training.nested_cv import PreparedEndpoint
 
 from oxyformer.contracts import StageRequest, StageResult
@@ -252,7 +252,8 @@ def _profile(request, config, reference, scenario, recipe, stamps):
 
 def slice_count(profile, repetitions, seconds, factor, *, enforce_limit=True):
     """Conservative compute capacity after paying every leaf's measured costs."""
-    capacity = leaf_budget(seconds, factor, profile["leaf_overheads"])["compute_seconds"]
+    capacity = leaf_budget(seconds, factor, profile["leaf_overheads"])["compute_seconds"] - checkpoint_margin_seconds()
+    require(capacity > 0, "infeasible batch budget: in-fold checkpoint margin consumes slice")
     count = max(1, math.ceil(profile["seconds_per_repetition"] * repetitions / capacity))
     require(not enforce_limit or count <= 40, "infeasible batch budget: campaign instance exceeds forty leaves")
     return count
