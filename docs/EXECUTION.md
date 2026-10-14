@@ -439,8 +439,9 @@ drift, gaps, reordered parts and corrupt blobs are refusals, never new draws.
 
 A bounded coverage leaf uses the shared compute budget described below,
 reserving measured export/publication costs, the safety factor, and
-`min(120 seconds, wall_seconds / 10)`. Nested-CV retains its checkpoint margin.
-The 14,400-second bound applies to a slice, not to a fold's cumulative
+a finalization reserve of at least 300 seconds. The in-fold checkpoint margin
+is measured separately, inside the compute deadline. The 14,400-second bound
+applies to the complete allocation, including setup, not a fold's cumulative
 training. Epochs, tuning, seeds and estimators are unchanged. Only after all
 prediction parts exist does the usual terminal aggregation run. Incomplete
 repetitions have no `repetitions/<id>/result.json`; a valid checkpointed slice
@@ -478,9 +479,9 @@ a leaf can revalidate the measurements before spending its compute allowance.
 A partial or unsuccessful chain cannot justify a lock. For a chained profile,
 lock sizing pays the maximum measured cost of each overhead phase on every
 slice and applies the declared safety factor. Usable compute per slice is
-`(wall_seconds - checkpoint_reserve) / safety_factor - sum(max_phase_overheads)`;
-the slice count is the ceiling of measured repetition compute divided by this
-capacity. Admission also measures actual locked setup and refuses if it exceeds
+`(wall_seconds - finalization_reserve) / safety_factor - sum(max_phase_overheads)
+- checkpoint_margin_seconds()`; the slice count is the ceiling of measured
+repetition compute divided by this capacity. Admission also measures actual locked setup and refuses if it exceeds
 the allocation. Collection counts the last leaf's accumulated terminal records
 once, retains all declared draws in denominators, and lists incomplete chains.
 
@@ -503,11 +504,12 @@ suite, on Slurm. Tests use only synthetic fixtures and no network access.
 
 For coverage-owned chains, the lock stores `leaf_budget` in each batch and its
 expanded tasks. Sizing, locked preflight admission, and execution all use
-`C = (wall_seconds - min(120, wall_seconds / 10)) / safety_factor - sum(overheads)`.
+`C = (wall_seconds - LEAF_FINALIZATION_SECONDS) / safety_factor - sum(overheads)`.
 Overheads name setup, import, export, and publication separately. The immutable
-lock and continuation binding authenticate the budget, including the compute
-ceiling. A 600-second wall, factor 1.2, and 100 seconds of overhead admit 350
-seconds of compute: 800 seconds of work requires three leaves.
+lock and continuation binding authenticate this compute ceiling. Sizing subtracts
+the declared in-fold checkpoint margin from C on every leaf, since fitting stops
+before that ceiling. The worker still meters all actual compute against C;
+unused headroom cannot enlarge a successor's sealed allowance.
 
 The whole leaf shares one compute deadline. Setup and import are each charged
 once; each positive overrun reduces C and underruns never increase it. Export
@@ -519,7 +521,7 @@ uninterruptible operations that overrun are detected, not certified as within
 budget. The scheduler remains the hard wall limit.
 
 Bootstrap chain profiles need no prior measurement. They may declare an
-immutable `compute_ceiling_seconds` below the wall minus checkpoint reserve;
+immutable `compute_ceiling_seconds` below the wall minus finalization reserve;
 otherwise that bound applies. Their separate phase measurements supply the
 next lock. Partial, unsuccessful, or known-overrun measurements never admit a
 lock. Existing archive-free single-leaf producers retain their legacy behavior:
@@ -541,8 +543,8 @@ The worker's bounded deadline and final wall check, the runner's finalization,
 and the sealed-budget loader share the pre-publication limit
 `wall_seconds - min(30, wall_seconds / 20)`. At a 600-second wall, elapsed 570
 passes the wall check and 571 fails; the reserved publication time remains inside
-the existing checkpoint reserve. This does not change the compute formula or its
-350-second capacity for wall 600, factor 1.2, and 100 seconds of overhead. Legacy
+the existing finalization reserve. This check does not enlarge the separate
+compute ceiling or the usable capacity used by sizing. Legacy
 CPU profiles retain their planning-only training deadline and must pass the same
 final budget check to supply usable measurements.
 
