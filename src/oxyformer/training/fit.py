@@ -546,9 +546,13 @@ def _profile(model, config, view, inputs, *, policy_cache=None):
             model.group_offsets.update_identity(view.original_ids, target.double(), base.double(), weights)
 
 
-# Real-frame bounds are validated by the leaf-deadline-margins D3 probe;
-# see docs/EXECUTION.md and that attempt's deadline_report.json.
-PHASE_UNIT_SECONDS = {"ssl": 60., "nuisance": 90., "evaluation": 120.}
+# Real-frame D3 measurements, 2026-10-14, Slurm 89923/89980/90034:
+# SSL 50.643 s, nuisance (including fold preparation) 150.883 s,
+# evaluation 44.217 s, and in-fold checkpoint write 1.529 s. Phase bounds
+# round twice the observed maxima upward to 30 s, with conservative floors.
+# Source: leaf-deadline-margins-r2/1c4dee1ab8d11248/deadline_report.json;
+# measurement revisions and probe-only epoch controls are in docs/EXECUTION.md.
+PHASE_UNIT_SECONDS = {"ssl": 120., "nuisance": 330., "evaluation": 120.}
 CHECKPOINT_WRITE_SECONDS = 30.
 
 
