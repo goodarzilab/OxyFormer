@@ -92,26 +92,35 @@ def test_final_collector_dependencies():
 
 @pytest.mark.parametrize("custom_store", [False, False, True],
                          ids=["default-first", "default-next", "test-override"])
-def test_publication_store_is_per_test(tmp_path, monkeypatch, custom_store):
+def test_publication_store_is_per_test(tmp_path, tmp_path_factory, monkeypatch, custom_store):
     from oxyformer.execution.integrity import publication_receipt
 
     # Check before creating a receipt so a missing fixture cannot touch home.
     configured = os.environ.get("OXYFORMER_PUBLICATION_STORE")
     assert configured is not None, "tests must not fall back to the real home store"
     store = Path(configured).resolve()
-    assert store.is_relative_to(tmp_path.resolve())
-    assert not store.exists(), "each test must start with a fresh publication store"
+    assert store.is_relative_to(tmp_path_factory.getbasetemp())
+    assert not store.is_relative_to(tmp_path)
+    assert not list(store.iterdir()), "each test must start with a fresh publication store"
     if custom_store:
         store = tmp_path / "custom-publications"
+        store.mkdir()
         monkeypatch.setenv("OXYFORMER_PUBLICATION_STORE", str(store))
 
     attempt = tmp_path / "attempt"
-    store.mkdir()
     receipt = publication_receipt(attempt)
     assert receipt.parent == store
     assert publication_receipt(attempt, create=True) == receipt
     receipt.write_text("synthetic receipt marker")
     assert receipt.read_text() == "synthetic receipt marker"
+
+
+def test_publication_store_does_not_overlap_attempt(tmp_path):
+    from oxyformer.execution.integrity import publication_receipt
+
+    assert os.environ.get("OXYFORMER_PUBLICATION_STORE") is not None
+    receipt = publication_receipt(tmp_path, create=True)
+    assert not receipt.parent.is_relative_to(tmp_path)
 
 
 def test_final_coverage_collector_dependencies(tmp_path, monkeypatch):
