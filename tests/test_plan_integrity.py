@@ -8,7 +8,9 @@ import json
 import os
 from pathlib import Path
 import re
-from tempfile import TemporaryDirectory
+import subprocess
+import sys
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -130,19 +132,61 @@ def test_publication_store_does_not_overlap_attempt(tmp_path, tmp_path_factory):
     assert not receipt.parent.is_relative_to(tmp_path)
 
 
+def test_publication_guard_with_tmpdir_equal_to_basetemp(tmp_path):
+    # Exercise a real pytest launch: tempfile may share pytest's session root.
+    base = tmp_path / "child-pytest"
+    base.mkdir()
+    env = dict(os.environ, TMPDIR=str(base), PYTHONPATH=str(ROOT / "src"))
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "--basetemp", str(base),
+         str(Path(__file__).resolve()) + "::test_publication_callers_reject_external_store"],
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "2 passed" in result.stdout
+
+
 @pytest.mark.parametrize("caller", ["receipt", "collector"])
-def test_publication_callers_reject_external_store(tmp_path, tmp_path_factory, monkeypatch, caller):
-    # A fake inherited home store reproduces a missing fixture without risking
-    # the developer's real store, even when running against a broken check.
-    with TemporaryDirectory(prefix="publication-fake-home-") as home:
-        store = Path(home) / "oxyformer-swarm/state/publications"
-        monkeypatch.setenv("OXYFORMER_PUBLICATION_STORE", str(store))
-        with pytest.raises(AssertionError, match="test publication store must be isolated"):
-            if caller == "receipt":
-                test_publication_store_does_not_overlap_attempt(tmp_path, tmp_path_factory)
-            else:
-                test_final_coverage_collector_dependencies(tmp_path, monkeypatch, tmp_path_factory)
-        assert not store.exists()
+def test_publication_callers_reject_external_store(tmp_path, monkeypatch, caller):
+    from oxyformer.execution import integrity
+    import test_campaign
+
+    # Model an external home under one sandbox, independent of TMPDIR and
+    # pytest's real session root. The attempt stays inside the model boundary.
+    sandbox = tmp_path.resolve()
+    boundary = sandbox / "pytest-boundary"
+    home = sandbox / "fake-home"
+    boundary.mkdir()
+    home.mkdir()
+    attempt = boundary / "attempt"
+    attempt.mkdir()
+    store = home / "oxyformer-swarm/state/publications"
+    assert boundary.parent == home.parent == sandbox
+    assert attempt.is_relative_to(boundary)
+    assert not store.is_relative_to(boundary)
+    assert not attempt.is_relative_to(store)
+    assert not store.exists()
+    factory = SimpleNamespace(getbasetemp=lambda: boundary)
+
+    downstream_calls = []
+
+    def unexpected_work(*args, **kwargs):
+        downstream_calls.append(True)
+        # A different exception prevents the expected assertion from hiding
+        # accidental receipt creation, collector work, or publication.
+        raise RuntimeError("publication caller reached downstream work")
+
+    monkeypatch.setattr(integrity, "publication_receipt", unexpected_work)
+    monkeypatch.setattr(integrity, "publish_result", unexpected_work)
+    monkeypatch.setattr(test_campaign, "locked", unexpected_work)
+    monkeypatch.setenv("OXYFORMER_PUBLICATION_STORE", str(store))
+    with pytest.raises(AssertionError, match="test publication store must be isolated"):
+        if caller == "receipt":
+            test_publication_store_does_not_overlap_attempt(attempt, factory)
+        else:
+            test_final_coverage_collector_dependencies(attempt, monkeypatch, factory)
+    assert downstream_calls == []
+    assert not store.exists()
 
 
 def test_final_coverage_collector_dependencies(tmp_path, monkeypatch, tmp_path_factory):
