@@ -761,7 +761,7 @@ def test_producer_budget_pays_in_fold_headroom(tmp_path, monkeypatch):
         assert row['compute_seconds'] <= 350.
         assert row['export_seconds'] == 100.
         assert row['wall_seconds'] <= 450. < wall
-        assert coverage.read_json(directory / 'result.json')['terminal'] == (index == 3)
+        assert coverage.read_json(directory / 'result.json')['terminal'] == (index >= 2)
         dependencies[leaf['id']] = directory
     assert set(deadlines) == {350.}
     assert len(finished) == 1000 and len(resumed) == 2
