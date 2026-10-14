@@ -481,7 +481,12 @@ lock sizing pays the maximum measured cost of each overhead phase on every
 slice and applies the declared safety factor. Usable compute per slice is
 `(wall_seconds - finalization_reserve) / safety_factor - sum(max_phase_overheads)
 - checkpoint_margin_seconds()`; the slice count is the ceiling of measured
-repetition compute divided by this capacity. Admission also measures actual locked setup and refuses if it exceeds
+repetition compute divided by this capacity, plus one required spare successor
+for each chained work item. The spare counts against the same allocation,
+GPU-hour and 40-leaf limits; sizing refuses when it cannot fit. This is a
+planning allowance, not a guarantee against arbitrary runtime variation.
+The emitted screening profile chains already declare 40 slots and are unchanged.
+Admission also measures actual locked setup and refuses if it exceeds
 the allocation. Collection counts the last leaf's accumulated terminal records
 once, retains all declared draws in denominators, and lists incomplete chains.
 

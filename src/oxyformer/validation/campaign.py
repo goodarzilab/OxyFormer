@@ -251,11 +251,11 @@ def _profile(request, config, reference, scenario, recipe, stamps):
 
 
 def slice_count(profile, repetitions, seconds, factor, *, enforce_limit=True):
-    """Conservative compute capacity after paying every leaf's measured costs."""
+    """Pay measured leaf costs and reserve one successor beyond the estimate."""
     capacity = leaf_budget(seconds, factor, profile["leaf_overheads"])["compute_seconds"] - checkpoint_margin_seconds()
     require(capacity > 0, "infeasible batch budget: in-fold checkpoint margin consumes slice")
-    count = max(1, math.ceil(profile["seconds_per_repetition"] * repetitions / capacity))
-    require(not enforce_limit or count <= 40, "infeasible batch budget: campaign instance exceeds forty leaves")
+    count = max(1, math.ceil(profile["seconds_per_repetition"] * repetitions / capacity)) + 1
+    require(not enforce_limit or count <= 40, "infeasible batch budget: required spare slice exceeds forty leaves")
     return count
 
 
@@ -304,11 +304,11 @@ def screening_estimate(request, config, parameters):
             if slice_count(profile, candidate, owner_wall, factor, enforce_limit=False) <= 40:
                 count = candidate
                 break
-        require(count > 0, "one screening repetition cannot fit forty leaves: " + name)
+        require(count > 0, "one screening repetition with its required spare slice cannot fit forty leaves: " + name)
         # A shorter requested wall may save allocation, but cannot lower the
         # count fixed by the owner's full permitted per-scenario capacity.
         leaves = slice_count(profile, count, wall, factor, enforce_limit=False)
-        require(leaves <= 40, "requested leaf wall cannot fit the owner-maximal repetition count: " + name)
+        require(leaves <= 40, "requested leaf wall cannot fit the owner-maximal repetition count with its required spare slice: " + name)
         rows[name] = {"repetitions": count, "leaves": leaves,
                       "gpu_hours": leaves * allocation / 3600}
     total = math.fsum(row["gpu_hours"] for row in rows.values())
@@ -552,7 +552,7 @@ def build_lock(request, config, task):
                 batches.append({"batch_id": digest([campaign_id, namespace, mode, scenario["name"], start])[:24],
                     "mode": mode, "scenario": scenario, "draws": concrete, "wall_seconds": wall_seconds, "gpus": gpus, **extra})
                 mode_leaves += slices
-        require(mode_leaves <= 40, "campaign instance exceeds forty leaves; profile a feasible batching plan")
+        require(mode_leaves <= 40, "campaign instance including required spare slices exceeds forty leaves; profile a feasible batching plan")
     draws = [d for batch in batches for d in batch["draws"]]
     validate_draws(draws)
     require(not prior_seeds.intersection(d["seed"] for d in draws), "evaluation draws overlap prior lock or profiling")

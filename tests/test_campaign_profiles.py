@@ -614,7 +614,7 @@ def test_chained_profile_uses_cumulative_max_and_full_overhead(tmp_path, case):
         {"dependency": "profile", "path": "result.json"}, result["scenario"], task["parameters"]["recipe"], STAMPS)
     assert profile["seconds_per_repetition"] == 100.
     if case == "unequal_cumulative_compute":
-        assert campaign.slice_count(profile, 1, 390. + campaign.checkpoint_margin_seconds(), 1.) == 2
+        assert campaign.slice_count(profile, 1, 390. + campaign.checkpoint_margin_seconds(), 1.) == 3
     else:
         assert profile["leaf_overheads"] == {"setup_seconds": 10., "import_seconds": 2.,
                                             "export_seconds": 2., "publication_seconds": 1.}
@@ -731,9 +731,9 @@ def test_month1_estimate_uses_maximal_independent_chained_counts_and_admits_noth
         profile = estimate['profiles'][name]
         capacity = (coverage.leaf_budget(14100, 2., profile['leaf_overheads'])['compute_seconds']
                     - campaign.checkpoint_margin_seconds())
-        assert row['leaves'] == math.ceil(profile['seconds_per_repetition'] * row['repetitions'] / capacity)
+        assert row['leaves'] == math.ceil(profile['seconds_per_repetition'] * row['repetitions'] / capacity) + 1
         assert row['leaves'] <= 40 and row['gpu_hours'] == row['leaves'] * 4
-        assert row['repetitions'] == 25 or profile['seconds_per_repetition'] * (row['repetitions'] + 1) > 40 * capacity
+        assert row['repetitions'] == 25 or profile['seconds_per_repetition'] * (row['repetitions'] + 1) > 39 * capacity
     assert estimate['gpu_hours'] <= 640 < estimate['budget_h100_hours']
     assert not list(Path(screening_request.output_dir).iterdir())
 

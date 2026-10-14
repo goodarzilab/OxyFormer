@@ -598,7 +598,7 @@ def test_late_locked_draws_remain_complete_and_reported(tmp_path, monkeypatch):
 
 def setup_chain_lock(tmp_path, **changes):
     req, task = setup_lock(tmp_path, repetitions_per_leaf=50,
-        wall_seconds=900 + int(2 * campaign.checkpoint_margin_seconds()), cpu_wall_hours_budget=100., **changes)
+        wall_seconds=1500 + int(2 * campaign.checkpoint_margin_seconds()), cpu_wall_hours_budget=100., **changes)
     path = profile_directory(req) / "timing.json"
     timing = coverage.read_json(path)
     leaves = [{"task_id": f"profile-{i}", "step": i, "compute_seconds": seconds,
@@ -618,12 +618,12 @@ def test_chained_profile_sizes_slices_without_changing_instances_or_limits(tmp_p
     lock = coverage.read_json(root / "recipe_lock.json")
     plans = coverage.read_json(root / "expanded_units.json")["plans"]
     assert lock["instances"] == {"screening": "test-screen", "final": "test-final"}
-    assert [len(p["expected_leaves"]) for p in plans] == [1, 40]
+    assert [len(p["expected_leaves"]) for p in plans] == [2, 40]
     assert all(len(w["slices"]) == 2 for w in plans[1]["spec"]["work"])
     assert all("continuation.tar" in t["outputs"] for p in plans for t in p["tasks"][:-1])
     assert all("--partition=standard" in u["sbatch"] and u["gpu_hours"] <= 4 for p in plans for u in p["units"])
     allocation = coverage.leaf_allocation(lock["batches"][0]["wall_seconds"])["allocation_seconds"]
-    assert lock["budget"]["cpu_wall_hours_ceiling"] == pytest.approx(41 * allocation / 3600 + 20 / 60)
+    assert lock["budget"]["cpu_wall_hours_ceiling"] == pytest.approx(42 * allocation / 3600 + 20 / 60)
 
 
 def test_chained_profile_still_refuses_forty_one_leaves(tmp_path):
@@ -637,7 +637,7 @@ def test_chained_profile_still_refuses_forty_one_leaves(tmp_path):
 def test_slicing_pays_each_leaf_overhead_safety_factor_and_checkpoint_reserve():
     profile = {"seconds_per_repetition": 24000., "leaf_overheads": {
         "setup_seconds": 100., "import_seconds": 100., "export_seconds": 100., "publication_seconds": 100.}}
-    assert campaign.slice_count(profile, 1, 14400, 1.2) == 3
+    assert campaign.slice_count(profile, 1, 14400, 1.2) == 4
     with pytest.raises(ContractError, match="overhead"):
         campaign.slice_count(profile, 1, 300, 1.)
 
@@ -721,7 +721,7 @@ def test_producer_budget_pays_in_fold_headroom(tmp_path, monkeypatch):
     lock_root = Path(req.output_dir)
     lock = coverage.read_json(lock_root / 'recipe_lock.json')
     plans = coverage.read_json(lock_root / 'expanded_units.json')['plans']
-    assert [len(p['expected_leaves']) for p in plans] == [3, 3]
+    assert [len(p['expected_leaves']) for p in plans] == [4, 4]
     assert all(b['leaf_budget']['compute_seconds'] == 350. + margin for b in lock['batches'])
     assert all('continuation.tar' in leaf['outputs'] for p in plans for leaf in p['tasks'][:-1])
     dependencies = {'campaign-lock': lock_root, 'inputs': tmp_path / 'inputs'}
@@ -761,7 +761,7 @@ def test_producer_budget_pays_in_fold_headroom(tmp_path, monkeypatch):
         assert row['compute_seconds'] <= 350.
         assert row['export_seconds'] == 100.
         assert row['wall_seconds'] <= 450. < wall
-        assert coverage.read_json(directory / 'result.json')['terminal'] == (index == 2)
+        assert coverage.read_json(directory / 'result.json')['terminal'] == (index == 3)
         dependencies[leaf['id']] = directory
     assert set(deadlines) == {350.}
     assert len(finished) == 1000 and len(resumed) == 2
@@ -1296,4 +1296,31 @@ def test_slice_sizing_pays_in_fold_stopping_headroom():
     profile = {'seconds_per_repetition': compute, 'leaf_overheads': overheads}
     # A repetition needing the entire compute ceiling cannot fit a leaf which
     # must durably stop earlier. Sizing must pay this headroom on every leaf.
-    assert campaign.slice_count(profile, 1, wall, 1.) == 2
+    assert campaign.slice_count(profile, 1, wall, 1.) == 3
+
+
+@pytest.mark.parametrize("estimated_slices", [1, 2, 39])
+def test_exact_slice_sizing_reserves_one_successor(estimated_slices):
+    # Stage 1,990 = 300 reserve + 690 stopping margin + 1,000 useful seconds.
+    profile = {"seconds_per_repetition": 1000.,
+               "leaf_overheads": dict.fromkeys(coverage.OVERHEAD_PHASES, 0.)}
+    assert campaign.slice_count(profile, estimated_slices, 1990, 1.) == estimated_slices + 1
+
+
+def test_slice_sizing_refuses_forty_one_with_required_spare():
+    profile = {"seconds_per_repetition": 1000.,
+               "leaf_overheads": dict.fromkeys(coverage.OVERHEAD_PHASES, 0.)}
+    with pytest.raises(ContractError, match="required spare slice exceeds forty leaves"):
+        campaign.slice_count(profile, 40, 1990, 1.)
+    # The screening search can inspect an infeasible count, never drop its spare.
+    assert campaign.slice_count(profile, 40, 1990, 1., enforce_limit=False) == 41
+
+
+def test_campaign_refuses_aggregate_spares_over_forty(tmp_path):
+    req, task = setup_chain_lock(tmp_path)
+    # Twenty work items each need two estimated slices plus their own spare.
+    task["parameters"]["wall_seconds"] = 900 + int(2 * campaign.checkpoint_margin_seconds())
+    write(Path(req.task_path), task)
+    result = campaign.run_stage(replace(req, task_hash=file_hash(req.task_path)))
+    assert result.status == "blocked" and "required spare slices exceeds forty leaves" in result.message
+    assert not result.artifacts and not list(Path(req.output_dir).iterdir())
