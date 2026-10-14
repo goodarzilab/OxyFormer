@@ -591,3 +591,19 @@ remain separately accounted work. All task resources and expanded Slurm units
 use `standard` / `root`; preemptible and all other partitions are refused.
 Screening publications carry the recorded final-cell deferral and certify no
 release criterion. Production/final code paths retain their existing gates.
+
+Chained coverage allocations reserve 300 seconds for clone, environment and
+runner preparation (the 2026-10-14 slot-0 jobs measured 94 seconds). A full leaf
+has a 14,100-second stage wall inside a 14,400-second Slurm allocation. Its
+sealed budget reserves at least 300 seconds within that stage for export and
+publication. `coverage.leaf_allocation` is shared by screening profiles and
+campaign expansion; GPU-hour accounting includes the complete allocation.
+
+The nested coverage fit checks its absolute compute deadline with a margin of
+at least 120 seconds, twice the largest declared or observed phase transaction,
+and the checkpoint-write bound. SSL uses its existing cooperative stop-request
+check; nuisance fitting and evaluation record their existing transaction
+boundaries. Completed nuisance training can checkpoint before evaluation and
+resume evaluation without another optimizer update. Timing is execution metadata
+and does not enter the scientific recipe. Real-frame validation of the initial
+bounds is pending in this work-in-progress change; it is not ready to merge.
