@@ -573,10 +573,10 @@ def test_cost_study_frozen_schedule_reaches_controller_without_patience(tmp_path
 
 
 def test_evaluation_deadline_resumes_completed_training_without_refitting(full, tmp_path, monkeypatch):
-    from oxyformer.training.fit import DeadlineTiming
+    from oxyformer.training.fit import DeadlineTiming, checkpoint_margin_seconds
     prepared, expected = full
     clock = [0.]
-    timing = DeadlineTiming(1200., clock=lambda: clock[0])
+    timing = DeadlineTiming(checkpoint_margin_seconds() + 1000., clock=lambda: clock[0])
     train = nested._train_transaction
     def stop_before_evaluation(*args, **kwargs):
         result = train(*args, **kwargs)
@@ -601,7 +601,7 @@ def test_evaluation_deadline_resumes_completed_training_without_refitting(full, 
 
 def test_ssl_slow_units_checkpoint_before_absolute_compute_deadline(tmp_path, monkeypatch):
     from oxyformer.training import pretrain as ssl
-    from oxyformer.training.fit import DeadlineTiming
+    from oxyformer.training.fit import DeadlineTiming, checkpoint_margin_seconds
     prepared = endpoint(tmp_path)
     clock = [0.]
     monkeypatch.setattr(nested.time, 'monotonic', lambda: clock[0])
@@ -617,9 +617,9 @@ def test_ssl_slow_units_checkpoint_before_absolute_compute_deadline(tmp_path, mo
         clock[0] += 20.
         return value
     monkeypatch.setattr(nested, 'save_checkpoint', durable_checkpoint)
-    timing = DeadlineTiming(600.)
+    timing = DeadlineTiming(checkpoint_margin_seconds() + 330.)
     config = replace(tiny_config(prepared, tmp_path / 'slow-ssl'), ssl_epochs=30,
-                     deadline_timing=timing, slice_seconds=600., checkpoint_margin_seconds=timing.margin_seconds)
+                     deadline_timing=timing, slice_seconds=timing.deadline, checkpoint_margin_seconds=timing.margin_seconds)
     partial = nested.run_fold(config, prepared.outer, 1103, geography=prepared.geography)
     assert not partial.complete and state(partial)['ssl_pending']
     assert timing.largest['ssl'] >= 40.
@@ -629,7 +629,7 @@ def test_ssl_slow_units_checkpoint_before_absolute_compute_deadline(tmp_path, mo
 
 
 def test_nuisance_slow_units_checkpoint_before_absolute_compute_deadline(tmp_path, monkeypatch):
-    from oxyformer.training.fit import DeadlineTiming
+    from oxyformer.training.fit import DeadlineTiming, checkpoint_margin_seconds
     prepared = endpoint(tmp_path)
     clock = [0.]
     monkeypatch.setattr(nested.time, 'monotonic', lambda: clock[0])
@@ -639,10 +639,10 @@ def test_nuisance_slow_units_checkpoint_before_absolute_compute_deadline(tmp_pat
         clock[0] += 40.
         return value
     monkeypatch.setattr(nested, '_predict', slow_prediction)
-    timing = DeadlineTiming(600.)
+    timing = DeadlineTiming(checkpoint_margin_seconds() + 330.)
     config = replace(tiny_config(prepared, tmp_path / 'slow-nuisance', batch_size=8),
         settings=nested.NuisanceSettings(batch_size=8, frozen_epochs=30),
-        deadline_timing=timing, slice_seconds=600., checkpoint_margin_seconds=timing.margin_seconds)
+        deadline_timing=timing, slice_seconds=timing.deadline, checkpoint_margin_seconds=timing.margin_seconds)
     partial = nested.run_fold(config, prepared.outer, 1103, geography=prepared.geography)
     assert not partial.complete and state(partial)['active']
     assert timing.largest['nuisance'] >= 40.

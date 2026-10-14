@@ -598,6 +598,8 @@ has a 14,100-second stage wall inside a 14,400-second Slurm allocation. Its
 sealed budget reserves at least 300 seconds within that stage for export and
 publication. `coverage.leaf_allocation` is shared by screening profiles and
 campaign expansion; GPU-hour accounting includes the complete allocation.
+Sizing also pays the in-fold stopping headroom on every leaf; that time remains
+inside the compute ceiling authenticated by the sealed budget.
 
 The nested coverage fit checks its absolute compute deadline with a margin of
 at least 120 seconds, twice the largest declared or observed phase transaction,

@@ -337,7 +337,7 @@ def test_complete_controller_counts_fifteen_fits_as_one_repetition(tmp_path, mon
     monkeypatch.setattr(coverage.nested_cv, "predict", fake_predict)
     from oxyformer.training.fit import RecipeStudy
     result = coverage.estimate_repetition(prepared, smoke_recipe(endpoint, frame), tmp_path,
-        coverage.time.monotonic() + 1200, study=RecipeStudy(seed_count=seed_count))
+        coverage.time.monotonic() + campaign.checkpoint_margin_seconds() + 1200, study=RecipeStudy(seed_count=seed_count))
     assert calls == [(fold, seed) for fold in range(5) for seed in coverage.nested_cv.SEEDS[:seed_count]]
     assert prepared.outer.seed_ids == coverage.nested_cv.SEEDS
     assert set(result) == set(coverage.METHODS)

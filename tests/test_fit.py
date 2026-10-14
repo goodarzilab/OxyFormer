@@ -977,7 +977,7 @@ def test_cost_study_defaults_preserve_identity_and_independent_options(tmp_path)
 def test_deadline_margin_tracks_long_units_with_injected_clock():
     from oxyformer.training.fit import DeadlineTiming, PHASE_UNIT_SECONDS, CHECKPOINT_WRITE_SECONDS
     clock = [0.]
-    timing = DeadlineTiming(1200., clock=lambda: clock[0])
+    timing = DeadlineTiming(10000., clock=lambda: clock[0])
     for phase in ('ssl', 'nuisance', 'evaluation'):
         timing.finish_unit()
         timing.boundary(phase)
@@ -998,13 +998,13 @@ def test_ssl_budget_request_observes_each_existing_cooperative_check(tmp_path):
     from oxyformer.training.checkpoint import CheckpointRequest
     _, _, _, config = make_case(tmp_path)
     clock = [0.]
-    timing = DeadlineTiming(1200., clock=lambda: clock[0])
+    timing = DeadlineTiming(10000., clock=lambda: clock[0])
     budget = _Budget(replace(config, deadline_timing=timing, device="cpu"), CheckpointRequest())
     request = budget.ssl_request()
     assert not request.requested
     clock[0] = 200.
     assert not request.requested
     assert timing.largest['ssl'] == 200.
-    clock[0] = 800.
+    clock[0] = timing.deadline - timing.margin_seconds
     assert request.requested
-    assert timing.margin_seconds >= 1200. + 30.
+    assert timing.margin_seconds >= 2 * (clock[0] - 200.) + 30.

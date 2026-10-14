@@ -552,6 +552,12 @@ PHASE_UNIT_SECONDS = {"ssl": 60., "nuisance": 90., "evaluation": 120.}
 CHECKPOINT_WRITE_SECONDS = 30.
 
 
+def checkpoint_margin_seconds(*, largest_unit_seconds=0., checkpoint_write_seconds=0.):
+    """One stopping-headroom rule for fitting and conservative leaf sizing."""
+    unit = max(*PHASE_UNIT_SECONDS.values(), largest_unit_seconds)
+    return max(120., 2 * unit + max(CHECKPOINT_WRITE_SECONDS, checkpoint_write_seconds))
+
+
 class DeadlineTiming:
     """Execution-only telemetry shared by every nested fold in one leaf.
 
@@ -570,8 +576,8 @@ class DeadlineTiming:
 
     @property
     def margin_seconds(self):
-        unit = max(*PHASE_UNIT_SECONDS.values(), *self.largest.values())
-        return max(120., 2 * unit + max(CHECKPOINT_WRITE_SECONDS, self.checkpoint_seconds))
+        return checkpoint_margin_seconds(largest_unit_seconds=max(self.largest.values()),
+                                         checkpoint_write_seconds=self.checkpoint_seconds)
 
     def boundary(self, phase, device="cpu"):
         if torch.device(device).type == "cuda":

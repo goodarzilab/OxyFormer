@@ -597,8 +597,8 @@ def test_late_locked_draws_remain_complete_and_reported(tmp_path, monkeypatch):
 
 
 def setup_chain_lock(tmp_path, **changes):
-    req, task = setup_lock(tmp_path, repetitions_per_leaf=50, wall_seconds=900,
-                           cpu_wall_hours_budget=20., **changes)
+    req, task = setup_lock(tmp_path, repetitions_per_leaf=50,
+        wall_seconds=900 + int(2 * campaign.checkpoint_margin_seconds()), cpu_wall_hours_budget=100., **changes)
     path = profile_directory(req) / "timing.json"
     timing = coverage.read_json(path)
     leaves = [{"task_id": f"profile-{i}", "step": i, "compute_seconds": seconds,
@@ -622,12 +622,13 @@ def test_chained_profile_sizes_slices_without_changing_instances_or_limits(tmp_p
     assert all(len(w["slices"]) == 2 for w in plans[1]["spec"]["work"])
     assert all("continuation.tar" in t["outputs"] for p in plans for t in p["tasks"][:-1])
     assert all("--partition=standard" in u["sbatch"] and u["gpu_hours"] <= 4 for p in plans for u in p["units"])
-    assert lock["budget"]["cpu_wall_hours_ceiling"] == pytest.approx((41 * 20 + 20) / 60)
+    allocation = coverage.leaf_allocation(lock["batches"][0]["wall_seconds"])["allocation_seconds"]
+    assert lock["budget"]["cpu_wall_hours_ceiling"] == pytest.approx(41 * allocation / 3600 + 20 / 60)
 
 
 def test_chained_profile_still_refuses_forty_one_leaves(tmp_path):
     req, task = setup_chain_lock(tmp_path)
-    task["parameters"]["wall_seconds"] = 360
+    task["parameters"]["wall_seconds"] = 600 + int(2 * campaign.checkpoint_margin_seconds())
     write(Path(req.task_path), task)
     result = campaign.run_stage(replace(req, task_hash=file_hash(req.task_path)))
     assert result.status == "blocked" and "forty leaves" in result.message
@@ -689,15 +690,17 @@ def test_collection_counts_chained_terminal_records_once(tmp_path, incomplete):
     assert value["gate"]["scenario_summaries"]["null_effect"]["missing_repetitions"] == int(incomplete)
 
 
-def test_producer_budget_840_120_percent_800_compute_100_overhead(tmp_path, monkeypatch):
+def test_producer_budget_pays_in_fold_headroom(tmp_path, monkeypatch):
     """Real lock -> expansion -> execution -> collection; synthetic draw costs.
 
     A 1,000-draw batch costs 800 s. This preserves the frozen final minimum
     and instance structure while testing the committee's 800 s work item.
     """
     from test_coverage import chain_request
+    margin = campaign.checkpoint_margin_seconds()
+    wall = 840 + int(1.2 * margin)
     req, task = setup_lock(tmp_path, screening_repetitions=1000, repetitions_per_leaf=1000,
-                           wall_seconds=840, profile_safety_factor=1.2)
+                           wall_seconds=wall, profile_safety_factor=1.2, cpu_wall_hours_budget=100.)
     profile_root = profile_directory(req)
     data = coverage.read_json(profile_root / 'result.json')
     data['draws'], data['records'] = successful_records(1000)
@@ -719,7 +722,7 @@ def test_producer_budget_840_120_percent_800_compute_100_overhead(tmp_path, monk
     lock = coverage.read_json(lock_root / 'recipe_lock.json')
     plans = coverage.read_json(lock_root / 'expanded_units.json')['plans']
     assert [len(p['expected_leaves']) for p in plans] == [3, 3]
-    assert all(b['leaf_budget']['compute_seconds'] == 350. for b in lock['batches'])
+    assert all(b['leaf_budget']['compute_seconds'] == 350. + margin for b in lock['batches'])
     assert all('continuation.tar' in leaf['outputs'] for p in plans for leaf in p['tasks'][:-1])
     dependencies = {'campaign-lock': lock_root, 'inputs': tmp_path / 'inputs'}
     original_export = coverage._write_continuation
@@ -731,6 +734,7 @@ def test_producer_budget_840_120_percent_800_compute_100_overhead(tmp_path, monk
     def execute(draw, frame, scenario, template, recipe, root, deadline, *, continuation, study):
         rid = draw['repetition_id']
         assert rid not in finished  # Completed draws are carried, never rerun.
+        deadline -= margin
         deadlines.append(deadline)
         used = continuation['compute_seconds']
         if used:
@@ -753,10 +757,10 @@ def test_producer_budget_840_120_percent_800_compute_100_overhead(tmp_path, monk
         done.verify(leaf_req)
         directory = Path(leaf_req.output_dir)
         row = coverage.read_json(directory / 'timing.json')['leaves'][-1]
-        assert row['compute_capacity_seconds'] == 350.
+        assert row['compute_capacity_seconds'] == 350. + margin
         assert row['compute_seconds'] <= 350.
         assert row['export_seconds'] == 100.
-        assert row['wall_seconds'] <= 450. < 840.
+        assert row['wall_seconds'] <= 450. < wall
         assert coverage.read_json(directory / 'result.json')['terminal'] == (index == 2)
         dependencies[leaf['id']] = directory
     assert set(deadlines) == {350.}
@@ -1277,3 +1281,19 @@ def test_chained_allocation_includes_setup_compute_and_finalization():
         assert clock < allocation['allocation_seconds']
     with pytest.raises(ContractError, match='including setup'):
         coverage.leaf_allocation(14400)
+
+
+def test_slice_sizing_pays_in_fold_stopping_headroom():
+    from oxyformer.training.fit import DeadlineTiming
+    wall = coverage.maximum_leaf_stage_seconds()
+    overheads = dict.fromkeys(coverage.OVERHEAD_PHASES, 0.)
+    compute = coverage.leaf_budget(wall, 1., overheads)['compute_seconds']
+    clock = [0.]
+    timing = DeadlineTiming(compute, clock=lambda: clock[0])
+    while not timing.boundary('nuisance'):
+        clock[0] += 30.  # A bounded unit much longer than the former 1 s margin.
+    assert clock[0] < compute
+    profile = {'seconds_per_repetition': compute, 'leaf_overheads': overheads}
+    # A repetition needing the entire compute ceiling cannot fit a leaf which
+    # must durably stop earlier. Sizing must pay this headroom on every leaf.
+    assert campaign.slice_count(profile, 1, wall, 1.) == 2
