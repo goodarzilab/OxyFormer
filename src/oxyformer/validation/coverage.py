@@ -74,7 +74,9 @@ OVERHEAD_PHASES = ("setup_seconds", "import_seconds", "export_seconds", "publica
 
 
 # Slot-0 Slurm 89833--89836 (2026-10-14): clone/environment/runner
-# preparation took 94 s. D3 deadline_report.json records the validation run.
+# preparation took 94 s. D3 Slurm 89923/89980 measured at most 4.099 s
+# from in-fold checkpoint return through sealed terminal publication.
+# Both margins retain a conservative 300 s floor; see docs/EXECUTION.md.
 LEAF_SETUP_SECONDS = 300
 LEAF_FINALIZATION_SECONDS = 300
 MAX_LEAF_ALLOCATION_SECONDS = 14400

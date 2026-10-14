@@ -609,5 +609,41 @@ and the checkpoint-write bound. SSL uses its existing cooperative stop-request
 check; nuisance fitting and evaluation record their existing transaction
 boundaries. Completed nuisance training can checkpoint before evaluation and
 resume evaluation without another optimizer update. Timing is execution metadata
-and does not enter the scientific recipe. Real-frame validation of the initial
-bounds is pending in this work-in-progress change; it is not ready to merge.
+and does not enter the scientific recipe.
+
+The bounds use the real-frame D3 measurements from 2026-10-14, Slurm jobs
+89923, 89980 and 90034, on one H100 with eight CPUs. The largest measured
+intervals used to set the bounds were:
+
+| Phase | Observed seconds | Declared bound, seconds |
+| --- | ---: | ---: |
+| SSL, including its preparation | 50.643 | 120 |
+| Nuisance, including fold configuration and identity preparation | 150.883 | 330 |
+| Evaluation, including calibration and held-out prediction | 44.217 | 120 |
+| In-fold checkpoint write | 1.529 | 30 |
+| Checkpoint return through sealed publication | 4.099 | 300 |
+
+Phase bounds round twice the observations upward to a 30-second boundary,
+retaining conservative phase floors. The shared stopping margin is therefore
+690 seconds initially: twice the largest phase bound plus 30 seconds for the
+checkpoint. Each leaf raises that margin when its own largest observed unit or
+checkpoint write requires more headroom. Sizing subtracts the same declared
+margin from every leaf's compute capacity.
+
+The measurement chains used revision
+`bb4aaee493119eef19546aeffd985147c14d7aa4`, keeping the owner study cell;
+SSL and nuisance deadline checkpoints both published and their successors
+advanced the saved batch count. The independent evaluation probe used
+`6a9f760af08f3ee8e1331cc7d38f6d60062d9d47`, including the initial fold-preparation
+interval. Only that probe used one SSL and nuisance epoch through the existing
+fit controls. It completed all twelve inner evaluations, final refits,
+calibration, and outer prediction. Production profiles and campaigns retain
+the frozen study settings.
+
+The attempt's external `deadline_report.json` records these measurements,
+subsequent checks on the finalized source, source revisions, per-leaf Slurm
+allocations and publication times, and cumulative GPU accounting including
+failed and canceled probe jobs. It lives under
+`runs/leaf-deadline-margins-r2/1c4dee1ab8d11248` in the coordinator project,
+alongside `SUMMARY.md` and the final validation logs. Generated reports,
+checkpoints and study inputs are not repository files.
