@@ -634,7 +634,7 @@ def chain_fixture(tmp_path):
         "parameters": {"mode": "smoke", "recipe": smoke_recipe(endpoint, frame),
             "study": {"seed_count": 1, "grid_points": 2},
             "scenario": {"name": "null_effect", "active_mechanisms": ["null"], "effect": "null"},
-            "draws": coverage.repetition_plan("coverage-chain", "null_effect", 1), "wall_seconds": 14400,
+            "draws": coverage.repetition_plan("coverage-chain", "null_effect", 1), "wall_seconds": 14100,
             "endpoint_input": {"dependency": "inputs", "path": "endpoint.json"},
             "frame_input": {"dependency": "inputs", "path": "frame.json"}}}
     return task, inputs
@@ -687,7 +687,7 @@ def test_coverage_chain_bit_equivalence(tmp_path, monkeypatch):
         def predict(*args, **kwargs):
             value = original_predict(*args, **kwargs)
             if step[0] == 1 and not cut[1]:
-                clock[0] += 14280.
+                clock[0] += 13800.
                 cut[1] = True
             return value
         monkeypatch.setattr(coverage.nested_cv, "predict", predict)

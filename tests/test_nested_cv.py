@@ -570,3 +570,30 @@ def test_cost_study_frozen_schedule_reaches_controller_without_patience(tmp_path
     assert complete and reason == "max_epochs"
     assert trained["progress"]["epoch"] == 30 and trained["progress"]["bad_epochs"] == 0
     assert trained["progress"]["history"] == [None] * 30
+
+
+def test_evaluation_deadline_resumes_completed_training_without_refitting(full, tmp_path, monkeypatch):
+    from oxyformer.training.fit import DeadlineTiming
+    prepared, expected = full
+    clock = [0.]
+    timing = DeadlineTiming(1200., clock=lambda: clock[0])
+    train = nested._train_transaction
+    def stop_before_evaluation(*args, **kwargs):
+        result = train(*args, **kwargs)
+        if result[2]:
+            clock[0] = timing.deadline - timing.margin_seconds
+        return result
+    with monkeypatch.context() as patch:
+        patch.setattr(nested, '_train_transaction', stop_before_evaluation)
+        partial = nested.run_fold(tiny_config(prepared, tmp_path / 'first', deadline_timing=timing),
+            prepared.outer, 1103, geography=prepared.geography)
+    assert not partial.complete
+    saved = state(partial)
+    assert saved['active']['progress']['epoch'] == 1
+    assert saved['counts']['nuisance_fits'] == 1
+    assert saved['results'] == []
+    actual = nested.run_fold(tiny_config(prepared, tmp_path / 'next', predecessor=partial),
+        prepared.outer, 1103, geography=prepared.geography)
+    assert_fitted_invariant(expected, actual)
+    assert_prediction_invariant(predictions(prepared, expected), predictions(prepared, actual))
+    assert state(actual)['counts'] == state(expected)['counts']

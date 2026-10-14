@@ -634,6 +634,11 @@ def test_month1_profiles_bind_owner_cell_and_four_sequential_standard_chains(bui
         assert task['parameters']['study'] == decision['recipe']
         assert task['parameters']['recipe']['study'] == decision['recipe']
         assert task['resources'] == {'cpus_per_task': 8, 'gpus': 1, 'wall_seconds': 14400, 'partition': 'standard'}
+        assert task['parameters']['wall_seconds'] == 14100
+        allocation = coverage.leaf_allocation(task['parameters']['wall_seconds'])
+        assert allocation['allocation_seconds'] == task['resources']['wall_seconds']
+        assert allocation['setup_seconds'] >= 300
+        assert allocation['finalization_seconds'] >= 300
         assert 'continuation.tar' in task['outputs'] and coverage.BUDGET_RECORD in task['outputs']
         if step:
             assert set(tasks[index-1]['outputs']) <= set(task['needs'][tasks[index-1]['id']])
@@ -724,7 +729,7 @@ def test_month1_estimate_uses_maximal_independent_chained_counts_and_admits_noth
     assert len({r['repetitions'] for r in estimate['per_scenario'].values()}) == 4
     for name, row in estimate['per_scenario'].items():
         profile = estimate['profiles'][name]
-        capacity = coverage.leaf_budget(14400, 2., profile['leaf_overheads'])['compute_seconds']
+        capacity = coverage.leaf_budget(14100, 2., profile['leaf_overheads'])['compute_seconds']
         assert row['leaves'] == math.ceil(profile['seconds_per_repetition'] * row['repetitions'] / capacity)
         assert row['leaves'] <= 40 and row['gpu_hours'] == row['leaves'] * 4
         assert row['repetitions'] == 25 or profile['seconds_per_repetition'] * (row['repetitions'] + 1) > 40 * capacity

@@ -345,8 +345,11 @@ def _train_transaction(config, bundle, encoder_state, view, stopping, epochs, se
         sampler.load_state_dict(saved["sampler"])
         progress, best = saved["progress"], saved["best"]
         restore_rng(saved["rng"], config.device)
-    complete, reason = False, None
+    # A training-complete state can await evaluation at a slice boundary.
+    complete = progress["epoch"] >= epochs or progress["bad_epochs"] >= config.settings.patience
+    reason = ("max_epochs" if progress["epoch"] >= epochs else "patience") if complete else None
     while not complete:
+        budget.phase = "evaluation" if progress["phase"] == "evaluate" else "nuisance"
         reason = budget.reason()
         if reason:
             break
@@ -442,9 +445,14 @@ def _grouped_ssl(config, split, fitting, view, root, seed, budget, predecessor, 
     remaining = (None if config.max_batches is None else config.max_batches - budget.batches)
     seconds = max(.01, config.slice_seconds - (time.monotonic() - budget.started))
     ssl_config = PretrainConfig(settings=settings, output_dir=str(root), device=config.device,
-        predecessor=predecessor, stop_request=budget.request, max_batches=remaining,
+        predecessor=predecessor, stop_request=budget.ssl_request(), max_batches=remaining,
         slice_seconds=seconds, checkpoint_margin_seconds=min(config.checkpoint_margin_seconds, seconds / 2))
+    if config.deadline_timing is not None:
+        config.deadline_timing.finish_unit(config.device)
+        config.deadline_timing.boundary("ssl", config.device)
     artifact = pretrain(subset(view, fitting, use="ssl"), split, ssl_config, seed)
+    if config.deadline_timing is not None:
+        config.deadline_timing.finish_unit(config.device)
     # SSL validation transactions are also charged to the enclosing slice.
     state = load_checkpoint(artifact, artifact.identity)
     before = load_checkpoint(predecessor, predecessor.identity) if predecessor else None
@@ -496,6 +504,8 @@ def _advance(config, outer, manifest, identity, controller, root, budget, varian
     partitions[3] = (outer_local, fitting, held, ())
     tasks.extend((("select", 3, None), ("ssl", 3, None), ("outcome", 3, None), ("origin", 3, None)))
     while controller["position"] < len(tasks):
+        kind, fold, grid = tasks[controller["position"]]
+        budget.phase = "ssl" if kind == "ssl" else "evaluation" if kind == "select" else "nuisance"
         reason = budget.reason()
         if reason:
             return controller, False, reason
@@ -564,6 +574,11 @@ def _advance(config, outer, manifest, identity, controller, root, budget, varian
             if not complete:
                 controller["active"] = state
                 return controller, False, reason
+            budget.phase = "evaluation"
+            reason = budget.reason()
+            if reason:
+                controller["active"] = state
+                return controller, False, reason
             controller["active"] = None
             if fold == 3:
                 with torch.no_grad():
@@ -601,6 +616,10 @@ def _advance(config, outer, manifest, identity, controller, root, budget, varian
                         selection_metrics=pair_metrics(selection_logits, selection_inputs.origin_weights))
                 controller["results"].append(result)
         controller["position"] += 1
+    budget.phase = "evaluation"
+    reason = budget.reason()
+    if reason:
+        return controller, False, reason
     calibration = AffineCalibration.from_json(controller["calibration"])
     model = _build(controller["final"]["origin"]).to(config.device).eval()
     metadata = _inputs(config, calibration.original_ids)
@@ -659,6 +678,9 @@ def run_fold(config, outer, seed, *, geography, variant="A0"):
         if torch.device(config.device).type == "cuda":
             controller["compute"]["gpu_seconds"] += elapsed
         controller["compute"]["cpu_seconds"] += time.process_time() - cpu_started
+        if config.deadline_timing is not None:
+            config.deadline_timing.finish_unit(config.device)
+        checkpoint_started = time.monotonic()
         tensors = fitting._tensor_state(controller)
         lineage = _lineage(manifest, identity, allowed, (manifest.content_hash, outer.content_hash),
             model_hash=model_state_hash(tensors), parameter_count=controller.get("parameter_count", 0))
@@ -667,6 +689,10 @@ def run_fold(config, outer, seed, *, geography, variant="A0"):
                    "progress": {"epoch": controller["position"], "step": controller["position"]}},
             complete=complete, reason=reason,
             predecessor=config.predecessor.checkpoint if config.predecessor else None)
+        if config.deadline_timing is not None:
+            timing = config.deadline_timing
+            timing.checkpoint_seconds = max(timing.checkpoint_seconds, time.monotonic() - checkpoint_started)
+            atomic_json(root, "deadline-timing.json", timing.report())
         held = outer.evaluation_ids(config.fold)
         return FoldArtifacts(spec=manifest.spec, split=outer, data_manifest=manifest,
             fold=config.fold, seed=seed, prediction_inputs=_inputs(config, held), checkpoint=checkpoint)

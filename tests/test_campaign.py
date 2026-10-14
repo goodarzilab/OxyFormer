@@ -48,6 +48,7 @@ def seal_budget_fixture(root, unit, task=None):
             'mode': result['mode'], 'scenario': result['scenario'], 'draws': result['draws'],
             'wall_seconds': timing.get('admitted_budget_seconds', 14400)}}
         if chain is not None:
+            task['parameters']['wall_seconds'] = max(600, task['parameters']['wall_seconds'])
             task['continuation'] = chain
             task['outputs'] = ['result.json', 'continuation.tar']
     config = write(root / '_execution/config.json', {})
@@ -1258,3 +1259,20 @@ def test_null_leaf_budget_is_bootstrap_in_finalizer_and_loader(tmp_path, monkeyp
     record = coverage.load_budget(req, coverage.read_json(req.config_path), 'profile')
     assert record['complete'] and record['all_successful']
     assert record['leaves'][0]['compute_seconds'] == 420.
+
+
+def test_chained_allocation_includes_setup_compute_and_finalization():
+    wall = coverage.maximum_leaf_stage_seconds()
+    allocation = coverage.leaf_allocation(wall)
+    budget = coverage.leaf_budget(wall, 1., dict.fromkeys(coverage.OVERHEAD_PHASES, 0.))
+    assert allocation['setup_seconds'] >= 300
+    assert budget['reserve_seconds'] >= 300
+    assert allocation['allocation_seconds'] <= 14400
+    assert wall < allocation['allocation_seconds']
+    # An injected 94-second clone/setup, bounded compute and 240-second
+    # finalization all fit, even when setup consumes its entire declared margin.
+    for setup in (94., allocation['setup_seconds']):
+        clock = setup + budget['compute_seconds'] + 240.
+        assert clock < allocation['allocation_seconds']
+    with pytest.raises(ContractError, match='including setup'):
+        coverage.leaf_allocation(14400)
