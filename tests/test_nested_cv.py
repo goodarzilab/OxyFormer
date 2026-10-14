@@ -597,3 +597,54 @@ def test_evaluation_deadline_resumes_completed_training_without_refitting(full, 
     assert_fitted_invariant(expected, actual)
     assert_prediction_invariant(predictions(prepared, expected), predictions(prepared, actual))
     assert state(actual)['counts'] == state(expected)['counts']
+
+
+def test_ssl_slow_units_checkpoint_before_absolute_compute_deadline(tmp_path, monkeypatch):
+    from oxyformer.training import pretrain as ssl
+    from oxyformer.training.fit import DeadlineTiming
+    prepared = endpoint(tmp_path)
+    clock = [0.]
+    monkeypatch.setattr(nested.time, 'monotonic', lambda: clock[0])
+    losses = ssl.reconstruction_losses
+    def slow_unit(*args, **kwargs):
+        value = losses(*args, **kwargs)
+        clock[0] += 40.
+        return value
+    monkeypatch.setattr(ssl, 'reconstruction_losses', slow_unit)
+    save = nested.save_checkpoint
+    def durable_checkpoint(*args, **kwargs):
+        value = save(*args, **kwargs)
+        clock[0] += 20.
+        return value
+    monkeypatch.setattr(nested, 'save_checkpoint', durable_checkpoint)
+    timing = DeadlineTiming(600.)
+    config = replace(tiny_config(prepared, tmp_path / 'slow-ssl'), ssl_epochs=30,
+                     deadline_timing=timing, slice_seconds=600., checkpoint_margin_seconds=timing.margin_seconds)
+    partial = nested.run_fold(config, prepared.outer, 1103, geography=prepared.geography)
+    assert not partial.complete and state(partial)['ssl_pending']
+    assert timing.largest['ssl'] >= 40.
+    assert timing.checkpoint_seconds == 20.
+    assert clock[0] + 40. < timing.deadline
+    assert timing.margin_seconds >= 2 * timing.largest['ssl'] + 20.
+
+
+def test_nuisance_slow_units_checkpoint_before_absolute_compute_deadline(tmp_path, monkeypatch):
+    from oxyformer.training.fit import DeadlineTiming
+    prepared = endpoint(tmp_path)
+    clock = [0.]
+    monkeypatch.setattr(nested.time, 'monotonic', lambda: clock[0])
+    predict = nested._predict
+    def slow_prediction(*args, **kwargs):
+        value = predict(*args, **kwargs)
+        clock[0] += 40.
+        return value
+    monkeypatch.setattr(nested, '_predict', slow_prediction)
+    timing = DeadlineTiming(600.)
+    config = replace(tiny_config(prepared, tmp_path / 'slow-nuisance', batch_size=8),
+        settings=nested.NuisanceSettings(batch_size=8, frozen_epochs=30),
+        deadline_timing=timing, slice_seconds=600., checkpoint_margin_seconds=timing.margin_seconds)
+    partial = nested.run_fold(config, prepared.outer, 1103, geography=prepared.geography)
+    assert not partial.complete and state(partial)['active']
+    assert timing.largest['nuisance'] >= 40.
+    assert clock[0] + max(timing.largest.values()) < timing.deadline
+    assert timing.margin_seconds >= 2 * max(timing.largest.values()) + timing.checkpoint_seconds

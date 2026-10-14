@@ -999,7 +999,7 @@ def test_ssl_budget_request_observes_each_existing_cooperative_check(tmp_path):
     _, _, _, config = make_case(tmp_path)
     clock = [0.]
     timing = DeadlineTiming(1200., clock=lambda: clock[0])
-    budget = _Budget(replace(config, deadline_timing=timing), CheckpointRequest())
+    budget = _Budget(replace(config, deadline_timing=timing, device="cpu"), CheckpointRequest())
     request = budget.ssl_request()
     assert not request.requested
     clock[0] = 200.
