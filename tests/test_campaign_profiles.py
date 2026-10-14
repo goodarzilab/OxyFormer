@@ -814,7 +814,7 @@ def test_month1_bound_cell_executes_and_cpu_collector_scopes_one_scenario(screen
     lock = coverage.read_json(root / 'recipe_lock.json')
     plans = coverage.read_json(root / 'expanded_units.json')['plans']
     plan = next(p for p in plans if p['spec']['work'][0]['parameters']['scenario']['name'] == 'null_effect')
-    assert len(plan['expected_leaves']) == 1
+    assert len(plan['expected_leaves']) == 2
     config = coverage.read_json(req.config_path)
     deps = {k: Path(v) for k, v in config['dependencies'].items()}
     deps['campaign-lock'] = root
@@ -826,18 +826,19 @@ def test_month1_bound_cell_executes_and_cpu_collector_scopes_one_scenario(screen
         _, records = successful_records(1)
         return {**records[0], 'draw': draw, 'wall_seconds': .001}
     monkeypatch.setattr(coverage, 'execute_draw', execute)
-    leaf = plan['tasks'][0]
-    leaf_req = chain_request(tmp_path / 'month1-leaf', leaf, deps)
-    cfg = coverage.read_json(leaf_req.config_path)
-    cfg['approvals'] = config['approvals']
-    write(Path(leaf_req.config_path), cfg)
-    leaf_req = replace(leaf_req, config_hash=file_hash(leaf_req.config_path))
-    result = run_coverage(leaf_req)
-    assert result.status == 'pass', result.message
-    assert calls == lock['batches'][0]['draws']
-    value = coverage.read_json(Path(leaf_req.output_dir) / 'result.json')
-    assert not value['certifies_release_criteria'] and not value['summary']['production_equivalent']
-    deps[leaf['id']] = Path(leaf_req.output_dir)
+    for leaf in plan['tasks'][:-1]:
+        leaf_req = chain_request(tmp_path / leaf['id'], leaf, deps)
+        cfg = coverage.read_json(leaf_req.config_path)
+        cfg['approvals'] = config['approvals']
+        write(Path(leaf_req.config_path), cfg)
+        leaf_req = replace(leaf_req, config_hash=file_hash(leaf_req.config_path))
+        result = run_coverage(leaf_req)
+        assert result.status == 'pass', result.message
+        # The spare carries completed draws without fitting them again.
+        assert calls == lock['batches'][0]['draws']
+        value = coverage.read_json(Path(leaf_req.output_dir) / 'result.json')
+        assert not value['certifies_release_criteria'] and not value['summary']['production_equivalent']
+        deps[leaf['id']] = Path(leaf_req.output_dir)
     collector = request(tmp_path / 'month1-collector', plan['tasks'][-1], deps, config['approvals'])
     # CPU collection has a different hardware environment, but verifies the
     # unchanged scientific fingerprint and bound profile receipt identities.
