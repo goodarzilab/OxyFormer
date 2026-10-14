@@ -246,7 +246,7 @@ def screening_profile_tasks(endpoint, frame, approvals):
     is carried unchanged through remaining slots, never fitted again. This
     supplies a concrete terminal dependency without predicting its cost.
     """
-    from oxyformer.validation.coverage import BUDGET_RECORD
+    from oxyformer.validation.coverage import BUDGET_RECORD, leaf_allocation, maximum_leaf_stage_seconds
     decision = campaign.screening_decision(approvals)
     require(decision == campaign.screening_decision(), 'screening approval drift')
     legacy = profile_tasks(endpoint, frame)['tasks']
@@ -254,13 +254,15 @@ def screening_profile_tasks(endpoint, frame, approvals):
     recipe.update(campaign_mode='screening', study=deepcopy(decision['recipe']))
     campaign.validate_recipe(recipe)
     metadata = campaign.screening_metadata(recipe)
-    resources = {'cpus_per_task': 8, 'gpus': 1, 'wall_seconds': 14400, 'partition': 'standard'}
+    stage_seconds = maximum_leaf_stage_seconds()
+    allocation = leaf_allocation(stage_seconds)
+    resources = {'cpus_per_task': 8, 'gpus': 1, 'wall_seconds': allocation['allocation_seconds'], 'partition': 'standard'}
     outputs = ['result.json', 'timing.json', 'runtime.json', 'artifact_manifest.json', BUDGET_RECORD, 'continuation.tar']
     receipt_inputs = ['_execution/task.json', '_execution/request.json', '_execution/result.json', *outputs]
     tasks, profiles = [], {}
     for original in legacy[:4]:
         parameters = {**deepcopy(original['parameters']), 'recipe': recipe, **metadata,
-                      'study': decision['recipe'], 'wall_seconds': resources['wall_seconds'],
+                      'study': decision['recipe'], 'wall_seconds': stage_seconds,
                       'partition': 'standard', 'device': 'cuda'}
         name = parameters['scenario']['name']
         parameters['draws'] = repetition_plan(digest(['month1-screening-profile', recipe]), name, 1)
@@ -283,7 +285,7 @@ def screening_profile_tasks(endpoint, frame, approvals):
                   **{ref['dependency']: receipt_inputs for ref in profiles.values()}},
         'outputs': ['budget_estimate.json', 'artifact_manifest.json'],
         'parameters': {**{k: deepcopy(legacy[4]['parameters'][k]) for k in ('endpoint_input', 'frame_input')},
-            'recipe': recipe, 'profiles': profiles, **resources, 'profile_safety_factor': 2.}})
+            'recipe': recipe, 'profiles': profiles, **resources, 'wall_seconds': stage_seconds, 'profile_safety_factor': 2.}})
     return {'schema_version': 1, **metadata, 'gpu_concurrency_max': 4, 'tasks': tasks}
 
 

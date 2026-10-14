@@ -194,6 +194,7 @@ class FitConfig:
     slice_seconds: float = 14400.
     checkpoint_margin_seconds: float = 120.
     device: str = "auto"
+    deadline_timing: DeadlineTiming | None = None
 
     def __post_init__(self):
         require(type(self.study) is RecipeStudy, "RecipeStudy required")
@@ -545,18 +546,89 @@ def _profile(model, config, view, inputs, *, policy_cache=None):
             model.group_offsets.update_identity(view.original_ids, target.double(), base.double(), weights)
 
 
+# Real-frame bounds are validated by the leaf-deadline-margins D3 probe;
+# see docs/EXECUTION.md and that attempt's deadline_report.json.
+PHASE_UNIT_SECONDS = {"ssl": 60., "nuisance": 90., "evaluation": 120.}
+CHECKPOINT_WRITE_SECONDS = 30.
+
+
+class DeadlineTiming:
+    """Execution-only telemetry shared by every nested fold in one leaf.
+
+    One interval is the work between two cooperative checks, including CUDA
+    completion. No clock or timing measurement enters the scientific identity.
+    The second unit in the margin covers a phase transition after the last
+    check; checkpoint serialization has its own bound.
+    """
+    def __init__(self, deadline, *, clock=None):
+        self.deadline = deadline
+        self.clock = clock or time.monotonic
+        self.largest = dict.fromkeys(PHASE_UNIT_SECONDS, 0.)
+        self.checkpoint_seconds = 0.
+        self.last = None
+        self.phase = None
+
+    @property
+    def margin_seconds(self):
+        unit = max(*PHASE_UNIT_SECONDS.values(), *self.largest.values())
+        return max(120., 2 * unit + max(CHECKPOINT_WRITE_SECONDS, self.checkpoint_seconds))
+
+    def boundary(self, phase, device="cpu"):
+        if torch.device(device).type == "cuda":
+            torch.cuda.synchronize(device)
+        now = self.clock()
+        if self.last is not None:
+            self.largest[self.phase] = max(self.largest[self.phase], now - self.last)
+        self.last, self.phase = now, phase
+        return now >= self.deadline - self.margin_seconds
+
+    def finish_unit(self, device="cpu"):
+        if self.last is not None:
+            self.boundary(self.phase, device)
+        self.last = self.phase = None
+
+    def report(self):
+        return {"phase_unit_bounds_seconds": dict(PHASE_UNIT_SECONDS),
+                "largest_unit_seconds": dict(self.largest),
+                "checkpoint_write_bound_seconds": CHECKPOINT_WRITE_SECONDS,
+                "checkpoint_write_seconds": self.checkpoint_seconds,
+                "margin_seconds": self.margin_seconds,
+                "compute_deadline": self.deadline if math.isfinite(self.deadline) else None}
+
+
+class _SSLDeadlineRequest:
+    """Observe the existing SSL request check without altering its algorithm."""
+    def __init__(self, budget):
+        self.budget = budget
+
+    @property
+    def requested(self):
+        timing = self.budget.config.deadline_timing
+        return self.budget.request.requested or timing.boundary("ssl", self.budget.config.device)
+
+    def signals(self):
+        return self.budget.request.signals()
+
+
 class _Budget:
     def __init__(self, config, request):
         self.config, self.request, self.started, self.batches = config, request, time.monotonic(), 0
+        self.phase = "nuisance"
 
     def reason(self):
         if self.request.requested:
             return "requested"
+        timing = self.config.deadline_timing
+        if timing is not None and timing.boundary(self.phase, self.config.device):
+            return "slice_limit"
         if time.monotonic() - self.started >= self.config.slice_seconds - self.config.checkpoint_margin_seconds:
             return "slice_limit"
         if self.config.max_batches is not None and self.batches >= self.config.max_batches:
             return "batch_limit"
         return None
+
+    def ssl_request(self):
+        return self.request if self.config.deadline_timing is None else _SSLDeadlineRequest(self)
 
 
 def _train_one(config, bundle, encoder_state, view, stopping, epochs, seed, budget, saved=None):
