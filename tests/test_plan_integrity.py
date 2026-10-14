@@ -94,6 +94,7 @@ def test_final_coverage_collector_dependencies(tmp_path, monkeypatch):
     # fixture's allocation and fingerprint are not production authorizations.
     from test_campaign import STAMPS, locked
     from oxyformer.validation import campaign
+    monkeypatch.setenv("OXYFORMER_PUBLICATION_STORE", str(tmp_path / ".publications"))
     monkeypatch.setattr(campaign, "fingerprint", lambda: deepcopy(STAMPS))
     _, lock, plans = locked(tmp_path)
     plan = plans[-1]
