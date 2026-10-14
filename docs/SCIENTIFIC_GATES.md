@@ -212,3 +212,25 @@ are true: 282 sampled rows have gaps (34 target, 248 training-only), and 4,226
 have no positive-width shift interval (1,035 target, 3,191 training-only).
 The real-frame report records both values and these membership counts.
 `bridge_support_gaps` remains false; the support, target and estimand are unchanged.
+
+Month-1 screening follows `owner_decisions.screening_campaign.month1_sizing`
+(owner decision 2026-10-13). The four registered scenarios use the explicit
+RecipeStudy cell: reference cap 32, frozen epochs 30, two grid points, one seed.
+The registered production recipe is retained; these study overrides do not
+certify any release criterion. Final cells of at least 1,000 repetitions remain
+deferred to month 2 with a separate allocation.
+
+`campaign-estimate` publishes measured counts before admission. Independently
+for each scenario it chooses the largest positive count at most 25 that fits
+40 continuation leaves, each at most four GPU-hours. It uses the same measured
+compute rate, per-leaf overhead, publication reserve and safety factor as
+`campaign-lock`. A scenario unable to fit even one repetition is refused;
+counts are never guessed or uniformly reduced. The report contains each
+scenario's repetitions, leaves and reserved GPU-hours, and checks the sum is
+at most 640 hours and below the 3,600 H100-hour planning ceiling.
+
+The orchestrator reports these measured counts to the owner before running the
+separate `campaign-lock` stage. The lock records the exact estimate hash and
+refuses changed measurements or settings. Estimation cannot expand or admit
+leaves. Each scenario has its own screening specification and collector;
+month 1 builds no final instance. Both paths retain explicit non-release labels.

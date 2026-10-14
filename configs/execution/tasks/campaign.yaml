@@ -42,3 +42,6 @@ tasks:
           scenario: null_effect
           index: 0
       wall_seconds: 1800
+# Month-1 screening is emitted by real-frame-inputs as coverage continuation
+# profile chains, then campaign-estimate. The orchestrator reports measured
+# counts before constructing a separate campaign-lock with estimate_input.

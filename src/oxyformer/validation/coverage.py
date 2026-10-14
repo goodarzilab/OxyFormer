@@ -122,12 +122,12 @@ def budget_binding(request, task, recipe_hash):
         "task_id": task["id"], "chain": task.get("continuation"),
         "recipe_hash": recipe_hash, "lock_hash": task.get("recipe_lock", {}).get("sha256"),
         "draws": parameters["draws"], "scenario": parameters["scenario"],
-        "mode": parameters["mode"], "code_identity": request.code_identity}
+        "mode": parameters["mode"], "code_identity": request.code_identity, **output_metadata(task)}
 
 
 def record_measurements(request, completed, started, task, timing, summary):
     """Worker measurements only. They cannot authorize any downstream decision."""
-    value = {"binding": budget_binding(request, task, timing["recipe_hash"]),
+    value = {**output_metadata(task), "binding": budget_binding(request, task, timing["recipe_hash"]),
         "started_monotonic": started, "timing": timing,
         "counts": summary["counts"], "received": summary["received_repetitions"]}
     path = atomic_json(request.output_dir, MEASUREMENTS, value)
@@ -357,7 +357,15 @@ def read_json(path):
     return json.loads(Path(path).read_text())
 
 
+def output_metadata(task):
+    from oxyformer.validation.campaign import screening_metadata
+    recipe = task.get("parameters", {}).get("recipe", task.get("parameters", {}))
+    return screening_metadata(task if task.get("campaign_mode") == "screening" else recipe)
+
+
 def publish(request, values, *, status, message, extra_artifacts=()):
+    metadata = output_metadata(read_json(request.task_path))
+    values = {name: {**value, **metadata} for name, value in values.items()}
     root = Path(request.output_dir)
     root.mkdir(parents=True, exist_ok=True)
     lineage = ArtifactLineage(source_hashes=(request.config_hash, request.task_hash),
@@ -375,7 +383,7 @@ def publish(request, values, *, status, message, extra_artifacts=()):
     records.extend(extra_artifacts)
     if "artifact_manifest.json" not in values:
         path = atomic_json(root, "artifact_manifest.json", {"request_hash": request.content_hash,
-            "artifacts": [r.to_dict() for r in records]})
+            "artifacts": [r.to_dict() for r in records], **metadata})
         records.append(ArtifactRecord(path="artifact_manifest.json", kind="artifact_manifest", sha256=file_hash(path), lineage=lineage))
     result = StageResult(request_hash=request.content_hash, status=status, artifacts=tuple(records), message=message)
     result.verify(request)
@@ -633,6 +641,13 @@ def prepare_batch(request: StageRequest):
     else:
         recipe = parameters["recipe"]
         lock = None
+    from oxyformer.validation.campaign import screening_metadata, validate_screening
+    if screening_metadata(recipe):
+        decision = validate_screening(recipe, config.get("approvals"))
+        require(mode in ("profile", "screening"), "screening cell cannot certify final coverage")
+        require(parameters.get("study") == decision["recipe"], "screening task study drift")
+        require(parameters.get("partition") == "standard", "screening partition must be standard")
+        require(uses_continuation(task), "screening requires coverage continuation")
     production = mode != "smoke"
     validate_recipe(recipe, production=production)
     template_path = dependency(request, config, parameters["endpoint_input"])
@@ -723,7 +738,7 @@ def record_runtime(request, completed, started, task, *, budget_exceeded=False):
     budget = finite(parameters["wall_seconds"], "admitted budget")
     aggregate = read_json(Path(request.output_dir) / "result.json")
     elapsed = time.monotonic() - started
-    runtime = {"measurement_scope": "complete_batch_return", "wall_seconds": elapsed,
+    runtime = {**output_metadata(task), "measurement_scope": "complete_batch_return", "wall_seconds": elapsed,
         "admitted_budget_seconds": budget, "budget_exceeded": budget_exceeded or elapsed > budget,
         "overrun_seconds": max(0., elapsed - budget), "batch_id": parameters.get("batch_id"),
         "lock_hash": aggregate["lock_hash"], "request_hash": completed.request_hash,
@@ -942,7 +957,7 @@ def _run_chain(request, started):
         "publication_verification_seconds": math.fsum(v["publication_seconds"] for v in leaves),
         "admitted_budget_seconds": seconds,
         "production_equivalent": parameters["mode"] != "smoke" and study == RecipeStudy(),
-        "study": study.to_dict(),
+        "study": study.to_dict(), **output_metadata(task),
         "complete_repetition_seconds": [s["compute_seconds"] for s in states if s["record"] is not None
                                         and s["record"]["status"] == "success"],
         "complete": summary["complete"] and not exceeded, "budget_exceeded": exceeded,
