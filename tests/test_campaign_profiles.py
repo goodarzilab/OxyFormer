@@ -14,11 +14,16 @@ from oxyformer.provenance import ContractError, file_hash
 from oxyformer.training import nested_cv
 from oxyformer.validation import campaign, campaign_estimate, coverage, real_frame, smoke_inputs
 from oxyformer.validation.scm import SCMConfig
-from test_campaign import STAMPS, request, write
-from test_coverage import successful_records
+from test_campaign import STAMPS, request, write, seal_budget_fixture, refresh_profile, profile_directory
+from test_coverage import successful_records, run_coverage
 from test_design import make_inputs
 
 ROOT = Path(__file__).parents[1]
+
+
+@pytest.fixture(autouse=True)
+def profile_publication_store(tmp_path, monkeypatch):
+    monkeypatch.setenv('OXYFORMER_PUBLICATION_STORE', str(tmp_path / '.publications'))
 
 
 def real_fixture():
@@ -139,6 +144,7 @@ def test_generated_tasks_use_all_registered_scenarios_and_no_lock(built):
 
 @pytest.fixture
 def estimate_request(tmp_path, monkeypatch):
+    monkeypatch.setenv("OXYFORMER_PUBLICATION_STORE", str(tmp_path / ".publications"))
     monkeypatch.setattr(campaign, 'fingerprint', lambda: deepcopy(STAMPS))
     endpoint, frame = smoke_inputs.build_inputs()
     tasks = real_frame.profile_tasks(endpoint, frame)['tasks']
@@ -158,6 +164,7 @@ def estimate_request(tmp_path, monkeypatch):
             'recipe_hash': coverage.digest(p['recipe']), 'device': 'cpu', 'gpu_seconds': 0,
             'complete_repetition_seconds': [10.], 'wall_seconds': 13., 'setup_seconds': 2.,
             'measurement_scope': 'complete_stage_return', **STAMPS})
+        seal_budget_fixture(root, task['id'], task)
     req = request(tmp_path / 'estimate', tasks[4], deps)
     # There is deliberately no approvals or allocation key at all.
     config = json.loads(Path(req.config_path).read_text())
@@ -228,7 +235,7 @@ def test_estimate_rejects_incomplete_or_mismatched_profiles(estimate_request, ch
     else:
         value['production_equivalent'] = False
     write(path, value)
-    req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    req = refresh_profile(req)
     result = campaign_estimate.run_stage(req)
     assert result.status == 'blocked' and not result.artifacts
     assert not list(Path(req.output_dir).iterdir())
@@ -304,7 +311,7 @@ def test_gpu_probe_refuses_unavailable_cuda_before_fitting(gpu_profile_request, 
     monkeypatch.setenv('OXYFORMER_DEVICE', 'cuda')
     monkeypatch.setattr(torch.cuda, 'is_available', lambda: False)
     monkeypatch.setattr(coverage, 'execute_draw', lambda *args: pytest.fail('started draw without CUDA'))
-    result = coverage.run_stage(gpu_profile_request)
+    result = run_coverage(gpu_profile_request)
     assert result.status == 'blocked' and 'unavailable' in result.message
     assert not result.artifacts
 
@@ -315,7 +322,7 @@ def test_gpu_probe_refuses_cpu_runtime_before_fitting(gpu_profile_request, monke
     monkeypatch.setattr(fit, 'resolve_device', lambda device='auto':
                         torch.device('cuda:0' if device == 'cuda' else 'cpu'))
     monkeypatch.setattr(coverage, 'execute_draw', lambda *args: pytest.fail('started CPU draw'))
-    result = coverage.run_stage(gpu_profile_request)
+    result = run_coverage(gpu_profile_request)
     assert result.status == 'blocked' and 'required device' in result.message
     assert not result.artifacts
 
@@ -331,7 +338,7 @@ def test_gpu_profile_timing_and_budget_are_honest(gpu_profile_request, monkeypat
     monkeypatch.setattr(fit, 'fit_environment', lambda device='auto': tuple(environment.items()))
     monkeypatch.setattr(torch.cuda, 'synchronize', lambda device: None)
     def execute(draw, frame, scenario, template, recipe, root, deadline):
-        assert deadline == 13500
+        assert deadline == 13470  # 13500 seconds minus the publication reserve.
         clock[0] += 13501 if outcome == 'late_fit' else 10
         _, records = successful_records(1)
         record = {**records[0], 'draw': draw, 'wall_seconds': clock[0]}
@@ -346,7 +353,7 @@ def test_gpu_profile_timing_and_budget_are_honest(gpu_profile_request, monkeypat
         return result
     monkeypatch.setattr(coverage, 'execute_draw', execute)
     monkeypatch.setattr(coverage, 'publish', publish)
-    result = coverage.run_stage(gpu_profile_request)
+    result = run_coverage(gpu_profile_request)
     assert result.status == ('pass' if outcome == 'success' else 'fail'), result.message
     result.verify(gpu_profile_request)
     timing = coverage.read_json(Path(gpu_profile_request.output_dir) / 'timing.json')
@@ -495,6 +502,7 @@ def test_estimate_and_lock_compare_derived_real_frame_scenarios(built, tmp_path,
             'recipe_hash': coverage.digest(p['recipe']), 'device': 'cpu', 'gpu_seconds': 0,
             'complete_repetition_seconds': [10.], 'wall_seconds': 13., 'setup_seconds': 2.,
             'measurement_scope': 'complete_stage_return', **STAMPS})
+        seal_budget_fixture(root, task['id'], task)
     req = request(tmp_path / 'estimate-derived', tasks[4], deps)
     assert campaign_estimate.estimate_budget(req)['total_repetitions'] == 4000
     # Exercise registry admission without fitting or timing this policy-only fixture.
@@ -515,6 +523,98 @@ def test_estimate_and_lock_compare_derived_real_frame_scenarios(built, tmp_path,
     stale = coverage.read_json(deps['profile-null-effect'] / 'result.json')
     stale['scenario'] = explicit
     write(deps['profile-null-effect'] / 'result.json', stale)
-    req = replace(req, dependency_hashes=tuple(map(file_hash, req.dependency_paths)))
+    req = refresh_profile(req)
     with pytest.raises(ContractError, match='profile scenario mismatch'):
         campaign_estimate.estimate_budget(req)
+
+
+def test_profile_chain_accounts_for_every_leaf_and_refuses_partial(tmp_path, monkeypatch):
+    from test_coverage import chain_fixture, chain_request
+    task, inputs = chain_fixture(tmp_path)
+    task["parameters"]["mode"] = "profile"
+    task["parameters"]["recipe"]["nested_cv"] = {}
+    task["parameters"].pop("study")
+    clock = [0.]
+    monkeypatch.setattr(coverage.time, "monotonic", lambda: clock[0])
+    def stamp():
+        clock[0] += 2.
+        return deepcopy(STAMPS)
+    monkeypatch.setattr(campaign, "fingerprint", stamp)
+    original_read, original_write, original_publish = coverage._read_continuation, coverage._write_continuation, coverage.publish
+    def read(*a, **k):
+        clock[0] += 3.
+        return original_read(*a, **k)
+    def write(*a, **k):
+        clock[0] += 4.
+        return original_write(*a, **k)
+    def publish(*a, **k):
+        clock[0] += 5.
+        return original_publish(*a, **k)
+    monkeypatch.setattr(coverage, "_read_continuation", read)
+    monkeypatch.setattr(coverage, "_write_continuation", write)
+    monkeypatch.setattr(coverage, "publish", publish)
+    calls = []
+    def estimate(*a, **k):
+        calls.append(1)
+        clock[0] += 10.
+        return None if len(calls) == 1 else {m: {"value": 0., "se": 1.} for m in coverage.METHODS}
+    monkeypatch.setattr(coverage, "estimate_repetition", estimate)
+    first = chain_request(tmp_path / "first", task, {"inputs": inputs})
+    assert run_coverage(first).status == "pass"
+    timing = coverage.read_json(Path(first.output_dir) / "timing.json")
+    assert not timing["complete"]
+    def profile(req):
+        config = json.loads(Path(req.config_path).read_text())
+        result = coverage.read_json(Path(req.output_dir) / "result.json")
+        unit = coverage.read_json(req.task_path)["id"]
+        reader = chain_request(tmp_path / ("reader-" + str(len(calls))), task, {unit: Path(req.output_dir)})
+        config = json.loads(Path(reader.config_path).read_text())
+        return campaign._profile(reader, config, {"dependency": unit, "path": "result.json"},
+                                 result["scenario"], task["parameters"]["recipe"], STAMPS)
+    with pytest.raises(ContractError, match="complete production"):
+        profile(first)
+    task = deepcopy(task)
+    task.update(id="chain-1", continuation={"owner": "coverage-test", "step": 1, "predecessor": "chain-0"})
+    second = chain_request(tmp_path / "second", task, {"inputs": inputs, "chain-0": Path(first.output_dir)})
+    assert run_coverage(second).status == "pass"
+    timing = coverage.read_json(Path(second.output_dir) / "timing.json")
+    assert timing["complete"] and timing["wall_seconds"] == 45.
+    assert timing["complete_repetition_seconds"] == [20.]
+    assert [leaf["wall_seconds"] for leaf in timing["leaves"]] == [21., 24.]
+    measured = profile(second)
+    assert measured["seconds_per_repetition"] == 20.
+    assert measured["leaf_overheads"] == {"setup_seconds": 2., "import_seconds": 3., "export_seconds": 4., "publication_seconds": 5.}
+
+
+@pytest.mark.parametrize("case", ["unequal_cumulative_compute", "setup_exceeds_import_export"])
+def test_chained_profile_uses_cumulative_max_and_full_overhead(tmp_path, case):
+    from test_campaign import setup_lock
+    req, task = setup_lock(tmp_path)
+    result_path = tmp_path / "profile/result.json"
+    result = coverage.read_json(result_path)
+    for record in result["records"]:
+        record["wall_seconds"] = 10.  # Last-leaf time is not cumulative compute.
+    write(result_path, result)
+    path = profile_directory(req) / "timing.json"
+    timing = coverage.read_json(path)
+    if case == "unequal_cumulative_compute":
+        leaves = [{"task_id": f"profile-{i}", "step": i, "compute_seconds": compute,
+            "setup_seconds": 1., "import_seconds": 0., "export_seconds": 0., "publication_seconds": 0.,
+            "wall_seconds": compute + 1.} for i, compute in enumerate((90., 20.))]
+        # Bootstrap capacity also pays setup: 90 compute + 1 setup fits 110.
+        timing.update(wall_seconds=112., setup_seconds=2., admitted_budget_seconds=110.)
+    else:
+        leaves = [{"task_id": "profile-0", "step": 0, "compute_seconds": 110., "setup_seconds": 10.,
+            "import_seconds": 2., "export_seconds": 2., "publication_seconds": 1., "wall_seconds": 125.}]
+        timing.update(wall_seconds=125., setup_seconds=10., admitted_budget_seconds=600.)
+    timing.update(measurement_scope="complete_chain_return", leaves=leaves, complete_repetition_seconds=[100., 10.])
+    write(path, timing)
+    req = refresh_profile(req)
+    profile = campaign._profile(req, json.loads(Path(req.config_path).read_text()),
+        {"dependency": "profile", "path": "result.json"}, result["scenario"], task["parameters"]["recipe"], STAMPS)
+    assert profile["seconds_per_repetition"] == 100.
+    if case == "unequal_cumulative_compute":
+        assert campaign.slice_count(profile, 1, 100., 1.) == 2
+    else:
+        assert profile["leaf_overheads"] == {"setup_seconds": 10., "import_seconds": 2.,
+                                            "export_seconds": 2., "publication_seconds": 1.}

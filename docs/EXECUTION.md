@@ -416,3 +416,139 @@ Report the 5,400/1,700 H100-hour comparisons and
 `floor(5400 / (scenario_count * repetition_hours))` for 4, 2 and 1 scenarios.
 This arithmetic does not amend the frozen minimum of 1,000 repetitions per final
 scenario or authorize a campaign or a larger leaf.
+
+### Coverage-owned continuation chains
+
+Coverage work may use the generic campaign `slices` chain. A work item that
+uses chained profiling declares `continuation.tar` on **every** slice, including
+the terminal slice. Its immutable parameters retain the draws, recipe, scenario,
+wall budget and optional `RecipeStudy` cell. The owner/step/predecessor fields
+come from the generic expansion; no new instance type or scheduler is involved.
+Archive-free single-leaf execution remains available. Budget evidence from both
+legacy and chained producers must now pass the runner-finalized loader.
+
+The coverage archive binds draw IDs and simulation seeds, scenario payload,
+endpoint/frame/observation hashes, recipe, study cell, lock, code identity, wall
+budget and scientific/environment fingerprints. Import resolves only the named predecessor
+from `StageRequest.dependency_paths`; the executor authenticates its declared
+outputs. Digest-named archive members carry the original observations/truth
+receipts, completed `(fold, seed)` prediction parts and the unfinished fold's
+nested-CV continuation. Embedded old checkpoint paths are never opened. Each
+predecessor must have the same owner and exactly the preceding step. Binding
+drift, gaps, reordered parts and corrupt blobs are refusals, never new draws.
+
+A bounded coverage leaf uses the shared compute budget described below,
+reserving measured export/publication costs, the safety factor, and
+`min(120 seconds, wall_seconds / 10)`. Nested-CV retains its checkpoint margin.
+The 14,400-second bound applies to a slice, not to a fold's cumulative
+training. Epochs, tuning, seeds and estimators are unchanged. Only after all
+prediction parts exist does the usual terminal aggregation run. Incomplete
+repetitions have no `repetitions/<id>/result.json`; a valid checkpointed slice
+passes execution while its batch summary remains incomplete. If a leaf crashes
+before export, retry in a fresh attempt root with the same task and exported
+predecessor. Never consume partial files in the failed root.
+
+The runner finalizes exactly one `budget_record.json` after the final wall
+check. Its terminal `StageResult` lists that record and its SHA256. The record
+binds the request, declared wall, task and continuation owner/step, recipe, lock,
+scenario and draws. It contains reconciled per-leaf compute, setup, import,
+export and publication measurements, outcome counts, and chain totals.
+`coverage_measurements.json` is worker input to finalization, with no downstream
+authority. `result.json`, `timing.json` and `runtime.json` remain diagnostics and
+scientific payloads; their budget flags cannot authorize work.
+Execution and finalization classify a chain from the producer task's archive
+output or predecessor, preserving the archive-free generic step-zero path.
+The same task supplies the effective compute contract, including a bootstrap
+ceiling; worker scope tags and copied contracts cannot enlarge that allowance.
+
+`coverage.load_budget` is the only budget-evidence loader. It requires a
+passing terminal result and the existing independent publication seal, verifies
+the declared producer request/task and record hash, checks the wall/bindings,
+and recomputes eligibility from measurements and counts. Within this same loader,
+the recorded chain mode and per-leaf contracts must match the producer task,
+and the hashed scientific recipe and outcomes must agree with the binding and counts;
+diagnostic summary flags remain irrelevant. Missing, truncated,
+pre-seal, over-budget and reused evidence is refused. Stored eligibility,
+complete and success flags are not trusted. Scientific payload reads follow
+this gate. Profiles, lock sizing and admission, leaf deadlines, predecessor
+import, collection, and dependency reuse/retry all use the same loader. A lock
+carries the profile record identity and declares its original sealed inputs so
+a leaf can revalidate the measurements before spending its compute allowance.
+
+A partial or unsuccessful chain cannot justify a lock. For a chained profile,
+lock sizing pays the maximum measured cost of each overhead phase on every
+slice and applies the declared safety factor. Usable compute per slice is
+`(wall_seconds - checkpoint_reserve) / safety_factor - sum(max_phase_overheads)`;
+the slice count is the ceiling of measured repetition compute divided by this
+capacity. Admission also measures actual locked setup and refuses if it exceeds
+the allocation. Collection counts the last leaf's accumulated terminal records
+once, retains all declared draws in denominators, and lists incomplete chains.
+
+The bounds remain 4 GPU-hours per leaf and 40 leaves **per campaign spec**.
+Screening and final instances are still formed as before, and all generated
+resources remain `standard`/`root`. Per-scenario instances and month-1 sizing
+belong to the subsequent campaign-binding unit.
+
+The synthetic equivalence regression runs one reference repetition and a chain
+of three leaves, cutting inside a fold and between folds. It compares floating
+values by their binary64 bytes and records discrete fields separately. Only the
+explicitly enumerated timing/provenance fields in its report are excluded.
+`OXYFORMER_EQUIVALENCE_REPORT` selects the external report path;
+`OXYFORMER_CHAIN_DEVICE=cuda` selects the single-device H100 check. CPU is the
+default. Run the required coverage/campaign/profile/nested-CV files with and
+without `-B` in both the shared and CI CPU environments, plus the full CI-style
+suite, on Slurm. Tests use only synthetic fixtures and no network access.
+
+### Shared coverage leaf budget
+
+For coverage-owned chains, the lock stores `leaf_budget` in each batch and its
+expanded tasks. Sizing, locked preflight admission, and execution all use
+`C = (wall_seconds - min(120, wall_seconds / 10)) / safety_factor - sum(overheads)`.
+Overheads name setup, import, export, and publication separately. The immutable
+lock and continuation binding authenticate the budget, including the compute
+ceiling. A 600-second wall, factor 1.2, and 100 seconds of overhead admit 350
+seconds of compute: 800 seconds of work requires three leaves.
+
+The whole leaf shares one compute deadline. Setup and import are each charged
+once; each positive overrun reduces C and underruns never increase it. Export
+and publication remain reserved, along with the checkpoint margin and safety
+factor. A compute overrun refuses usable publication. Observed finalization or
+wall overruns fail the leaf and cannot justify a profile lock. The collector
+refuses over-budget leaves. Checkpoint boundaries are cooperative;
+uninterruptible operations that overrun are detected, not certified as within
+budget. The scheduler remains the hard wall limit.
+
+Bootstrap chain profiles need no prior measurement. They may declare an
+immutable `compute_ceiling_seconds` below the wall minus checkpoint reserve;
+otherwise that bound applies. Their separate phase measurements supply the
+next lock. Partial, unsuccessful, or known-overrun measurements never admit a
+lock. Existing archive-free single-leaf producers retain their legacy behavior:
+generic step-zero metadata alone does not promise an archive. New locks built
+from chained profiles explicitly declare `continuation.tar`. Malformed archive
+declaration hardening is deferred to a follow-up.
+
+The final wall measurement includes worker return and runner verification.
+Post-check record writing and terminal publication use `min(30 seconds,
+wall_seconds / 20)` of the existing checkpoint/finalization reserve; the final
+check requires elapsed plus that reserved interval to fit the wall. This
+allocation does not enlarge compute or change the shared C formula. Actual
+post-check duration is not claimed as measured in a record written before it.
+Slurm enforces the allocation's hard limit. Publication first writes provisional
+bytes and then the independent seal; no terminal result is changed after that
+seal. A provisional passing result without the seal admits nothing.
+
+The worker's bounded deadline and final wall check, the runner's finalization,
+and the sealed-budget loader share the pre-publication limit
+`wall_seconds - min(30, wall_seconds / 20)`. At a 600-second wall, elapsed 570
+passes the wall check and 571 fails; the reserved publication time remains inside
+the existing checkpoint reserve. This does not change the compute formula or its
+350-second capacity for wall 600, factor 1.2, and 100 seconds of overhead. Legacy
+CPU profiles retain their planning-only training deadline and must pass the same
+final budget check to supply usable measurements.
+
+An omitted or explicitly null `leaf_budget` selects bootstrap accounting in
+execution, finalization and loading. Only a non-null measured contract charges
+export/publication phase overruns against compute. The sealed scientific payload's
+scenario (with registered defaults expanded), mode and recipe hash must match the
+producer task's identities; profile admission then requires those same identities
+to match the scenario and recipe being locked.
