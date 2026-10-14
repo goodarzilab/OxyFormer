@@ -526,7 +526,6 @@ def estimate_repetition(endpoint, recipe, root, deadline, *, study=None, continu
             timing.boundary("evaluation")
             parts.append(nested_cv.predict(artifact, view, endpoint.policy))
             timing.finish_unit()
-            atomic_json(root, "deadline-timing.json", timing.report())
             if continuation is not None:
                 continuation["parts"].append(parts[-1].to_json())
     names = ("original_ids", "fold_ids", "seed_ids", "mu_a", "mu_d", "r_a", "r_d", "origin_weights")
