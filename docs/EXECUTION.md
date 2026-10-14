@@ -575,8 +575,9 @@ orchestrator constructs a separate `campaign-lock` task from the estimate task's
 parameters, adding `campaign_id`, `evaluation_namespace`, `retry_rules`,
 `prior_locks`, `cpu_wall_hours_budget` and `estimate_input` (a declared dependency
 reference to `budget_estimate.json`). Do not supply manual repetition counts or
-batch sizes. The estimate and lock require the recorded four-hour leaf wall
-bound; a shorter caller-supplied bound cannot silently reduce the maximal count.
+batch sizes. Counts are maximized against the recorded four-hour leaf cap. A
+shorter requested wall is accepted only when it can schedule those same counts
+within forty leaves per scenario; it cannot silently reduce them.
 The lock rechecks the report, records its SHA-256, and measures
 setup on the expanded leaf shapes before admission. Setup beyond the measured
 profile allowance is refused and requires new measurements.

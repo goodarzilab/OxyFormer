@@ -275,8 +275,8 @@ def screening_estimate(request, config, parameters):
     require(resolve_device().type == "cuda", "screening measurement requires CUDA")
     require(integer(parameters["cpus_per_task"], "CPUs", 1) == 8, "screening requires eight CPUs")
     wall = integer(parameters["wall_seconds"], "leaf wall seconds", 1)
-    require(wall == decision["month1_sizing"]["gpu_hours_per_leaf_max"] * 3600,
-            "screening sizing requires the owner four-hour leaf bound")
+    owner_wall = decision["month1_sizing"]["gpu_hours_per_leaf_max"] * 3600
+    require(math.ceil(wall / 60) * 60 <= owner_wall, "leaf exceeds four GPU-hours")
     factor = finite(parameters["profile_safety_factor"], "profile safety factor")
     require(factor >= 1, "profiling safety factor must be at least one")
     require(not {"screening_repetitions", "final_repetitions", "repetitions_per_leaf"}.intersection(parameters),
@@ -300,11 +300,14 @@ def screening_estimate(request, config, parameters):
         # below to construct the lock: there is no second cost approximation.
         count = 0
         for candidate in range(decision["month1_sizing"]["repetitions_per_scenario_max"], 0, -1):
-            if slice_count(profile, candidate, wall, factor, enforce_limit=False) <= 40:
+            if slice_count(profile, candidate, owner_wall, factor, enforce_limit=False) <= 40:
                 count = candidate
                 break
         require(count > 0, "one screening repetition cannot fit forty leaves: " + name)
-        leaves = slice_count(profile, count, wall, factor)
+        # A shorter requested wall may save allocation, but cannot lower the
+        # count fixed by the owner's full permitted per-scenario capacity.
+        leaves = slice_count(profile, count, wall, factor, enforce_limit=False)
+        require(leaves <= 40, "requested leaf wall cannot fit the owner-maximal repetition count: " + name)
         rows[name] = {"repetitions": count, "leaves": leaves,
                       "gpu_hours": leaves * math.ceil(wall / 60) / 60}
     total = math.fsum(row["gpu_hours"] for row in rows.values())

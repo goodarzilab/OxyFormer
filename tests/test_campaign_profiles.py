@@ -841,6 +841,7 @@ def test_month1_bound_cell_executes_and_cpu_collector_scopes_one_scenario(screen
     gate = coverage.read_json(Path(collector.output_dir) / 'gate.json')
     assert set(gate['scenario_summaries']) == {'null_effect'}
     assert not gate['certifies_production_coverage'] and not gate['certifies_release_criteria']
+    assert coverage.read_json(Path(collector.output_dir) / 'result.json')['gate'] == gate
     assert gate['scenario_summaries']['null_effect']['declared_repetitions'] == 25
 
 
@@ -900,13 +901,13 @@ def test_month1_estimate_refuses_completed_nonterminal_profile_slot(screening_re
 
 
 @pytest.mark.parametrize('screening_rates', [(10000.,) * 4], indirect=True)
-def test_month1_estimate_refuses_shortened_owner_wall_bound(screening_request):
+def test_month1_estimate_refuses_shortened_wall_that_reduces_maximal_count(screening_request):
     estimate = campaign_estimate.estimate_budget(screening_request)
     assert all(r == {'repetitions': 25, 'leaves': 36, 'gpu_hours': 144.}
                for r in estimate['per_scenario'].values())
     req = update_task(screening_request, lambda p: p.update(wall_seconds=3600))
     result = campaign_estimate.run_stage(req)
-    assert result.status == 'blocked' and 'owner four-hour' in result.message
+    assert result.status == 'blocked' and 'owner-maximal' in result.message
     assert not result.artifacts and not list(Path(req.output_dir).iterdir())
 
 
@@ -948,3 +949,18 @@ def test_month1_emitted_profile_chain_mode_is_accepted(screening_request, tmp_pa
     assert result.status == 'pass', result.message
     report = coverage.read_json(Path(req.output_dir) / 'budget_estimate.json')
     assert report['per_scenario']['null_effect']['repetitions'] == 25
+
+
+@pytest.mark.parametrize('screening_rates', [(100.,) * 4], indirect=True)
+def test_month1_shorter_wall_preserves_owner_maximal_count(screening_request, tmp_path):
+    req = update_task(screening_request, lambda p: p.update(wall_seconds=3600))
+    lock_req = screening_lock_request(req, tmp_path)
+    report = coverage.read_json(Path(req.output_dir) / 'budget_estimate.json')
+    assert report['gpu_hours'] == 8.
+    assert all(row == {'repetitions': 25, 'leaves': 2, 'gpu_hours': 2.}
+               for row in report['per_scenario'].values())
+    locked = campaign.run_stage(lock_req)
+    assert locked.status == 'pass', locked.message
+    lock = coverage.read_json(Path(lock_req.output_dir) / 'recipe_lock.json')
+    assert lock['budget']['per_scenario'] == report['per_scenario']
+    assert all(b['wall_seconds'] == 3600 and b['slices'] == 2 for b in lock['batches'])
