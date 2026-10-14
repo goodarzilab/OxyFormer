@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+from tempfile import TemporaryDirectory
 
 import pytest
 import yaml
@@ -90,16 +91,22 @@ def test_final_collector_dependencies():
         assert "continuation.tar" in second["needs"][first["id"]]
 
 
+def publication_store_for_test(tmp_path_factory):
+    # Every publication caller checks independently: pytest continues after a
+    # failed regression, including when the shared fixture was not loaded.
+    configured = os.environ.get("OXYFORMER_PUBLICATION_STORE")
+    assert configured is not None, "tests must not fall back to the real home store"
+    store = Path(configured).resolve()
+    assert store.is_relative_to(tmp_path_factory.getbasetemp()), "test publication store must be isolated"
+    return store
+
+
 @pytest.mark.parametrize("custom_store", [False, False, True],
                          ids=["default-first", "default-next", "test-override"])
 def test_publication_store_is_per_test(tmp_path, tmp_path_factory, monkeypatch, custom_store):
     from oxyformer.execution.integrity import publication_receipt
 
-    # Check before creating a receipt so a missing fixture cannot touch home.
-    configured = os.environ.get("OXYFORMER_PUBLICATION_STORE")
-    assert configured is not None, "tests must not fall back to the real home store"
-    store = Path(configured).resolve()
-    assert store.is_relative_to(tmp_path_factory.getbasetemp())
+    store = publication_store_for_test(tmp_path_factory)
     assert not store.is_relative_to(tmp_path)
     assert not list(store.iterdir()), "each test must start with a fresh publication store"
     if custom_store:
@@ -115,15 +122,31 @@ def test_publication_store_is_per_test(tmp_path, tmp_path_factory, monkeypatch, 
     assert receipt.read_text() == "synthetic receipt marker"
 
 
-def test_publication_store_does_not_overlap_attempt(tmp_path):
+def test_publication_store_does_not_overlap_attempt(tmp_path, tmp_path_factory):
     from oxyformer.execution.integrity import publication_receipt
 
-    assert os.environ.get("OXYFORMER_PUBLICATION_STORE") is not None
+    publication_store_for_test(tmp_path_factory)
     receipt = publication_receipt(tmp_path, create=True)
     assert not receipt.parent.is_relative_to(tmp_path)
 
 
-def test_final_coverage_collector_dependencies(tmp_path, monkeypatch):
+@pytest.mark.parametrize("caller", ["receipt", "collector"])
+def test_publication_callers_reject_external_store(tmp_path, tmp_path_factory, monkeypatch, caller):
+    # A fake inherited home store reproduces a missing fixture without risking
+    # the developer's real store, even when running against a broken check.
+    with TemporaryDirectory(prefix="publication-fake-home-") as home:
+        store = Path(home) / "oxyformer-swarm/state/publications"
+        monkeypatch.setenv("OXYFORMER_PUBLICATION_STORE", str(store))
+        with pytest.raises(AssertionError, match="test publication store must be isolated"):
+            if caller == "receipt":
+                test_publication_store_does_not_overlap_attempt(tmp_path, tmp_path_factory)
+            else:
+                test_final_coverage_collector_dependencies(tmp_path, monkeypatch, tmp_path_factory)
+        assert not store.exists()
+
+
+def test_final_coverage_collector_dependencies(tmp_path, monkeypatch, tmp_path_factory):
+    publication_store_for_test(tmp_path_factory)
     # Existing synthetic profile receipts exercise the real lock builder. The
     # fixture's allocation and fingerprint are not production authorizations.
     from test_campaign import STAMPS, locked
