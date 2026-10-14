@@ -563,7 +563,9 @@ code never writes `configs/approvals.yaml`.
 Bootstrap profiling declares one draw per scenario across 40 sequential slots
 of at most four GPU-hours. Once complete, the same terminal record is carried
 through remaining slots without fitting or drawing again. If still incomplete
-at the terminal slot, estimation refuses the profile. Every slot declares the
+at the terminal slot, estimation refuses the profile. Estimation also refuses a
+reference to an earlier completed slot: its receipt must account for all 40
+declared bootstrap slots. Every slot declares the
 coverage-owned continuation archive and finalized budget receipt. Each scenario
 has one sequential chain; at most four single-GPU profiles can run together.
 The estimate task depends on all four terminal receipts and admits nothing.
@@ -573,7 +575,9 @@ orchestrator constructs a separate `campaign-lock` task from the estimate task's
 parameters, adding `campaign_id`, `evaluation_namespace`, `retry_rules`,
 `prior_locks`, `cpu_wall_hours_budget` and `estimate_input` (a declared dependency
 reference to `budget_estimate.json`). Do not supply manual repetition counts or
-batch sizes. The lock rechecks the report, records its SHA-256, and measures
+batch sizes. The estimate and lock require the recorded four-hour leaf wall
+bound; a shorter caller-supplied bound cannot silently reduce the maximal count.
+The lock rechecks the report, records its SHA-256, and measures
 setup on the expanded leaf shapes before admission. Setup beyond the measured
 profile allowance is refused and requires new measurements.
 

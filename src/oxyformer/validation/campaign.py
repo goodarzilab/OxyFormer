@@ -193,6 +193,9 @@ def _profile(request, config, reference, scenario, recipe, stamps):
         require(record["chained"] and producer["parameters"].get("study") == recipe["study"]
                 and record["profile"]["production_equivalent"] is False,
                 "screening requires measured study continuation profiles")
+        slots = screening_decision()["month1_sizing"]["leaves_per_scenario_max"]
+        require(producer.get("continuation", {}).get("step") == slots - 1
+                and len(record["leaves"]) == slots, "screening requires the terminal bootstrap profile slot")
     result_path = dependency(request, config, reference)
     require(file_hash(result_path) == record["payload_hash"], "profile scientific payload hash mismatch")
     result = read_json(result_path)
@@ -272,7 +275,8 @@ def screening_estimate(request, config, parameters):
     require(resolve_device().type == "cuda", "screening measurement requires CUDA")
     require(integer(parameters["cpus_per_task"], "CPUs", 1) == 8, "screening requires eight CPUs")
     wall = integer(parameters["wall_seconds"], "leaf wall seconds", 1)
-    require(math.ceil(wall / 60) * 60 <= 14400, "leaf exceeds four GPU-hours")
+    require(wall == decision["month1_sizing"]["gpu_hours_per_leaf_max"] * 3600,
+            "screening sizing requires the owner four-hour leaf bound")
     factor = finite(parameters["profile_safety_factor"], "profile safety factor")
     require(factor >= 1, "profiling safety factor must be at least one")
     require(not {"screening_repetitions", "final_repetitions", "repetitions_per_leaf"}.intersection(parameters),

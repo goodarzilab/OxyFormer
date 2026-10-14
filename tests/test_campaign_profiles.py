@@ -867,3 +867,84 @@ def test_month1_refuses_when_one_complete_profile_cannot_fit_one_evaluation_repe
     result = campaign_estimate.run_stage(screening_request)
     assert result.status == 'blocked' and 'one screening repetition' in result.message
     assert not result.artifacts and not list(Path(screening_request.output_dir).iterdir())
+
+
+def test_month1_estimate_refuses_completed_nonterminal_profile_slot(screening_request, tmp_path):
+    config = coverage.read_json(screening_request.config_path)
+    task = coverage.read_json(screening_request.task_path)
+    reference = task['parameters']['profiles']['null_effect']
+    source = Path(config['dependencies'][reference['dependency']])
+    producer = coverage.read_json(source / '_execution/task.json')
+    old_id = producer['id']
+    producer['id'] = 'profile-null-effect-0'
+    producer['continuation'].update(step=0, predecessor=None)
+    producer['needs'] = {'real-frame-inputs': producer['needs']['real-frame-inputs']}
+    root = tmp_path / 'completed-first-slot'
+    result = coverage.read_json(source / 'result.json')
+    timing = coverage.read_json(source / 'timing.json')
+    rate = timing['complete_repetition_seconds'][0]
+    leaf = {**timing['leaves'][0], 'task_id': producer['id'], 'step': 0,
+            'compute_seconds': rate, 'wall_seconds': rate + 30.}
+    timing.update(leaves=[leaf], wall_seconds=rate + 30., gpu_seconds=rate + 30., setup_seconds=20.)
+    write(root / 'result.json', result)
+    write(root / 'timing.json', timing)
+    seal_budget_fixture(root, producer['id'], producer)
+    deps = {k: Path(v) for k, v in config['dependencies'].items() if k != old_id}
+    deps[producer['id']] = root
+    task['needs'][producer['id']] = task['needs'].pop(old_id)
+    reference['dependency'] = producer['id']
+    req = request(tmp_path / 'early-slot-estimate', task, deps, config['approvals'])
+    result = campaign_estimate.run_stage(req)
+    assert result.status == 'blocked' and 'terminal bootstrap' in result.message
+    assert not result.artifacts and not list(Path(req.output_dir).iterdir())
+
+
+@pytest.mark.parametrize('screening_rates', [(10000.,) * 4], indirect=True)
+def test_month1_estimate_refuses_shortened_owner_wall_bound(screening_request):
+    estimate = campaign_estimate.estimate_budget(screening_request)
+    assert all(r == {'repetitions': 25, 'leaves': 36, 'gpu_hours': 144.}
+               for r in estimate['per_scenario'].values())
+    req = update_task(screening_request, lambda p: p.update(wall_seconds=3600))
+    result = campaign_estimate.run_stage(req)
+    assert result.status == 'blocked' and 'owner four-hour' in result.message
+    assert not result.artifacts and not list(Path(req.output_dir).iterdir())
+
+
+def test_month1_emitted_profile_chain_mode_is_accepted(screening_request, tmp_path, monkeypatch):
+    import torch
+    from oxyformer.training import fit
+    from test_coverage import chain_request
+    config = coverage.read_json(screening_request.config_path)
+    estimate_task = coverage.read_json(screening_request.task_path)
+    endpoint, frame = smoke_inputs.build_inputs()
+    tasks = real_frame.screening_profile_tasks(endpoint, frame, config['approvals'])['tasks'][:40]
+    deps = {k: Path(v) for k, v in config['dependencies'].items()}
+    # Exercise real continuation, publication and receipt admission on CPU;
+    # only fitting and hardware metadata are synthetic.
+    monkeypatch.setattr(fit, 'resolve_device', lambda *a: torch.device('cuda:0'))
+    monkeypatch.setattr(fit, 'fit_environment', lambda *a: {})
+    monkeypatch.setattr(torch.cuda, 'synchronize', lambda *a: None)
+    calls = []
+    def execute(draw, *args, **kwargs):
+        calls.append(draw)
+        _, records = successful_records(1)
+        return {**records[0], 'draw': draw, 'wall_seconds': .001}
+    monkeypatch.setattr(coverage, 'execute_draw', execute)
+    for task in tasks:
+        req = chain_request(tmp_path / ('executed-' + task['id']), task, deps)
+        cfg = coverage.read_json(req.config_path)
+        cfg['approvals'] = config['approvals']
+        write(Path(req.config_path), cfg)
+        req = replace(req, config_hash=file_hash(req.config_path))
+        completed = run_coverage(req)
+        assert completed.status == 'pass', completed.message
+        deps[task['id']] = Path(req.output_dir)
+    assert len(calls) == 1
+    terminal = coverage.read_json(deps[tasks[-1]['id']] / 'result.json')
+    assert terminal['mode'] == 'profile' and terminal['campaign_mode'] == 'screening'
+    assert tasks[-1]['parameters']['recipe']['campaign_mode'] == 'screening'
+    req = request(tmp_path / 'executed-profile-estimate', estimate_task, deps, config['approvals'])
+    result = campaign_estimate.run_stage(req)
+    assert result.status == 'pass', result.message
+    report = coverage.read_json(Path(req.output_dir) / 'budget_estimate.json')
+    assert report['per_scenario']['null_effect']['repetitions'] == 25
