@@ -603,7 +603,7 @@ campaign expansion; GPU-hour accounting includes the complete allocation.
 Sizing also pays the in-fold stopping headroom on every leaf; that time remains
 inside the compute ceiling authenticated by the sealed budget.
 
-The nested coverage fit checks its absolute compute deadline with a margin of
+The nested chained coverage fit checks its absolute compute deadline with a margin of
 at least 120 seconds, twice the largest declared or observed phase transaction,
 and the checkpoint-write bound. SSL uses its existing cooperative stop-request
 check; nuisance fitting and evaluation record their existing transaction
@@ -628,7 +628,9 @@ retaining conservative phase floors. The shared stopping margin is therefore
 690 seconds initially: twice the largest phase bound plus 30 seconds for the
 checkpoint. Each leaf raises that margin when its own largest observed unit or
 checkpoint write requires more headroom. Sizing subtracts the same declared
-margin from every leaf's compute capacity.
+margin from every leaf's compute capacity. Archive-free repetitions keep their existing
+short admission margin because they have no successor to resume an early
+checkpoint.
 
 The measurement chains used revision
 `bb4aaee493119eef19546aeffd985147c14d7aa4`, keeping the owner study cell;

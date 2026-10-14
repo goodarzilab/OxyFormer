@@ -492,7 +492,9 @@ def estimate_repetition(endpoint, recipe, root, deadline, *, study=None, continu
 
     study = RecipeStudy() if study is None else study
     require(type(study) is RecipeStudy, "RecipeStudy required")
-    timing = (continuation.get("deadline_timing") if continuation is not None else None) or DeadlineTiming(deadline)
+    # Only chained leaves can resume a deliberately early checkpoint. Keep
+    # the existing admission margin for archive-free complete repetitions.
+    timing = None if continuation is None else continuation.get("deadline_timing") or DeadlineTiming(deadline)
     seeds = study.seeds
     scoring_split = endpoint.outer if study.seed_count == 3 else replace(endpoint.outer, seed_ids=seeds)
     options = nested_cv._settings(recipe, endpoint)
@@ -510,15 +512,18 @@ def estimate_repetition(endpoint, recipe, root, deadline, *, study=None, continu
                 continue
             # Include configuration/identity/predecessor preparation in the
             # interval up to the nested controller's first cooperative check.
-            timing.boundary("nuisance")
+            if timing is not None:
+                timing.boundary("nuisance")
             remaining = min(14400., deadline - time.monotonic())
-            if remaining <= timing.margin_seconds:
-                timing.finish_unit()
+            if remaining <= (timing.margin_seconds if timing is not None else 0.):
+                if timing is not None:
+                    timing.finish_unit()
                 return None
+            margin = timing.margin_seconds if timing is not None else min(1., remaining / 10)
             predecessor = None if continuation is None else continuation.get("predecessor")
             config = endpoint.configuration(fold, root / f"fold-{fold}-seed-{neural_seed}",
                 **options, study=study, predecessor=predecessor,
-                slice_seconds=remaining, checkpoint_margin_seconds=timing.margin_seconds, deadline_timing=timing)
+                slice_seconds=remaining, checkpoint_margin_seconds=margin, deadline_timing=timing)
             artifact = nested_cv.run_fold(config, endpoint.outer, neural_seed, geography=endpoint.geography)
             if not artifact.complete:
                 if continuation is not None:
@@ -529,9 +534,11 @@ def estimate_repetition(endpoint, recipe, root, deadline, *, study=None, continu
                 continuation["predecessor"] = None
             view = subset(endpoint.data.covariates(tuple(n for n, _ in endpoint.feature_kinds)),
                           artifact.prediction_inputs.original_ids)
-            timing.boundary("evaluation")
+            if timing is not None:
+                timing.boundary("evaluation")
             parts.append(nested_cv.predict(artifact, view, endpoint.policy))
-            timing.finish_unit()
+            if timing is not None:
+                timing.finish_unit()
             if continuation is not None:
                 continuation["parts"].append(parts[-1].to_json())
     names = ("original_ids", "fold_ids", "seed_ids", "mu_a", "mu_d", "r_a", "r_d", "origin_weights")
