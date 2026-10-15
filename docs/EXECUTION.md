@@ -417,6 +417,22 @@ Report the 5,400/1,700 H100-hour comparisons and
 This arithmetic does not amend the frozen minimum of 1,000 repetitions per final
 scenario or authorize a campaign or a larger leaf.
 
+### Accelerator identity and existing artifacts
+
+CUDA environment identity records the device model and architecture directly
+from `name`, `major`, `minor`, `total_memory`, `multi_processor_count` and
+`L2_cache_size`. Physical-card UUID and PCI identifiers are excluded, so Slurm
+may resume a continuation on another card with exactly the same recorded model
+properties. All other environment fields and exact checkpoint, fingerprint and
+continuation comparisons are unchanged; different models remain incompatible.
+
+There is no compatibility shim or migration for artifacts written before this
+fix. Checkpoints also bind `scientific_code_hash`; coverage and portable nested
+continuations bind the request's `code_identity` (the Git commit). Those existing
+code bindings already reject pre-fix artifacts. The orchestrator must restart
+the screening profile chains from slot 0 after merge; this change does not
+consume their old checkpoints or continuations.
+
 ### Coverage-owned continuation chains
 
 Coverage work may use the generic campaign `slices` chain. A work item that

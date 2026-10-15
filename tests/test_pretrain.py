@@ -472,3 +472,69 @@ def test_population_moments_preserve_small_spread(tmp_path, values, expected_mea
                                      for value, row in zip(values, view.values)))
     artifact = pretrain(view, split, replace(config, settings=replace(config.settings, max_epochs=1)), 1103)
     assert artifact.complete
+
+
+class SyntheticDeviceProperties:
+    """CUDA-shaped properties whose representation must never enter identity."""
+
+    def __init__(self, **changes):
+        self.__dict__.update(name="NVIDIA H100 80GB HBM3", major=9, minor=0,
+            total_memory=85_018_771_456, multi_processor_count=132, L2_cache_size=52_428_800,
+            uuid="card-a", pci_bus_id=82, pci_device_id=0, pci_domain_id=0)
+        self.__dict__.update(changes)
+
+    def __repr__(self):
+        raise AssertionError("device identity must use fields, never repr")
+
+
+def synthetic_cuda_environment(monkeypatch, **changes):
+    from oxyformer.training.pretrain import environment_identity
+    properties = SyntheticDeviceProperties(**changes)
+    def get_properties(device):
+        assert device == torch.device("cuda:0")
+        return properties
+    monkeypatch.setattr(torch.cuda, "get_device_properties", get_properties)
+    return environment_identity(torch.device("cuda:0"))
+
+
+def test_accelerator_identity_ignores_card_instance_and_unknown_properties(monkeypatch):
+    import json
+    from oxyformer.training.pretrain import environment_identity
+    cpu = dict(environment_identity(torch.device("cpu")))
+    a = synthetic_cuda_environment(monkeypatch)
+    b = synthetic_cuda_environment(monkeypatch, uuid="card-b", pci_bus_id=17,
+                                   pci_device_id=1, pci_domain_id=2, future_instance_id="new-field")
+    assert a == b
+    values = dict(a)
+    assert json.loads(values.pop("accelerator")) == {
+        "name": "NVIDIA H100 80GB HBM3", "major": 9, "minor": 0,
+        "total_memory": 85_018_771_456, "multi_processor_count": 132, "L2_cache_size": 52_428_800}
+    assert values == {**cpu, "device": "cuda:0"}
+
+
+@pytest.mark.parametrize("field,value", [
+    ("name", "NVIDIA A100 80GB PCIe"), ("major", 8), ("minor", 1),
+    ("total_memory", 85_018_771_455), ("multi_processor_count", 131), ("L2_cache_size", 52_428_799),
+])
+def test_accelerator_identity_binds_each_model_property(monkeypatch, field, value):
+    a = synthetic_cuda_environment(monkeypatch)
+    b = synthetic_cuda_environment(monkeypatch, **{field: value})
+    assert a != b
+    assert dict(a)["accelerator"] != dict(b)["accelerator"]
+
+
+def test_checkpoint_load_across_same_model_cards(tmp_path, monkeypatch):
+    import importlib
+    module = importlib.import_module("oxyformer.training.pretrain")
+    a = synthetic_cuda_environment(monkeypatch)
+    b = synthetic_cuda_environment(monkeypatch, uuid="card-b", pci_bus_id=17,
+                                   pci_device_id=1, pci_domain_id=2)
+    different = synthetic_cuda_environment(monkeypatch, name="NVIDIA A100 80GB PCIe", major=8)
+    # Train on CPU; only the environment in the real checkpoint is synthetic.
+    monkeypatch.setattr(module, "environment_identity", lambda device: a)
+    view, split, config = make_case(tmp_path)
+    artifact = pretrain(view, split, replace(config, max_batches=1), 1103)
+    restored = load_checkpoint(artifact, replace(artifact.identity, environment=b))
+    assert restored["progress"]["step"] == artifact.step == 1
+    with pytest.raises(ContractError, match="incompatible checkpoint identity"):
+        load_checkpoint(artifact, replace(artifact.identity, environment=different))

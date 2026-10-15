@@ -398,7 +398,10 @@ def environment_identity(device: torch.device) -> tuple[tuple[str, str], ...]:
                  "NVIDIA_TF32_OVERRIDE"):
         values["env_" + name] = canonical_json(os.environ.get(name))
     if device.type == "cuda":
-        values["accelerator"] = str(torch.cuda.get_device_properties(device))
+        properties = torch.cuda.get_device_properties(device)
+        # Bind model/architecture, never the physical card assigned by Slurm.
+        values["accelerator"] = canonical_json({name: getattr(properties, name) for name in (
+            "name", "major", "minor", "total_memory", "multi_processor_count", "L2_cache_size")})
     return tuple(sorted(values.items()))
 
 
