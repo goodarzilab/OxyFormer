@@ -1126,3 +1126,39 @@ def test_bootstrap_null_budget_execution_and_chain_routing(tmp_path, monkeypatch
     assert record['chained'] and record['complete']
     assert record['leaves'][0]['wall_seconds'] == 550.
     assert record['leaves'][0]['compute_seconds'] == 420.
+
+
+@pytest.mark.parametrize("different_model", [False, True])
+def test_coverage_binding_across_cards(tmp_path, monkeypatch, different_model):
+    from test_pretrain import synthetic_cuda_environment
+    from oxyformer.training.pretrain import environment_identity
+    import torch
+    # Keep repository identity fixed while exercising the real environment hash
+    # and continuation writer/reader. No CUDA runtime is needed for this fixture.
+    monkeypatch.setattr(campaign.identity, "scientific_fingerprint",
+                        lambda repo: {"algorithm": "synthetic", "sha256": "a" * 64})
+    monkeypatch.setattr(campaign, "fit_environment",
+                        lambda: environment_identity(torch.device("cuda:0")))
+    monkeypatch.setattr(coverage, "estimate_repetition", lambda *a, **k: None)
+    synthetic_cuda_environment(monkeypatch)
+    first_hash = campaign.fingerprint()["environment_hash"]
+    task, inputs = chain_fixture(tmp_path)
+    first = chain_request(tmp_path / "first", task, {"inputs": inputs})
+    result = run_coverage(first)
+    assert result.status == "pass", result.message
+    changes = {"name": "NVIDIA A100 80GB PCIe", "major": 8} if different_model else {}
+    synthetic_cuda_environment(monkeypatch, uuid="card-b", pci_bus_id=17,
+                               pci_device_id=1, pci_domain_id=2, **changes)
+    second_hash = campaign.fingerprint()["environment_hash"]
+    assert (first_hash == second_hash) is (not different_model)
+    task.update(id="chain-1", continuation={"owner": "coverage-test", "step": 1, "predecessor": "chain-0"})
+    second = chain_request(tmp_path / "second", task, {"inputs": inputs, "chain-0": Path(first.output_dir)})
+    result = run_coverage(second)
+    if different_model:
+        assert result.status == "blocked"
+        assert "coverage binding mismatch" in result.message
+        assert not (Path(second.output_dir) / "continuation.tar").exists()
+    else:
+        assert result.status == "pass", result.message
+        result.verify(second)
+        assert (Path(second.output_dir) / "continuation.tar").is_file()
