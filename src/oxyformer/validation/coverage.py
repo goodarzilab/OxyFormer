@@ -73,13 +73,35 @@ def check_worker_wall(completed, started, task):
 OVERHEAD_PHASES = ("setup_seconds", "import_seconds", "export_seconds", "publication_seconds")
 
 
+# Slot-0 Slurm 89833--89836 (2026-10-14): clone/environment/runner
+# preparation took 94 s. D3 Slurm 89923/89980 measured at most 4.099 s
+# from in-fold checkpoint return through sealed terminal publication.
+# Both margins retain a conservative 300 s floor; see docs/EXECUTION.md.
+LEAF_SETUP_SECONDS = 300
+LEAF_FINALIZATION_SECONDS = 300
+MAX_LEAF_ALLOCATION_SECONDS = 14400
+
+
+def leaf_allocation(stage_seconds):
+    """Whole-minute allocation; finalization is inside the sealed stage wall."""
+    require(0 < finite(stage_seconds, "leaf stage seconds"), "positive stage wall required")
+    allocated = math.ceil((stage_seconds + LEAF_SETUP_SECONDS) / 60) * 60
+    require(allocated <= MAX_LEAF_ALLOCATION_SECONDS, "leaf exceeds four hours including setup")
+    return {"setup_seconds": LEAF_SETUP_SECONDS, "stage_seconds": stage_seconds,
+            "finalization_seconds": LEAF_FINALIZATION_SECONDS, "allocation_seconds": allocated}
+
+
+def maximum_leaf_stage_seconds():
+    return MAX_LEAF_ALLOCATION_SECONDS - LEAF_SETUP_SECONDS
+
+
 def leaf_budget(seconds, factor, overheads):
     """The immutable budget used by sizing, admission and chain execution."""
     require(0 < finite(seconds, "leaf wall seconds") <= 14400, "coverage slice exceeds four hours")
     require(finite(factor, "profile safety factor") >= 1, "invalid profile safety factor")
     require(set(overheads) == set(OVERHEAD_PHASES), "incomplete leaf overheads")
     require(all(finite(overheads[k], k) >= 0 for k in OVERHEAD_PHASES), "negative leaf overhead")
-    reserve = min(120., seconds / 10)
+    reserve = LEAF_FINALIZATION_SECONDS
     capacity = (seconds - reserve) / factor - math.fsum(overheads.values())
     require(capacity > 0, "infeasible batch budget: leaf overhead consumes slice")
     return {"wall_seconds": seconds, "reserve_seconds": reserve, "safety_factor": factor,
@@ -466,10 +488,13 @@ def estimate_repetition(endpoint, recipe, root, deadline, *, study=None, continu
     from oxyformer.estimation.mtp import one_step
     from oxyformer.estimation.targeting import cv_tmle
     from oxyformer.estimation.covariance import align_estimates, spatial_sensitivities
-    from oxyformer.training.fit import RecipeStudy, subset
+    from oxyformer.training.fit import DeadlineTiming, RecipeStudy, subset
 
     study = RecipeStudy() if study is None else study
     require(type(study) is RecipeStudy, "RecipeStudy required")
+    # Only chained leaves can resume a deliberately early checkpoint. Keep
+    # the existing admission margin for archive-free complete repetitions.
+    timing = None if continuation is None else continuation.get("deadline_timing") or DeadlineTiming(deadline)
     seeds = study.seeds
     scoring_split = endpoint.outer if study.seed_count == 3 else replace(endpoint.outer, seed_ids=seeds)
     options = nested_cv._settings(recipe, endpoint)
@@ -485,13 +510,20 @@ def estimate_repetition(endpoint, recipe, root, deadline, *, study=None, continu
                 require(set(part.fold_ids) == {fold} and set(part.seed_ids) == {neural_seed},
                         "reordered prediction parts")
                 continue
+            # Include configuration/identity/predecessor preparation in the
+            # interval up to the nested controller's first cooperative check.
+            if timing is not None:
+                timing.boundary("nuisance")
             remaining = min(14400., deadline - time.monotonic())
-            if remaining <= 0:
+            if remaining <= (timing.margin_seconds if timing is not None else 0.):
+                if timing is not None:
+                    timing.finish_unit()
                 return None
+            margin = timing.margin_seconds if timing is not None else min(1., remaining / 10)
             predecessor = None if continuation is None else continuation.get("predecessor")
             config = endpoint.configuration(fold, root / f"fold-{fold}-seed-{neural_seed}",
                 **options, study=study, predecessor=predecessor,
-                slice_seconds=remaining, checkpoint_margin_seconds=min(1., remaining / 10))
+                slice_seconds=remaining, checkpoint_margin_seconds=margin, deadline_timing=timing)
             artifact = nested_cv.run_fold(config, endpoint.outer, neural_seed, geography=endpoint.geography)
             if not artifact.complete:
                 if continuation is not None:
@@ -502,7 +534,11 @@ def estimate_repetition(endpoint, recipe, root, deadline, *, study=None, continu
                 continuation["predecessor"] = None
             view = subset(endpoint.data.covariates(tuple(n for n, _ in endpoint.feature_kinds)),
                           artifact.prediction_inputs.original_ids)
+            if timing is not None:
+                timing.boundary("evaluation")
             parts.append(nested_cv.predict(artifact, view, endpoint.policy))
+            if timing is not None:
+                timing.finish_unit()
             if continuation is not None:
                 continuation["parts"].append(parts[-1].to_json())
     names = ("original_ids", "fold_ids", "seed_ids", "mu_a", "mu_d", "r_a", "r_d", "origin_weights")
@@ -833,7 +869,7 @@ def _write_continuation(path, states, *, binding, chain, task_id):
 
 def _run_chain(request, started):
     """One bounded leaf of a prospectively declared coverage work item."""
-    from oxyformer.training.fit import RecipeStudy, resolve_device, fit_environment
+    from oxyformer.training.fit import DeadlineTiming, RecipeStudy, resolve_device, fit_environment
     task, recipe, lock, template, frame, scenario, seconds, stamps = prepare_batch(request)
     chain = _chain(task)
     parameters, root = task["parameters"], Path(request.output_dir)
@@ -886,6 +922,9 @@ def _run_chain(request, started):
     import_seconds = compute_at - imported_at
     capacity = remaining_compute(budget, setup_seconds=setup, import_seconds=import_seconds)
     deadline = min(compute_at + capacity, started + reserved_wall_limit(seconds))
+    deadline_timing = DeadlineTiming(deadline)
+    for state in states:
+        state["deadline_timing"] = deadline_timing
     for draw, state, destination in zip(parameters["draws"], states, destinations):
         if state["record"] is not None:
             require(state["record"]["draw"] == draw and state["record"]["status"] != "incomplete",
@@ -908,6 +947,7 @@ def _run_chain(request, started):
         torch.cuda.synchronize(device)
     export_at = time.monotonic()
     compute_seconds = export_at - compute_at
+    atomic_json(root, "deadline-timing.json", deadline_timing.report())
     require(compute_seconds <= capacity, "coverage compute exceeded admitted budget; no usable leaf")
     for state, destination in zip(states, destinations):
         if state["predecessor"] is not None:

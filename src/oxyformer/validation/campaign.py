@@ -12,7 +12,7 @@ import time
 import yaml
 import torch
 
-from oxyformer.training.fit import fit_environment, resolve_device
+from oxyformer.training.fit import checkpoint_margin_seconds, fit_environment, resolve_device
 from oxyformer.training.nested_cv import PreparedEndpoint
 
 from oxyformer.contracts import StageRequest, StageResult
@@ -21,7 +21,7 @@ from oxyformer.execution.campaign import expand_campaign, validate_plan, concret
 from oxyformer.provenance import ContractError, file_hash, require
 from oxyformer.validation.coverage import (MIN_REPETITIONS, RETRY_RULES, dependency, digest,
     finite, integer, publish, read_json, repetition_plan, summarize, validate_draws, prepare_batch, atomic_json, fixed_exposures,
-    leaf_budget, remaining_compute, load_budget, BUDGET_RECORD)
+    leaf_budget, leaf_allocation, maximum_leaf_stage_seconds, remaining_compute, load_budget, BUDGET_RECORD)
 from oxyformer.validation.scm import SCMConfig, CovariateFrame, sampled_support_facts
 
 REGISTRY = Path(__file__).parents[3] / "configs/validation/final_scenarios.yaml"
@@ -251,10 +251,11 @@ def _profile(request, config, reference, scenario, recipe, stamps):
 
 
 def slice_count(profile, repetitions, seconds, factor, *, enforce_limit=True):
-    """Conservative compute capacity after paying every leaf's measured costs."""
-    capacity = leaf_budget(seconds, factor, profile["leaf_overheads"])["compute_seconds"]
-    count = max(1, math.ceil(profile["seconds_per_repetition"] * repetitions / capacity))
-    require(not enforce_limit or count <= 40, "infeasible batch budget: campaign instance exceeds forty leaves")
+    """Pay measured leaf costs and reserve one successor beyond the estimate."""
+    capacity = leaf_budget(seconds, factor, profile["leaf_overheads"])["compute_seconds"] - checkpoint_margin_seconds()
+    require(capacity > 0, "infeasible batch budget: in-fold checkpoint margin consumes slice")
+    count = max(1, math.ceil(profile["seconds_per_repetition"] * repetitions / capacity)) + 1
+    require(not enforce_limit or count <= 40, "infeasible batch budget: required spare slice exceeds forty leaves")
     return count
 
 
@@ -275,8 +276,8 @@ def screening_estimate(request, config, parameters):
     require(resolve_device().type == "cuda", "screening measurement requires CUDA")
     require(integer(parameters["cpus_per_task"], "CPUs", 1) == 8, "screening requires eight CPUs")
     wall = integer(parameters["wall_seconds"], "leaf wall seconds", 1)
-    owner_wall = decision["month1_sizing"]["gpu_hours_per_leaf_max"] * 3600
-    require(math.ceil(wall / 60) * 60 <= owner_wall, "leaf exceeds four GPU-hours")
+    owner_wall = maximum_leaf_stage_seconds()
+    allocation = leaf_allocation(wall)["allocation_seconds"]
     factor = finite(parameters["profile_safety_factor"], "profile safety factor")
     require(factor >= 1, "profiling safety factor must be at least one")
     require(not {"screening_repetitions", "final_repetitions", "repetitions_per_leaf"}.intersection(parameters),
@@ -303,13 +304,13 @@ def screening_estimate(request, config, parameters):
             if slice_count(profile, candidate, owner_wall, factor, enforce_limit=False) <= 40:
                 count = candidate
                 break
-        require(count > 0, "one screening repetition cannot fit forty leaves: " + name)
+        require(count > 0, "one screening repetition with its required spare slice cannot fit forty leaves: " + name)
         # A shorter requested wall may save allocation, but cannot lower the
         # count fixed by the owner's full permitted per-scenario capacity.
         leaves = slice_count(profile, count, wall, factor, enforce_limit=False)
-        require(leaves <= 40, "requested leaf wall cannot fit the owner-maximal repetition count: " + name)
+        require(leaves <= 40, "requested leaf wall cannot fit the owner-maximal repetition count with its required spare slice: " + name)
         rows[name] = {"repetitions": count, "leaves": leaves,
-                      "gpu_hours": leaves * math.ceil(wall / 60) / 60}
+                      "gpu_hours": leaves * allocation / 3600}
     total = math.fsum(row["gpu_hours"] for row in rows.values())
     require(total <= 640 and total <= decision["budget_h100_hours"], "screening exceeds owner GPU-hour ceiling")
     return {"schema_version": 1, **screening_metadata(recipe), "estimate_only": True,
@@ -367,7 +368,7 @@ def build_screening_lock(request, config, task):
         "profile_safety_factor": p["profile_safety_factor"], "profiles": profiles,
         "concurrency_limits": {"gpu": 4, "cpu": 6}, "run_gpu_hours_ceiling": 3600,
         "collector_gpu_hours": 0,
-        "cpu_wall_hours_ceiling": (estimate["projected_leaf_count"] * math.ceil(p["wall_seconds"] / 60) + 40) / 60}
+        "cpu_wall_hours_ceiling": (estimate["projected_leaf_count"] * leaf_allocation(p["wall_seconds"])["allocation_seconds"] / 60 + 40) / 60}
     require(budget["gpu_hours"] + budget["collector_gpu_hours"] <= 3600, "screening allocation exceeded")
     require(finite(p["cpu_wall_hours_budget"], "CPU hours budget") >= budget["cpu_wall_hours_ceiling"],
             "infeasible CPU budget")
@@ -392,7 +393,7 @@ def build_screening_lock(request, config, task):
         work = {"id": batch["batch_id"], "stage": "coverage",
             "parameters": {**batch, "endpoint_input": p["endpoint_input"], "frame_input": p["frame_input"]},
             "outputs": LEAF_OUTPUTS + ["continuation.tar"],
-            "slices": [{"gpus": 1, "wall_seconds": p["wall_seconds"]}] * batch["slices"]}
+            "slices": [{"gpus": 1, "wall_seconds": leaf_allocation(p["wall_seconds"])["allocation_seconds"]}] * batch["slices"]}
         spec = {"schema_version": 1, "id": lock["instances"][batch["scenario"]["name"]],
             "kind": "screening", **metadata, "partition": "standard", "gpu_concurrency_max": 4,
             "prerequisites": [], "inputs": inputs, "recipe_lock": lock_ref, "work": [work],
@@ -551,13 +552,15 @@ def build_lock(request, config, task):
                 batches.append({"batch_id": digest([campaign_id, namespace, mode, scenario["name"], start])[:24],
                     "mode": mode, "scenario": scenario, "draws": concrete, "wall_seconds": wall_seconds, "gpus": gpus, **extra})
                 mode_leaves += slices
-        require(mode_leaves <= 40, "campaign instance exceeds forty leaves; profile a feasible batching plan")
+        require(mode_leaves <= 40, "campaign instance including required spare slices exceeds forty leaves; profile a feasible batching plan")
     draws = [d for batch in batches for d in batch["draws"]]
     validate_draws(draws)
     require(not prior_seeds.intersection(d["seed"] for d in draws), "evaluation draws overlap prior lock or profiling")
     total_leaves = sum(b.get("slices", 1) for b in batches)
-    budget = {"gpu_hours": gpus * total_leaves * math.ceil(wall_seconds / 60) / 60, "gpu_hours_per_leaf_max": 4., "leaves_per_instance_max": 40,
-              "cpu_wall_hours_ceiling": (total_leaves * math.ceil(wall_seconds / 60) + 20) / 60,
+    allocation_seconds = sum(b.get("slices", 1) * (leaf_allocation(wall_seconds)["allocation_seconds"]
+        if "slices" in b else math.ceil(wall_seconds / 60) * 60) for b in batches)
+    budget = {"gpu_hours": gpus * allocation_seconds / 3600, "gpu_hours_per_leaf_max": 4., "leaves_per_instance_max": 40,
+              "cpu_wall_hours_ceiling": (allocation_seconds / 60 + 20) / 60,
               "profile_safety_factor": factor, "profiles": profiles,
               "admission_model": "measure locked setup at each leaf size; scale complete profile finalization by repetition count",
               "budget_semantics": "planning estimate; report overruns and retain draws; scheduler enforces binding limits",
@@ -598,7 +601,8 @@ def build_lock(request, config, task):
                 parameters_for_leaf["screening_gate"] = screening_gate
             work.append({"id": batch["batch_id"], "stage": "coverage", "parameters": parameters_for_leaf,
                 "outputs": LEAF_OUTPUTS + (["continuation.tar"] if "slices" in batch else []),
-                "slices": [{"gpus": gpus, "wall_seconds": wall_seconds}] * batch.get("slices", 1)})
+                "slices": [{"gpus": gpus, "wall_seconds": (leaf_allocation(wall_seconds)["allocation_seconds"]
+                    if "slices" in batch else wall_seconds)}] * batch.get("slices", 1)})
         spec = {"schema_version": 1, "id": lock["instances"][mode],
             "kind": "screening" if mode == "screening" else "final-coverage",
             "prerequisites": [], "inputs": stage_inputs, "recipe_lock": lock_ref, "work": work,
@@ -626,7 +630,8 @@ def _plan_for_task(request, config, task, lock):
             require(batch["batch_id"] in by_batch, "locked batch missing")
             actual = by_batch[batch["batch_id"]]
             require(all(actual["parameters"].get(k) == v for k, v in batch.items()), "locked batch drift")
-            require(actual["slices"] == [{"gpus": batch.get("gpus", 0), "wall_seconds": batch["wall_seconds"]}]
+            require(actual["slices"] == [{"gpus": batch.get("gpus", 0), "wall_seconds": (leaf_allocation(batch["wall_seconds"])["allocation_seconds"]
+                        if "slices" in batch else batch["wall_seconds"])}]
                     * batch.get("slices", 1), "locked resources drift")
         if plan["spec"]["id"] == task["campaign"]:
             require(task in plan["tasks"], "task is not the prospectively expanded task")

@@ -315,15 +315,23 @@ def test_incomplete_fold_stops_repetition_without_estimating(tmp_path, monkeypat
 
 
 @pytest.mark.parametrize("seed_count", [3, 1])
-def test_complete_controller_counts_fifteen_fits_as_one_repetition(tmp_path, monkeypatch, seed_count):
+@pytest.mark.parametrize("slow_clock", [False, True], ids=["fast", "finite-slow"])
+def test_complete_controller_counts_fifteen_fits_as_one_repetition(tmp_path, monkeypatch, seed_count, slow_clock):
     from types import SimpleNamespace
     from oxyformer.contracts import OOFNuisances
     endpoint, frame = synthetic_endpoint(tmp_path)
     sample = coverage.generate_suite_a(frame, SCMConfig(name="null_effect", active_mechanisms=("null",), effect="null"), endpoint.policy)
     prepared = coverage.bind_observations(endpoint, sample.observations)
     calls = []
+    clock = [0.]
+    if slow_clock:
+        monkeypatch.setattr(coverage.time, "monotonic", lambda: clock[0])
     def fake_fit(config, outer, seed, **kwargs):
         calls.append((config.fold, seed))
+        # Honest unchained work takes 1200 of 1500 admitted seconds. Each
+        # unit is 80 or 240 seconds, within the measured 330-second bound.
+        if slow_clock:
+            clock[0] += 1200 / (5 * seed_count)
         held = tuple(i for i, f in zip(outer.original_ids, outer.fold_ids) if f == config.fold)
         return SimpleNamespace(complete=True, prediction_inputs=SimpleNamespace(original_ids=held), fold=config.fold, seed=seed)
     def fake_predict(artifact, view, policy):
@@ -336,8 +344,12 @@ def test_complete_controller_counts_fifteen_fits_as_one_repetition(tmp_path, mon
     monkeypatch.setattr(coverage.nested_cv, "run_fold", fake_fit)
     monkeypatch.setattr(coverage.nested_cv, "predict", fake_predict)
     from oxyformer.training.fit import RecipeStudy
+    deadline = 1500. if slow_clock else coverage.time.monotonic() + campaign.checkpoint_margin_seconds() + 1200
     result = coverage.estimate_repetition(prepared, smoke_recipe(endpoint, frame), tmp_path,
-        coverage.time.monotonic() + 60, study=RecipeStudy(seed_count=seed_count))
+        deadline, study=RecipeStudy(seed_count=seed_count))
+    assert result is not None
+    if slow_clock:
+        assert clock[0] == 1200. < deadline
     assert calls == [(fold, seed) for fold in range(5) for seed in coverage.nested_cv.SEEDS[:seed_count]]
     assert prepared.outer.seed_ids == coverage.nested_cv.SEEDS
     assert set(result) == set(coverage.METHODS)
@@ -634,7 +646,7 @@ def chain_fixture(tmp_path):
         "parameters": {"mode": "smoke", "recipe": smoke_recipe(endpoint, frame),
             "study": {"seed_count": 1, "grid_points": 2},
             "scenario": {"name": "null_effect", "active_mechanisms": ["null"], "effect": "null"},
-            "draws": coverage.repetition_plan("coverage-chain", "null_effect", 1), "wall_seconds": 14400,
+            "draws": coverage.repetition_plan("coverage-chain", "null_effect", 1), "wall_seconds": 14100,
             "endpoint_input": {"dependency": "inputs", "path": "endpoint.json"},
             "frame_input": {"dependency": "inputs", "path": "frame.json"}}}
     return task, inputs
@@ -687,7 +699,7 @@ def test_coverage_chain_bit_equivalence(tmp_path, monkeypatch):
         def predict(*args, **kwargs):
             value = original_predict(*args, **kwargs)
             if step[0] == 1 and not cut[1]:
-                clock[0] += 14280.
+                clock[0] += 13800.
                 cut[1] = True
             return value
         monkeypatch.setattr(coverage.nested_cv, "predict", predict)
@@ -961,7 +973,7 @@ def test_generic_step_zero_preserves_archive_free_legacy_path(tmp_path, monkeypa
 def test_chain_deadline_charges_phase_overruns_once(tmp_path, monkeypatch, setup, imported, expected):
     from test_campaign import STAMPS
     task, inputs = chain_fixture(tmp_path)
-    task['parameters'].update(wall_seconds=600, leaf_budget=coverage.leaf_budget(600, 1.2,
+    task['parameters'].update(wall_seconds=840, leaf_budget=coverage.leaf_budget(840, 1.2,
         {'setup_seconds': 20., 'import_seconds': 30., 'export_seconds': 40., 'publication_seconds': 10.}))
     clock = [0.]
     monkeypatch.setattr(coverage.time, 'monotonic', lambda: clock[0])
@@ -1006,7 +1018,7 @@ def test_chain_deadline_charges_phase_overruns_once(tmp_path, monkeypatch, setup
     assert calls == [expected]
     leaf = coverage.read_json(Path(req.output_dir) / 'timing.json')['leaves'][-1]
     assert leaf['compute_seconds'] == expected - 1.
-    assert leaf['wall_seconds'] == setup + imported + expected - 1. + 50. <= 600.
+    assert leaf['wall_seconds'] == setup + imported + expected - 1. + 50. <= 840.
     assert leaf['compute_capacity_seconds'] == expected
 
 
@@ -1072,14 +1084,14 @@ def test_worker_and_runner_share_reserved_wall_limit(tmp_path, monkeypatch, chai
     terminal = finalize_coverage_budget(req, replace(worker, status='pass'), 0.)
     assert terminal.status == expected, terminal.message
     assert worker.status == expected, worker.message
-    assert deadlines == [540. if chained else 570.]
+    assert deadlines == [300. if chained else 570.]
 
 
 @pytest.mark.parametrize('explicit_null', [False, True])
 def test_bootstrap_null_budget_execution_and_chain_routing(tmp_path, monkeypatch, explicit_null):
     from test_campaign import STAMPS
     task, inputs = chain_fixture(tmp_path)
-    task['parameters']['wall_seconds'] = 600
+    task['parameters']['wall_seconds'] = 840
     if explicit_null:
         task['parameters']['leaf_budget'] = None
     clock = [0.]

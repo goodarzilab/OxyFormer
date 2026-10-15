@@ -972,3 +972,39 @@ def test_cost_study_defaults_preserve_identity_and_independent_options(tmp_path)
     with pytest.raises(ContractError, match="excluded by cost study"):
         fitting._validate(config.data.manifest.spec, split, manifest,
             replace(config, study=fitting.RecipeStudy(seed_count=1)), 2207)
+
+
+def test_deadline_margin_tracks_long_units_with_injected_clock():
+    from oxyformer.training.fit import DeadlineTiming, PHASE_UNIT_SECONDS, CHECKPOINT_WRITE_SECONDS
+    clock = [0.]
+    timing = DeadlineTiming(10000., clock=lambda: clock[0])
+    for phase in ('ssl', 'nuisance', 'evaluation'):
+        timing.finish_unit()
+        timing.boundary(phase)
+        clock[0] += 150.
+        timing.finish_unit()
+        assert timing.largest[phase] == 150.
+    assert timing.margin_seconds >= 2 * max(PHASE_UNIT_SECONDS.values()) + CHECKPOINT_WRITE_SECONDS
+    assert timing.margin_seconds >= 2 * 150. + CHECKPOINT_WRITE_SECONDS
+    assert timing.margin_seconds >= 120.
+    clock[0] = timing.deadline - timing.margin_seconds
+    assert timing.boundary('evaluation')
+    # The last bounded transaction and durable checkpoint finish before compute.
+    assert clock[0] + 150. + CHECKPOINT_WRITE_SECONDS < timing.deadline
+
+
+def test_ssl_budget_request_observes_each_existing_cooperative_check(tmp_path):
+    from oxyformer.training.fit import DeadlineTiming, _Budget
+    from oxyformer.training.checkpoint import CheckpointRequest
+    _, _, _, config = make_case(tmp_path)
+    clock = [0.]
+    timing = DeadlineTiming(10000., clock=lambda: clock[0])
+    budget = _Budget(replace(config, deadline_timing=timing, device="cpu"), CheckpointRequest())
+    request = budget.ssl_request()
+    assert not request.requested
+    clock[0] = 200.
+    assert not request.requested
+    assert timing.largest['ssl'] == 200.
+    clock[0] = timing.deadline - timing.margin_seconds
+    assert request.requested
+    assert timing.margin_seconds >= 2 * (clock[0] - 200.) + 30.

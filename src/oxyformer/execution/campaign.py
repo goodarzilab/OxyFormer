@@ -125,6 +125,10 @@ def _spec_check(spec, approvals):
         outputs_valid(work['outputs'])
         require(work['slices'], 'empty continuation chain')
         for segment in work['slices']:
+            if work['stage'] in ('coverage', 'simulation-smoke') and 'continuation.tar' in work['outputs']:
+                from oxyformer.validation.coverage import leaf_allocation
+                expected = leaf_allocation(work['parameters']['wall_seconds'])['allocation_seconds']
+                require(segment['wall_seconds'] == expected, 'coverage allocation margin drift')
             resources(segment['gpus'], segment['wall_seconds'])
             total_gpu_seconds += segment['gpus'] * ((segment['wall_seconds'] + 59) // 60) * 60
     collector = spec['collector']

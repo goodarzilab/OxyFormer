@@ -439,8 +439,9 @@ drift, gaps, reordered parts and corrupt blobs are refusals, never new draws.
 
 A bounded coverage leaf uses the shared compute budget described below,
 reserving measured export/publication costs, the safety factor, and
-`min(120 seconds, wall_seconds / 10)`. Nested-CV retains its checkpoint margin.
-The 14,400-second bound applies to a slice, not to a fold's cumulative
+a finalization reserve of at least 300 seconds. The in-fold checkpoint margin
+is measured separately, inside the compute deadline. The 14,400-second bound
+applies to the complete allocation, including setup, not a fold's cumulative
 training. Epochs, tuning, seeds and estimators are unchanged. Only after all
 prediction parts exist does the usual terminal aggregation run. Incomplete
 repetitions have no `repetitions/<id>/result.json`; a valid checkpointed slice
@@ -478,9 +479,14 @@ a leaf can revalidate the measurements before spending its compute allowance.
 A partial or unsuccessful chain cannot justify a lock. For a chained profile,
 lock sizing pays the maximum measured cost of each overhead phase on every
 slice and applies the declared safety factor. Usable compute per slice is
-`(wall_seconds - checkpoint_reserve) / safety_factor - sum(max_phase_overheads)`;
-the slice count is the ceiling of measured repetition compute divided by this
-capacity. Admission also measures actual locked setup and refuses if it exceeds
+`(wall_seconds - finalization_reserve) / safety_factor - sum(max_phase_overheads)
+- checkpoint_margin_seconds()`; the slice count is the ceiling of measured
+repetition compute divided by this capacity, plus one required spare successor
+for each chained work item. The spare counts against the same allocation,
+GPU-hour and 40-leaf limits; sizing refuses when it cannot fit. This is a
+planning allowance, not a guarantee against arbitrary runtime variation.
+The emitted screening profile chains already declare 40 slots and are unchanged.
+Admission also measures actual locked setup and refuses if it exceeds
 the allocation. Collection counts the last leaf's accumulated terminal records
 once, retains all declared draws in denominators, and lists incomplete chains.
 
@@ -503,11 +509,12 @@ suite, on Slurm. Tests use only synthetic fixtures and no network access.
 
 For coverage-owned chains, the lock stores `leaf_budget` in each batch and its
 expanded tasks. Sizing, locked preflight admission, and execution all use
-`C = (wall_seconds - min(120, wall_seconds / 10)) / safety_factor - sum(overheads)`.
+`C = (wall_seconds - LEAF_FINALIZATION_SECONDS) / safety_factor - sum(overheads)`.
 Overheads name setup, import, export, and publication separately. The immutable
-lock and continuation binding authenticate the budget, including the compute
-ceiling. A 600-second wall, factor 1.2, and 100 seconds of overhead admit 350
-seconds of compute: 800 seconds of work requires three leaves.
+lock and continuation binding authenticate this compute ceiling. Sizing subtracts
+the declared in-fold checkpoint margin from C on every leaf, since fitting stops
+before that ceiling. The worker still meters all actual compute against C;
+unused headroom cannot enlarge a successor's sealed allowance.
 
 The whole leaf shares one compute deadline. Setup and import are each charged
 once; each positive overrun reduces C and underruns never increase it. Export
@@ -519,7 +526,7 @@ uninterruptible operations that overrun are detected, not certified as within
 budget. The scheduler remains the hard wall limit.
 
 Bootstrap chain profiles need no prior measurement. They may declare an
-immutable `compute_ceiling_seconds` below the wall minus checkpoint reserve;
+immutable `compute_ceiling_seconds` below the wall minus finalization reserve;
 otherwise that bound applies. Their separate phase measurements supply the
 next lock. Partial, unsuccessful, or known-overrun measurements never admit a
 lock. Existing archive-free single-leaf producers retain their legacy behavior:
@@ -541,8 +548,8 @@ The worker's bounded deadline and final wall check, the runner's finalization,
 and the sealed-budget loader share the pre-publication limit
 `wall_seconds - min(30, wall_seconds / 20)`. At a 600-second wall, elapsed 570
 passes the wall check and 571 fails; the reserved publication time remains inside
-the existing checkpoint reserve. This does not change the compute formula or its
-350-second capacity for wall 600, factor 1.2, and 100 seconds of overhead. Legacy
+the existing finalization reserve. This check does not enlarge the separate
+compute ceiling or the usable capacity used by sizing. Legacy
 CPU profiles retain their planning-only training deadline and must pass the same
 final budget check to supply usable measurements.
 
@@ -591,3 +598,59 @@ remain separately accounted work. All task resources and expanded Slurm units
 use `standard` / `root`; preemptible and all other partitions are refused.
 Screening publications carry the recorded final-cell deferral and certify no
 release criterion. Production/final code paths retain their existing gates.
+
+Chained coverage allocations reserve 300 seconds for clone, environment and
+runner preparation (the 2026-10-14 slot-0 jobs measured 94 seconds). A full leaf
+has a 14,100-second stage wall inside a 14,400-second Slurm allocation. Its
+sealed budget reserves at least 300 seconds within that stage for export and
+publication. `coverage.leaf_allocation` is shared by screening profiles and
+campaign expansion; GPU-hour accounting includes the complete allocation.
+Sizing also pays the in-fold stopping headroom on every leaf; that time remains
+inside the compute ceiling authenticated by the sealed budget.
+
+The nested chained coverage fit checks its absolute compute deadline with a margin of
+at least 120 seconds, twice the largest declared or observed phase transaction,
+and the checkpoint-write bound. SSL uses its existing cooperative stop-request
+check; nuisance fitting and evaluation record their existing transaction
+boundaries. Completed nuisance training can checkpoint before evaluation and
+resume evaluation without another optimizer update. Timing is execution metadata
+and does not enter the scientific recipe.
+
+The bounds use the real-frame D3 measurements from 2026-10-14, Slurm jobs
+89923, 89980 and 90034, on one H100 with eight CPUs. The largest measured
+intervals used to set the bounds were:
+
+| Phase | Observed seconds | Declared bound, seconds |
+| --- | ---: | ---: |
+| SSL, including its preparation | 50.643 | 120 |
+| Nuisance, including fold configuration and identity preparation | 150.883 | 330 |
+| Evaluation, including calibration and held-out prediction | 44.217 | 120 |
+| In-fold checkpoint write | 1.529 | 30 |
+| Checkpoint return through sealed publication | 4.099 | 300 |
+
+Phase bounds round twice the observations upward to a 30-second boundary,
+retaining conservative phase floors. The shared stopping margin is therefore
+690 seconds initially: twice the largest phase bound plus 30 seconds for the
+checkpoint. Each leaf raises that margin when its own largest observed unit or
+checkpoint write requires more headroom. Sizing subtracts the same declared
+margin from every leaf's compute capacity. Archive-free repetitions keep their existing
+short admission margin because they have no successor to resume an early
+checkpoint.
+
+The measurement chains used revision
+`bb4aaee493119eef19546aeffd985147c14d7aa4`, keeping the owner study cell;
+SSL and nuisance deadline checkpoints both published and their successors
+advanced the saved batch count. The independent evaluation probe used
+`6a9f760af08f3ee8e1331cc7d38f6d60062d9d47`, including the initial fold-preparation
+interval. Only that probe used one SSL and nuisance epoch through the existing
+fit controls. It completed all twelve inner evaluations, final refits,
+calibration, and outer prediction. Production profiles and campaigns retain
+the frozen study settings.
+
+The attempt's external `deadline_report.json` records these measurements,
+subsequent checks on the finalized source, source revisions, per-leaf Slurm
+allocations and publication times, and cumulative GPU accounting including
+failed and canceled probe jobs. It lives under
+`runs/leaf-deadline-margins-r2/1c4dee1ab8d11248` in the coordinator project,
+alongside `SUMMARY.md` and the final validation logs. Generated reports,
+checkpoints and study inputs are not repository files.
