@@ -2,6 +2,7 @@
 from collections import Counter
 from copy import deepcopy
 from dataclasses import replace
+from datetime import date, datetime
 import json
 from pathlib import Path
 
@@ -165,10 +166,12 @@ def estimate_request(tmp_path, monkeypatch):
             'complete_repetition_seconds': [10.], 'wall_seconds': 13., 'setup_seconds': 2.,
             'measurement_scope': 'complete_stage_return', **STAMPS})
         seal_budget_fixture(root, task['id'], task)
+    # Preserve this arithmetic fixture's factor, explicitly approved by its fixture.
+    tasks[4]['parameters']['profile_safety_factor'] = 2.
     req = request(tmp_path / 'estimate', tasks[4], deps)
-    # There is deliberately no approvals or allocation key at all.
+    # Planning requires the sizing decision, but no campaign allocation.
     config = json.loads(Path(req.config_path).read_text())
-    del config['approvals']
+    del config['approvals']['owner_decisions']['campaign_allocations']
     write(Path(req.config_path), config)
     return replace(req, config_hash=file_hash(req.config_path))
 
@@ -193,6 +196,7 @@ def test_estimate_never_expands_locks_admits_or_requires_allocation(estimate_req
     root = Path(estimate_request.output_dir)
     assert {p.name for p in root.iterdir()} == {'budget_estimate.json', 'artifact_manifest.json'}
     budget = coverage.read_json(root / 'budget_estimate.json')
+    assert budget['owner_safety_factor_decision'] == {**campaign.screening_safety_factor(), 'profile_safety_factor': 2.}
     assert budget['estimate_only'] and not budget['admitted']
     assert budget['total_repetitions'] == 4000 and budget['final_coverage_gpu_hours'] == 0
     # 2*(setup=2 + 654*(repetition=10 + publication=1)) <= 14400.
@@ -274,7 +278,11 @@ def test_profile_task_bytes_pin_smoke_and_amended_real_frame(fixture_name, built
         'smoke': '1fb64eaf6987e8fb62c6df3c95b53f0482e2fe7cfcc07e5db214a20fd35e7377',
         'real_fixture': 'ec44a0c499cfd354bc3a617661514bcd3d96779d284a73f9b7ea158fefbc15d3',
     }
-    assert coverage.digest(real_frame.profile_tasks(*pair)['tasks'][:5]) == expected[fixture_name]
+    tasks = real_frame.profile_tasks(*pair)['tasks'][:5]
+    assert tasks[4]['parameters']['profile_safety_factor'] == campaign.screening_safety_factor()['profile_safety_factor']
+    # Only the estimate's factor changes; retain the prior full-manifest pin.
+    tasks[4]['parameters']['profile_safety_factor'] = 2.
+    assert coverage.digest(tasks) == expected[fixture_name]
 
 
 def test_gpu_probe_appends_identical_work_with_explicit_cuda_and_bounded_resources(built):
@@ -668,7 +676,7 @@ def test_month1_decision_refuses_malformed_sizing(field, value):
 
 @pytest.fixture
 def screening_rates(request):
-    return getattr(request, 'param', (100., 15000., 50000., 200000.))
+    return getattr(request, 'param', (100., 20000., 50000., 200000.))
 
 
 @pytest.fixture
@@ -725,11 +733,13 @@ def test_month1_estimate_uses_maximal_independent_chained_counts_and_admits_noth
     for name in ('build_lock', 'expand_campaign', '_admit_locked_leaves'):
         monkeypatch.setattr(campaign, name, forbidden)
     estimate = campaign_estimate.estimate_budget(screening_request)
+    assert estimate['owner_safety_factor_decision'] == campaign.screening_safety_factor()
+    assert estimate['profile_safety_factor'] == campaign.screening_safety_factor()['profile_safety_factor']
     assert estimate['estimate_only'] and not estimate['admitted'] and not estimate['certifies_release_criteria']
     assert len({r['repetitions'] for r in estimate['per_scenario'].values()}) == 4
     for name, row in estimate['per_scenario'].items():
         profile = estimate['profiles'][name]
-        capacity = (coverage.leaf_budget(14100, 2., profile['leaf_overheads'])['compute_seconds']
+        capacity = (coverage.leaf_budget(14100, estimate['profile_safety_factor'], profile['leaf_overheads'])['compute_seconds']
                     - campaign.checkpoint_margin_seconds())
         assert row['leaves'] == math.ceil(profile['seconds_per_repetition'] * row['repetitions'] / capacity) + 1
         assert row['leaves'] <= 40 and row['gpu_hours'] == row['leaves'] * 4
@@ -751,6 +761,8 @@ def test_month1_lock_matches_estimate_instances_and_global_concurrency(screening
     assert len(plans) == 4 and 'final' not in lock['instances']
     assert lock['budget']['concurrency_limits']['gpu'] == 4
     assert lock['budget']['per_scenario'] == estimate['per_scenario']
+    assert lock['budget']['owner_safety_factor_decision'] == estimate['owner_safety_factor_decision']
+    assert coverage.read_json(root / 'budget.json')['owner_safety_factor_decision'] == campaign.screening_safety_factor()
     # Each instance is a single path including its collector: four disjoint
     # paths imply at most four simultaneous GPUs under any topological schedule.
     for plan in plans:
@@ -868,7 +880,7 @@ def test_month1_profile_binds_study_and_refuses_wrong_cell_before_fitting(tmp_pa
     assert result.status == 'blocked' and 'study' in result.message
 
 
-@pytest.mark.parametrize('screening_rates', [(100., 15000., 50000., 300000.)], indirect=True)
+@pytest.mark.parametrize('screening_rates', [(100., 20000., 50000., 500000.)], indirect=True)
 def test_month1_refuses_when_one_complete_profile_cannot_fit_one_evaluation_repetition(screening_request):
     # A 300,000 s bootstrap measurement fits forty unsafetied profile slots,
     # but one evaluation repetition cannot fit the declared 2x safety factor.
@@ -972,3 +984,149 @@ def test_month1_shorter_wall_preserves_owner_maximal_count(screening_request, tm
     assert lock['budget']['per_scenario'] == report['per_scenario']
     assert all(b['wall_seconds'] == 3600 and b['slices'] == report['per_scenario'][b['scenario']['name']]['leaves']
                for b in lock['batches'])
+
+
+@pytest.mark.parametrize('factor', [1, 1.25, 2.0])
+@pytest.mark.parametrize('decided_on', ['2026-10-17', date(2026, 10, 17)])
+def test_safety_factor_reader_is_strict_read_only_and_json_safe(factor, decided_on):
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    block = approvals['owner_decisions']['screening_month1_safety_factor']
+    block.update(profile_safety_factor=factor, decided_on=decided_on)
+    before = deepcopy(approvals)
+    decision = campaign.screening_safety_factor(approvals)
+    assert decision == {**block, 'profile_safety_factor': float(factor), 'decided_on': '2026-10-17'}
+    assert type(decision['profile_safety_factor']) is float
+    assert json.loads(json.dumps(decision)) == decision
+    decision['applies_to'].append('changed-copy')
+    assert approvals == before
+
+
+@pytest.mark.parametrize('approvals', [None, [], {}, {'owner_decisions': None},
+    {'owner_decisions': {}}, {'owner_decisions': {'screening_month1_safety_factor': []}}])
+def test_safety_factor_reader_refuses_absence(approvals):
+    with pytest.raises(ContractError, match='screening_month1_safety_factor'):
+        campaign.screening_safety_factor(approvals)
+
+
+@pytest.mark.parametrize('field', ['profile_safety_factor', 'decided_on', 'applies_to',
+    'basis', 'accepted_risk', 'deferred', 'extra'])
+def test_safety_factor_reader_requires_exact_keys(field):
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    block = approvals['owner_decisions']['screening_month1_safety_factor']
+    if field == 'extra':
+        block[field] = 'unexpected'
+    else:
+        block.pop(field)
+    with pytest.raises(ContractError, match='screening_month1_safety_factor'):
+        campaign.screening_safety_factor(approvals)
+
+
+@pytest.mark.parametrize('field,value', [
+    *[('profile_safety_factor', v) for v in (True, False, '1.25', None, [],
+        float('nan'), float('inf'), float('-inf'), .999, 2.001, 10 ** 1000)],
+    ('decided_on', ''), ('decided_on', '2026-02-30'), ('decided_on', '17 October 2026'),
+    ('decided_on', '2026-10-17T12:00:00'), ('decided_on', datetime(2026, 10, 17)),
+    ('decided_on', 20261017), ('applies_to', ['campaign-lock', 'campaign-estimate']),
+    ('applies_to', ['campaign-estimate']), ('applies_to', 'campaign-estimate'),
+    ('basis', ''), ('basis', '  '), ('accepted_risk', None), ('deferred', 123),
+])
+def test_safety_factor_reader_refuses_malformed_fields(field, value):
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    approvals['owner_decisions']['screening_month1_safety_factor'][field] = value
+    with pytest.raises(ContractError, match='screening_month1_safety_factor'):
+        campaign.screening_safety_factor(approvals)
+
+
+@pytest.mark.parametrize('factor', [1., 1.25, 2.])
+def test_screening_emitter_uses_dispatched_factor_and_preserves_previous_chain_bytes(factor):
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    approvals['owner_decisions']['screening_month1_safety_factor']['profile_safety_factor'] = factor
+    tasks = real_frame.screening_profile_tasks(*smoke_inputs.build_inputs(), approvals)['tasks']
+    assert tasks[-1]['parameters']['profile_safety_factor'] == factor
+    assert all('profile_safety_factor' not in task['parameters'] for task in tasks[:-1])
+    # SHA256 of canonical task bytes from the previous emitter at launch base
+    # 1cf40a54b2c47a8449fc450a698fa3f23dfb534c on this fixed smoke endpoint/frame.
+    # Covers all 160 task IDs, draws, chain owners, parameters and receipt declarations.
+    assert coverage.digest(tasks[:-1]) == '51a1a989a1657afb258908acff11ee0a59d25136278d8e75d7c7c876639a7c8d'
+
+
+@pytest.mark.parametrize('factor', [1., 1.25, 2.])
+def test_legacy_emitter_uses_repository_factor(factor, tmp_path, monkeypatch):
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    approvals['owner_decisions']['screening_month1_safety_factor']['profile_safety_factor'] = factor
+    import yaml
+    path = tmp_path / 'approvals.yaml'
+    path.write_text(yaml.safe_dump(approvals))
+    monkeypatch.setattr(campaign, 'OWNER_APPROVALS', path)
+    task = real_frame.profile_tasks(*smoke_inputs.build_inputs())['tasks'][4]
+    assert task['parameters']['profile_safety_factor'] == factor
+
+
+@pytest.mark.parametrize('stage', ['estimate', 'lock'])
+@pytest.mark.parametrize('factor', [1., 2.])
+def test_screening_consumers_refuse_task_factor_drift(screening_request, tmp_path, stage, factor):
+    req = screening_lock_request(screening_request, tmp_path) if stage == 'lock' else screening_request
+    req = update_task(req, lambda p: p.update(profile_safety_factor=factor))
+    result = (campaign.run_stage if stage == 'lock' else campaign_estimate.run_stage)(req)
+    assert result.status == 'blocked' and 'profile_safety_factor drift' in result.message
+    assert not result.artifacts and not list(Path(req.output_dir).iterdir())
+
+
+@pytest.mark.parametrize('field,value', [('profile_safety_factor', 2.), ('decided_on', '2026-10-18'),
+    ('basis', 'changed basis'), ('accepted_risk', 'changed risk'), ('deferred', 'changed deferral')])
+def test_screening_validation_checks_entire_dispatched_safety_decision(field, value):
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    approvals['owner_decisions']['screening_month1_safety_factor'][field] = value
+    recipe = {'study': campaign.screening_decision()['recipe']}
+    with pytest.raises(ContractError, match='screening_month1_safety_factor approval differs from repository'):
+        campaign.validate_screening(recipe, approvals)
+
+
+def test_legacy_estimate_refuses_task_factor_drift(estimate_request):
+    req = update_task(estimate_request, lambda p: p.update(profile_safety_factor=1.25))
+    result = campaign_estimate.run_stage(req)
+    assert result.status == 'blocked' and 'profile_safety_factor drift' in result.message
+    assert not result.artifacts and not list(Path(req.output_dir).iterdir())
+
+
+@pytest.mark.parametrize('payload', [None, 'owner_decisions: [',
+    'owner_decisions: {screening_month1_safety_factor: {decided_on: 2026-02-30}}'])
+def test_safety_factor_reader_wraps_missing_or_malformed_yaml(tmp_path, monkeypatch, payload):
+    path = tmp_path / 'approvals.yaml'
+    if payload is not None:
+        path.write_text(payload)
+    monkeypatch.setattr(campaign, 'OWNER_APPROVALS', path)
+    with pytest.raises(ContractError, match='owner_decisions.screening_month1_safety_factor'):
+        campaign.screening_safety_factor()
+
+
+@pytest.mark.parametrize('text,expected', [
+    ('2026-290', '2026-10-17'), ('2026290', '2026-10-17'),
+    ('2024-366', '2024-12-31'), ('2024366', '2024-12-31'),
+    ('2026-001', '2026-01-01'), ('20261017', '2026-10-17'),
+    ('2026-W42-6', '2026-10-17'), ('2026W426', '2026-10-17'),
+])
+def test_safety_factor_reader_normalizes_complete_iso_date_formats(text, expected):
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    approvals['owner_decisions']['screening_month1_safety_factor']['decided_on'] = text
+    decision = campaign.screening_safety_factor(approvals)
+    assert decision['decided_on'] == expected
+    assert approvals['owner_decisions']['screening_month1_safety_factor']['decided_on'] == text
+
+
+@pytest.mark.parametrize('text', ['2026-000', '2026000', '2026-366', '2026366',
+    '2024-367', '2024367', '0000-001', '9999-366'])
+def test_safety_factor_reader_refuses_invalid_ordinal_dates(text):
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    approvals['owner_decisions']['screening_month1_safety_factor']['decided_on'] = text
+    with pytest.raises(ContractError, match='screening_month1_safety_factor'):
+        campaign.screening_safety_factor(approvals)
+
+
+def test_screening_emitter_accepts_equivalent_ordinal_decision_date():
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    endpoint, frame = smoke_inputs.build_inputs()
+    expected = real_frame.screening_profile_tasks(endpoint, frame, approvals)
+    approvals['owner_decisions']['screening_month1_safety_factor']['decided_on'] = '2026-290'
+    assert real_frame.screening_profile_tasks(endpoint, frame, approvals) == expected
+    campaign.validate_screening(expected['tasks'][-1]['parameters']['recipe'], approvals)

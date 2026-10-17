@@ -14,8 +14,8 @@ from oxyformer.validation.scm import CovariateFrame
 
 def estimate_budget(request):
     request.verify_inputs()
-    # This envelope also carries dispatcher approvals. Estimation deliberately
-    # never consults them; allocation remains the unchanged lock's concern.
+    # Sizing reads the dispatcher's owner decision; allocation remains the
+    # unchanged lock's concern.
     config = read_mapping(request.config_path)
     task = json.loads(Path(request.task_path).read_text())
     require(request.stage == task['stage'] == 'campaign-estimate', 'stage mismatch')
@@ -40,7 +40,7 @@ def estimate_budget(request):
     require(gpus == int(campaign.resolve_device().type == 'cuda'), 'estimate device/resource mismatch')
     require(gpus * math.ceil(wall / 60) * 60 <= 14400, 'leaf exceeds four GPU-hours')
     factor = finite(p['profile_safety_factor'], 'profile safety factor')
-    require(factor >= 1, 'profile safety factor must be at least one')
+    safety_decision = campaign.approved_safety_factor(p, config.get('approvals'))
     stamps = campaign.fingerprint()
     profiles = {s['name']: campaign._profile(request, config, p['profiles'][s['name']], s, recipe, stamps)
                 for s in scenarios}
@@ -88,6 +88,7 @@ def estimate_budget(request):
         'recipe': recipe, **stamps, 'profiles': rows,
         'final_repetitions_per_scenario': count, 'total_repetitions': count * len(scenarios),
         'requested_leaf_wall_seconds': wall, 'profile_safety_factor': factor,
+        'owner_safety_factor_decision': safety_decision,
         'cpus_per_task': cpus, 'gpus': gpus,
         'common_feasible_repetitions_per_leaf': common,
         'leaf_count_at_requested_wall': len(scenarios) * math.ceil(count / common) if common else None,

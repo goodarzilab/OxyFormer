@@ -3,9 +3,11 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
+from datetime import date
 import json
 import math
 from pathlib import Path
+import re
 from tempfile import TemporaryDirectory
 import time
 
@@ -70,6 +72,52 @@ def screening_decision(approvals=_REPOSITORY_APPROVALS):
     return deepcopy(decision)
 
 
+def screening_safety_factor(approvals=_REPOSITORY_APPROVALS):
+    """Return a JSON-safe copy of the owner sizing decision; never amend it."""
+    name = "owner_decisions.screening_month1_safety_factor"
+    if approvals is _REPOSITORY_APPROVALS:
+        try:
+            approvals = yaml.safe_load(OWNER_APPROVALS.read_text())
+        except (OSError, yaml.YAMLError, ValueError) as exc:
+            raise ContractError("missing or malformed " + name) from exc
+    require(type(approvals) is dict, "missing " + name)
+    owner = approvals.get("owner_decisions")
+    require(type(owner) is dict, "missing " + name)
+    decision = owner.get("screening_month1_safety_factor")
+    expected = {"profile_safety_factor", "decided_on", "applies_to", "basis", "accepted_risk", "deferred"}
+    require(type(decision) is dict and set(decision) == expected, "missing or malformed " + name)
+    factor = decision["profile_safety_factor"]
+    require(type(factor) in (int, float) and 1. <= factor <= 2. and math.isfinite(factor),
+            "invalid " + name + ".profile_safety_factor")
+    require(decision["applies_to"] == ["campaign-estimate", "campaign-lock"],
+            "invalid " + name + ".applies_to")
+    for field in ("basis", "accepted_risk", "deferred"):
+        require(type(decision[field]) is str and bool(decision[field].strip()), "invalid " + name + "." + field)
+    decided_on = decision["decided_on"]
+    if type(decided_on) is str:
+        try:
+            # fromisoformat handles calendar/week dates, but not ordinal dates.
+            if re.fullmatch(r"[0-9]{4}-?[0-9]{3}", decided_on):
+                year, day = int(decided_on[:4]), int(decided_on[-3:])
+                decided_on = date.fromordinal(date(year, 1, 1).toordinal() + day - 1)
+                require(decided_on.year == year, "invalid " + name + ".decided_on")
+            else:
+                decided_on = date.fromisoformat(decided_on)
+        except ValueError as exc:
+            raise ContractError("invalid " + name + ".decided_on") from exc
+    require(type(decided_on) is date, "invalid " + name + ".decided_on")
+    return {**deepcopy(decision), "profile_safety_factor": float(factor), "decided_on": decided_on.isoformat()}
+
+
+def approved_safety_factor(parameters, approvals):
+    """Refuse a stale manifest instead of silently resizing it."""
+    decision = screening_safety_factor(approvals)
+    factor = finite(parameters.get("profile_safety_factor"), "profile safety factor")
+    require(factor == decision["profile_safety_factor"],
+            "profile_safety_factor drift from owner_decisions.screening_month1_safety_factor")
+    return decision
+
+
 def screening_metadata(recipe):
     if recipe.get("campaign_mode") != "screening":
         return {}
@@ -81,6 +129,8 @@ def screening_metadata(recipe):
 def validate_screening(recipe, approvals):
     decision = screening_decision(approvals)
     require(decision == screening_decision(), "dispatched screening approval differs from repository")
+    require(screening_safety_factor(approvals) == screening_safety_factor(),
+            "dispatched screening_month1_safety_factor approval differs from repository")
     require(recipe.get("study") == decision["recipe"], "screening study differs from approval")
     return decision
 
@@ -279,7 +329,7 @@ def screening_estimate(request, config, parameters):
     owner_wall = maximum_leaf_stage_seconds()
     allocation = leaf_allocation(wall)["allocation_seconds"]
     factor = finite(parameters["profile_safety_factor"], "profile safety factor")
-    require(factor >= 1, "profiling safety factor must be at least one")
+    safety_decision = approved_safety_factor(parameters, config.get("approvals"))
     require(not {"screening_repetitions", "final_repetitions", "repetitions_per_leaf"}.intersection(parameters),
             "screening counts come only from measured month1 sizing")
     records = []
@@ -320,6 +370,7 @@ def screening_estimate(request, config, parameters):
         "profiles": profiles, "per_scenario": rows, "total_repetitions": sum(r["repetitions"] for r in rows.values()),
         "projected_leaf_count": sum(r["leaves"] for r in rows.values()), "gpu_hours": total,
         "partition": "standard", "gpus": 1, "cpus_per_task": 8, "wall_seconds": wall,
+        "owner_safety_factor_decision": safety_decision,
         "profile_safety_factor": factor, "gpu_concurrency_max": decision["gpu_concurrency_max"],
         "budget_h100_hours": decision["budget_h100_hours"],
         "limitations": ["Planning estimate only; report per-scenario counts to owner before separate campaign-lock.",
@@ -365,7 +416,8 @@ def build_screening_lock(request, config, task):
     require(not prior_seeds.intersection(d["seed"] for d in draws), "evaluation draws overlap prior lock or profiling")
     budget = {"gpu_hours": estimate["gpu_hours"], "gpu_hours_per_leaf_max": 4,
         "leaves_per_instance_max": 40, "per_scenario": estimate["per_scenario"],
-        "profile_safety_factor": p["profile_safety_factor"], "profiles": profiles,
+        "owner_safety_factor_decision": estimate["owner_safety_factor_decision"],
+        "profile_safety_factor": estimate["profile_safety_factor"], "profiles": profiles,
         "concurrency_limits": {"gpu": 4, "cpu": 6}, "run_gpu_hours_ceiling": 3600,
         "collector_gpu_hours": 0,
         "cpu_wall_hours_ceiling": (estimate["projected_leaf_count"] * leaf_allocation(p["wall_seconds"])["allocation_seconds"] / 60 + 40) / 60}
@@ -518,7 +570,7 @@ def build_lock(request, config, task):
     wall_seconds = integer(parameters["wall_seconds"], "leaf wall seconds", 1)
     require(gpus * math.ceil(wall_seconds / 60) * 60 <= 14400, "leaf exceeds four GPU-hours")
     factor = finite(parameters["profile_safety_factor"], "profile safety factor")
-    require(factor >= 1, "profiling safety factor must be at least one")
+    safety_decision = approved_safety_factor(parameters, config.get("approvals"))
     namespace = parameters["evaluation_namespace"]
     require(isinstance(namespace, str) and bool(namespace.strip()), "independent evaluation namespace required")
     require(parameters["retry_rules"] == RETRY_RULES, "unregistered retry rules")
@@ -561,6 +613,7 @@ def build_lock(request, config, task):
         if "slices" in b else math.ceil(wall_seconds / 60) * 60) for b in batches)
     budget = {"gpu_hours": gpus * allocation_seconds / 3600, "gpu_hours_per_leaf_max": 4., "leaves_per_instance_max": 40,
               "cpu_wall_hours_ceiling": (allocation_seconds / 60 + 20) / 60,
+              "owner_safety_factor_decision": safety_decision,
               "profile_safety_factor": factor, "profiles": profiles,
               "admission_model": "measure locked setup at each leaf size; scale complete profile finalization by repetition count",
               "budget_semantics": "planning estimate; report overruns and retain draws; scheduler enforces binding limits",

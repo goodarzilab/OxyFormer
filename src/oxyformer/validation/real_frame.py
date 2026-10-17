@@ -228,7 +228,7 @@ def profile_tasks(endpoint, frame):
                              for ref in profiles.values()}},
         'outputs': ['budget_estimate.json', 'artifact_manifest.json'],
         'parameters': {**common, 'profiles': profiles, 'final_repetitions': 1000,
-            **resources, 'profile_safety_factor': 2.}})
+            **resources, 'profile_safety_factor': campaign.screening_safety_factor()['profile_safety_factor']}})
     # A paired hardware probe, deliberately outside the CPU estimate fan-in.
     # Copy the already-declared draw, rather than assigning a new seed namespace.
     probe = deepcopy(next(task for task in tasks if task['id'] == 'profile-null-effect'))
@@ -285,7 +285,8 @@ def screening_profile_tasks(endpoint, frame, approvals):
                   **{ref['dependency']: receipt_inputs for ref in profiles.values()}},
         'outputs': ['budget_estimate.json', 'artifact_manifest.json'],
         'parameters': {**{k: deepcopy(legacy[4]['parameters'][k]) for k in ('endpoint_input', 'frame_input')},
-            'recipe': recipe, 'profiles': profiles, **resources, 'wall_seconds': stage_seconds, 'profile_safety_factor': 2.}})
+            'recipe': recipe, 'profiles': profiles, **resources, 'wall_seconds': stage_seconds,
+            'profile_safety_factor': campaign.screening_safety_factor(approvals)['profile_safety_factor']}})
     return {'schema_version': 1, **metadata, 'gpu_concurrency_max': 4, 'tasks': tasks}
 
 
