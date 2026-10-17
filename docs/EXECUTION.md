@@ -523,6 +523,16 @@ suite, on Slurm. Tests use only synthetic fixtures and no network access.
 
 ### Shared coverage leaf budget
 
+The month-1 screening safety factor is read from the owner decision
+`owner_decisions.screening_month1_safety_factor` in `configs/approvals.yaml`.
+Both profile task emitters use that approval. `campaign-estimate` and
+`campaign-lock` reject a task factor that differs from their dispatched approval;
+screening validation also requires that decision to match the repository's.
+Their `budget_estimate.json` and `budget.json` record the normalized decision as
+`owner_safety_factor_decision`. Changing the factor requires an owner decision
+recorded by the orchestrator; workers never edit the approvals file. Bootstrap
+profile chain tasks and their sealed receipts are unchanged by this sizing input.
+
 For coverage-owned chains, the lock stores `leaf_budget` in each batch and its
 expanded tasks. Sizing, locked preflight admission, and execution all use
 `C = (wall_seconds - LEAF_FINALIZATION_SECONDS) / safety_factor - sum(overheads)`.

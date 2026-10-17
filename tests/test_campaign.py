@@ -151,9 +151,14 @@ def request(root, task, dependencies, approvals=None):
             for unit in task.get('needs', {}):
                 if unit not in dependencies and unit in upstream:
                     dependencies[unit] = Path(upstream[unit])
+    if approvals is None:
+        safety = campaign.screening_safety_factor()
+        safety["profile_safety_factor"] = task.get("parameters", {}).get(
+            "profile_safety_factor", safety["profile_safety_factor"])
+        approvals = {"owner_decisions": {"screening_month1_safety_factor": safety,
+            "campaign_allocations": {"test-final": {"kind": "final-coverage", "gpu_hours": 0}}}}
     config = write(root / "config.json", {"dependencies": {k: str(v) for k, v in dependencies.items()},
-        "approvals": approvals or {"owner_decisions": {"campaign_allocations": {
-            "test-final": {"kind": "final-coverage", "gpu_hours": 0}}}}})
+        "approvals": approvals})
     task_path = write(root / "task.json", task)
     paths = tuple(str(p) for directory in dependencies.values()
         for p in sorted([*directory.glob("*.json"), *(directory / '_execution').glob('*.json')]))
@@ -215,6 +220,9 @@ def test_lock_emits_reviewable_bounded_manifests_without_submission(tmp_path):
     all_draws = [d for b in lock["batches"] for d in b["draws"]]
     assert len(all_draws) == len({d["seed"] for d in all_draws}) == 1005
     assert lock["recipe"]["nested_cv"] == {}
+    expected = {**campaign.screening_safety_factor(), "profile_safety_factor": 2.}
+    assert lock["budget"]["owner_safety_factor_decision"] == expected
+    assert coverage.read_json(root / "budget.json")["owner_safety_factor_decision"] == expected
 
 
 @pytest.mark.parametrize("changes,reason", [
@@ -1323,4 +1331,14 @@ def test_campaign_refuses_aggregate_spares_over_forty(tmp_path):
     write(Path(req.task_path), task)
     result = campaign.run_stage(replace(req, task_hash=file_hash(req.task_path)))
     assert result.status == "blocked" and "required spare slices exceeds forty leaves" in result.message
+    assert not result.artifacts and not list(Path(req.output_dir).iterdir())
+
+
+def test_legacy_lock_refuses_task_safety_factor_drift(tmp_path):
+    req, task = setup_lock(tmp_path)
+    task["parameters"]["profile_safety_factor"] = 1.25
+    write(Path(req.task_path), task)
+    req = replace(req, task_hash=file_hash(req.task_path))
+    result = campaign.run_stage(req)
+    assert result.status == "blocked" and "profile_safety_factor drift" in result.message
     assert not result.artifacts and not list(Path(req.output_dir).iterdir())
