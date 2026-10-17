@@ -255,7 +255,7 @@ owner_decisions:
   # screening_campaign.month1_sizing is unchanged, and the sized counts are still reported to the owner before campaign-lock admits any leaf.
   screening_month1_safety_factor:
     profile_safety_factor: 1.25        # replaces the emitter's 2.0 for the month-1 screening campaign-estimate and campaign-lock sizing
-    decided_on: 2026-10-17
+    decided_on: "2026-10-17"
     applies_to: [campaign-estimate, campaign-lock]   # sizing only; leaf deadlines, sealed budgets and the overrun rule are unchanged
     basis: "measured screening-cell profiles 29.0-31.8 H100-hours per repetition; per-leaf compute variance under 1.5% across 36 leaves; the sealed-budget contract keeps any overrun leaf unusable rather than wrong"
     accepted_risk: "a repetition slower than 1.25 times its profile can leave a chain's last repetition incomplete, which fails that scenario's screening gate safely"
