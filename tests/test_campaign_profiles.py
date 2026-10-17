@@ -1098,3 +1098,35 @@ def test_safety_factor_reader_wraps_missing_or_malformed_yaml(tmp_path, monkeypa
     monkeypatch.setattr(campaign, 'OWNER_APPROVALS', path)
     with pytest.raises(ContractError, match='owner_decisions.screening_month1_safety_factor'):
         campaign.screening_safety_factor()
+
+
+@pytest.mark.parametrize('text,expected', [
+    ('2026-290', '2026-10-17'), ('2026290', '2026-10-17'),
+    ('2024-366', '2024-12-31'), ('2024366', '2024-12-31'),
+    ('2026-001', '2026-01-01'), ('20261017', '2026-10-17'),
+    ('2026-W42-6', '2026-10-17'), ('2026W426', '2026-10-17'),
+])
+def test_safety_factor_reader_normalizes_complete_iso_date_formats(text, expected):
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    approvals['owner_decisions']['screening_month1_safety_factor']['decided_on'] = text
+    decision = campaign.screening_safety_factor(approvals)
+    assert decision['decided_on'] == expected
+    assert approvals['owner_decisions']['screening_month1_safety_factor']['decided_on'] == text
+
+
+@pytest.mark.parametrize('text', ['2026-000', '2026000', '2026-366', '2026366',
+    '2024-367', '2024367', '0000-001', '9999-366'])
+def test_safety_factor_reader_refuses_invalid_ordinal_dates(text):
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    approvals['owner_decisions']['screening_month1_safety_factor']['decided_on'] = text
+    with pytest.raises(ContractError, match='screening_month1_safety_factor'):
+        campaign.screening_safety_factor(approvals)
+
+
+def test_screening_emitter_accepts_equivalent_ordinal_decision_date():
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    endpoint, frame = smoke_inputs.build_inputs()
+    expected = real_frame.screening_profile_tasks(endpoint, frame, approvals)
+    approvals['owner_decisions']['screening_month1_safety_factor']['decided_on'] = '2026-290'
+    assert real_frame.screening_profile_tasks(endpoint, frame, approvals) == expected
+    campaign.validate_screening(expected['tasks'][-1]['parameters']['recipe'], approvals)

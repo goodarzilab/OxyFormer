@@ -7,6 +7,7 @@ from datetime import date
 import json
 import math
 from pathlib import Path
+import re
 from tempfile import TemporaryDirectory
 import time
 
@@ -95,7 +96,13 @@ def screening_safety_factor(approvals=_REPOSITORY_APPROVALS):
     decided_on = decision["decided_on"]
     if type(decided_on) is str:
         try:
-            decided_on = date.fromisoformat(decided_on)
+            # fromisoformat handles calendar/week dates, but not ordinal dates.
+            if re.fullmatch(r"[0-9]{4}-?[0-9]{3}", decided_on):
+                year, day = int(decided_on[:4]), int(decided_on[-3:])
+                decided_on = date.fromordinal(date(year, 1, 1).toordinal() + day - 1)
+                require(decided_on.year == year, "invalid " + name + ".decided_on")
+            else:
+                decided_on = date.fromisoformat(decided_on)
         except ValueError as exc:
             raise ContractError("invalid " + name + ".decided_on") from exc
     require(type(decided_on) is date, "invalid " + name + ".decided_on")
