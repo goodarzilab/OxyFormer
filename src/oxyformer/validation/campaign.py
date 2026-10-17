@@ -75,7 +75,10 @@ def screening_safety_factor(approvals=_REPOSITORY_APPROVALS):
     """Return a JSON-safe copy of the owner sizing decision; never amend it."""
     name = "owner_decisions.screening_month1_safety_factor"
     if approvals is _REPOSITORY_APPROVALS:
-        approvals = yaml.safe_load(OWNER_APPROVALS.read_text())
+        try:
+            approvals = yaml.safe_load(OWNER_APPROVALS.read_text())
+        except (OSError, yaml.YAMLError, ValueError) as exc:
+            raise ContractError("missing or malformed " + name) from exc
     require(type(approvals) is dict, "missing " + name)
     owner = approvals.get("owner_decisions")
     require(type(owner) is dict, "missing " + name)

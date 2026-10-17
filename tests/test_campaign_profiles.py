@@ -1087,3 +1087,14 @@ def test_legacy_estimate_refuses_task_factor_drift(estimate_request):
     result = campaign_estimate.run_stage(req)
     assert result.status == 'blocked' and 'profile_safety_factor drift' in result.message
     assert not result.artifacts and not list(Path(req.output_dir).iterdir())
+
+
+@pytest.mark.parametrize('payload', [None, 'owner_decisions: [',
+    'owner_decisions: {screening_month1_safety_factor: {decided_on: 2026-02-30}}'])
+def test_safety_factor_reader_wraps_missing_or_malformed_yaml(tmp_path, monkeypatch, payload):
+    path = tmp_path / 'approvals.yaml'
+    if payload is not None:
+        path.write_text(payload)
+    monkeypatch.setattr(campaign, 'OWNER_APPROVALS', path)
+    with pytest.raises(ContractError, match='owner_decisions.screening_month1_safety_factor'):
+        campaign.screening_safety_factor()
