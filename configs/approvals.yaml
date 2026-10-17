@@ -247,6 +247,19 @@ owner_decisions:
     final_cells: "the 1,000-repetition final cells (minimum_final_repetitions) are deferred to month 2 with a separate allocation; this screening campaign certifies no release criterion"
     gpu_concurrency_max: 4             # standing rule for this run: never more than 4 GPUs held at once
     gpu_concurrency_exempt_partitions: [preemptible]   # the owner wrote "pre-emptible"; this cluster's partition is literally named preemptible (sinfo, 2026-10-12: all, h100-reserved, large_batch, preemptible, standard); using any partition other than standard still needs its own approval
+  # Owner decision 2026-10-17 ("go with your recommendation" to the orchestrator's option B) after the four screening-cell profiles
+  # measured on the real frame (dev 405d737; chains profile-*-0..39-r3, Slurm 2026-10-14..17): one repetition costs 29.0 (null_effect),
+  # 29.2 (nonlinear), 30.7 (linear_reference) and 31.8 (sign_changing) H100-hours over nine leaves, with per-leaf compute within 1.5% across
+  # all 36 full leaves. campaign-estimate-r3 (Slurm 95158) applied the emitter's hard-coded profile_safety_factor of 2.0 and admitted only
+  # 2/2/1/1 repetitions (125 leaves, 500 H100-hours). This block lowers that factor for month-1 screening sizing only; every other bound in
+  # screening_campaign.month1_sizing is unchanged, and the sized counts are still reported to the owner before campaign-lock admits any leaf.
+  screening_month1_safety_factor:
+    profile_safety_factor: 1.25        # replaces the emitter's 2.0 for the month-1 screening campaign-estimate and campaign-lock sizing
+    decided_on: 2026-10-17
+    applies_to: [campaign-estimate, campaign-lock]   # sizing only; leaf deadlines, sealed budgets and the overrun rule are unchanged
+    basis: "measured screening-cell profiles 29.0-31.8 H100-hours per repetition; per-leaf compute variance under 1.5% across 36 leaves; the sealed-budget contract keeps any overrun leaf unusable rather than wrong"
+    accepted_risk: "a repetition slower than 1.25 times its profile can leave a chain's last repetition incomplete, which fails that scenario's screening gate safely"
+    deferred: "any other factor, more leaves per scenario, or the preemptible partition are separate owner decisions"
 
 # Not yet approved. A unit that needs one of these must stop and report; the orchestrator brings it to the owner.
 pending_owner_approval:
