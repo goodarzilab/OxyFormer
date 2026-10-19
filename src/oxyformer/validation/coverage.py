@@ -80,6 +80,10 @@ OVERHEAD_PHASES = ("setup_seconds", "import_seconds", "export_seconds", "publica
 LEAF_SETUP_SECONDS = 300
 LEAF_FINALIZATION_SECONDS = 300
 MAX_LEAF_ALLOCATION_SECONDS = 14400
+BUDGET_FORMULA = "arc-2612-window"
+# The final null-effect leaf (2026-10-19) had 809.556315 s excess per leaf
+# while still unsealed; round upward from the required 800 s minimum.
+RESUME_OVERHEAD_FLOOR_SECONDS = 810.
 
 
 def leaf_allocation(stage_seconds):
@@ -102,10 +106,56 @@ def leaf_budget(seconds, factor, overheads):
     require(set(overheads) == set(OVERHEAD_PHASES), "incomplete leaf overheads")
     require(all(finite(overheads[k], k) >= 0 for k in OVERHEAD_PHASES), "negative leaf overhead")
     reserve = LEAF_FINALIZATION_SECONDS
-    capacity = (seconds - reserve) / factor - math.fsum(overheads.values())
+    capacity = (seconds - reserve) - math.fsum(overheads.values())
     require(capacity > 0, "infeasible batch budget: leaf overhead consumes slice")
     return {"wall_seconds": seconds, "reserve_seconds": reserve, "safety_factor": factor,
-            "overheads": dict(overheads), "compute_seconds": capacity}
+            "overheads": dict(overheads), "compute_seconds": capacity, "formula": BUDGET_FORMULA}
+
+
+def validate_leaf_budget(budget):
+    """Accept the old generation only where both formulas are identical."""
+    expected = leaf_budget(budget["wall_seconds"], budget["safety_factor"], budget["overheads"])
+    if "formula" not in budget:
+        require(budget["safety_factor"] == 1.0 and budget["compute_seconds"] == expected["compute_seconds"],
+                "leaf budget sealed under the pre-ARC-2612 window formula")
+        expected.pop("formula")
+    require(budget == expected, "leaf budget drift")
+    return budget
+
+
+def usable_leaf_compute(seconds, overheads, margin=None, *, resume_overhead_seconds=RESUME_OVERHEAD_FLOOR_SECONDS):
+    """Sizing capacity before resume; one shared guard for every sizing caller."""
+    from oxyformer.training.fit import checkpoint_margin_seconds, PHASE_UNIT_SECONDS, CHECKPOINT_WRITE_SECONDS
+    margin = checkpoint_margin_seconds() if margin is None else finite(margin, "checkpoint margin")
+    require(margin >= checkpoint_margin_seconds(), "insufficient checkpoint margin")
+    partial = max(PHASE_UNIT_SECONDS.values())
+    resume = finite(resume_overhead_seconds, "resume overhead")
+    require(resume >= RESUME_OVERHEAD_FLOOR_SECONDS, "insufficient resume overhead")
+    usable = leaf_budget(seconds, 1., overheads)["compute_seconds"] - margin - partial
+    require(usable - resume >= partial + CHECKPOINT_WRITE_SECONDS,
+            "infeasible batch budget: usable capacity cannot fit a phase unit and checkpoint")
+    return usable
+
+
+def read_leaf_measurements(path):
+    """Authenticated measurements only: never grants execution budget authority."""
+    from oxyformer.execution.integrity import verify_publication
+    path = Path(path).resolve(strict=True)
+    require(path.name == BUDGET_RECORD, "calibration requires a sealed budget record")
+    root = path.parent
+    terminal = StageResult.from_json((root / "_execution/result.json").read_text())
+    require(terminal.status == "pass", "measurement publication did not pass")
+    verify_publication(root, terminal)
+    records = [a for a in terminal.artifacts if a.path == BUDGET_RECORD]
+    require(len(records) == 1 and file_hash(path) == records[0].sha256, "measurement record hash mismatch")
+    value = read_json(path)
+    require(value.get("schema_version") == 1 and bool(value.get("leaves")), "invalid measurement record")
+    own = value["leaves"][-1]
+    require(own["task_id"] == value["binding"]["task_id"], "measurement leaf identity mismatch")
+    require(all(finite(own[k], k) >= 0 for k in (*OVERHEAD_PHASES, "compute_seconds")),
+            "negative leaf measurement")
+    generation = (own.get("leaf_budget") or {}).get("formula", "pre-ARC-2612")
+    return {**value, "record_hash": records[0].sha256, "budget_generation": generation}
 
 
 def remaining_compute(budget, **measured):
@@ -128,8 +178,8 @@ def task_leaf_budget(task):
     locked = bool(task.get("recipe_lock"))
     require(not locked or budget is not None, "locked chain requires leaf budget")
     if budget is not None:
-        require(budget == leaf_budget(seconds, budget["safety_factor"], budget["overheads"]),
-                "leaf budget drift")
+        validate_leaf_budget(budget)
+        require(budget["wall_seconds"] == seconds, "leaf budget wall drift")
     else:
         budget = leaf_budget(seconds, 1., {k: 0. for k in OVERHEAD_PHASES})
     ceiling = parameters.get("compute_ceiling_seconds", budget["compute_seconds"])
@@ -217,7 +267,13 @@ def load_budget(request, config, unit, *, expected_task=None):
             "budget accounting mismatch")
         require(leaf["post_check_reserve_seconds"] == publication_reserve(wall), "publication reserve drift")
         require(elapsed <= reserved_wall_limit(wall), "coverage leaf exceeded admitted budget")
-        require(leaf.get("leaf_budget") == contract, "budget contract differs from producer task")
+        observed = leaf.get("leaf_budget")
+        if observed is not None and "formula" not in observed:
+            validate_leaf_budget(observed)
+        comparable = dict(contract) if contract is not None else None
+        if comparable is not None and observed is not None and "formula" not in observed:
+            comparable.pop("formula", None)
+        require(observed == comparable, "budget contract differs from producer task")
         if contract is not None:
             phases = {k: leaf[k] for k in OVERHEAD_PHASES} if task["parameters"].get("leaf_budget") is not None else {
                 k: leaf[k] for k in ("setup_seconds", "import_seconds")}

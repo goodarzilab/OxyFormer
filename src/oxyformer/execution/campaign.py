@@ -68,6 +68,8 @@ def stage_command(task, *, cuda=False):
         'set -euo pipefail',
         *(['export OXYFORMER_DEVICE=cuda'] if cuda else []),
         ': "${SWARM_UNIT_DIR:?}"',
+        *([f'export OXYFORMER_SETUP_STARTED=$({PYTHON} -B -c "import time; print(time.monotonic())")']
+          if task['stage'] == 'campaign-setup-probe' else []),
         'export GIT_NO_REPLACE_OBJECTS=1',
         f'git clone --depth 1 --branch dev {REMOTE} "$SWARM_UNIT_DIR/src"',
         'git -C "$SWARM_UNIT_DIR/src" rev-parse HEAD > "$SWARM_UNIT_DIR/code_commit.txt"',
@@ -94,6 +96,13 @@ def _spec_check(spec, approvals):
         concrete_id(value)
     require(len(set(spec['prerequisites'])) == len(spec['prerequisites']), 'duplicate prerequisites')
     external = set(spec['prerequisites']) | set(spec['inputs'])
+    if 'admission_receipt' in spec:
+        ref = spec['admission_receipt']
+        require(set(ref) == {'dependency', 'path'} and ref['path'] == 'admission.json',
+                'invalid admission receipt reference')
+        concrete_id(ref['dependency'])
+        require(ref['dependency'] not in external, 'admission receipt must be a separate dependency')
+        external.add(ref['dependency'])
     variables = [dependency_variable(x) for x in external]
     require(len(set(variables)) == len(variables), 'dependency normalization collision')
     lock = spec['recipe_lock']
@@ -167,13 +176,17 @@ def _unit(spec, task, prerequisites, gpus, seconds, role):
 
 def _build(spec):
     units, tasks, leaves = [], [], []
+    inputs = deepcopy(spec['inputs'])
+    if 'admission_receipt' in spec:
+        ref = spec['admission_receipt']
+        inputs[ref['dependency']] = [ref['path']]
     for work in spec['work']:
         previous = None
         owner = sha256(canonical_json({'campaign': spec['id'], 'work': work,
                     'recipe': spec['recipe_lock']}).encode()).hexdigest()
         for step, segment in enumerate(work['slices']):
             unit_id = _id(spec, [work['id'], step])
-            needs = deepcopy(spec['inputs'])
+            needs = deepcopy(inputs)
             if previous:
                 needs[previous] = ['_execution/task.json', '_execution/request.json',
                     '_execution/result.json', *work['outputs']]
@@ -183,11 +196,13 @@ def _build(spec):
                 'continuation': {'owner': owner, 'step': step, 'predecessor': previous}}
             if spec.get('campaign_mode') == 'screening':
                 task.update({k: spec[k] for k in ('campaign_mode', 'study', 'campaign_label', 'certifies_release_criteria', 'final_cells')})
+            if 'admission_receipt' in spec:
+                task['admission_receipt'] = deepcopy(spec['admission_receipt'])
             tasks.append(task)
             units.append(_unit(spec, task, spec['prerequisites'], segment['gpus'], segment['wall_seconds'], 'leaf'))
             leaves.append(unit_id)
             previous = unit_id
-    needs = deepcopy(spec['inputs'])
+    needs = deepcopy(inputs)
     for task in tasks:
         needs[task['id']] = ['_execution/task.json', '_execution/request.json',
             '_execution/result.json', *task['outputs']]
@@ -196,6 +211,8 @@ def _build(spec):
         'recipe_lock': spec['recipe_lock'], 'expected_leaves': leaves}
     if spec.get('campaign_mode') == 'screening':
         task.update({k: spec[k] for k in ('campaign_mode', 'study', 'campaign_label', 'certifies_release_criteria', 'final_cells')})
+    if 'admission_receipt' in spec:
+        task['admission_receipt'] = deepcopy(spec['admission_receipt'])
     tasks.append(task)
     units.append(_unit(spec, task, spec['prerequisites'], spec['collector'].get('gpus', 0), spec['collector']['wall_seconds'], 'collector'))
     return units, tasks, leaves

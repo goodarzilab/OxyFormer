@@ -23,7 +23,7 @@ from oxyformer.execution.campaign import expand_campaign, validate_plan, concret
 from oxyformer.provenance import ContractError, file_hash, require
 from oxyformer.validation.coverage import (MIN_REPETITIONS, RETRY_RULES, dependency, digest,
     finite, integer, publish, read_json, repetition_plan, summarize, validate_draws, prepare_batch, atomic_json, fixed_exposures,
-    leaf_budget, leaf_allocation, maximum_leaf_stage_seconds, remaining_compute, load_budget, BUDGET_RECORD)
+    leaf_budget, leaf_allocation, maximum_leaf_stage_seconds, remaining_compute, load_budget, BUDGET_RECORD, usable_leaf_compute, RESUME_OVERHEAD_FLOOR_SECONDS)
 from oxyformer.validation.scm import SCMConfig, CovariateFrame, sampled_support_facts
 
 REGISTRY = Path(__file__).parents[3] / "configs/validation/final_scenarios.yaml"
@@ -200,6 +200,9 @@ def load_lock(request, config, task):
     draws = [draw for batch in lock["batches"] for draw in batch["draws"]]
     validate_draws(draws)
     require(len({b["batch_id"] for b in lock["batches"]}) == len(lock["batches"]), "duplicate locked batches")
+    if screening_metadata(lock["recipe"]):
+        from oxyformer.validation.campaign_probe import require_admission
+        require_admission(request, config, task, lock)
     return lock
 
 
@@ -302,9 +305,14 @@ def _profile(request, config, reference, scenario, recipe, stamps):
 
 def slice_count(profile, repetitions, seconds, factor, *, enforce_limit=True):
     """Pay measured leaf costs and reserve one successor beyond the estimate."""
-    capacity = leaf_budget(seconds, factor, profile["leaf_overheads"])["compute_seconds"] - checkpoint_margin_seconds()
-    require(capacity > 0, "infeasible batch budget: in-fold checkpoint margin consumes slice")
-    count = max(1, math.ceil(profile["seconds_per_repetition"] * repetitions / capacity)) + 1
+    require(finite(factor, "profile safety factor") >= 1, "invalid profile safety factor")
+    integer(repetitions, "repetitions", 1)
+    resume = profile.get("resume_overhead_seconds", RESUME_OVERHEAD_FLOOR_SECONDS)
+    capacity = usable_leaf_compute(seconds, profile["leaf_overheads"],
+                                   resume_overhead_seconds=resume) - resume
+    demand = repetitions * profile["seconds_per_repetition"] + profile["publication_verification_seconds"]
+    require(finite(demand, "chain demand") > 0, "positive chain demand required")
+    count = math.ceil(factor * demand / capacity) + 1
     require(not enforce_limit or count <= 40, "infeasible batch budget: required spare slice exceeds forty leaves")
     return count
 
@@ -344,16 +352,30 @@ def screening_estimate(request, config, parameters):
     stamps = fingerprint()
     profiles = {s["name"]: _profile(request, config, parameters["profiles"][s["name"]], s, recipe, stamps)
                 for s in scenarios}
+    from oxyformer.validation.campaign_probe import calibrate
+    profiles, calibration = calibrate(request, config, parameters, profiles)
     rows = {}
+    requested_counts = {}
     for name, profile in profiles.items():
         require("leaf_overheads" in profile, "screening requires measured chained costs")
         # Search the bounded set in descending order. slice_count is also used
         # below to construct the lock: there is no second cost approximation.
+        requested_counts[name] = slice_count(profile,
+            decision["month1_sizing"]["repetitions_per_scenario_max"], owner_wall, factor, enforce_limit=False)
         count = 0
         for candidate in range(decision["month1_sizing"]["repetitions_per_scenario_max"], 0, -1):
             if slice_count(profile, candidate, owner_wall, factor, enforce_limit=False) <= 40:
                 count = candidate
                 break
+        if count == 0 and calibration['source'] == 'pre_lock_probe':
+            without = deepcopy(profile)
+            without['leaf_overheads']['setup_seconds'] = calibration['setup_without_headroom']
+            unpadded = slice_count(without, 1, owner_wall, factor, enforce_limit=False)
+            require(False, f"one screening repetition cannot fit forty leaves with 1.5x calibration headroom; "
+                f"count without headroom: {unpadded}; declare a calibration set from sealed campaign-shaped leaves; "
+                f"completed probe draws: {len(calibration['draws'])}; "
+                + ("run the second calibration probe before re-estimating" if len(calibration['draws']) == 1
+                   else "two-draw recovery exhausted; further draws require owner decision"))
         require(count > 0, "one screening repetition with its required spare slice cannot fit forty leaves: " + name)
         # A shorter requested wall may save allocation, but cannot lower the
         # count fixed by the owner's full permitted per-scenario capacity.
@@ -361,13 +383,16 @@ def screening_estimate(request, config, parameters):
         require(leaves <= 40, "requested leaf wall cannot fit the owner-maximal repetition count with its required spare slice: " + name)
         rows[name] = {"repetitions": count, "leaves": leaves,
                       "gpu_hours": leaves * allocation / 3600}
+    calibration['requested_batch_counts'] = requested_counts
+    calibration['second_probe_recommended'] = (calibration['source'] == 'pre_lock_probe'
+        and len(calibration['draws']) == 1 and any(n > 40 for n in requested_counts.values()))
     total = math.fsum(row["gpu_hours"] for row in rows.values())
     require(total <= 640 and total <= decision["budget_h100_hours"], "screening exceeds owner GPU-hour ceiling")
     return {"schema_version": 1, **screening_metadata(recipe), "estimate_only": True,
         "admitted": False, "submission_performed": False, "certifies_production_coverage": False,
         "recipe": deepcopy(recipe), "recipe_hash": digest(recipe), "owner_decision": decision,
         "owner_decision_hash": digest(decision), "scenario_family": scenarios, **stamps,
-        "profiles": profiles, "per_scenario": rows, "total_repetitions": sum(r["repetitions"] for r in rows.values()),
+        "profiles": profiles, "calibration": calibration, "per_scenario": rows, "total_repetitions": sum(r["repetitions"] for r in rows.values()),
         "projected_leaf_count": sum(r["leaves"] for r in rows.values()), "gpu_hours": total,
         "partition": "standard", "gpus": 1, "cpus_per_task": 8, "wall_seconds": wall,
         "owner_safety_factor_decision": safety_decision,
@@ -375,7 +400,7 @@ def screening_estimate(request, config, parameters):
         "budget_h100_hours": decision["budget_h100_hours"],
         "limitations": ["Planning estimate only; report per-scenario counts to owner before separate campaign-lock.",
             "GPU hours reserve whole leaves; collectors use CPU; profiles and reruns are separate accounting.",
-            "Lock measures its expanded setup and refuses if measured overhead exceeds the profile allowance."]}
+            "A separate post-lock probe and admission receipt are required before screening execution."]}
 
 
 def build_screening_lock(request, config, task):
@@ -418,6 +443,7 @@ def build_screening_lock(request, config, task):
         "leaves_per_instance_max": 40, "per_scenario": estimate["per_scenario"],
         "owner_safety_factor_decision": estimate["owner_safety_factor_decision"],
         "profile_safety_factor": estimate["profile_safety_factor"], "profiles": profiles,
+        "calibration": estimate["calibration"],
         "concurrency_limits": {"gpu": 4, "cpu": 6}, "run_gpu_hours_ceiling": 3600,
         "collector_gpu_hours": 0,
         "cpu_wall_hours_ceiling": (estimate["projected_leaf_count"] * leaf_allocation(p["wall_seconds"])["allocation_seconds"] / 60 + 40) / 60}
@@ -428,12 +454,13 @@ def build_screening_lock(request, config, task):
         "recipe": deepcopy(p["recipe"]), "nested_cv": deepcopy(p["recipe"]["nested_cv"]),
         **{k: estimate[k] for k in ("scientific_fingerprint", "environment_hash", "scenario_family")},
         "launch_code_identity": request.code_identity, "estimate_hash": file_hash(estimate_path),
-        "estimate_input": deepcopy(p["estimate_input"]), "owner_decision_hash": estimate["owner_decision_hash"],
+        "estimate_input": deepcopy(p["estimate_input"]), "admission_receipt": deepcopy(p["admission_receipt"]), "owner_decision_hash": estimate["owner_decision_hash"],
         "evaluation_namespace": namespace, "seed_namespace": seed_namespace, "batches": batches, "budget": budget,
         "retry_rules": deepcopy(RETRY_RULES), "prior_namespaces": sorted(prior_namespaces),
         "instances": {name: campaign_id + "-s" + str(i) for i, name in enumerate(estimate["per_scenario"])}}
     lock_ref = {"dependency": task["id"], "path": "recipe_lock.json", "sha256": digest(lock)}
-    inputs = {task["id"]: ["recipe_lock.json", "expanded_units.json"]}
+    from oxyformer.validation.campaign_probe import LOCK_OUTPUTS
+    inputs = {task["id"]: list(LOCK_OUTPUTS)}
     for key in ("endpoint_input", "frame_input", "estimate_input"):
         ref = p[key]
         inputs.setdefault(ref["dependency"], []).append(ref["path"])
@@ -449,11 +476,10 @@ def build_screening_lock(request, config, task):
         spec = {"schema_version": 1, "id": lock["instances"][batch["scenario"]["name"]],
             "kind": "screening", **metadata, "partition": "standard", "gpu_concurrency_max": 4,
             "prerequisites": [], "inputs": inputs, "recipe_lock": lock_ref, "work": [work],
+            "admission_receipt": deepcopy(p["admission_receipt"]),
             "collector": {"stage": "campaign-collect", "outputs": COLLECT_OUTPUTS, "wall_seconds": 600, "gpus": 0}}
         plans.append(expand_campaign(spec, config["approvals"]))
-    measurements = _admit_locked_leaves(request, config, lock, plans)
-    return lock, plans, {**budget, **metadata, "lock_hash": digest(lock), "estimate_hash": lock["estimate_hash"],
-                         "admission_measurements": measurements}
+    return lock, plans, {**budget, **metadata, "lock_hash": digest(lock), "estimate_hash": lock["estimate_hash"]}
 
 
 def _admit_locked_leaves(request, config, lock, plans):
@@ -777,7 +803,7 @@ def run_stage(request: StageRequest) -> StageResult:
             values = {"recipe_lock.json": lock, "task_manifest.json": {"lock_hash": digest(lock),
                 "tasks": [t for plan in plans for t in plan["tasks"]]},
                 "expanded_units.json": {"lock_hash": digest(lock), "plans": plans},
-                "budget.json": budget, "gate.json": {"pass": True, "admitted": True,
+                "budget.json": budget, "gate.json": {"pass": True, "admitted": not bool(screening_metadata(lock["recipe"])),
                     "lock_hash": digest(lock), "submission_performed": False, "screening_complete": False,
                     "certifies_production_coverage": False}}
             metadata = screening_metadata(lock["recipe"])

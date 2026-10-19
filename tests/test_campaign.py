@@ -606,7 +606,7 @@ def test_late_locked_draws_remain_complete_and_reported(tmp_path, monkeypatch):
 
 def setup_chain_lock(tmp_path, **changes):
     req, task = setup_lock(tmp_path, repetitions_per_leaf=50,
-        wall_seconds=1500 + int(2 * campaign.checkpoint_margin_seconds()), cpu_wall_hours_budget=100., **changes)
+        wall_seconds=2640 + int(2 * campaign.checkpoint_margin_seconds()), cpu_wall_hours_budget=100., **changes)
     path = profile_directory(req) / "timing.json"
     timing = coverage.read_json(path)
     leaves = [{"task_id": f"profile-{i}", "step": i, "compute_seconds": seconds,
@@ -636,14 +636,14 @@ def test_chained_profile_sizes_slices_without_changing_instances_or_limits(tmp_p
 
 def test_chained_profile_still_refuses_forty_one_leaves(tmp_path):
     req, task = setup_chain_lock(tmp_path)
-    task["parameters"]["wall_seconds"] = 600 + int(2 * campaign.checkpoint_margin_seconds())
+    task["parameters"]["wall_seconds"] = 1740 + int(2 * campaign.checkpoint_margin_seconds())
     write(Path(req.task_path), task)
     result = campaign.run_stage(replace(req, task_hash=file_hash(req.task_path)))
     assert result.status == "blocked" and "forty leaves" in result.message
 
 
 def test_slicing_pays_each_leaf_overhead_safety_factor_and_checkpoint_reserve():
-    profile = {"seconds_per_repetition": 24000., "leaf_overheads": {
+    profile = {"seconds_per_repetition": 24000., "publication_verification_seconds": 0., "leaf_overheads": {
         "setup_seconds": 100., "import_seconds": 100., "export_seconds": 100., "publication_seconds": 100.}}
     assert campaign.slice_count(profile, 1, 14400, 1.2) == 4
     with pytest.raises(ContractError, match="overhead"):
@@ -706,7 +706,7 @@ def test_producer_budget_pays_in_fold_headroom(tmp_path, monkeypatch):
     """
     from test_coverage import chain_request
     margin = campaign.checkpoint_margin_seconds()
-    wall = 840 + int(1.2 * margin)
+    wall = 2670
     req, task = setup_lock(tmp_path, screening_repetitions=1000, repetitions_per_leaf=1000,
                            wall_seconds=wall, profile_safety_factor=1.2, cpu_wall_hours_budget=100.)
     profile_root = profile_directory(req)
@@ -730,9 +730,15 @@ def test_producer_budget_pays_in_fold_headroom(tmp_path, monkeypatch):
     lock = coverage.read_json(lock_root / 'recipe_lock.json')
     plans = coverage.read_json(lock_root / 'expanded_units.json')['plans']
     assert [len(p['expected_leaves']) for p in plans] == [4, 4]
-    assert all(b['leaf_budget']['compute_seconds'] == 350. + margin for b in lock['batches'])
+    assert all(b['leaf_budget']['compute_seconds'] == 2270. for b in lock['batches'])
     assert all('continuation.tar' in leaf['outputs'] for p in plans for leaf in p['tasks'][:-1])
     dependencies = {'campaign-lock': lock_root, 'inputs': tmp_path / 'inputs'}
+    original_prepare = coverage.prepare_batch
+    def prepare(*args):
+        value = original_prepare(*args)
+        clock[0] += 1230.  # Real setup overrun is charged against the full execution window.
+        return value
+    monkeypatch.setattr(coverage, 'prepare_batch', prepare)
     original_export = coverage._write_continuation
     def export(*a, **kw):
         clock[0] += 100.
@@ -768,10 +774,10 @@ def test_producer_budget_pays_in_fold_headroom(tmp_path, monkeypatch):
         assert row['compute_capacity_seconds'] == 350. + margin
         assert row['compute_seconds'] <= 350.
         assert row['export_seconds'] == 100.
-        assert row['wall_seconds'] <= 450. < wall
+        assert row['wall_seconds'] <= 1680. < wall
         assert coverage.read_json(directory / 'result.json')['terminal'] == (index >= 2)
         dependencies[leaf['id']] = directory
-    assert set(deadlines) == {350.}
+    assert set(deadlines) == {1580.}
     assert len(finished) == 1000 and len(resumed) == 2
     collector = chain_request(tmp_path / 'collector', plans[0]['tasks'][-1], dependencies)
     done = campaign.run_stage(collector)
@@ -1301,7 +1307,7 @@ def test_slice_sizing_pays_in_fold_stopping_headroom():
     while not timing.boundary('nuisance'):
         clock[0] += 30.  # A bounded unit much longer than the former 1 s margin.
     assert clock[0] < compute
-    profile = {'seconds_per_repetition': compute, 'leaf_overheads': overheads}
+    profile = {'seconds_per_repetition': compute, 'publication_verification_seconds': 0., 'leaf_overheads': overheads}
     # A repetition needing the entire compute ceiling cannot fit a leaf which
     # must durably stop earlier. Sizing must pay this headroom on every leaf.
     assert campaign.slice_count(profile, 1, wall, 1.) == 3
@@ -1309,25 +1315,25 @@ def test_slice_sizing_pays_in_fold_stopping_headroom():
 
 @pytest.mark.parametrize("estimated_slices", [1, 2, 39])
 def test_exact_slice_sizing_reserves_one_successor(estimated_slices):
-    # Stage 1,990 = 300 reserve + 690 stopping margin + 1,000 useful seconds.
-    profile = {"seconds_per_repetition": 1000.,
+    # Stage 3,130 pays reserve, margin, partial-unit and resume allowances before 1,000 useful seconds.
+    profile = {"seconds_per_repetition": 1000., "publication_verification_seconds": 0.,
                "leaf_overheads": dict.fromkeys(coverage.OVERHEAD_PHASES, 0.)}
-    assert campaign.slice_count(profile, estimated_slices, 1990, 1.) == estimated_slices + 1
+    assert campaign.slice_count(profile, estimated_slices, 3130, 1.) == estimated_slices + 1
 
 
 def test_slice_sizing_refuses_forty_one_with_required_spare():
-    profile = {"seconds_per_repetition": 1000.,
+    profile = {"seconds_per_repetition": 1000., "publication_verification_seconds": 0.,
                "leaf_overheads": dict.fromkeys(coverage.OVERHEAD_PHASES, 0.)}
     with pytest.raises(ContractError, match="required spare slice exceeds forty leaves"):
-        campaign.slice_count(profile, 40, 1990, 1.)
+        campaign.slice_count(profile, 40, 3130, 1.)
     # The screening search can inspect an infeasible count, never drop its spare.
-    assert campaign.slice_count(profile, 40, 1990, 1., enforce_limit=False) == 41
+    assert campaign.slice_count(profile, 40, 3130, 1., enforce_limit=False) == 41
 
 
 def test_campaign_refuses_aggregate_spares_over_forty(tmp_path):
     req, task = setup_chain_lock(tmp_path)
     # Twenty work items each need two estimated slices plus their own spare.
-    task["parameters"]["wall_seconds"] = 900 + int(2 * campaign.checkpoint_margin_seconds())
+    task["parameters"]["wall_seconds"] = 2040 + int(2 * campaign.checkpoint_margin_seconds())
     write(Path(req.task_path), task)
     result = campaign.run_stage(replace(req, task_hash=file_hash(req.task_path)))
     assert result.status == "blocked" and "required spare slices exceeds forty leaves" in result.message

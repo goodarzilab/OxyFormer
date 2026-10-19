@@ -487,24 +487,87 @@ and the hashed scientific recipe and outcomes must agree with the binding and co
 diagnostic summary flags remain irrelevant. Missing, truncated,
 pre-seal, over-budget and reused evidence is refused. Stored eligibility,
 complete and success flags are not trusted. Scientific payload reads follow
-this gate. Profiles, lock sizing and admission, leaf deadlines, predecessor
-import, collection, and dependency reuse/retry all use the same loader. A lock
+this gate. Authoritative profiles, leaf deadlines, predecessor import, collection and
+ordinary dependency reuse/retry use this loader. Measurement-only calibration
+is the explicit sizing exception described below. A lock
 carries the profile record identity and declares its original sealed inputs so
 a leaf can revalidate the measurements before spending its compute allowance.
 
-A partial or unsuccessful chain cannot justify a lock. For a chained profile,
-lock sizing pays the maximum measured cost of each overhead phase on every
-slice and applies the declared safety factor. Usable compute per slice is
-`(wall_seconds - finalization_reserve) / safety_factor - sum(max_phase_overheads)
-- checkpoint_margin_seconds()`; the slice count is the ceiling of measured
-repetition compute divided by this capacity, plus one required spare successor
-for each chained work item. The spare counts against the same allocation,
-GPU-hour and 40-leaf limits; sizing refuses when it cannot fit. This is a
-planning allowance, not a guarantee against arbitrary runtime variation.
-The emitted screening profile chains already declare 40 slots and are unchanged.
-Admission also measures actual locked setup and refuses if it exceeds
-the allocation. Collection counts the last leaf's accumulated terminal records
-once, retains all declared draws in denominators, and lists incomplete chains.
+A partial or unsuccessful profile chain cannot justify a lock. Chained sizing
+uses one capacity calculation. The execution window is
+`C = wall_seconds - 300 - sum(overheads)`; the safety factor is recorded for
+provenance but never shortens execution. Sizing uses
+`usable = C - checkpoint_margin_seconds() - max(PHASE_UNIT_SECONDS.values())`
+and `net = usable - resume_overhead_seconds`. With today's declared bounds the
+margin is 690 s, the partial-unit allowance is 330 s and the checkpoint write
+bound is 30 s. Net capacity must fit a 330 s unit plus its checkpoint or sizing
+refuses. For `r` repetitions, `DEMAND = r * seconds_per_repetition +
+publication_verification_seconds` (the last term is paid once per chain), and
+`slices = ceil(safety_factor * DEMAND / net) + 1`. The spare counts against the
+same allocation and forty-leaf cap. The resume constant is shared across
+scenarios: the maximum completed-first-repetition excess per leaf over the
+profile rate, with a minimum of 810 s. This floor raises the required 800 s
+minimum above the final null-effect snapshot's 809.556315 s excess per leaf.
+Collection still counts the last leaf's accumulated terminal records once,
+retains all draws in denominators, and lists incomplete chains.
+
+Screening estimate and lock accept `setup_calibration`, a list of
+`{dependency, path: budget_record.json}` references, one per sealed campaign
+leaf. Each record contributes its **last** leaf, avoiding repeated chain
+history. Setup is `max(1.25 * P90, max)`; the other phase allowances are the
+maximum of campaign calibration and profile measurements. The dedicated
+`read_leaf_measurements` verifies the budget hash and publication receipt and
+reports its generation. It grants no execution-budget authority. Only estimate
+and lock may declare these measurement dependencies; the runner retains all
+publication/hash/fingerprint checks, skips only their budget-authority load,
+and publishes `measurement_only_dependencies.json` in the consumer result.
+Profile chains and ordinary budget consumers retain their existing checks.
+
+Without calibration records, estimate and lock require one or two receipts from
+`campaign-setup-probe` in `calibration` mode. Its inputs are the four terminal
+profile receipts and real-frame inputs, never an estimate or lock. Receipt
+input digests must match the inputs being sized. The smaller completed draw is
+used: setup is `max(probe + 60 s, profile allowance) * 1.5`. All draws, the
+chosen draw and its ratio to the profile allowance are recorded. The estimate
+reports requested counts beyond forty and recommends a second draw when only
+one exists. The fallback deliberately refuses a batch that fits only without
+headroom; the refusal names the unpadded count and the remedy of declaring
+sealed campaign-shaped calibration records. Further draws after two need an
+owner decision.
+
+Screening locks no longer perform in-process admission. They publish immutable
+outputs with `gate.json.admitted: false`. The separate CPU
+`campaign-setup-probe` in `admission` mode measures clone, environment startup
+and the runner's full verification of the first expanded leaf's input set,
+including lock outputs and excluding only its not-yet-created admission
+receipt. The launcher sets `OXYFORMER_SETUP_STARTED` before cloning. The probe
+receipt binds both the verified input digests and `lock_hash`.
+
+`campaign-admit` asserts equality of all batch-level spec `inputs` (never
+per-leaf `needs`, whose predecessor changes), checks the probe's lock and input
+digests, and recomputes every batch with setup equal to the greater of its
+allowance and `probe + 60 s`. It refuses if a count exceeds its locked count or
+forty, or if estimate and lock outputs plus the serialized admission candidate
+exceed 50 MB. Refusal never resizes or mutates the lock. The orchestrator may
+run one new probe attempt and re-admit; two consecutive refusals go to the owner
+as **admission not established**, with both draws.
+
+`admission.json` is the only authority for screening admission. Every expanded
+screening leaf and collector declares it as an input and verifies `admitted`,
+`lock_hash` and `estimate_hash`. This is a deliberate leaf dispatch contract
+change. The lock gate remains false permanently. Specs without an
+`admission_receipt` (including bootstrap profiles and final `build_lock`)
+retain their expansion contract. Final `build_lock` shares the new window and
+slice arithmetic but retains its existing in-process admission.
+
+The probe samples the first leaf. Shared spec inputs make its base dependency
+shape representative across scenarios. Campaign calibration includes resumed
+leaves' predecessor verification; fallback covers that extra work only through
+1.5x headroom, the unchanged overrun rule and gates. No throughput guarantee is
+claimed. The scientific fingerprint freeze is unchanged: old profiles require
+an owner-approved re-profile on the final tree before a new estimate/lock run.
+The sealed fixtures prove sizing; CPU probe exercises can verify the old
+campaign's dependency shape without authorizing its science.
 
 The bounds remain 4 GPU-hours per leaf and 40 leaves **per campaign spec**.
 Screening and final instances are still formed as before, and all generated
@@ -535,17 +598,17 @@ profile chain tasks and their sealed receipts are unchanged by this sizing input
 
 For coverage-owned chains, the lock stores `leaf_budget` in each batch and its
 expanded tasks. Sizing, locked preflight admission, and execution all use
-`C = (wall_seconds - LEAF_FINALIZATION_SECONDS) / safety_factor - sum(overheads)`.
+`C = wall_seconds - LEAF_FINALIZATION_SECONDS - sum(overheads)`.
 Overheads name setup, import, export, and publication separately. The immutable
 lock and continuation binding authenticate this compute ceiling. Sizing subtracts
-the declared in-fold checkpoint margin from C on every leaf, since fitting stops
-before that ceiling. The worker still meters all actual compute against C;
+the declared in-fold checkpoint margin, partial-unit allowance and resume cost
+from C on every leaf, since fitting stops before that ceiling. The worker still meters all actual compute against C;
 unused headroom cannot enlarge a successor's sealed allowance.
 
 The whole leaf shares one compute deadline. Setup and import are each charged
 once; each positive overrun reduces C and underruns never increase it. Export
-and publication remain reserved, along with the checkpoint margin and safety
-factor. A compute overrun refuses usable publication. Observed finalization or
+and publication remain reserved, along with the checkpoint margin. The safety
+factor multiplies sizing demand only. A compute overrun refuses usable publication. Observed finalization or
 wall overruns fail the leaf and cannot justify a profile lock. The collector
 refuses over-budget leaves. Checkpoint boundaries are cooperative;
 uninterruptible operations that overrun are detected, not certified as within
@@ -680,3 +743,9 @@ failed and canceled probe jobs. It lives under
 `runs/leaf-deadline-margins-r2/1c4dee1ab8d11248` in the coordinator project,
 alongside `SUMMARY.md` and the final validation logs. Generated reports,
 checkpoints and study inputs are not repository files.
+
+New leaf budgets carry `formula: "arc-2612-window"` and must equal the current
+formula. Unmarked budgets are accepted only at exactly factor 1.0 with the
+matching compute value. All others are refused as "leaf budget sealed under
+the pre-ARC-2612 window formula"; old factor-2 campaign records are usable only
+as non-authority calibration measurements. No receipt is rebound or resealed.
