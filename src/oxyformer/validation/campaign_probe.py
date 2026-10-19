@@ -128,6 +128,7 @@ def calibrate(request, config, parameters, profiles):
             if refs is not None and calibration['source'] == 'sealed_campaign_leaves':
                 overheads[phase] = max(overheads[phase], calibration['statistics'][phase]['max'])
         profile['resume_overhead_seconds'] = calibration['resume_overhead_seconds']
+        profile['resume_source'] = deepcopy(calibration['resume_source'])
         profile['assumed_usable_per_leaf'] = usable_leaf_compute(parameters['wall_seconds'], overheads,
             resume_overhead_seconds=profile['resume_overhead_seconds']) - profile['resume_overhead_seconds']
         profile['calibration_source'] = calibration['source']
@@ -178,6 +179,8 @@ def admit(request, config, task):
     path = dependency(request, config, p['lock_input'])
     lock = read_json(path)
     lock_hash = file_hash(path)
+    require(file_hash(dependency(request, config, lock['estimate_input'])) == lock['estimate_hash'],
+            'admission estimate_hash mismatch')
     expansion = read_json(dependency(request, config, {
         'dependency': p['lock_input']['dependency'], 'path': 'expanded_units.json'}))
     require(expansion['lock_hash'] == lock_hash, 'admission expansion lock mismatch')

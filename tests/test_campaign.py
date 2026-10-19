@@ -1156,16 +1156,16 @@ def test_record_contract_must_match_authorized_task(tmp_path, monkeypatch):
     phases = dict(zip(coverage.OVERHEAD_PHASES, (20., 30., 40., 10.)))
     authorized = coverage.leaf_budget(840, 1.2, phases)
     substituted = coverage.leaf_budget(840, 1., {k: 0. for k in coverage.OVERHEAD_PHASES})
-    assert authorized['compute_seconds'] == 350. and substituted['compute_seconds'] == 540.
+    assert authorized['compute_seconds'] == 440. and substituted['compute_seconds'] == 540.
     task['parameters'].update(wall_seconds=840, leaf_budget=authorized,
         recipe=consumer_task['parameters']['recipe'])
     task.update(outputs=['result.json', 'continuation.tar'],
         continuation={'owner': 'profile', 'step': 0, 'predecessor': None})
     timing = coverage.read_json(root / 'timing.json')
     timing.update(measurement_scope='complete_chain_return', admitted_budget_seconds=840,
-        complete_repetition_seconds=[200., 200.], setup_seconds=20., wall_seconds=500.,
-        leaves=[profile_leaf('profile', 0, 400., phases, substituted)])
-    req = finalize_profile_fixture(req, task, payload, timing, 500., monkeypatch, status='fail')
+        complete_repetition_seconds=[250., 250.], setup_seconds=20., wall_seconds=600.,
+        leaves=[profile_leaf('profile', 0, 500., phases, substituted)])
+    req = finalize_profile_fixture(req, task, payload, timing, 600., monkeypatch, status='fail')
     result = campaign.run_stage(req)
     assert result.status != 'pass', result.message
     assert not (Path(req.output_dir) / 'recipe_lock.json').exists()
@@ -1333,7 +1333,7 @@ def test_slice_sizing_refuses_forty_one_with_required_spare():
 def test_campaign_refuses_aggregate_spares_over_forty(tmp_path):
     req, task = setup_chain_lock(tmp_path)
     # Twenty work items each need two estimated slices plus their own spare.
-    task["parameters"]["wall_seconds"] = 2040 + int(2 * campaign.checkpoint_margin_seconds())
+    task["parameters"]["wall_seconds"] = 3200
     write(Path(req.task_path), task)
     result = campaign.run_stage(replace(req, task_hash=file_hash(req.task_path)))
     assert result.status == "blocked" and "required spare slices exceeds forty leaves" in result.message

@@ -4439,3 +4439,24 @@ def test_measurement_route_refuses_nonsizing_consumer(stage):
     with raises(ContractError, match='only on estimate and lock'):
         measurement_dependencies({'stage': stage, 'parameters': {'setup_calibration': [
             {'dependency': 'leaf', 'path': 'budget_record.json'}]}, 'needs': {'leaf': ['budget_record.json']}})
+
+
+def test_runner_publishes_measurement_only_dependencies(runtime, tmp_path, monkeypatch):
+    from test_campaign import setup_chain_lock, profile_directory
+    from oxyformer.validation import coverage
+    repo, out = runtime
+    req, _ = setup_chain_lock(tmp_path / 'producer')
+    root = profile_directory(req)
+    unit = read_json(root / '_execution/task.json')['id']
+    (repo / 'configs/execution/stages.yaml').write_text(yaml.safe_dump({'schema_version': 1,
+        'stages': {'campaign-estimate': {'module': 'oxyformer.dummy'}}}))
+    commit(repo)
+    (out / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    task = task_file(out, id='estimate', stage='campaign-estimate', needs={unit: ['budget_record.json']},
+        parameters={'setup_calibration': [{'dependency': unit, 'path': 'budget_record.json'}]})
+    monkeypatch.setenv(dependency_variable(unit), str(root))
+    monkeypatch.setattr(coverage, 'load_budget', lambda *a, **kw: pytest.fail('measurement acquired budget authority'))
+    result = run_worker('campaign-estimate', out, repo, deps_env=True, task_file=task, execute=inline_fixture_stage)
+    assert_pass(result)
+    assert 'measurement_only_dependencies.json' in {a.path for a in result.artifacts}
+    assert read_json(out / 'measurement_only_dependencies.json') == {'measurement_only_dependencies': [unit]}

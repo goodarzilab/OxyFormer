@@ -296,7 +296,8 @@ def _profile(request, config, reference, scenario, recipe, stamps):
         # well as the maximum individually measured repetition.
         rate = max(rate, math.fsum(v["compute_seconds"] for v in leaves) / len(declared))
         extra = {"leaf_overheads": {k: max(v[k] for v in leaves) for k in names[1:]},
-                 "leaf_measurements": leaves}
+                 "leaf_measurements": leaves, "resume_overhead_seconds": RESUME_OVERHEAD_FLOOR_SECONDS,
+                 "resume_source": {"rule": "uncalibrated_floor", "floor_seconds": RESUME_OVERHEAD_FLOOR_SECONDS}}
     return {**extra, "seconds_per_repetition": rate, "setup_seconds": setup,
             "publication_verification_seconds": overhead - setup,
             "profile_repetitions": len(declared), "result_hash": file_hash(result_path),

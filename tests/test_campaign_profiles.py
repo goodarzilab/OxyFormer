@@ -622,7 +622,9 @@ def test_chained_profile_uses_cumulative_max_and_full_overhead(tmp_path, case):
         {"dependency": "profile", "path": "result.json"}, result["scenario"], task["parameters"]["recipe"], STAMPS)
     assert profile["seconds_per_repetition"] == 100.
     if case == "unequal_cumulative_compute":
-        assert campaign.slice_count(profile, 1, 390. + campaign.checkpoint_margin_seconds(), 1.) == 3
+        # Four repetitions distinguish the cumulative maximum while respecting
+        # the positive-capacity guard (360 s unit-plus-write minimum).
+        assert campaign.slice_count(profile, 4, 2491., 1.) == 3
     else:
         assert profile["leaf_overheads"] == {"setup_seconds": 10., "import_seconds": 2.,
                                             "export_seconds": 2., "publication_seconds": 1.}
@@ -1470,16 +1472,17 @@ def test_sealed_campaign_replay():
     print(json.dumps(result, indent=2))
 
 
-def test_measurement_reader_accepts_old_generation_without_budget_authority(tmp_path, monkeypatch):
+@pytest.mark.parametrize('factor', [1., 2.])
+def test_measurement_reader_accepts_old_generation_without_budget_authority(tmp_path, monkeypatch, factor):
     from test_campaign import setup_chain_lock, profile_directory, request
     req, _ = setup_chain_lock(tmp_path)
     import shutil
     root = tmp_path / 'old-producer'
     shutil.copytree(profile_directory(req), root)
     task = coverage.read_json(root / '_execution/task.json')
-    contract = coverage.leaf_budget(task['parameters']['wall_seconds'], 2., dict.fromkeys(coverage.OVERHEAD_PHASES, 0.))
+    contract = coverage.leaf_budget(task['parameters']['wall_seconds'], factor, dict.fromkeys(coverage.OVERHEAD_PHASES, 0.))
     contract.pop('formula')
-    contract['compute_seconds'] /= 2
+    contract['compute_seconds'] /= factor
     task['parameters']['leaf_budget'] = contract
     # Model an honestly sealed pre-change producer; restore the current loader
     # before consuming its publication.
@@ -1495,5 +1498,42 @@ def test_measurement_reader_accepts_old_generation_without_budget_authority(tmp_
         {k: root if k == task['id'] else Path(v) for k,v in cfg['dependencies'].items()}, cfg['approvals'])
     measured = coverage.read_leaf_measurements(root / coverage.BUDGET_RECORD)
     assert measured['budget_generation'] == 'pre-ARC-2612'
-    with pytest.raises(ContractError, match='pre-ARC-2612 window formula'):
-        coverage.load_budget(consumer, coverage.read_json(consumer.config_path), task['id'])
+    if factor == 1.:
+        assert coverage.load_budget(consumer, coverage.read_json(consumer.config_path), task['id'])['all_successful']
+    else:
+        with pytest.raises(ContractError, match='pre-ARC-2612 window formula'):
+            coverage.load_budget(consumer, coverage.read_json(consumer.config_path), task['id'])
+    (root / coverage.BUDGET_RECORD).write_text('{}')
+    with pytest.raises(ContractError, match='record hash mismatch'):
+        coverage.read_leaf_measurements(root / coverage.BUDGET_RECORD)
+
+
+@pytest.mark.parametrize('screening_rates', [(340000.,) * 4], indirect=True)
+def test_fallback_headroom_limit_names_unpadded_count_and_bounded_recovery(screening_request, tmp_path):
+    base = screening_request
+    config, task = coverage.read_json(base.config_path), coverage.read_json(base.task_path)
+    p = task['parameters']
+    p.pop('setup_calibration')
+    pre = probe_request_from_screening(base, tmp_path / 'pre')
+    digests = campaign_probe.probe(pre, coverage.read_json(pre.config_path), coverage.read_json(pre.task_path), measurer=lambda: 0.)['input_digests']
+    deps = {k: Path(v) for k,v in config['dependencies'].items()}
+    p['calibration_probes'] = []
+    for i, seconds in enumerate((940., 100.)):
+        unit = 'bounded-calibration-' + str(i)
+        deps[unit] = sealed_json_fixture(tmp_path / unit, unit, 'campaign-setup-probe',
+            {'setup_probe.json': {'mode': 'calibration', 'setup_seconds': seconds, 'input_digests': digests}})
+        p['calibration_probes'].append({'dependency': unit, 'path': 'setup_probe.json'})
+        req = request(tmp_path / ('estimate-' + str(i)), task, deps, config['approvals'])
+        result = campaign_estimate.run_stage(req)
+        if i == 0:
+            assert result.status == 'blocked' and not result.artifacts
+            assert '1.5x calibration headroom' in result.message
+            assert 'count without headroom: 40' in result.message
+            assert 'second calibration probe' in result.message
+        else:
+            assert result.status == 'pass', result.message
+            estimate = coverage.read_json(Path(req.output_dir) / 'budget_estimate.json')
+            assert estimate['calibration']['chosen_seconds'] == 100
+            assert len(estimate['calibration']['draws']) == 2
+            assert not estimate['calibration']['second_probe_recommended']
+            assert all(r['repetitions'] == 1 and r['leaves'] <= 40 for r in estimate['per_scenario'].values())

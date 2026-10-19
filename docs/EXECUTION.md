@@ -582,7 +582,7 @@ explicitly enumerated timing/provenance fields in its report are excluded.
 `OXYFORMER_CHAIN_DEVICE=cuda` selects the single-device H100 check. CPU is the
 default. Run the required coverage/campaign/profile/nested-CV files with and
 without `-B` in both the shared and CI CPU environments, plus the full CI-style
-suite, on Slurm. Tests use only synthetic fixtures and no network access.
+suite, on Slurm. Tests use synthetic inputs and sealed budget measurements, with no network access.
 
 ### Shared coverage leaf budget
 
