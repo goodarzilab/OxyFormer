@@ -71,14 +71,22 @@ def calibration_statistics(records, profiles):
         'min': min(r[k] for r in own), 'max': max(r[k] for r in own)}
         for k in (*OVERHEAD_PHASES, 'compute_seconds')}
     completed = {}
+    completed_chains = set()
     for record in sorted(records, key=lambda r: len(r['leaves'])):
         name = record['binding']['scenario']['name']
         require(name in profiles, 'calibration scenario has no profile')
-        if record['counts']['success'] >= 1 and name not in completed:
+        # Prefix records share their first leaf identity. Take each chain's
+        # first completion, then the largest excess across chains of a scenario.
+        chain = (name, record['leaves'][0]['task_id'])
+        if record['counts']['success'] >= 1 and chain not in completed_chains:
+            completed_chains.add(chain)
             leaves = record['leaves']
             delivered = math.fsum(r['compute_seconds'] for r in leaves)
-            completed[name] = {'leaves': len(leaves), 'delivered_seconds': delivered,
+            candidate = {'leaves': len(leaves), 'delivered_seconds': delivered,
+                'first_leaf_task_id': chain[1],
                 'excess_per_leaf': (delivered - profiles[name]['seconds_per_repetition']) / len(leaves)}
+            if name not in completed or candidate['excess_per_leaf'] > completed[name]['excess_per_leaf']:
+                completed[name] = candidate
     resume = max(RESUME_OVERHEAD_FLOOR_SECONDS,
                  max((r['excess_per_leaf'] for r in completed.values()), default=0.))
     return {'source': 'sealed_campaign_leaves', 'leaf_count': len(own), 'statistics': statistics,

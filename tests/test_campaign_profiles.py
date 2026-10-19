@@ -1213,6 +1213,35 @@ def test_calibration_uses_own_leaf_percentile_and_max_completed_resume():
         campaign_probe.calibration_statistics(records + [records[0]], profiles)
 
 
+@pytest.mark.parametrize('reverse', [False, True])
+@pytest.mark.parametrize('rate,chains,repetitions,publication,expected_resume,expected_count', [
+    (430000., [('short', 36, 430000.), ('slow', 39, 488500.)], 1, 100., 1500., 40),
+    (1000., [('short', 2, 2000.), ('slow', 3, 9000.)], 11, 0., 8000 / 3, 3),
+])
+def test_resume_max_includes_distinct_chains_of_same_scenario(reverse, rate, chains,
+        repetitions, publication, expected_resume, expected_count):
+    overheads = dict.fromkeys(coverage.OVERHEAD_PHASES, 0.)
+    profile = {'seconds_per_repetition': rate, 'publication_verification_seconds': publication,
+               'leaf_overheads': overheads}
+    records = []
+    for chain, count, delivered in chains:
+        leaves = []
+        # The later successful prefix must not replace this chain's first completion.
+        for step in range(count + 1):
+            leaves.append({**overheads, 'task_id': f'{chain}-{step}',
+                           'compute_seconds': delivered / count if step < count else 12000.})
+            records.append({'leaves': list(leaves), 'binding': {'scenario': {'name': 'a'}},
+                'counts': {'success': int(step >= count - 1)},
+                'record_hash': coverage.digest(leaves), 'budget_generation': 'pre-ARC-2612'})
+    if reverse:
+        records.reverse()
+    result = campaign_probe.calibration_statistics(records, {'a': profile})
+    assert result['resume_overhead_seconds'] == expected_resume
+    assert result['resume_source']['completed']['a']['leaves'] == chains[1][1]
+    assert campaign.slice_count({**profile, 'resume_overhead_seconds': result['resume_overhead_seconds']},
+                                repetitions, 14100, 1.) == expected_count
+
+
 def probe_request_from_screening(req, tmp_path, *, mode='calibration', lock_root=None):
     original = coverage.read_json(req.task_path)
     config = coverage.read_json(req.config_path)

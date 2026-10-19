@@ -4441,6 +4441,43 @@ def test_measurement_route_refuses_nonsizing_consumer(stage):
             {'dependency': 'leaf', 'path': 'budget_record.json'}]}, 'needs': {'leaf': ['budget_record.json']}})
 
 
+def test_measurement_lineage_preserves_frozen_recipe_refusal(runtime, tmp_path, monkeypatch):
+    """Synthetic stage bodies isolate the retained cross-recipe preflight refusal."""
+    from oxyformer.execution.integrity import publication_receipt
+    repo, ancestor = runtime
+    (repo / 'configs/execution/stages.yaml').write_text(yaml.safe_dump({'schema_version': 1,
+        'stages': {name: {'module': 'oxyformer.dummy'} for name in ('dummy', 'campaign-estimate')}}))
+    (ancestor / 'code_commit.txt').write_text(commit(repo))
+    path = locked_task(repo, ancestor, tmp_path / 'old-lock', monkeypatch)
+    task = read_json(path)
+    task.update(id='old-measurement', outputs=['budget_record.json'])
+    path.write_text(json.dumps(task))
+    assert_pass(run_task(repo, ancestor, path))
+    (repo / 'src/science.py').write_text('new_science = 2\n')
+    commit(repo)
+    middle = new_attempt(repo, tmp_path / 'estimate')
+    monkeypatch.setenv('SWARM_DEP_OLD_MEASUREMENT', str(ancestor))
+    path = task_file(middle, id='estimate', stage='campaign-estimate',
+        needs={'old-measurement': ['budget_record.json']}, parameters={'setup_calibration': [
+            {'dependency': 'old-measurement', 'path': 'budget_record.json'}]})
+    assert_pass(run_worker('campaign-estimate', middle, repo, deps_env=True, task_file=path,
+                          execute=inline_fixture_stage))
+    consumer = new_attempt(repo, tmp_path / 'consumer')
+    path = locked_task(repo, consumer, tmp_path / 'new-lock', monkeypatch)
+    task = read_json(path)
+    task['needs']['estimate'] = ['value.json']
+    path.write_text(json.dumps(task))
+    monkeypatch.setenv('SWARM_DEP_ESTIMATE', str(middle))
+    executions = []
+    with raises(ContractError, match='dependency scientific code/config drift'):
+        run_worker('dummy', consumer, repo, deps_env=True, task_file=path,
+                   execute=lambda *args: executions.append(args))
+    assert not executions
+    assert not (consumer / 'value.json').exists()
+    assert not (consumer / RESULT).exists()
+    assert not publication_receipt(consumer).exists()
+
+
 def test_runner_publishes_measurement_only_dependencies(runtime, tmp_path, monkeypatch):
     from test_campaign import setup_chain_lock, profile_directory
     from oxyformer.validation import coverage
