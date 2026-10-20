@@ -4589,3 +4589,18 @@ def test_runner_publishes_measurement_only_dependencies(runtime, tmp_path, monke
     assert_pass(result)
     assert 'measurement_only_dependencies.json' in {a.path for a in result.artifacts}
     assert read_json(out / 'measurement_only_dependencies.json') == {'measurement_only_dependencies': [unit]}
+
+
+@pytest.mark.parametrize('stage', ['coverage', 'simulation-smoke', 'campaign-collect'])
+def test_runner_refuses_setup_calibration_on_leaves_and_collectors(runtime, monkeypatch, stage):
+    repo, out = runtime
+    (repo / 'configs/execution/stages.yaml').write_text(yaml.safe_dump({'schema_version': 1,
+        'stages': {stage: {'module': 'oxyformer.dummy'}}}))
+    (out / 'code_commit.txt').write_text(commit(repo))
+    path = task_file(out, stage=stage, needs={'old-measurement': ['budget_record.json']},
+        parameters={'setup_calibration': [{'dependency': 'old-measurement', 'path': 'budget_record.json'}]})
+    executions = []
+    with raises(ContractError, match='setup_calibration is permitted only on estimate and lock tasks'):
+        run_worker(stage, out, repo, deps_env=True, task_file=path, execute=lambda *args: executions.append(args))
+    assert executions == []
+    assert not (out / RESULT).exists()
