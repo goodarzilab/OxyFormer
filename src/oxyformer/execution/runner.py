@@ -315,15 +315,16 @@ def measurement_dependencies(task):
 
 
 def verify_dependency_result(root, *, expected_hash=None, trees=None, active=None, verified=None,
-    output_dir=None, consumer_task=None, measurement_only_dependencies=None, budget_authorities=None):
+    output_dir=None, consumer_task=None, measurement_only_dependencies=None, budget_authorities=None, scientific_edges=None):
     with integrity_observation(root):
         return _verify_dependency_result(root, expected_hash=expected_hash, trees=trees,
             active=active, verified=verified, output_dir=output_dir, consumer_task=consumer_task,
-            measurement_only_dependencies=measurement_only_dependencies, budget_authorities=budget_authorities)
+            measurement_only_dependencies=measurement_only_dependencies, budget_authorities=budget_authorities,
+            scientific_edges=scientific_edges)
 
 
 def _verify_dependency_result(root, *, expected_hash, trees, active, verified, output_dir,
-                              consumer_task=None, measurement_only_dependencies=None, budget_authorities=None):
+                              consumer_task=None, measurement_only_dependencies=None, budget_authorities=None, scientific_edges=None):
     """Verify all lineage publications; only live stages observe acquisitions."""
     root = directory_path(root)
     active = set() if active is None else active
@@ -382,7 +383,8 @@ def _verify_dependency_result(root, *, expected_hash, trees, active, verified, o
                     require(result.status == 'pass', 'dependency stage did not pass')
                     tree = verify_published_tree(current, result, expected)
                     producer_task = read_mapping(current / '_execution/task.json')
-                    child_measurements = allowed_measurements | measurement_dependencies(producer_task)
+                    own_measurements = measurement_dependencies(producer_task)
+                    child_measurements = allowed_measurements | own_measurements
                     config = read_mapping(request.config_path)
                     hashes = dict(zip(request.dependency_paths, request.dependency_hashes))
                     parents = []
@@ -402,6 +404,11 @@ def _verify_dependency_result(root, *, expected_hash, trees, active, verified, o
                             digest = hashes.get(str(parent / FINGERPRINT))
                             require(digest is not None, 'dependency fingerprint absent from published request')
                             parents.append((parent, digest, parent_unit, False, child_measurements))
+                    if scientific_edges is not None:
+                        # Edge ownership matters: an ancestor's calibration list
+                        # cannot classify an ordinary edge owned by this task.
+                        scientific_edges[current] = tuple(parent for parent, _, parent_unit, *_ in parents
+                            if parent_unit not in own_measurements)
                     _verify_publication_result(result, request, recorded_inputs)
                     verify_budget_authority(current, request, producer_task, allowed_measurements)
                     pending[current] = (result, tree)
@@ -587,6 +594,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     acquisition_hashes = {}
     dependency_trees = {}
     verified_dependencies = {}
+    scientific_edges = {}
     budget_authorities = set()
     acquisitions = {}
     for unit, root in deps.items():
@@ -609,7 +617,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         require((root / '_execution/result.json').is_file(), f'stage receipt missing or not regular: {root / "_execution/result.json"}')
         result = verify_dependency_result(root, trees=dependency_trees, verified=verified_dependencies,
             output_dir=out, consumer_task=task, measurement_only_dependencies=measurement_only_dependencies,
-            budget_authorities=budget_authorities)
+            budget_authorities=budget_authorities, scientific_edges=scientific_edges)
         verify_dependency_id(root, unit)
         published_hashes[root / FINGERPRINT] = next(
             a.sha256 for a in result.artifacts if a.path == FINGERPRINT)
@@ -642,7 +650,19 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         require(file_hash(lock_file) == lock_ref['sha256'], 'recipe lock hash mismatch')
         lock = read_mapping(lock_file)
         verify_recipe(repo, lock)
+        # Compute reachability afresh for this consumer, across all its roots.
+        # A record is scientific if ANY path to it uses only ordinary edges.
+        measurements = measurement_dependencies(task)
+        pending = [root for unit, root in deps.items() if unit not in measurements and unit not in acquisitions]
+        scientific = set()
+        while pending:
+            root = pending.pop()
+            if root not in scientific:
+                scientific.add(root)
+                pending.extend(scientific_edges[root])
         for root in verified_dependencies:
+            if root not in scientific:
+                continue
             for path in verify_dependency_recipe(root, lock):
                 if path not in files:
                     files.append(path)

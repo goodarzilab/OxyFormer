@@ -1199,7 +1199,7 @@ def test_calibration_uses_own_leaf_percentile_and_max_completed_resume():
                 'publication_seconds': 3.} for i in range(step + 1)]
             records.append({'leaves': leaves, 'binding': {'scenario': {'name': name}},
                 'counts': {'success': success if step else 0}, 'record_hash': coverage.digest(leaves),
-                'budget_generation': 'pre-ARC-2612'})
+                'budget_generation': 'pre-ARC-2612', 'profile': deepcopy(STAMPS)})
     result = campaign_probe.calibration_statistics(records, profiles)
     assert result['leaf_count'] == 6
     assert result['setup_seconds'] == 312.5  # P90 = 250, no cumulative-history duplication.
@@ -1232,7 +1232,7 @@ def test_resume_max_includes_distinct_chains_of_same_scenario(reverse, rate, cha
                            'compute_seconds': delivered / count if step < count else 12000.})
             records.append({'leaves': list(leaves), 'binding': {'scenario': {'name': 'a'}},
                 'counts': {'success': int(step >= count - 1)},
-                'record_hash': coverage.digest(leaves), 'budget_generation': 'pre-ARC-2612'})
+                'record_hash': coverage.digest(leaves), 'budget_generation': 'pre-ARC-2612', 'profile': deepcopy(STAMPS)})
     if reverse:
         records.reverse()
     result = campaign_probe.calibration_statistics(records, {'a': profile})
@@ -1566,3 +1566,42 @@ def test_fallback_headroom_limit_names_unpadded_count_and_bounded_recovery(scree
             assert len(estimate['calibration']['draws']) == 2
             assert not estimate['calibration']['second_probe_recommended']
             assert all(r['repetitions'] == 1 and r['leaves'] <= 40 for r in estimate['per_scenario'].values())
+
+
+def test_estimate_and_lock_record_historical_calibration_provenance(screening_request, tmp_path):
+    """Sealed historical stamps are copied exactly, independently of profiles."""
+    import shutil
+    base = screening_request
+    config, task = coverage.read_json(base.config_path), coverage.read_json(base.task_path)
+    deps = {k: Path(v) for k, v in config['dependencies'].items()}
+    expected = []
+    refs = []
+    for i, ref in enumerate(task['parameters']['setup_calibration']):
+        unit = f'historical-calibration-{i}'
+        root = tmp_path / unit
+        shutil.copytree(deps[ref['dependency']], root)
+        timing = coverage.read_json(root / 'timing.json')
+        timing.update(scientific_fingerprint={'algorithm': 'tracked-science-v2', 'sha256': str(i) * 64},
+                      environment_hash=str(i + 4) * 64)
+        write(root / 'timing.json', timing)
+        producer_task = coverage.read_json(root / '_execution/task.json')
+        producer_task['id'] = unit
+        seal_budget_fixture(root, unit, producer_task)
+        record = coverage.read_leaf_measurements(root / coverage.BUDGET_RECORD)
+        assert record['profile']['scientific_fingerprint'] != STAMPS['scientific_fingerprint']
+        assert record['profile']['environment_hash'] != STAMPS['environment_hash']
+        expected.append({'record_hash': file_hash(root / coverage.BUDGET_RECORD), 'task_id': unit,
+            'budget_generation': record['budget_generation'],
+            'scientific_fingerprint': record['profile']['scientific_fingerprint'],
+            'environment_hash': record['profile']['environment_hash']})
+        deps[unit] = root
+        refs.append({'dependency': unit, 'path': coverage.BUDGET_RECORD})
+    task['parameters']['setup_calibration'] = refs
+    estimate_req = request(tmp_path / 'provenance-estimate', task, deps, config['approvals'])
+    lock_req = screening_lock_request(estimate_req, tmp_path / 'provenance-lock')
+    outcome = campaign.run_stage(lock_req)
+    assert outcome.status == 'pass', outcome.message
+    outcome.verify(lock_req)
+    estimate = coverage.read_json(Path(estimate_req.output_dir) / 'budget_estimate.json')
+    budget = coverage.read_json(Path(lock_req.output_dir) / 'budget.json')
+    assert estimate['calibration']['records'] == budget['calibration']['records'] == expected

@@ -4441,41 +4441,133 @@ def test_measurement_route_refuses_nonsizing_consumer(stage):
             {'dependency': 'leaf', 'path': 'budget_record.json'}]}, 'needs': {'leaf': ['budget_record.json']}})
 
 
-def test_measurement_lineage_preserves_frozen_recipe_refusal(runtime, tmp_path, monkeypatch):
-    """Synthetic stage bodies isolate the retained cross-recipe preflight refusal."""
+@pytest.mark.parametrize('route', ['measurement', 'ordinary', 'both', 'descendant', 'ancestor'])
+@pytest.mark.parametrize('measurement_first', [True, False])
+def test_measurement_lineage_preserves_frozen_recipe_refusal(runtime, tmp_path, monkeypatch, route, measurement_first):
+    """PR #77 expected refusal even through calibration (finding 8d981976).
+
+    H1 replaces that expectation with execution through measurement ancestry;
+    ordinary and mixed paths must still refuse. Stage bodies are synthetic;
+    recipe checks, dependency walks and publication use the real runner.
+    """
     from oxyformer.execution.integrity import publication_receipt
     repo, ancestor = runtime
     (repo / 'configs/execution/stages.yaml').write_text(yaml.safe_dump({'schema_version': 1,
-        'stages': {name: {'module': 'oxyformer.dummy'} for name in ('dummy', 'campaign-estimate')}}))
+        'stages': {name: {'module': 'oxyformer.dummy'}
+                   for name in ('dummy', 'simulation-smoke', 'campaign-estimate', 'campaign-lock')}}))
     (ancestor / 'code_commit.txt').write_text(commit(repo))
     path = locked_task(repo, ancestor, tmp_path / 'old-lock', monkeypatch)
-    task = read_json(path)
-    task.update(id='old-measurement', outputs=['budget_record.json'])
-    path.write_text(json.dumps(task))
+    old_task = read_json(path)
+    old_task.update(id='old-parent')
+    path.write_text(json.dumps(old_task))
     assert_pass(run_task(repo, ancestor, path))
+    monkeypatch.setenv('SWARM_DEP_OLD_PARENT', str(ancestor))
+    measurement = new_attempt(repo, tmp_path / 'old-measurement')
+    old_task = deepcopy(old_task)
+    from oxyformer.validation import coverage
+    from test_coverage import successful_records
+    draws, records = successful_records(1)
+    old_task.update(id='old-measurement', stage='simulation-smoke', outputs=['result.json', 'budget_record.json'],
+        parameters={'mode': 'profile', 'wall_seconds': 600., 'draws': draws,
+            'scenario': {'name': 'null_effect', 'effect': 'null', 'active_mechanisms': ['null']},
+            'recipe': {'fixture': True}})
+    old_task['needs']['old-parent'] = ['value.json']
+
+    def measured_worker(request, *args):
+        started = coverage.time.monotonic()
+        timing = {'recipe_hash': coverage.digest(old_task['parameters']['recipe']),
+            'measurement_scope': 'complete_stage_return', 'complete_repetition_seconds': [0.],
+            'setup_seconds': 0., 'device': 'cpu', 'environment': {'fixture': True},
+            'production_equivalent': True, 'scientific_fingerprint': scientific_fingerprint(repo),
+            'environment_hash': 'a' * 64}
+        completed = coverage.publish(request, {'result.json': {
+            'records': records, 'recipe_hash': timing['recipe_hash'], 'mode': 'profile',
+            'scenario': coverage.SCMConfig(**old_task['parameters']['scenario']).to_dict()['payload']}},
+            status='pass', message='synthetic measurement producer')
+        summary = coverage.summarize(records, draws, production_equivalent=True, null_scenario=True)
+        return coverage.record_measurements(request, completed, started, old_task, timing, summary)
+
+    assert_pass(run_worker('simulation-smoke', measurement, repo, deps_env=True,
+        task_file=task_file(measurement, **old_task), execute=measured_worker))
+    monkeypatch.setenv('SWARM_DEP_OLD_MEASUREMENT', str(measurement))
+
+    # A second ordinary branch shares the record, so the verified cache sees
+    # the same publication via both paths in either traversal order.
+    bridge = new_attempt(repo, tmp_path / 'bridge')
+    assert_pass(run_task(repo, bridge, id='bridge', needs={'old-measurement': ['budget_record.json']}))
+    monkeypatch.setenv('SWARM_DEP_BRIDGE', str(bridge))
     (repo / 'src/science.py').write_text('new_science = 2\n')
     commit(repo)
-    middle = new_attempt(repo, tmp_path / 'estimate')
-    monkeypatch.setenv('SWARM_DEP_OLD_MEASUREMENT', str(ancestor))
-    path = task_file(middle, id='estimate', stage='campaign-estimate',
-        needs={'old-measurement': ['budget_record.json']}, parameters={'setup_calibration': [
-            {'dependency': 'old-measurement', 'path': 'budget_record.json'}]})
-    assert_pass(run_worker('campaign-estimate', middle, repo, deps_env=True, task_file=path,
-                          execute=inline_fixture_stage))
-    consumer = new_attempt(repo, tmp_path / 'consumer')
-    path = locked_task(repo, consumer, tmp_path / 'new-lock', monkeypatch)
+    assert read_json(measurement / '_execution/identity.json')['scientific_fingerprint'] != scientific_fingerprint(repo)
+    estimate = new_attempt(repo, tmp_path / 'estimate')
+    path = locked_task(repo, estimate, tmp_path / 'new-lock', monkeypatch)
     task = read_json(path)
-    task['needs']['estimate'] = ['value.json']
+    task.update(id='estimate', stage='campaign-estimate', parameters={})
+    task['needs']['old-measurement'] = ['budget_record.json']
+    if route != 'ordinary':
+        task['parameters']['setup_calibration'] = [
+            {'dependency': 'old-measurement', 'path': 'budget_record.json'}]
+    if route == 'both':
+        task['needs']['bridge'] = ['value.json']
+    if not measurement_first:
+        task['needs'] = dict(reversed(list(task['needs'].items())))
     path.write_text(json.dumps(task))
-    monkeypatch.setenv('SWARM_DEP_ESTIMATE', str(middle))
     executions = []
-    with raises(ContractError, match='dependency scientific code/config drift'):
-        run_worker('dummy', consumer, repo, deps_env=True, task_file=path,
-                   execute=lambda *args: executions.append(args))
-    assert not executions
-    assert not (consumer / 'value.json').exists()
-    assert not (consumer / RESULT).exists()
-    assert not publication_receipt(consumer).exists()
+
+    def execute(request, *args):
+        executions.append(read_json(Path(request.task_path))['id'])
+        result = inline_fixture_stage(request, *args)
+        if request.stage == 'campaign-lock':
+            lock = Path(request.output_dir) / 'recipe_lock.json'
+            lock.write_text(json.dumps({'scientific_fingerprint': scientific_fingerprint(repo)}))
+            result = replace(result, artifacts=tuple(replace(a, sha256=file_hash(lock))
+                if a.path == 'recipe_lock.json' else a for a in result.artifacts))
+        return result
+
+    def refused(stage, out, path):
+        before = list(executions)
+        with raises(ContractError, match='dependency scientific code/config drift'):
+            run_worker(stage, out, repo, deps_env=True, task_file=path, execute=execute)
+        assert executions == before
+        assert not (out / 'value.json').exists()
+        assert not (out / RESULT).exists()
+        assert not publication_receipt(out).exists()
+
+    if route in ('ordinary', 'both'):
+        refused('campaign-estimate', estimate, path)
+        return
+    assert_pass(run_worker('campaign-estimate', estimate, repo, deps_env=True, task_file=path, execute=execute))
+    assert read_json(estimate / 'measurement_only_dependencies.json') == {
+        'measurement_only_dependencies': ['old-measurement']}
+    monkeypatch.setenv('SWARM_DEP_ESTIMATE', str(estimate))
+    lock = new_attempt(repo, tmp_path / 'locked-sizing')
+    lock_task = deepcopy(task)
+    lock_task.update(id='locked-sizing', stage='campaign-lock', outputs=['recipe_lock.json'], parameters={})
+    lock_task['needs'] = {'campaign-lock': task['needs']['campaign-lock'], 'estimate': ['value.json']}
+    assert_pass(run_worker('campaign-lock', lock, repo, deps_env=True,
+        task_file=task_file(lock, **lock_task), execute=execute))
+    assert read_json(lock / 'measurement_only_dependencies.json') == {
+        'measurement_only_dependencies': ['old-measurement']}
+    monkeypatch.setenv('SWARM_DEP_LOCKED_SIZING', str(lock))
+    consumer = new_attempt(repo, tmp_path / 'consumer')
+    task = {'id': 'leaf', 'needs': {'locked-sizing': ['recipe_lock.json']},
+        'recipe_lock': {'dependency': 'locked-sizing', 'path': 'recipe_lock.json',
+                        'sha256': file_hash(lock / 'recipe_lock.json')}}
+    if route in ('descendant', 'ancestor'):
+        unit, name = ('old-measurement', 'budget_record.json') if route == 'descendant' else ('old-parent', 'value.json')
+        task['needs'][unit] = [name]
+        if not measurement_first:
+            task['needs'] = dict(reversed(list(task['needs'].items())))
+        refused('dummy', consumer, task_file(consumer, **task))
+        assert executions == ['estimate', 'locked-sizing']
+    else:
+        assert_pass(run_worker('dummy', consumer, repo, deps_env=True,
+            task_file=task_file(consumer, **task), execute=execute))
+        assert executions == ['estimate', 'locked-sizing', 'leaf']
+        assert publication_receipt(consumer).is_file()
+        assert read_json(consumer / 'value.json') == {'value': 1}
+        assert read_json(consumer / 'measurement_only_dependencies.json') == {
+            'measurement_only_dependencies': ['old-measurement']}
 
 
 def test_runner_publishes_measurement_only_dependencies(runtime, tmp_path, monkeypatch):
@@ -4497,3 +4589,87 @@ def test_runner_publishes_measurement_only_dependencies(runtime, tmp_path, monke
     assert_pass(result)
     assert 'measurement_only_dependencies.json' in {a.path for a in result.artifacts}
     assert read_json(out / 'measurement_only_dependencies.json') == {'measurement_only_dependencies': [unit]}
+
+
+@pytest.mark.parametrize('stage', ['coverage', 'simulation-smoke', 'campaign-collect'])
+def test_runner_refuses_setup_calibration_on_leaves_and_collectors(runtime, monkeypatch, stage):
+    repo, out = runtime
+    (repo / 'configs/execution/stages.yaml').write_text(yaml.safe_dump({'schema_version': 1,
+        'stages': {stage: {'module': 'oxyformer.dummy'}}}))
+    (out / 'code_commit.txt').write_text(commit(repo))
+    path = task_file(out, stage=stage, needs={'old-measurement': ['budget_record.json']},
+        parameters={'setup_calibration': [{'dependency': 'old-measurement', 'path': 'budget_record.json'}]})
+    executions = []
+    with raises(ContractError, match='setup_calibration is permitted only on estimate and lock tasks'):
+        run_worker(stage, out, repo, deps_env=True, task_file=path, execute=lambda *args: executions.append(args))
+    assert executions == []
+    assert not (out / RESULT).exists()
+
+
+@pytest.mark.parametrize('measurement_first', [True, False])
+def test_declared_calibration_budget_skip_is_independent_of_bridge_order(runtime, tmp_path, monkeypatch, measurement_first):
+    """A shared ordinary branch retains the verifying consumer's declaration."""
+    from oxyformer.execution.integrity import publication_receipt
+    from oxyformer.validation import coverage
+    from test_coverage import successful_records
+    repo, measurement = runtime
+    (repo / 'configs/execution/stages.yaml').write_text(yaml.safe_dump({'schema_version': 1,
+        'stages': {name: {'module': 'oxyformer.dummy'}
+                   for name in ('dummy', 'simulation-smoke', 'campaign-estimate')}}))
+    (measurement / 'code_commit.txt').write_text(commit(repo))
+    path = locked_task(repo, measurement, tmp_path / 'lock', monkeypatch)
+    task = read_json(path)
+    draws, records = successful_records(1)
+    task.update(id='measurement', stage='simulation-smoke', outputs=['result.json', 'budget_record.json'],
+        parameters={'mode': 'profile', 'wall_seconds': 600., 'draws': draws,
+            'scenario': {'name': 'null_effect', 'effect': 'null', 'active_mechanisms': ['null']},
+            'recipe': {'fixture': True}})
+
+    def producer(request, *args):
+        started = coverage.time.monotonic()
+        timing = {'recipe_hash': coverage.digest(task['parameters']['recipe']),
+            'measurement_scope': 'complete_stage_return', 'complete_repetition_seconds': [0.],
+            'setup_seconds': 0., 'device': 'cpu', 'environment': {'fixture': True},
+            'production_equivalent': True, 'scientific_fingerprint': scientific_fingerprint(repo),
+            'environment_hash': 'a' * 64}
+        result = coverage.publish(request, {'result.json': {'records': records,
+            'recipe_hash': timing['recipe_hash'], 'mode': 'profile',
+            'scenario': coverage.SCMConfig(**task['parameters']['scenario']).to_dict()['payload']}},
+            status='pass', message='synthetic measured producer')
+        summary = coverage.summarize(records, draws, production_equivalent=True, null_scenario=True)
+        return coverage.record_measurements(request, result, started, task, timing, summary)
+
+    assert_pass(run_worker('simulation-smoke', measurement, repo, deps_env=True,
+        task_file=task_file(measurement, **task), execute=producer))
+    monkeypatch.setenv('SWARM_DEP_MEASUREMENT', str(measurement))
+    bridge = new_attempt(repo, tmp_path / 'bridge')
+    assert_pass(run_worker('dummy', bridge, repo, deps_env=True,
+        task_file=task_file(bridge, id='bridge', needs={'measurement': ['budget_record.json']}),
+        execute=inline_fixture_stage))
+    monkeypatch.setenv('SWARM_DEP_BRIDGE', str(bridge))
+    consumer = new_attempt(repo, tmp_path / 'consumer')
+    needs = {'campaign-lock': ['recipe_lock.json'], 'measurement': ['budget_record.json'], 'bridge': ['value.json']}
+    if not measurement_first:
+        needs = dict(reversed(list(needs.items())))
+    path = task_file(consumer, id='estimate', stage='campaign-estimate', needs=needs, recipe_lock=task['recipe_lock'],
+        parameters={'setup_calibration': [{'dependency': 'measurement', 'path': 'budget_record.json'}]})
+    calls = []
+    callbacks = []
+
+    # Construct the ordinary bridge before injecting the consumer's loader.
+    def forbidden(*args, **kwargs):
+        calls.append(args[2])
+        raise ContractError('synthetic non-authority calibration measurement')
+
+    monkeypatch.setattr(coverage, 'load_budget', forbidden)
+
+    def execute(*args):
+        callbacks.append('estimate')
+        return inline_fixture_stage(*args)
+
+    result = run_worker('campaign-estimate', consumer, repo, deps_env=True, task_file=path, execute=execute)
+    assert_pass(result)
+    assert calls == [] and callbacks == ['estimate']
+    assert publication_receipt(consumer).exists()
+    assert read_json(consumer / 'measurement_only_dependencies.json') == {
+        'measurement_only_dependencies': ['measurement']}
