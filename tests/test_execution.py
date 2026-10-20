@@ -4604,3 +4604,72 @@ def test_runner_refuses_setup_calibration_on_leaves_and_collectors(runtime, monk
         run_worker(stage, out, repo, deps_env=True, task_file=path, execute=lambda *args: executions.append(args))
     assert executions == []
     assert not (out / RESULT).exists()
+
+
+@pytest.mark.parametrize('measurement_first', [True, False])
+def test_declared_calibration_budget_skip_is_independent_of_bridge_order(runtime, tmp_path, monkeypatch, measurement_first):
+    """A shared ordinary branch retains the verifying consumer's declaration."""
+    from oxyformer.execution.integrity import publication_receipt
+    from oxyformer.validation import coverage
+    from test_coverage import successful_records
+    repo, measurement = runtime
+    (repo / 'configs/execution/stages.yaml').write_text(yaml.safe_dump({'schema_version': 1,
+        'stages': {name: {'module': 'oxyformer.dummy'}
+                   for name in ('dummy', 'simulation-smoke', 'campaign-estimate')}}))
+    (measurement / 'code_commit.txt').write_text(commit(repo))
+    path = locked_task(repo, measurement, tmp_path / 'lock', monkeypatch)
+    task = read_json(path)
+    draws, records = successful_records(1)
+    task.update(id='measurement', stage='simulation-smoke', outputs=['result.json', 'budget_record.json'],
+        parameters={'mode': 'profile', 'wall_seconds': 600., 'draws': draws,
+            'scenario': {'name': 'null_effect', 'effect': 'null', 'active_mechanisms': ['null']},
+            'recipe': {'fixture': True}})
+
+    def producer(request, *args):
+        started = coverage.time.monotonic()
+        timing = {'recipe_hash': coverage.digest(task['parameters']['recipe']),
+            'measurement_scope': 'complete_stage_return', 'complete_repetition_seconds': [0.],
+            'setup_seconds': 0., 'device': 'cpu', 'environment': {'fixture': True},
+            'production_equivalent': True, 'scientific_fingerprint': scientific_fingerprint(repo),
+            'environment_hash': 'a' * 64}
+        result = coverage.publish(request, {'result.json': {'records': records,
+            'recipe_hash': timing['recipe_hash'], 'mode': 'profile',
+            'scenario': coverage.SCMConfig(**task['parameters']['scenario']).to_dict()['payload']}},
+            status='pass', message='synthetic measured producer')
+        summary = coverage.summarize(records, draws, production_equivalent=True, null_scenario=True)
+        return coverage.record_measurements(request, result, started, task, timing, summary)
+
+    assert_pass(run_worker('simulation-smoke', measurement, repo, deps_env=True,
+        task_file=task_file(measurement, **task), execute=producer))
+    monkeypatch.setenv('SWARM_DEP_MEASUREMENT', str(measurement))
+    bridge = new_attempt(repo, tmp_path / 'bridge')
+    assert_pass(run_worker('dummy', bridge, repo, deps_env=True,
+        task_file=task_file(bridge, id='bridge', needs={'measurement': ['budget_record.json']}),
+        execute=inline_fixture_stage))
+    monkeypatch.setenv('SWARM_DEP_BRIDGE', str(bridge))
+    consumer = new_attempt(repo, tmp_path / 'consumer')
+    needs = {'campaign-lock': ['recipe_lock.json'], 'measurement': ['budget_record.json'], 'bridge': ['value.json']}
+    if not measurement_first:
+        needs = dict(reversed(list(needs.items())))
+    path = task_file(consumer, id='estimate', stage='campaign-estimate', needs=needs, recipe_lock=task['recipe_lock'],
+        parameters={'setup_calibration': [{'dependency': 'measurement', 'path': 'budget_record.json'}]})
+    calls = []
+    callbacks = []
+
+    # Construct the ordinary bridge before injecting the consumer's loader.
+    def forbidden(*args, **kwargs):
+        calls.append(args[2])
+        raise ContractError('synthetic non-authority calibration measurement')
+
+    monkeypatch.setattr(coverage, 'load_budget', forbidden)
+
+    def execute(*args):
+        callbacks.append('estimate')
+        return inline_fixture_stage(*args)
+
+    result = run_worker('campaign-estimate', consumer, repo, deps_env=True, task_file=path, execute=execute)
+    assert_pass(result)
+    assert calls == [] and callbacks == ['estimate']
+    assert publication_receipt(consumer).exists()
+    assert read_json(consumer / 'measurement_only_dependencies.json') == {
+        'measurement_only_dependencies': ['measurement']}
