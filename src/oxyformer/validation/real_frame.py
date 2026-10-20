@@ -239,7 +239,32 @@ def profile_tasks(endpoint, frame):
     return {'schema_version': 1, 'tasks': tasks}
 
 
-def screening_profile_tasks(endpoint, frame, approvals):
+def sizing_task_inputs(task, *, setup_calibration=None, calibration_probes=None, admission_receipt=None):
+    """Bind sizing-only inputs without changing any bootstrap profile task."""
+    task = deepcopy(task)
+    require(task['stage'] in ('campaign-estimate', 'campaign-lock'), 'sizing inputs require estimate or lock')
+    require(setup_calibration is None or calibration_probes is None, 'choose calibration records or probes')
+    p = task['parameters']
+    if setup_calibration is not None:
+        p['setup_calibration'] = deepcopy(setup_calibration)
+        p.pop('calibration_probes', None)
+        refs = setup_calibration
+    else:
+        refs = calibration_probes or [{'dependency': 'campaign-calibration', 'path': 'setup_probe.json'}]
+        p['calibration_probes'] = deepcopy(refs)
+    for ref in refs:
+        names = task.setdefault('needs', {}).setdefault(ref['dependency'], [])
+        if ref['path'] not in names:
+            names.append(ref['path'])
+    if task['stage'] == 'campaign-lock':
+        p['admission_receipt'] = deepcopy(admission_receipt or
+            {'dependency': 'campaign-admit', 'path': 'admission.json'})
+    else:
+        require(admission_receipt is None, 'estimate cannot depend on post-lock admission')
+    return task
+
+
+def screening_profile_tasks(endpoint, frame, approvals, *, setup_calibration=None, calibration_probes=None):
     """Bounded bootstrap chains; the final receipts must contain complete draws.
 
     Each scenario has 40 prospectively declared slots. A completed repetition
@@ -287,6 +312,7 @@ def screening_profile_tasks(endpoint, frame, approvals):
         'parameters': {**{k: deepcopy(legacy[4]['parameters'][k]) for k in ('endpoint_input', 'frame_input')},
             'recipe': recipe, 'profiles': profiles, **resources, 'wall_seconds': stage_seconds,
             'profile_safety_factor': campaign.screening_safety_factor(approvals)['profile_safety_factor']}})
+    tasks[-1] = sizing_task_inputs(tasks[-1], setup_calibration=setup_calibration, calibration_probes=calibration_probes)
     return {'schema_version': 1, **metadata, 'gpu_concurrency_max': 4, 'tasks': tasks}
 
 

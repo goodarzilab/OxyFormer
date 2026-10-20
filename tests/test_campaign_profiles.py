@@ -13,7 +13,7 @@ from oxyformer.execution.runner import read_mapping
 from oxyformer.design.splits import dependence_groups
 from oxyformer.provenance import ContractError, file_hash
 from oxyformer.training import nested_cv
-from oxyformer.validation import campaign, campaign_estimate, coverage, real_frame, smoke_inputs
+from oxyformer.validation import campaign, campaign_estimate, campaign_probe, coverage, real_frame, smoke_inputs
 from oxyformer.validation.scm import SCMConfig
 from test_campaign import STAMPS, request, write, seal_budget_fixture, refresh_profile, profile_directory
 from test_coverage import successful_records, run_coverage
@@ -622,7 +622,9 @@ def test_chained_profile_uses_cumulative_max_and_full_overhead(tmp_path, case):
         {"dependency": "profile", "path": "result.json"}, result["scenario"], task["parameters"]["recipe"], STAMPS)
     assert profile["seconds_per_repetition"] == 100.
     if case == "unequal_cumulative_compute":
-        assert campaign.slice_count(profile, 1, 390. + campaign.checkpoint_margin_seconds(), 1.) == 3
+        # Four repetitions distinguish the cumulative maximum while respecting
+        # the positive-capacity guard (360 s unit-plus-write minimum).
+        assert campaign.slice_count(profile, 4, 2491., 1.) == 3
     else:
         assert profile["leaf_overheads"] == {"setup_seconds": 10., "import_seconds": 2.,
                                             "export_seconds": 2., "publication_seconds": 1.}
@@ -700,15 +702,21 @@ def screening_request(tmp_path, monkeypatch, screening_rates):
         write(root / 'result.json', {'mode': 'profile', 'scenario': p['scenario'],
             'recipe_hash': coverage.digest(p['recipe']), 'draws': p['draws'], 'records': records})
         leaves = [{'task_id': t['id'], 'step': i, 'compute_seconds': rate / 40,
-            'setup_seconds': 20., 'import_seconds': 2., 'export_seconds': 3.,
-            'publication_seconds': 5., 'wall_seconds': rate / 40 + 30.}
+            'setup_seconds': 100., 'import_seconds': 2., 'export_seconds': 3.,
+            'publication_seconds': 5., 'wall_seconds': rate / 40 + 110.}
             for i, t in enumerate(tasks[index-39:index+1])]
         write(root / 'timing.json', {'production_equivalent': False, 'complete': True, 'all_successful': True,
-            'recipe_hash': coverage.digest(p['recipe']), 'device': 'cuda:0', 'gpu_seconds': rate + 1200.,
-            'complete_repetition_seconds': [rate], 'wall_seconds': rate + 1200., 'setup_seconds': 800.,
+            'recipe_hash': coverage.digest(p['recipe']), 'device': 'cuda:0', 'gpu_seconds': rate + 4400.,
+            'complete_repetition_seconds': [rate], 'wall_seconds': rate + 4400., 'setup_seconds': 4000.,
             'measurement_scope': 'complete_chain_return', 'leaves': leaves, **STAMPS})
         seal_budget_fixture(root, task['id'], task)
-    return request(tmp_path / 'screening-estimate', tasks[-1], deps, approvals)
+    estimate_task = tasks[-1]
+    estimate_task['parameters'].pop('calibration_probes')
+    estimate_task['needs'].pop('campaign-calibration')
+    estimate_task['parameters']['setup_calibration'] = [
+        {'dependency': ref['dependency'], 'path': coverage.BUDGET_RECORD}
+        for ref in estimate_task['parameters']['profiles'].values()]
+    return request(tmp_path / 'screening-estimate', estimate_task, deps, approvals)
 
 
 def screening_lock_request(req, tmp_path):
@@ -718,7 +726,8 @@ def screening_lock_request(req, tmp_path):
     parameters = {**original['parameters'], 'campaign_id': 'month1',
         'estimate_input': {'dependency': 'campaign-estimate', 'path': 'budget_estimate.json'},
         'evaluation_namespace': 'month1-evaluation', 'retry_rules': coverage.RETRY_RULES,
-        'prior_locks': [], 'cpu_wall_hours_budget': 1000.}
+        'prior_locks': [], 'cpu_wall_hours_budget': 1000.,
+        'admission_receipt': {'dependency': 'campaign-admit', 'path': 'admission.json'}}
     config = coverage.read_json(req.config_path)
     deps = {k: Path(v) for k, v in config['dependencies'].items()}
     deps['campaign-estimate'] = Path(req.output_dir)
@@ -739,11 +748,11 @@ def test_month1_estimate_uses_maximal_independent_chained_counts_and_admits_noth
     assert len({r['repetitions'] for r in estimate['per_scenario'].values()}) == 4
     for name, row in estimate['per_scenario'].items():
         profile = estimate['profiles'][name]
-        capacity = (coverage.leaf_budget(14100, estimate['profile_safety_factor'], profile['leaf_overheads'])['compute_seconds']
-                    - campaign.checkpoint_margin_seconds())
-        assert row['leaves'] == math.ceil(profile['seconds_per_repetition'] * row['repetitions'] / capacity) + 1
+        capacity = coverage.usable_leaf_compute(14100, profile['leaf_overheads']) - profile['resume_overhead_seconds']
+        demand = profile['seconds_per_repetition'] * row['repetitions'] + profile['publication_verification_seconds']
+        assert row['leaves'] == math.ceil(estimate['profile_safety_factor'] * demand / capacity) + 1
         assert row['leaves'] <= 40 and row['gpu_hours'] == row['leaves'] * 4
-        assert row['repetitions'] == 25 or profile['seconds_per_repetition'] * (row['repetitions'] + 1) > 39 * capacity
+        assert row['repetitions'] == 25 or estimate['profile_safety_factor'] * (profile['seconds_per_repetition'] * (row['repetitions'] + 1) + profile['publication_verification_seconds']) > 39 * capacity
     assert estimate['gpu_hours'] <= 640 < estimate['budget_h100_hours']
     assert not list(Path(screening_request.output_dir).iterdir())
 
@@ -830,6 +839,9 @@ def test_month1_bound_cell_executes_and_cpu_collector_scopes_one_scenario(screen
     config = coverage.read_json(req.config_path)
     deps = {k: Path(v) for k, v in config['dependencies'].items()}
     deps['campaign-lock'] = root
+    deps['campaign-admit'] = sealed_json_fixture(tmp_path / 'admit-fixture', 'campaign-admit',
+        'campaign-admit', {'admission.json': {'admitted': True, 'lock_hash': coverage.digest(lock),
+                                           'estimate_hash': lock['estimate_hash']}})
     calls = []
     def execute(draw, frame, scenario, template, recipe, destination, deadline, *, continuation, study):
         assert study == RecipeStudy(**campaign.SCREENING_CELL)
@@ -904,8 +916,8 @@ def test_month1_estimate_refuses_completed_nonterminal_profile_slot(screening_re
     timing = coverage.read_json(source / 'timing.json')
     rate = timing['complete_repetition_seconds'][0]
     leaf = {**timing['leaves'][0], 'task_id': producer['id'], 'step': 0,
-            'compute_seconds': rate, 'wall_seconds': rate + 30.}
-    timing.update(leaves=[leaf], wall_seconds=rate + 30., gpu_seconds=rate + 30., setup_seconds=20.)
+            'compute_seconds': rate, 'wall_seconds': rate + 110.}
+    timing.update(leaves=[leaf], wall_seconds=rate + 110., gpu_seconds=rate + 110., setup_seconds=100.)
     write(root / 'result.json', result)
     write(root / 'timing.json', timing)
     seal_budget_fixture(root, producer['id'], producer)
@@ -1130,3 +1142,427 @@ def test_screening_emitter_accepts_equivalent_ordinal_decision_date():
     approvals['owner_decisions']['screening_month1_safety_factor']['decided_on'] = '2026-290'
     assert real_frame.screening_profile_tasks(endpoint, frame, approvals) == expected
     campaign.validate_screening(expected['tasks'][-1]['parameters']['recipe'], approvals)
+
+
+def sealed_json_fixture(root, unit, stage, values):
+    """Seal small synthetic probe/admission outputs through publication authority."""
+    from oxyformer.execution.integrity import publish_result
+    from oxyformer.contracts import StageRequest
+    root.mkdir(parents=True, exist_ok=True)
+    cfg = write(root / '_execution/config.json', {})
+    task_path = write(root / '_execution/task.json', {'id': unit, 'stage': stage, 'parameters': {}})
+    req = StageRequest(stage=stage, config_path=str(cfg), config_hash=file_hash(cfg),
+        task_path=str(task_path), task_hash=file_hash(task_path), dependency_paths=(), dependency_hashes=(),
+        output_dir=str(root), code_identity='c' * 40)
+    (root / '_execution/request.json').write_text(req.to_json())
+    result = publish_result(root, coverage.publish(req, values, status='pass', message='synthetic receipt'))
+    assert result.status == 'pass', result.message
+    return root
+
+
+def test_full_window_factor_only_changes_provenance_and_demand():
+    import math
+    overheads = dict.fromkeys(coverage.OVERHEAD_PHASES, 100.)
+    a = coverage.leaf_budget(14100, 1., overheads)
+    b = coverage.leaf_budget(14100, 2., overheads)
+    assert a['compute_seconds'] == b['compute_seconds'] == 13400
+    assert a['formula'] == b['formula'] == 'arc-2612-window'
+    profile = {'seconds_per_repetition': 30000., 'publication_verification_seconds': 4000.,
+               'leaf_overheads': overheads}
+    capacity = 13800 - 400 - 690 - 330 - coverage.RESUME_OVERHEAD_FLOOR_SECONDS
+    assert campaign.slice_count(profile, 2, 14100, 1.25) == math.ceil(1.25 * 64000 / capacity) + 1
+    with pytest.raises(ContractError, match='phase unit and checkpoint'):
+        coverage.usable_leaf_compute(14100, {**overheads, 'setup_seconds': 12000})
+
+
+@pytest.mark.parametrize('factor,compute,accepted', [(1., 13800., True), (2., 6900., False), (2., 13800., False), (1., 6900., False)])
+def test_budget_generation_exception_is_narrow(factor, compute, accepted):
+    old = coverage.leaf_budget(14100, factor, dict.fromkeys(coverage.OVERHEAD_PHASES, 0.))
+    old.pop('formula')
+    old['compute_seconds'] = compute
+    if accepted:
+        assert coverage.validate_leaf_budget(old) == old
+    else:
+        with pytest.raises(ContractError, match='pre-ARC-2612 window formula'):
+            coverage.validate_leaf_budget(old)
+
+
+def test_calibration_uses_own_leaf_percentile_and_max_completed_resume():
+    profiles = {n: {'seconds_per_repetition': 1000.} for n in ('a', 'b', 'c')}
+    records = []
+    for name, setups, delivered, success in [('a', [10, 100], [1500, 1500], 1),
+                                             ('b', [20, 200], [2000, 2000], 1),
+                                             ('c', [30, 300], [4000, 4000], 0)]:
+        for step in range(2):
+            leaves = [{'task_id': name + str(i), 'setup_seconds': setups[i],
+                'compute_seconds': delivered[i], 'import_seconds': 1., 'export_seconds': 2.,
+                'publication_seconds': 3.} for i in range(step + 1)]
+            records.append({'leaves': leaves, 'binding': {'scenario': {'name': name}},
+                'counts': {'success': success if step else 0}, 'record_hash': coverage.digest(leaves),
+                'budget_generation': 'pre-ARC-2612'})
+    result = campaign_probe.calibration_statistics(records, profiles)
+    assert result['leaf_count'] == 6
+    assert result['setup_seconds'] == 312.5  # P90 = 250, no cumulative-history duplication.
+    assert result['resume_overhead_seconds'] == 1500  # MAX, not mean or completed-chain minimum.
+    assert not result['resume_uncalibrated']
+    for r in records:
+        r['counts']['success'] = 0
+    assert campaign_probe.calibration_statistics(records, profiles)['resume_uncalibrated']
+    assert campaign_probe.calibration_statistics(records, profiles)['resume_overhead_seconds'] == coverage.RESUME_OVERHEAD_FLOOR_SECONDS
+    with pytest.raises(ContractError, match='duplicate'):
+        campaign_probe.calibration_statistics(records + [records[0]], profiles)
+
+
+@pytest.mark.parametrize('reverse', [False, True])
+@pytest.mark.parametrize('rate,chains,repetitions,publication,expected_resume,expected_count', [
+    (430000., [('short', 36, 430000.), ('slow', 39, 488500.)], 1, 100., 1500., 40),
+    (1000., [('short', 2, 2000.), ('slow', 3, 9000.)], 11, 0., 8000 / 3, 3),
+])
+def test_resume_max_includes_distinct_chains_of_same_scenario(reverse, rate, chains,
+        repetitions, publication, expected_resume, expected_count):
+    overheads = dict.fromkeys(coverage.OVERHEAD_PHASES, 0.)
+    profile = {'seconds_per_repetition': rate, 'publication_verification_seconds': publication,
+               'leaf_overheads': overheads}
+    records = []
+    for chain, count, delivered in chains:
+        leaves = []
+        # The later successful prefix must not replace this chain's first completion.
+        for step in range(count + 1):
+            leaves.append({**overheads, 'task_id': f'{chain}-{step}',
+                           'compute_seconds': delivered / count if step < count else 12000.})
+            records.append({'leaves': list(leaves), 'binding': {'scenario': {'name': 'a'}},
+                'counts': {'success': int(step >= count - 1)},
+                'record_hash': coverage.digest(leaves), 'budget_generation': 'pre-ARC-2612'})
+    if reverse:
+        records.reverse()
+    result = campaign_probe.calibration_statistics(records, {'a': profile})
+    assert result['resume_overhead_seconds'] == expected_resume
+    assert result['resume_source']['completed']['a']['leaves'] == chains[1][1]
+    assert campaign.slice_count({**profile, 'resume_overhead_seconds': result['resume_overhead_seconds']},
+                                repetitions, 14100, 1.) == expected_count
+
+
+def probe_request_from_screening(req, tmp_path, *, mode='calibration', lock_root=None):
+    original = coverage.read_json(req.task_path)
+    config = coverage.read_json(req.config_path)
+    deps = {k: Path(v) for k, v in config['dependencies'].items()}
+    p = original['parameters']
+    if mode == 'calibration':
+        needs = campaign_probe.calibration_inputs(p)
+        parameters = {k: deepcopy(p[k]) for k in ('profiles', 'endpoint_input', 'frame_input')}
+    else:
+        deps['campaign-lock'] = lock_root
+        plans = coverage.read_json(lock_root / 'expanded_units.json')['plans']
+        needs = deepcopy(plans[0]['tasks'][0]['needs'])
+        needs.pop('campaign-admit')
+        parameters = {'lock_input': {'dependency': 'campaign-lock', 'path': 'recipe_lock.json'}}
+    task = {'id': 'probe', 'stage': 'campaign-setup-probe', 'parameters': {**parameters, 'mode': mode}, 'needs': needs}
+    return request(tmp_path, task, deps, config['approvals'])
+
+
+def test_probe_modes_measure_exact_shapes_and_bind_lock(screening_request, tmp_path):
+    pre = probe_request_from_screening(screening_request, tmp_path / 'pre')
+    value = campaign_probe.probe(pre, coverage.read_json(pre.config_path), coverage.read_json(pre.task_path), measurer=lambda: 123.)
+    assert value['setup_seconds'] == 123 and value['lock_hash'] is None
+    req = screening_lock_request(screening_request, tmp_path)
+    result = campaign.run_stage(req)
+    assert result.status == 'pass', result.message
+    post = probe_request_from_screening(screening_request, tmp_path / 'post', mode='admission', lock_root=Path(req.output_dir))
+    task = coverage.read_json(post.task_path)
+    result = campaign_probe.probe(post, coverage.read_json(post.config_path), task, measurer=lambda: 234.)
+    assert result['lock_hash'] == file_hash(Path(req.output_dir) / 'recipe_lock.json')
+    assert result['setup_seconds'] == 234
+    task['needs'].pop('campaign-lock')
+    with pytest.raises(ContractError, match='input shape'):
+        campaign_probe.probe(post, coverage.read_json(post.config_path), task, measurer=lambda: 1.)
+
+
+def test_prelock_two_draws_smaller_selected_and_inputs_bound(screening_request, tmp_path):
+    req = screening_request
+    config, task = coverage.read_json(req.config_path), coverage.read_json(req.task_path)
+    p = task['parameters']
+    profiles = campaign.screening_estimate(req, config, p)['profiles']
+    p.pop('setup_calibration')
+    pre = probe_request_from_screening(req, tmp_path / 'pre')
+    digests = campaign_probe.probe(pre, coverage.read_json(pre.config_path), coverage.read_json(pre.task_path), measurer=lambda: 10.)['input_digests']
+    deps = {k: Path(v) for k, v in config['dependencies'].items()}
+    p['calibration_probes'] = []
+    for i, seconds in enumerate((500., 100.)):
+        unit = 'calibration-' + str(i)
+        deps[unit] = sealed_json_fixture(tmp_path / unit, unit, 'campaign-setup-probe',
+            {'setup_probe.json': {'mode': 'calibration', 'setup_seconds': seconds, 'input_digests': digests}})
+        p['calibration_probes'].append({'dependency': unit, 'path': 'setup_probe.json'})
+    revised = request(tmp_path / 'two-draw-estimate', task, deps, config['approvals'])
+    result, calibration = campaign_probe.calibrate(revised, coverage.read_json(revised.config_path), p, profiles)
+    assert calibration['chosen_seconds'] == 100
+    assert calibration['setup_seconds'] == 240
+    assert len(calibration['draws']) == 2 and calibration['resume_uncalibrated']
+    assert all(v['leaf_overheads']['setup_seconds'] == 240 for v in result.values())
+    p['calibration_probes'].append(p['calibration_probes'][0])
+    with pytest.raises(ContractError, match='one or two'):
+        campaign_probe.calibrate(revised, coverage.read_json(revised.config_path), p, profiles)
+    p['calibration_probes'].pop()
+    p['frame_input']['path'] = 'endpoint.json'
+    with pytest.raises(ContractError, match='different inputs'):
+        campaign_probe.calibrate(revised, coverage.read_json(revised.config_path), p, profiles)
+
+
+def seal_stage_fixture(req, result):
+    from oxyformer.execution.integrity import publish_result
+    root = Path(req.output_dir)
+    write(root / '_execution/task.json', coverage.read_json(req.task_path))
+    write(root / '_execution/config.json', coverage.read_json(req.config_path))
+    (root / '_execution/request.json').write_text(req.to_json())
+    sealed = publish_result(root, result)
+    assert sealed.status == 'pass', sealed.message
+    return root
+
+
+def admission_fixture(screening_request, tmp_path, *, setup=0., probe_lock_hash=None):
+    req = screening_lock_request(screening_request, tmp_path)
+    # The small-output bound reads publication manifests, as the real runner does.
+    estimate_root = Path(screening_request.output_dir)
+    from oxyformer.contracts import StageResult
+    from oxyformer.provenance import ArtifactRecord, ArtifactLineage
+    from oxyformer.execution.integrity import publish_result
+    lineage = ArtifactLineage(source_hashes=(screening_request.config_hash,), unit_ids=(screening_request.content_hash,),
+        parent_hashes=(), split_hash=None, config_hash=screening_request.config_hash,
+        model_hash=None, environment=(("fixture", "synthetic"),), seed=None, parameter_count=None)
+    estimate_result = StageResult(request_hash=screening_request.content_hash, status='pass', message='synthetic estimate',
+        artifacts=tuple(ArtifactRecord(path=f.name, sha256=file_hash(f), kind='fixture', lineage=lineage)
+                        for f in sorted(estimate_root.glob('*.json'))))
+    seal_stage_fixture(screening_request, estimate_result)
+    # Refresh request hashes after sealing adds execution records to the producer.
+    cfg = coverage.read_json(req.config_path)
+    deps = {k: Path(v) for k, v in cfg['dependencies'].items()}
+    lock_root = seal_stage_fixture(req, campaign.run_stage(req))
+    deps['campaign-lock'] = lock_root
+    post = probe_request_from_screening(req, tmp_path / 'post-probe', mode='admission', lock_root=lock_root)
+    probe_value = campaign_probe.probe(post, coverage.read_json(post.config_path), coverage.read_json(post.task_path), measurer=lambda: setup)
+    if probe_lock_hash is not None:
+        probe_value['lock_hash'] = probe_lock_hash
+    deps['post-probe'] = sealed_json_fixture(tmp_path / 'probe-publication', 'post-probe',
+        'campaign-setup-probe', {'setup_probe.json': probe_value})
+    task = {'id': 'campaign-admit', 'stage': 'campaign-admit', 'parameters': {
+        'lock_input': {'dependency': 'campaign-lock', 'path': 'recipe_lock.json'},
+        'probe_input': {'dependency': 'post-probe', 'path': 'setup_probe.json'}}}
+    admitted = request(tmp_path / 'admit', task, deps, cfg['approvals'])
+    return admitted, lock_root
+
+
+def test_admission_is_only_authority_and_never_mutates_lock(screening_request, tmp_path):
+    req, root = admission_fixture(screening_request, tmp_path)
+    before = {p.name: file_hash(p) for p in root.glob('*.json')}
+    result = campaign_probe.run_stage(req)
+    assert result.status == 'pass', result.message
+    result.verify(req)
+    receipt = coverage.read_json(Path(req.output_dir) / 'admission.json')
+    assert receipt['admitted'] is True
+    assert receipt['lock_hash'] == file_hash(root / 'recipe_lock.json')
+    assert coverage.read_json(root / 'gate.json')['admitted'] is False
+    assert before == {p.name: file_hash(p) for p in root.glob('*.json')}
+    plans = coverage.read_json(root / 'expanded_units.json')['plans']
+    assert all(plan['spec']['inputs'] == plans[0]['spec']['inputs'] for plan in plans)
+    for plan in plans:
+        for task in plan['tasks']:
+            assert task['admission_receipt'] == {'dependency': 'campaign-admit', 'path': 'admission.json'}
+            assert task['needs']['campaign-admit'] == ['admission.json']
+    # Resume predecessor dependencies differ, while the admitted spec inputs agree.
+    assert plans[0]['tasks'][0]['needs'] != plans[0]['tasks'][1]['needs']
+
+
+@pytest.mark.parametrize('fault', ['slow', 'wrong_lock', 'oversized', 'near_window', 'unequal_specs'])
+def test_admission_refusals_leave_sized_lock_reusable(screening_request, tmp_path, monkeypatch, fault):
+    setup = 5000. if fault == 'slow' else 13000. if fault == 'near_window' else 0.
+    req, root = admission_fixture(screening_request, tmp_path, setup=setup,
+        probe_lock_hash='e' * 64 if fault == 'wrong_lock' else None)
+    before = {p.name: file_hash(p) for p in root.glob('*.json')}
+    if fault == 'oversized':
+        monkeypatch.setattr(campaign_probe, 'SMALL_OUTPUT_BYTES', 1)
+    if fault == 'unequal_specs':
+        original = campaign_probe.read_json
+        def read(path):
+            value = original(path)
+            if Path(path).name == 'expanded_units.json':
+                value['plans'][1]['spec']['inputs']['different'] = ['result.json']
+            return value
+        monkeypatch.setattr(campaign_probe, 'read_json', read)
+    result = campaign_probe.run_stage(req)
+    assert result.status == 'blocked', result.message
+    assert not result.artifacts and not list(Path(req.output_dir).iterdir())
+    assert before == {p.name: file_hash(p) for p in root.glob('*.json')}
+    if fault in ('slow', 'near_window', 'oversized'):
+        assert 'measured setup' in result.message and 'counts' in result.message
+
+
+@pytest.mark.parametrize('fault', ['absent', 'false', 'wrong_lock'])
+def test_screening_consumer_requires_matching_admission(screening_request, tmp_path, fault):
+    req = screening_lock_request(screening_request, tmp_path)
+    result = campaign.run_stage(req)
+    assert result.status == 'pass'
+    root = Path(req.output_dir)
+    lock = coverage.read_json(root / 'recipe_lock.json')
+    config = coverage.read_json(req.config_path)
+    deps = {k: Path(v) for k, v in config['dependencies'].items()}
+    task = {'id': 'leaf', 'stage': 'coverage'}
+    if fault != 'absent':
+        task['admission_receipt'] = lock['admission_receipt']
+        deps['campaign-admit'] = sealed_json_fixture(tmp_path / 'receipt', 'campaign-admit', 'campaign-admit',
+            {'admission.json': {'admitted': fault != 'false', 'lock_hash': 'f' * 64 if fault == 'wrong_lock' else coverage.digest(lock),
+                                'estimate_hash': lock['estimate_hash']}})
+    consumer = request(tmp_path / 'consumer', task, deps, config['approvals'])
+    with pytest.raises(ContractError, match='admission receipt'):
+        campaign_probe.require_admission(consumer, coverage.read_json(consumer.config_path), task, lock)
+
+
+def sizing_replay():
+    """Recompute all claims from hashed campaign budget fixtures, not snapshots."""
+    import gzip
+    import math
+    import numpy as np
+    from oxyformer.training.fit import PHASE_UNIT_SECONDS
+    fixture_path = ROOT / 'tests/fixtures/sizing/replay.json.gz'
+    fixture = json.loads(gzip.decompress(fixture_path.read_bytes()))
+    budget = fixture['budget']
+    assert coverage.digest(budget) == fixture['budget_sha256']
+    profiles = budget['profiles']
+    calibration = []
+    for row in fixture['calibration']:
+        selected = fixture['scenarios'][row['scenario']]['record']
+        prefix = selected['leaves'][:row['own_leaf']['step'] + 1]
+        assert prefix[-1] == row['own_leaf']
+        calibration.append({**selected, 'leaves': prefix, 'counts': {'success': row['success']},
+            'record_hash': row['sha256'], 'budget_generation': row['own_leaf']['leaf_budget'].get('formula', 'pre-ARC-2612')})
+    stats = campaign_probe.calibration_statistics(calibration, profiles)
+    for row in fixture['profile_records']:
+        assert coverage.digest(row['record']) == row['sha256']
+        for leaf in row['record']['leaves']:
+            contract = leaf['leaf_budget']
+            assert 'formula' not in contract and contract['safety_factor'] == 1.0
+            assert coverage.validate_leaf_budget(contract) == contract
+    assert sum(len(r['record']['leaves']) for r in fixture['profile_records']) == 160
+    result = {'captured_at': fixture['captured_at'], 'fixture_sha256': file_hash(fixture_path),
+        'calibration': stats, 'scenarios': {}, 'baseline': {}, 'full_window_seconds': 14100,
+        'profile_exception_leaves': 160}
+    for name, selected in fixture['scenarios'].items():
+        assert coverage.digest(selected['record']) == selected['sha256']
+        record = selected['record']
+        leaves = record['leaves']
+        n = len(leaves)
+        completed = record['counts']['success'] >= 1
+        assert fixture['choices'][name]['rule'] == ('first_sealed_repetition' if completed else 'last_sealed_leaf')
+        profile = deepcopy(profiles[name])
+        demand = profile['seconds_per_repetition'] + profile['publication_verification_seconds']
+        delivered = math.fsum(v['compute_seconds'] for v in leaves)
+        gross = delivered / n
+        net = demand / n if completed else None
+        contract = leaves[-1]['leaf_budget']
+        capacity = contract['compute_seconds']
+        old_usable = capacity - max(0., stats['setup_seconds'] - contract['overheads']['setup_seconds']) - campaign.checkpoint_margin_seconds() - max(PHASE_UNIT_SECONDS.values()) - stats['resume_overhead_seconds']
+        assert old_usable > 0
+        if completed:
+            assert old_usable <= net
+        old_counts = {str(f): math.ceil(f * demand / old_usable) + 1 for f in (1., 1.25)}
+        required = n + 1 if completed else math.ceil(demand / gross) + 1
+        assert old_counts['1.0'] >= required
+        assert old_counts['1.25'] >= old_counts['1.0']
+        # Exact pre-ARC-2612 implementation, using each scenario's own locked overheads.
+        old_capacity = (14100 - 300) / budget['profile_safety_factor'] - math.fsum(profile['leaf_overheads'].values())
+        baseline_repetitions = budget['per_scenario'][name]['repetitions']
+        baseline = math.ceil(profile['seconds_per_repetition'] * baseline_repetitions /
+                             (old_capacity - campaign.checkpoint_margin_seconds())) + 1
+        assert baseline == budget['per_scenario'][name]['leaves']
+        result['baseline'][name] = baseline
+        profile['leaf_overheads']['setup_seconds'] = stats['setup_seconds']
+        for phase in coverage.OVERHEAD_PHASES[1:]:
+            profile['leaf_overheads'][phase] = max(profile['leaf_overheads'][phase], stats['statistics'][phase]['max'])
+        profile['resume_overhead_seconds'] = stats['resume_overhead_seconds']
+        full_capacity = coverage.usable_leaf_compute(14100, profile['leaf_overheads'],
+            resume_overhead_seconds=profile['resume_overhead_seconds']) - profile['resume_overhead_seconds']
+        fits = {}
+        for factor, minimum in ((1.25, 2), (1., 3)):
+            assert campaign.slice_count(profile, minimum, 14100, factor) <= 40
+            maximal = max(n for n in range(1, 26) if campaign.slice_count(profile, n, 14100, factor, enforce_limit=False) <= 40)
+            fits[str(factor)] = {'repetitions': maximal, 'leaves': campaign.slice_count(profile, maximal, 14100, factor)}
+        excess = (delivered - profile['seconds_per_repetition']) / n
+        if name == 'null_effect':
+            assert coverage.RESUME_OVERHEAD_FLOOR_SECONDS >= excess
+        result['scenarios'][name] = {'fixture': fixture['choices'][name],
+            'DELIVERED': delivered, 'CAPACITY': capacity, 'DEMAND': demand,
+            'REALIZED_GROSS': gross, 'REALIZED_NET': net, 'per_leaf_excess': excess,
+            'usable_old': old_usable, 'old_window_counts': old_counts,
+            'full_window_usable_net': full_capacity, 'maximal_month1_counts': fits}
+    assert result['baseline'] == {'linear_reference': 22, 'sign_changing': 24, 'null_effect': 39, 'nonlinear': 40}
+    return result
+
+
+def test_sealed_campaign_replay():
+    result = sizing_replay()
+    print(json.dumps(result, indent=2))
+
+
+@pytest.mark.parametrize('factor', [1., 2.])
+def test_measurement_reader_accepts_old_generation_without_budget_authority(tmp_path, monkeypatch, factor):
+    from test_campaign import setup_chain_lock, profile_directory, request
+    req, _ = setup_chain_lock(tmp_path)
+    import shutil
+    root = tmp_path / 'old-producer'
+    shutil.copytree(profile_directory(req), root)
+    task = coverage.read_json(root / '_execution/task.json')
+    contract = coverage.leaf_budget(task['parameters']['wall_seconds'], factor, dict.fromkeys(coverage.OVERHEAD_PHASES, 0.))
+    contract.pop('formula')
+    contract['compute_seconds'] /= factor
+    task['parameters']['leaf_budget'] = contract
+    # Model an honestly sealed pre-change producer; restore the current loader
+    # before consuming its publication.
+    with monkeypatch.context() as old:
+        old.setattr(coverage, 'task_leaf_budget', lambda task: contract)
+        timing = coverage.read_json(root / 'timing.json')
+        for leaf in timing['leaves']:
+            leaf['leaf_budget'] = contract
+        write(root / 'timing.json', timing)
+        seal_budget_fixture(root, task['id'], task)
+    cfg = coverage.read_json(req.config_path)
+    consumer = request(tmp_path / 'generation-consumer', coverage.read_json(req.task_path),
+        {k: root if k == task['id'] else Path(v) for k,v in cfg['dependencies'].items()}, cfg['approvals'])
+    measured = coverage.read_leaf_measurements(root / coverage.BUDGET_RECORD)
+    assert measured['budget_generation'] == 'pre-ARC-2612'
+    if factor == 1.:
+        assert coverage.load_budget(consumer, coverage.read_json(consumer.config_path), task['id'])['all_successful']
+    else:
+        with pytest.raises(ContractError, match='pre-ARC-2612 window formula'):
+            coverage.load_budget(consumer, coverage.read_json(consumer.config_path), task['id'])
+    (root / coverage.BUDGET_RECORD).write_text('{}')
+    with pytest.raises(ContractError, match='record hash mismatch'):
+        coverage.read_leaf_measurements(root / coverage.BUDGET_RECORD)
+
+
+@pytest.mark.parametrize('screening_rates', [(340000.,) * 4], indirect=True)
+def test_fallback_headroom_limit_names_unpadded_count_and_bounded_recovery(screening_request, tmp_path):
+    base = screening_request
+    config, task = coverage.read_json(base.config_path), coverage.read_json(base.task_path)
+    p = task['parameters']
+    p.pop('setup_calibration')
+    pre = probe_request_from_screening(base, tmp_path / 'pre')
+    digests = campaign_probe.probe(pre, coverage.read_json(pre.config_path), coverage.read_json(pre.task_path), measurer=lambda: 0.)['input_digests']
+    deps = {k: Path(v) for k,v in config['dependencies'].items()}
+    p['calibration_probes'] = []
+    for i, seconds in enumerate((940., 100.)):
+        unit = 'bounded-calibration-' + str(i)
+        deps[unit] = sealed_json_fixture(tmp_path / unit, unit, 'campaign-setup-probe',
+            {'setup_probe.json': {'mode': 'calibration', 'setup_seconds': seconds, 'input_digests': digests}})
+        p['calibration_probes'].append({'dependency': unit, 'path': 'setup_probe.json'})
+        req = request(tmp_path / ('estimate-' + str(i)), task, deps, config['approvals'])
+        result = campaign_estimate.run_stage(req)
+        if i == 0:
+            assert result.status == 'blocked' and not result.artifacts
+            assert '1.5x calibration headroom' in result.message
+            assert 'count without headroom: 40' in result.message
+            assert 'second calibration probe' in result.message
+        else:
+            assert result.status == 'pass', result.message
+            estimate = coverage.read_json(Path(req.output_dir) / 'budget_estimate.json')
+            assert estimate['calibration']['chosen_seconds'] == 100
+            assert len(estimate['calibration']['draws']) == 2
+            assert not estimate['calibration']['second_probe_recommended']
+            assert all(r['repetitions'] == 1 and r['leaves'] <= 40 for r in estimate['per_scenario'].values())

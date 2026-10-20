@@ -298,24 +298,61 @@ def _verify_publication_result(result, request, recorded_inputs):
             f'artifact hash mismatch: {artifact.path}')
 
 
+def measurement_dependencies(task):
+    refs = task.get('parameters', {}).get('setup_calibration')
+    if refs is None:
+        return set()
+    require(task['stage'] in ('campaign-estimate', 'campaign-lock'),
+            'setup_calibration is permitted only on estimate and lock tasks')
+    require(isinstance(refs, list) and bool(refs), 'invalid setup_calibration')
+    for ref in refs:
+        require(set(ref) == {'dependency', 'path'} and ref['path'] == 'budget_record.json',
+                'invalid setup_calibration reference')
+        require(ref['path'] in task.get('needs', {}).get(ref['dependency'], []),
+                'setup_calibration must be a declared input')
+    require(len({ref['dependency'] for ref in refs}) == len(refs), 'duplicate calibration dependency')
+    return {ref['dependency'] for ref in refs}
+
+
 def verify_dependency_result(root, *, expected_hash=None, trees=None, active=None, verified=None,
-    output_dir=None):
+    output_dir=None, consumer_task=None, measurement_only_dependencies=None, budget_authorities=None):
     with integrity_observation(root):
         return _verify_dependency_result(root, expected_hash=expected_hash, trees=trees,
-            active=active, verified=verified, output_dir=output_dir)
+            active=active, verified=verified, output_dir=output_dir, consumer_task=consumer_task,
+            measurement_only_dependencies=measurement_only_dependencies, budget_authorities=budget_authorities)
 
 
-def _verify_dependency_result(root, *, expected_hash, trees, active, verified, output_dir):
+def _verify_dependency_result(root, *, expected_hash, trees, active, verified, output_dir,
+                              consumer_task=None, measurement_only_dependencies=None, budget_authorities=None):
     """Verify all lineage publications; only live stages observe acquisitions."""
     root = directory_path(root)
     active = set() if active is None else active
     verified = {} if verified is None else verified
     entered = set()
+    budget_authorities = set() if budget_authorities is None else budget_authorities
     pending = {}
-    stack = [(root, expected_hash, None, False)]
+    allowed_measurements = measurement_dependencies(consumer_task) if consumer_task else set()
+    stack = [(root, expected_hash, None, False, allowed_measurements)]
+    def verify_budget_authority(current, request, task, allowed):
+        measurement_dependencies(task)
+        if request.stage not in ('coverage', 'simulation-smoke'):
+            return
+        if task['id'] in allowed:
+            if measurement_only_dependencies is not None:
+                measurement_only_dependencies.add(task['id'])
+        elif current not in budget_authorities:
+            from oxyformer.validation.coverage import load_budget
+            names = ('_execution/request.json', '_execution/task.json', '_execution/result.json',
+                'budget_record.json', 'result.json')
+            paths = tuple(str(current / name) for name in names)
+            consumer = replace(request, dependency_paths=paths,
+                dependency_hashes=tuple(file_hash(p) for p in paths))
+            load_budget(consumer, {'dependencies': {task['id']: str(current)}}, task['id'])
+            budget_authorities.add(current)
+
     try:
         while stack:
-            current, expected, unit, ready = stack.pop()
+            current, expected, unit, ready, allowed_measurements = stack.pop()
             if ready:
                 result, tree = pending.pop(current)
                 if trees is not None:
@@ -333,6 +370,9 @@ def _verify_dependency_result(root, *, expected_hash, trees, active, verified, o
                     require(expected is None or any(a.path == FINGERPRINT and a.sha256 == expected
                             for a in result.artifacts),
                         'dependency published fingerprint identity changed')
+                    verify_budget_authority(current,
+                        StageRequest.from_json(read_regular(dependency_file(current, '_execution/request.json'))),
+                        read_mapping(current / '_execution/task.json'), allowed_measurements)
                 else:
                     active.add(current)
                     entered.add(current)
@@ -341,6 +381,8 @@ def _verify_dependency_result(root, *, expected_hash, trees, active, verified, o
                     require(Path(request.output_dir).resolve() == current, 'dependency attempt owner mismatch')
                     require(result.status == 'pass', 'dependency stage did not pass')
                     tree = verify_published_tree(current, result, expected)
+                    producer_task = read_mapping(current / '_execution/task.json')
+                    child_measurements = allowed_measurements | measurement_dependencies(producer_task)
                     config = read_mapping(request.config_path)
                     hashes = dict(zip(request.dependency_paths, request.dependency_hashes))
                     parents = []
@@ -359,19 +401,11 @@ def _verify_dependency_result(root, *, expected_hash, trees, active, verified, o
                             parent = directory_path(parent)
                             digest = hashes.get(str(parent / FINGERPRINT))
                             require(digest is not None, 'dependency fingerprint absent from published request')
-                            parents.append((parent, digest, parent_unit, False))
+                            parents.append((parent, digest, parent_unit, False, child_measurements))
                     _verify_publication_result(result, request, recorded_inputs)
-                    if request.stage in ('coverage', 'simulation-smoke'):
-                        from oxyformer.validation.coverage import load_budget
-                        names = ('_execution/request.json', '_execution/task.json', '_execution/result.json',
-                            'budget_record.json', 'result.json')
-                        paths = tuple(str(current / name) for name in names)
-                        consumer = replace(request, dependency_paths=paths,
-                            dependency_hashes=tuple(file_hash(p) for p in paths))
-                        producer_task = read_mapping(current / '_execution/task.json')
-                        load_budget(consumer, {'dependencies': {producer_task['id']: str(current)}}, producer_task['id'])
+                    verify_budget_authority(current, request, producer_task, allowed_measurements)
                     pending[current] = (result, tree)
-                    stack.append((current, expected, unit, True))
+                    stack.append((current, expected, unit, True, allowed_measurements))
                     stack.extend(reversed(parents))
                     continue
             if unit is not None:
@@ -542,6 +576,8 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
             'task omitted stage-required dependency')
     require(set(settings.get('outputs', [])) <= set(task['outputs']),
         'task omitted stage-required output')
+    measurement_dependencies(task)
+    measurement_only_dependencies = set()
     needs = task.get('needs', {})
     require(isinstance(needs, dict), 'task needs must map IDs to relative files')
     require(deps_env or not needs, 'dependencies require --deps-env')
@@ -551,6 +587,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     acquisition_hashes = {}
     dependency_trees = {}
     verified_dependencies = {}
+    budget_authorities = set()
     acquisitions = {}
     for unit, root in deps.items():
         require(not out.is_relative_to(root) and not root.is_relative_to(out),
@@ -571,7 +608,8 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
             continue
         require((root / '_execution/result.json').is_file(), f'stage receipt missing or not regular: {root / "_execution/result.json"}')
         result = verify_dependency_result(root, trees=dependency_trees, verified=verified_dependencies,
-            output_dir=out)
+            output_dir=out, consumer_task=task, measurement_only_dependencies=measurement_only_dependencies,
+            budget_authorities=budget_authorities)
         verify_dependency_id(root, unit)
         published_hashes[root / FINGERPRINT] = next(
             a.sha256 for a in result.artifacts if a.path == FINGERPRINT)
@@ -645,6 +683,13 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
                 module_name = 'oxyformer.execution.integrity'
             result = execute(request, module_name, repo)
             require(isinstance(result, StageResult), 'stage did not return StageResult')
+            if measurement_only_dependencies and result.status == 'pass':
+                from oxyformer.provenance import ArtifactRecord
+                path = atomic_json(out, 'measurement_only_dependencies.json',
+                    {'measurement_only_dependencies': sorted(measurement_only_dependencies)})
+                result = replace(result, artifacts=(*result.artifacts, ArtifactRecord(
+                    path=path.name, kind='measurement_only_dependencies', sha256=file_hash(path),
+                    lineage=result.artifacts[0].lineage)))
         except BaseException as exc:
             result = StageResult(request_hash=request.content_hash, status='fail', artifacts=(),
                 message=str(exc).strip() or type(exc).__name__)

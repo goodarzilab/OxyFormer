@@ -4402,3 +4402,98 @@ def test_noncoverage_budget_named_output_is_required(runtime, monkeypatch):
     assert result.status == 'fail', result.message
     assert 'stage omitted declared outputs' in result.message
     assert not publication_receipt(out).exists()
+
+
+@pytest.mark.parametrize('consumer_stage', ['campaign-estimate', 'campaign-lock'])
+def test_measurement_route_keeps_publication_checks_and_budget_authority_separate(tmp_path, monkeypatch, consumer_stage):
+    from oxyformer.execution import runner
+    from oxyformer.validation import coverage
+    from test_campaign import setup_chain_lock, profile_directory
+    req, _ = setup_chain_lock(tmp_path)
+    root = profile_directory(req)
+    producer = read_json(root / '_execution/task.json')['id']
+    task = {'id': 'sizing', 'stage': consumer_stage,
+        'needs': {producer: ['budget_record.json']},
+        'parameters': {'setup_calibration': [{'dependency': producer, 'path': 'budget_record.json'}]}}
+    calls = []
+    original = coverage.load_budget
+    def load(*args, **kwargs):
+        calls.append(args[2])
+        return original(*args, **kwargs)
+    monkeypatch.setattr(coverage, 'load_budget', load)
+    skipped = set()
+    cache = {}
+    runner.verify_dependency_result(root, consumer_task=task, measurement_only_dependencies=skipped, verified=cache)
+    assert skipped == {producer} and calls == []
+    # A cached measurement publication cannot waive an ordinary budget consumer.
+    runner.verify_dependency_result(root, verified=cache)
+    assert calls == [producer]
+    (root / 'budget_record.json').write_text('{}')
+    with raises(ContractError):
+        runner.verify_dependency_result(root, consumer_task=task)
+
+
+@pytest.mark.parametrize('stage', ['coverage', 'simulation-smoke', 'campaign-collect', 'campaign-admit'])
+def test_measurement_route_refuses_nonsizing_consumer(stage):
+    from oxyformer.execution.runner import measurement_dependencies
+    with raises(ContractError, match='only on estimate and lock'):
+        measurement_dependencies({'stage': stage, 'parameters': {'setup_calibration': [
+            {'dependency': 'leaf', 'path': 'budget_record.json'}]}, 'needs': {'leaf': ['budget_record.json']}})
+
+
+def test_measurement_lineage_preserves_frozen_recipe_refusal(runtime, tmp_path, monkeypatch):
+    """Synthetic stage bodies isolate the retained cross-recipe preflight refusal."""
+    from oxyformer.execution.integrity import publication_receipt
+    repo, ancestor = runtime
+    (repo / 'configs/execution/stages.yaml').write_text(yaml.safe_dump({'schema_version': 1,
+        'stages': {name: {'module': 'oxyformer.dummy'} for name in ('dummy', 'campaign-estimate')}}))
+    (ancestor / 'code_commit.txt').write_text(commit(repo))
+    path = locked_task(repo, ancestor, tmp_path / 'old-lock', monkeypatch)
+    task = read_json(path)
+    task.update(id='old-measurement', outputs=['budget_record.json'])
+    path.write_text(json.dumps(task))
+    assert_pass(run_task(repo, ancestor, path))
+    (repo / 'src/science.py').write_text('new_science = 2\n')
+    commit(repo)
+    middle = new_attempt(repo, tmp_path / 'estimate')
+    monkeypatch.setenv('SWARM_DEP_OLD_MEASUREMENT', str(ancestor))
+    path = task_file(middle, id='estimate', stage='campaign-estimate',
+        needs={'old-measurement': ['budget_record.json']}, parameters={'setup_calibration': [
+            {'dependency': 'old-measurement', 'path': 'budget_record.json'}]})
+    assert_pass(run_worker('campaign-estimate', middle, repo, deps_env=True, task_file=path,
+                          execute=inline_fixture_stage))
+    consumer = new_attempt(repo, tmp_path / 'consumer')
+    path = locked_task(repo, consumer, tmp_path / 'new-lock', monkeypatch)
+    task = read_json(path)
+    task['needs']['estimate'] = ['value.json']
+    path.write_text(json.dumps(task))
+    monkeypatch.setenv('SWARM_DEP_ESTIMATE', str(middle))
+    executions = []
+    with raises(ContractError, match='dependency scientific code/config drift'):
+        run_worker('dummy', consumer, repo, deps_env=True, task_file=path,
+                   execute=lambda *args: executions.append(args))
+    assert not executions
+    assert not (consumer / 'value.json').exists()
+    assert not (consumer / RESULT).exists()
+    assert not publication_receipt(consumer).exists()
+
+
+def test_runner_publishes_measurement_only_dependencies(runtime, tmp_path, monkeypatch):
+    from test_campaign import setup_chain_lock, profile_directory
+    from oxyformer.validation import coverage
+    repo, out = runtime
+    req, _ = setup_chain_lock(tmp_path / 'producer')
+    root = profile_directory(req)
+    unit = read_json(root / '_execution/task.json')['id']
+    (repo / 'configs/execution/stages.yaml').write_text(yaml.safe_dump({'schema_version': 1,
+        'stages': {'campaign-estimate': {'module': 'oxyformer.dummy'}}}))
+    commit(repo)
+    (out / 'code_commit.txt').write_text(git(repo, 'rev-parse', 'HEAD'))
+    task = task_file(out, id='estimate', stage='campaign-estimate', needs={unit: ['budget_record.json']},
+        parameters={'setup_calibration': [{'dependency': unit, 'path': 'budget_record.json'}]})
+    monkeypatch.setenv(dependency_variable(unit), str(root))
+    monkeypatch.setattr(coverage, 'load_budget', lambda *a, **kw: pytest.fail('measurement acquired budget authority'))
+    result = run_worker('campaign-estimate', out, repo, deps_env=True, task_file=task, execute=inline_fixture_stage)
+    assert_pass(result)
+    assert 'measurement_only_dependencies.json' in {a.path for a in result.artifacts}
+    assert read_json(out / 'measurement_only_dependencies.json') == {'measurement_only_dependencies': [unit]}

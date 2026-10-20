@@ -968,8 +968,8 @@ def test_generic_step_zero_preserves_archive_free_legacy_path(tmp_path, monkeypa
     assert coverage.read_json(Path(req.output_dir) / 'result.json')['summary']['complete']
 
 
-@pytest.mark.parametrize('setup,imported,expected', [(20., 30., 350.), (0., 0., 350.),
-    (30., 0., 340.), (0., 40., 340.), (30., 40., 330.)])
+@pytest.mark.parametrize('setup,imported,expected', [(20., 30., 440.), (0., 0., 440.),
+    (30., 0., 430.), (0., 40., 430.), (30., 40., 420.)])
 def test_chain_deadline_charges_phase_overruns_once(tmp_path, monkeypatch, setup, imported, expected):
     from test_campaign import STAMPS
     task, inputs = chain_fixture(tmp_path)
