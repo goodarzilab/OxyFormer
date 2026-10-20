@@ -749,3 +749,15 @@ formula. Unmarked budgets are accepted only at exactly factor 1.0 with the
 matching compute value. All others are refused as "leaf budget sealed under
 the pre-ARC-2612 window formula"; old factor-2 campaign records are usable only
 as non-authority calibration measurements. No receipt is rebound or resealed.
+
+Dependencies declared under an estimate or lock task's `setup_calibration` are
+measurement inputs, so they and ancestors reachable only through those edges do
+not enter that consumer's recipe drift comparison. Each descendant computes this
+exclusion over its own full dependency walk: any ordinary path to a record keeps
+that record scientific. Publication receipts, artifact hashes, request identity,
+pass status and attempt ownership remain verified throughout the walk; the existing
+budget-authority skips remain recorded in `measurement_only_dependencies.json`.
+The estimate's `budget_estimate.json` and the lock's `budget.json` retain each
+calibration record's hash, task ID, budget generation, scientific fingerprint and
+environment hash as sealed provenance. Scientific profiles, estimates and locks
+retain their existing fingerprint equality requirements.

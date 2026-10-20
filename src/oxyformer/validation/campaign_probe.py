@@ -96,7 +96,9 @@ def calibration_statistics(records, profiles):
                           'floor_seconds': RESUME_OVERHEAD_FLOOR_SECONDS, 'completed': completed},
         'realized_compute_per_leaf': statistics['compute_seconds']['mean'],
         'records': [{'record_hash': r['record_hash'], 'task_id': r['leaves'][-1]['task_id'],
-                     'budget_generation': r['budget_generation']} for r in records]}
+                     'budget_generation': r['budget_generation'],
+                     'scientific_fingerprint': r['profile']['scientific_fingerprint'],
+                     'environment_hash': r['profile']['environment_hash']} for r in records]}
 
 
 def calibrate(request, config, parameters, profiles):

@@ -1348,3 +1348,15 @@ def test_legacy_lock_refuses_task_safety_factor_drift(tmp_path):
     result = campaign.run_stage(req)
     assert result.status == "blocked" and "profile_safety_factor drift" in result.message
     assert not result.artifacts and not list(Path(req.output_dir).iterdir())
+
+
+def test_calibration_records_copy_sealed_profile_provenance(tmp_path):
+    from oxyformer.validation.campaign_probe import calibration_statistics
+    req, _ = setup_chain_lock(tmp_path)
+    record = coverage.read_leaf_measurements(profile_directory(req) / coverage.BUDGET_RECORD)
+    name = record['binding']['scenario']['name']
+    result = calibration_statistics([record], {name: {'seconds_per_repetition': 1.}})
+    assert result['records'] == [{'record_hash': record['record_hash'],
+        'task_id': record['leaves'][-1]['task_id'], 'budget_generation': record['budget_generation'],
+        'scientific_fingerprint': record['profile']['scientific_fingerprint'],
+        'environment_hash': record['profile']['environment_hash']}]
