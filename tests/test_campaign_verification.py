@@ -217,6 +217,19 @@ def test_postseal_predecessor_receipt_tamper_never_authorizes_reuse(verification
         chain.leaf(1)
 
 
+@pytest.mark.parametrize('ancestor', ['source', 'heavy'])
+def test_diagnostic_scratch_cannot_enter_attested_transitive_ancestor(verification_chain, ancestor):
+    from oxyformer.execution.runner import verify_only
+    chain = verification_chain
+    chain.leaf(0)
+    resumed = chain.leaf(1)
+    root = chain.source if ancestor == 'source' else chain.roots['heavy']
+    scratch = root / 'diagnostic-scratch'
+    with raises(ContractError, match='overlaps.*attempt|overlaps.*dependency|overlaps.*ancestor'):
+        verify_only(resumed, scratch)
+    assert not scratch.exists()
+
+
 @pytest.fixture
 def probe_pipeline(verification_chain, request):
     """Actual runner receipts and synthetic profile bytes; no training or lock bypass."""
