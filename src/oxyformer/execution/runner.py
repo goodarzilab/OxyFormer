@@ -15,7 +15,7 @@ from dataclasses import replace
 import yaml
 
 from oxyformer.contracts import StageRequest, StageResult
-from oxyformer.provenance import ContractError, canonical_json, relative_artifact_path, require
+from oxyformer.provenance import ArtifactRecord, ContractError, canonical_json, relative_artifact_path, require
 from .integrity import (DEPENDENCY_CHECK, FINGERPRINT, RESULT, _replace_control, _repair_control_directory,
     post_execution_check, publish_result, record_taints, snapshot_dependency_identities, observe_dependencies,
     directory_path, read_regular, regular_file_stat, regular_file_hash as file_hash,
@@ -423,34 +423,39 @@ class DependencyReuse:
                 'attested metadata hash mismatch')
             return raw
 
-        result = StageResult.from_json(read_bound(root / RESULT, tree[RESULT]['sha256']))
-        verify_publication(root, result)
-        records = [a for a in result.artifacts if a.path == FINGERPRINT]
-        require(result.status == 'pass' and len(records) == 1
-            and records[0].sha256 == tree[FINGERPRINT]['sha256'], 'attested publication mismatch')
-        value = json.loads(read_bound(root / FINGERPRINT, records[0].sha256))
-        original = replace(result, artifacts=tuple(a for a in result.artifacts if a.path != FINGERPRINT))
+        digest = tree[FINGERPRINT]['sha256']
+        value = json.loads(read_bound(root / FINGERPRINT, digest))
         require(value['schema_version'] in (1, 2) and value['attempt'] == str(root)
-            and value['excluded'] == list(PUBLICATION_EXCLUSIONS)
-            and value['stage_result'] == original.to_dict(), 'invalid attested publication manifest')
+            and value['excluded'] == list(PUBLICATION_EXCLUSIONS), 'invalid attested publication manifest')
+        original = StageResult.from_json(canonical_json(value['stage_result']))
+        require(original.status == 'pass' and all(a.path != FINGERPRINT for a in original.artifacts),
+            'invalid attested original result')
+        # Publication deterministically appends this artifact. Authenticate the
+        # reconstructed result without rereading an unused transitive payload.
+        result = replace(original, artifacts=(*original.artifacts,
+            ArtifactRecord(path=FINGERPRINT, sha256=digest, kind='attempt_fingerprint',
+                lineage=original.artifacts[0].lineage)))
+        serialized = result.to_json().encode()
+        require(tree[RESULT] == {'type': stat.S_IFREG, 'mode': value['control_modes'][RESULT],
+            'size': len(serialized), 'sha256': sha256(serialized).hexdigest(), 'target': None},
+            'attested result metadata mismatch')
+        verify_publication(root, result)
         selected = tuple(sorted({'_execution', *(a.path for a in original.artifacts)}))
         expected = value['entries']
         if value['schema_version'] == 1:
             expected = _legacy_publication_scope(expected, selected)
         require(publication_view(tree) == expected
             and tree['.'].get('published') == list(selected), 'attested snapshot differs from publication')
-        for name in PUBLICATION_EXCLUSIONS:
-            observed = regular_file_stat(root / name)
-            require(tree[name] == {'type': stat.S_IFREG, 'mode': stat.S_IMODE(observed.st_mode),
-                'size': observed.st_size, 'sha256': tree[name]['sha256'], 'target': None}
-                and tree[name]['mode'] == value['control_modes'][name], 'invalid attested control metadata')
+        observed = regular_file_stat(root / FINGERPRINT)
+        require(tree[FINGERPRINT] == {'type': stat.S_IFREG, 'mode': stat.S_IMODE(observed.st_mode),
+            'size': observed.st_size, 'sha256': digest, 'target': None}
+            and tree[FINGERPRINT]['mode'] == value['control_modes'][FINGERPRINT],
+            'invalid attested control metadata')
         request = StageRequest.from_json(read_bound(root / '_execution/request.json',
             expected['_execution/request.json']['sha256']))
         require(request.content_hash == result.request_hash and Path(request.output_dir) == root,
             'attested request owner mismatch')
         config = json.loads(read_bound(Path(request.config_path), request.config_hash))
-        task = json.loads(read_bound(Path(request.task_path), request.task_hash))
-        require(isinstance(task.get('id'), str) and task['id'], 'attested producer identity missing')
         hashes = dict(zip(request.dependency_paths, request.dependency_hashes))
         parents = []
         for unit, parent in config.get('dependencies', {}).items():
@@ -460,7 +465,7 @@ class DependencyReuse:
             digest = hashes.get(str(parent / FINGERPRINT))
             require(parent.is_absolute() and isinstance(digest, str), 'attested parent identity missing')
             parents.append((parent, digest, unit))
-        return task['id'], parents
+        return parents
 
     def validate_closure(self):
         """A pruned publication may not hide an uncovered parent or malformed tree."""
@@ -474,7 +479,7 @@ class DependencyReuse:
                 # hash for fallback, not this malformed receipt entry.
                 self.entries.pop(root)
         direct = {}
-        for _, parents in nodes.values():
+        for parents in nodes.values():
             for parent, expected, unit in parents:
                 if parent in self.direct:
                     if parent not in direct:
@@ -483,8 +488,12 @@ class DependencyReuse:
                     tree, identity = direct[parent]
                 else:
                     tree = self.entries.get(parent, {})
-                    identity = nodes.get(parent, (None, ()))[0]
-                if tree.get(FINGERPRINT, {}).get('sha256') != expected or identity != unit:
+                matches = tree.get(FINGERPRINT, {}).get('sha256') == expected
+                if parent in self.direct:
+                    matches = matches and identity == unit
+                # A transitive producer's task identity was checked by its
+                # sealed consumer; its publication hash anchors this edge.
+                if not matches:
                     self.rewalk[parent] = expected
         active, visited = set(), set()
         for first in nodes:
@@ -499,7 +508,7 @@ class DependencyReuse:
                 elif root not in visited and root in nodes:
                     active.add(root)
                     stack.append((root, True))
-                    stack.extend((parent, False) for parent, _, _ in nodes[root][1])
+                    stack.extend((parent, False) for parent, _, _ in nodes[root])
 
     def reusable(self, root, expected=None, *, measurement_path=None):
         if root in self.direct or root in self.rewalk or root not in self.entries:
