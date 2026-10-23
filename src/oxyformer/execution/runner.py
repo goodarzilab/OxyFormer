@@ -473,11 +473,14 @@ class DependencyReuse:
                 # Its authenticated parent's edge supplies the authoritative
                 # hash for fallback, not this malformed receipt entry.
                 self.entries.pop(root)
+        direct = {}
         for _, parents in nodes.values():
             for parent, expected, unit in parents:
                 if parent in self.direct:
-                    _, tree = self.publication(parent)
-                    identity = read_mapping(parent / '_execution/task.json').get('id')
+                    if parent not in direct:
+                        _, tree = self.publication(parent)
+                        direct[parent] = tree, read_mapping(parent / '_execution/task.json').get('id')
+                    tree, identity = direct[parent]
                 else:
                     tree = self.entries.get(parent, {})
                     identity = nodes.get(parent, (None, ()))[0]
