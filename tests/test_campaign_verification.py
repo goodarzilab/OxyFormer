@@ -240,6 +240,70 @@ def test_falsey_receipt_lists_force_full_verification(verification_chain, tmp_pa
     assert not (tmp_path / 'leaf-1' / FINGERPRINT).exists()
 
 
+def test_receipt_missing_both_snapshot_and_attempt_for_nested_ancestor(verification_chain, tmp_path, monkeypatch):
+    from oxyformer.execution import runner
+    chain = verification_chain
+    chain.produce('middle', needs=SOURCE_NEEDS, outputs=['value.json'])
+    chain.produce('outer', needs={'middle': ['value.json']}, outputs=['value.json'])
+    original_json, original_replace = runner.atomic_json, runner._replace_control
+
+    def write_json(root, name, value):
+        if Path(root).name == 'p0' and name == '_execution/dependencies.json':
+            value = deepcopy(value)
+            del value[str(chain.source)]
+        return original_json(root, name, value)
+
+    def replace_control(root, name, text):
+        if Path(root).name == 'p0' and name == runner.DEPENDENCY_CHECK:
+            value = json.loads(text)
+            del value['attempts'][str(chain.source)]
+            text = canonical_json(value)
+        return original_replace(root, name, text)
+
+    fields = {'parameters': chain.parameters,
+        'outputs': ['result.json', 'budget_record.json', 'continuation.tar']}
+    with monkeypatch.context() as injection:
+        injection.setattr(runner, 'atomic_json', write_json)
+        injection.setattr(runner, '_replace_control', replace_control)
+        chain.produce('p0', 'simulation-smoke', {'outer': ['value.json']},
+            continuation={'owner': 'closure-chain', 'step': 0, 'predecessor': None}, **fields)
+    (chain.source / 'data.json').write_text('{"changed_after_seal":true}')
+    with raises(ContractError, match='(fingerprint|input hash) mismatch'):
+        chain.produce('p1', 'simulation-smoke', {'outer': ['value.json'], 'p0': [
+            '_execution/task.json', '_execution/request.json', '_execution/result.json',
+            'result.json', 'budget_record.json', 'continuation.tar']},
+            continuation={'owner': 'closure-chain', 'step': 1, 'predecessor': 'p0'}, **fields)
+    assert not (tmp_path / 'p1' / FINGERPRINT).exists()
+
+
+def test_null_receipt_file_entry_rewalks_unchanged_source(verification_chain, monkeypatch):
+    from oxyformer.execution import runner
+    chain = verification_chain
+    original_json, original_replace = runner.atomic_json, runner._replace_control
+
+    def write_json(root, name, value):
+        if Path(root).name == 'leaf-0' and name == '_execution/dependencies.json':
+            value = deepcopy(value)
+            value[str(chain.source)]['data.json'] = None
+        return original_json(root, name, value)
+
+    def replace_control(root, name, text):
+        if Path(root).name == 'leaf-0' and name == runner.DEPENDENCY_CHECK:
+            value = json.loads(text)
+            value['attempts'][str(chain.source)]['fingerprint']['data.json'] = None
+            text = canonical_json(value)
+        return original_replace(root, name, text)
+
+    with monkeypatch.context() as injection:
+        injection.setattr(runner, 'atomic_json', write_json)
+        injection.setattr(runner, '_replace_control', replace_control)
+        chain.leaf(0)
+    leaf = chain.leaf(1)
+    timing = read_check(leaf)['timings']
+    assert timing['ancestors_rewalked'] >= 1
+    assert timing['roots'][str(chain.source)]['hashing']['bytes'] > 0
+
+
 @pytest.mark.parametrize('ancestor', ['source', 'heavy'])
 def test_diagnostic_scratch_cannot_enter_attested_transitive_ancestor(verification_chain, ancestor):
     from oxyformer.execution.runner import verify_only
