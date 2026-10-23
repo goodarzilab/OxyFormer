@@ -228,6 +228,25 @@ def task_file(out, **changes):
     return path
 
 
+def test_stopped_chain_reason_precedes_missing_scientific_payload(runtime, tmp_path, monkeypatch):
+    repo, out = runtime
+    stopped = new_attempt(repo, tmp_path / 'stopped')
+    def refuse(request, *unused):
+        atomic_json(request.output_dir, 'budget_record.json', {'diagnostic_only': True,
+            'status': 'allowance-exceeded', 'authorizes_compute_or_reuse': False})
+        return StageResult(request_hash=request.content_hash, status='blocked', artifacts=(),
+            message='allowance-exceeded: chain stopped before compute')
+    result = run_worker('dummy', stopped, repo, task_file=task_file(stopped, id='stopped'), execute=refuse)
+    assert result.status == 'blocked' and not (stopped / 'value.json').exists()
+    assert not (stopped / FINGERPRINT).exists()
+    monkeypatch.setenv(dependency_variable('stopped'), str(stopped))
+    with raises(ContractError, match='chain stopped: allowance-exceeded'):
+        run_worker('dummy', out, repo, deps_env=True,
+            task_file=task_file(out, needs={'stopped': ['value.json']}),
+            execute=lambda *args: pytest.fail('collector computed after a stopped dependency'))
+    assert not (out / FINGERPRINT).exists()
+
+
 def publish_source(repo, root, *, parent=None, head=None):
     """Seal the synthetic producer attempt."""
     dependencies = {} if parent is None else {'data-unit': str(parent)}

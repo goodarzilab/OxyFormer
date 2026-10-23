@@ -937,6 +937,14 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
                 require('payload.tar' in needs[unit], 'acquisition payload must be a declared input')
                 dependency_trees[str(root)] = verify_acquisition(root, acquisition_receipt)
                 acquisitions[unit] = acquisition_receipt
+            else:
+                # Stopped leaves never create scientific payloads. Report their
+                # terminal refusal before checking for those absent files.
+                with verification_span(root, 'lineage_walk'):
+                    require((root / RESULT).is_file(), f'stage receipt missing or not regular: {root / RESULT}')
+                    terminal = StageResult.from_json(read_regular(root / RESULT))
+                    require(terminal.status == 'pass', 'chain stopped: allowance-exceeded'
+                        if 'allowance-exceeded' in terminal.message else 'dependency stage did not pass')
             for relative in needs[unit]:
                 path = dependency_file(root, relative)
                 files.append(path)
@@ -944,7 +952,6 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
                     acquisition_hashes[path] = dependency_trees[str(root)][relative]['sha256']
             if acquisition_receipt is not None:
                 continue
-            require((root / '_execution/result.json').is_file(), f'stage receipt missing or not regular: {root / "_execution/result.json"}')
             result = verify_dependency_result(root, trees=dependency_trees, verified=verified_dependencies,
                 output_dir=out, consumer_task=task, measurement_only_dependencies=measurement_only_dependencies,
                 budget_authorities=budget_authorities, scientific_edges=scientific_edges, reuse=reuse)
