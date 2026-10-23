@@ -145,6 +145,28 @@ def test_five_leaf_receipt_reuse_bounds_verification_work(verification_chain, tm
         for i, row in enumerate(rows)]))
 
 
+def test_closure_reads_each_direct_parent_identity_once(verification_chain, monkeypatch):
+    from oxyformer.execution import runner
+    chain = verification_chain
+    for step in range(4):
+        predecessor = chain.leaf(step)
+    direct = {name: chain.roots[name] for name in ('frame', 'estimate')}
+    policy = runner.DependencyReuse(direct)
+    policy.add_receipt(predecessor)
+    reads = {root / '_execution/task.json': 0 for root in direct.values()}
+    original = runner.read_mapping
+
+    def observed(path):
+        if Path(path) in reads:
+            reads[Path(path)] += 1
+        return original(path)
+
+    monkeypatch.setattr(runner, 'read_mapping', observed)
+    policy.validate_closure()
+    assert not policy.rewalk
+    assert set(reads.values()) == {1}, reads
+
+
 @pytest.mark.parametrize('consumer', ['resumed', 'direct', 'collector'])
 def test_receipt_boundary_and_collector_backstop(verification_chain, tmp_path, monkeypatch, consumer):
     chain = verification_chain
