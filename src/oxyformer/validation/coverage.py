@@ -54,6 +54,58 @@ BUDGET_RECORD = "budget_record.json"
 MEASUREMENTS = "coverage_measurements.json"
 
 
+def projected_setup_allowance(fresh, resumed, longest_chain, *, leaf_indices=None, extrapolate=True):
+    """Conservative setup policy; admission deliberately does not extrapolate.
+
+    Explicit leaf indices preserve slopes for sparse calibration selections.
+    This changes sizing/admission evidence, never the sealed compute formula.
+    """
+    from statistics import median
+    fresh = finite(fresh, "fresh setup")
+    values = [finite(value, "resumed setup") for value in resumed]
+    integer(longest_chain, "longest chain", 1)
+    require(fresh >= 0 and bool(values) and all(value >= 0 for value in values), "invalid setup measurements")
+    indices = list(range(2, len(values) + 2)) if leaf_indices is None else list(leaf_indices)
+    require(len(indices) == len(values) and all(type(index) is int and index >= 2 for index in indices)
+        and indices == sorted(set(indices)), "invalid setup leaf indices")
+    slopes = [(values[j] - values[i]) / (indices[j] - indices[i])
+        for i in range(len(values)) for j in range(i + 1, len(values))]
+    growth = max(0., median(slopes)) if slopes else 0.
+    horizon = max(0, longest_chain - indices[-1]) if extrapolate else 0
+    projected = max(values) + growth * horizon
+    return {"fresh": fresh, "points": values, "leaf_indices": indices,
+        "growth": growth if extrapolate else values[-1] - values[0],
+        "projected": projected, "longest_chain": longest_chain, "horizon": horizon,
+        "allowance": max(fresh, projected) + 60., "extrapolated": extrapolate}
+
+
+def require_setup_fits(projection, *, window, resume_reserve, usable_compute):
+    ceiling = finite(window, "setup window") - finite(resume_reserve, "resume reserve") - finite(usable_compute, "sized usable compute")
+    evidence = {**projection, "ceiling": ceiling}
+    require(projection["allowance"] <= ceiling,
+        "setup allowance does not fit: " + canonical_json(evidence))
+    return evidence
+
+
+def setup_overruns(leaves, allowance):
+    """Derive the next-leaf refusal from authenticated timings, never flags."""
+    allowance = finite(allowance, "admitted setup allowance")
+    require(allowance >= 0 and bool(leaves), "setup safety net requires fresh measurements")
+    fresh = finite(leaves[0]["setup_seconds"], "chain fresh setup")
+    require(fresh >= 0, "negative fresh setup")
+    tolerance = .1 * fresh
+    flags = [finite(leaf["setup_seconds"], "chain resumed setup") > allowance + tolerance for leaf in leaves[1:]]
+    consecutive = 0
+    for flag in reversed(flags):
+        if not flag:
+            break
+        consecutive += 1
+    return {"allowance": allowance, "fresh": fresh, "tolerance": tolerance,
+        "overruns": sum(flags), "consecutive_overruns": consecutive,
+        "overrun": bool(flags and flags[-1]),
+        "stopped": consecutive >= 2 or sum(flags) >= 3}
+
+
 def publication_reserve(seconds):
     """Post-check publication uses part of the existing finalization reserve."""
     return min(30., seconds / 20)
