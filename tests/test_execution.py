@@ -308,6 +308,21 @@ def test_verify_only_cli_keeps_tamper_refusal(runtime, source, tmp_path):
     assert not Path(str(publication_receipt(source)) + '.tainted').exists()
 
 
+@pytest.mark.parametrize('target', ['attempt', 'dependency'])
+def test_verify_only_refuses_scratch_through_symlink_parent(runtime, source, tmp_path, target):
+    from oxyformer.execution.runner import verify_only
+    repo, out = runtime
+    assert_pass(run_task(repo, out, needs=SOURCE_NEEDS))
+    protected = out if target == 'attempt' else source
+    before = fingerprint_tree(protected)
+    alias = tmp_path / 'scratch-parent'
+    alias.symlink_to(protected, target_is_directory=True)
+    with raises(ContractError, match='diagnostic scratch overlaps'):
+        verify_only(out, alias / 'new-scratch')
+    assert not (protected / 'new-scratch').exists()
+    assert fingerprint_tree(protected) == before
+
+
 def seal_source(repo, source):
     source_files(source)
     publish_source(repo, source)
