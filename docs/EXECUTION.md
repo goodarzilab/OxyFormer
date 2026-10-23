@@ -862,12 +862,19 @@ ancestors using these sealed receipts:
   receipt cannot authorize reuse. True post-seal changes
   to the predecessor's own receipt fail its current publication check.
   Before pruning, the runner authenticates each attested publication's small
-  result, manifest, request, config and task records and checks its declared
+  manifest, request and config records and checks its declared
   parent hashes against the receipt. A parent absent from both receipt maps
   still receives a full walk. Snapshot entries must match the publication's
   manifest; malformed entries fall back to current verification. This metadata
   must remain readable. Reuse avoids rehashing transitive payloads, not the
   metadata needed to establish which publications the receipt covers.
+  The terminal result is reconstructed from the manifest's original result and
+  fingerprint artifact, then checked against both the sealed snapshot and the
+  independent publication authority. Unused stored result and task payloads are
+  attested rather than reread; the sealed consumer already checked the producer
+  identity, and the authenticated parent edge binds its publication hash.
+  Their post-seal drift has the same full-walk collector backstop as other
+  unused transitive payloads. Direct task/result inputs remain checked now.
   Direct-parent identities are read once from their currently verified
   publications and cached within this walk, including when older leaves share
   those parents; the cache never carries across attempts.
