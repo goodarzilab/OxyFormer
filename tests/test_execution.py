@@ -327,6 +327,16 @@ def test_verify_only_cli_keeps_tamper_refusal(runtime, source, tmp_path):
     assert not Path(str(publication_receipt(source)) + '.tainted').exists()
 
 
+def test_leaf_diagnostic_refuses_direct_acquisition_inputs(runtime, acquisition, tmp_path):
+    from oxyformer.execution.runner import verify_only
+    repo, out = runtime
+    assert_pass(run_task(repo, out, needs={'fetch-data': ['payload.tar', 'receipts.json']}))
+    scratch = tmp_path / 'unsupported-acquisition-diagnostic'
+    with raises(ContractError, match='diagnostic requires stage-publication inputs'):
+        verify_only(out, scratch)
+    assert not scratch.exists()
+
+
 @pytest.mark.parametrize('target', ['attempt', 'dependency'])
 def test_verify_only_refuses_scratch_through_symlink_parent(runtime, source, tmp_path, target):
     from oxyformer.execution.runner import verify_only
