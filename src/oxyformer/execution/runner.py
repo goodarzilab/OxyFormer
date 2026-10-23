@@ -474,7 +474,7 @@ def verify_only(attempt, scratch, *, successor=False):
     Recipe comparisons use the sealed consumer's lock, never this checkout's
     fingerprint. This diagnostic cannot authorize a scientific execution.
     """
-    attempt, scratch = Path(attempt).resolve(strict=True), Path(scratch).absolute()
+    attempt, scratch = Path(attempt).resolve(strict=True), Path(scratch).resolve(strict=False)
     require(not scratch.exists(), 'diagnostic scratch must be new')
     require(not scratch.is_relative_to(attempt), 'diagnostic scratch overlaps attempt')
     with verification_diagnostic():
