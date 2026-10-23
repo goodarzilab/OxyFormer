@@ -89,7 +89,7 @@ def write(path, value):
     return path
 
 
-def seal_budget_fixture(root, unit, task=None, *, complete_controls=False):
+def seal_budget_fixture(root, unit, task=None, *, complete_controls=False, dependency_snapshots=None):
     """Publish synthetic measurements through the real immutable sealing path."""
     from oxyformer.execution.integrity import publish_result, RESULT, FINGERPRINT
     from oxyformer.provenance import ArtifactRecord, ArtifactLineage
@@ -112,9 +112,11 @@ def seal_budget_fixture(root, unit, task=None, *, complete_controls=False):
     task_path = write(root / '_execution/task.json', task)
     inputs = ()
     if complete_controls:
-        snapshot = write(root / '_execution/dependencies.json', {})
+        snapshot = write(root / '_execution/dependencies.json', dependency_snapshots or {})
         inputs = (str(snapshot),)
-        write(root / '_execution/dependency_check.json', {'status': 'pass', 'attempts': {}})
+        write(root / '_execution/dependency_check.json', {'status': 'pass', 'attempts': {
+            name: {'status': 'unchanged', 'changed_paths': [], 'tainted_paths': [], 'fingerprint': tree}
+            for name, tree in (dependency_snapshots or {}).items()}})
         write(root / '_execution/environment.json', {'fixture': 'synthetic'})
         write(root / '_execution/identity.json', {'head': 'c' * 40,
             'scientific_fingerprint': timing['scientific_fingerprint']})
