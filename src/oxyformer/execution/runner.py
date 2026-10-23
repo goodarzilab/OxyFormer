@@ -454,7 +454,7 @@ class DependencyReuse:
             receipt_sources={root: self.sources[Path(root)] for root in reused})
 
 
-def dependency_reuse(task, deps):
+def dependency_reuse(task, deps, *, output_dir=None):
     chain = task.get('continuation', {})
     resumed = task['stage'] in ('coverage', 'simulation-smoke') and chain.get('predecessor')
     probe = task['stage'] == 'campaign-setup-probe' and task.get('parameters', {}).get('mode') == 'admission-resumed'
@@ -507,6 +507,12 @@ def dependency_reuse(task, deps):
         policy.add_receipt(root, payload=payload)
         policy.measurements.update(set(policy.entries) - previous)
         policy.measurements.update(Path(name) for name in payload.get('snapshot', {}))
+    if output_dir is not None:
+        # Pruning a branch must not prune its output-isolation check. Include
+        # deeper receipt entries that traversal will never visit at all.
+        for ancestor in set(policy.entries) | set(policy.rewalk):
+            require(not output_dir.is_relative_to(ancestor) and not ancestor.is_relative_to(output_dir),
+                f'output overlaps an attested ancestor: {ancestor}')
     return policy
 
 
@@ -735,7 +741,7 @@ def verify_only(attempt, scratch, *, successor=False, full_walk=False):
                 a.sha256 for a in terminal.artifacts if a.path == FINGERPRINT)
         trees, verified, edges, budget_authorities = {}, {}, {}, set()
         with verification_timings() as timings:
-            reuse = None if full_walk else dependency_reuse(task, deps)
+            reuse = None if full_walk else dependency_reuse(task, deps, output_dir=scratch)
             rewalk_receipt_misses(reuse, trees, verified, scratch, task, edges, budget_authorities)
             for unit, root in deps.items():
                 verify_dependency_result(root, expected_hash=hashes[str(root / FINGERPRINT)],
@@ -918,7 +924,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     budget_authorities = set()
     acquisitions = {}
     with verification_timings() as timings:
-        reuse = dependency_reuse(task, deps)
+        reuse = dependency_reuse(task, deps, output_dir=out)
         rewalk_receipt_misses(reuse, dependency_trees, verified_dependencies, out, task,
             scientific_edges, budget_authorities)
         for unit, root in deps.items():
