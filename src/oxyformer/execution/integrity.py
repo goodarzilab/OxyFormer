@@ -307,7 +307,10 @@ def observe_acquisition(path, *, metadata=None, digest=None):
     old = binding[2].get(binding[1])
     known = {} if metadata is None else dict(type=stat.S_IFMT(metadata.st_mode),
         mode=stat.S_IMODE(metadata.st_mode), size=metadata.st_size)
-    if old is not None and old.get('partial') and known.get('type') == stat.S_IFDIR:
+    if known.get('type') == stat.S_IFDIR:
+        # Directory size describes filesystem storage, not a particular input.
+        # Let the file read retain its own namespace evidence; complete tree
+        # verification still detects added/removed entries and directory drift.
         known.pop('size', None)
     if digest is not None:
         known['sha256'] = digest
