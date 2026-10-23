@@ -3,6 +3,7 @@
 Measurements size work; only admission.json authorizes a screening lock.
 """
 from copy import deepcopy
+from hashlib import sha256
 import math
 import os
 from pathlib import Path
@@ -76,17 +77,27 @@ def profile_setup_sources(request, config, refs, scenario, profile, stamps):
         tree = verify_published_tree(root, terminal)
         sources[depth] = {'reference': ref, 'publication_hash': tree[FINGERPRINT]['sha256'],
             'archive_hash': tree['continuation.tar']['sha256'], 'shape': publication_shape(tree),
+            'repetition_records': sum(name.startswith('repetitions/') and name.endswith('/result.json')
+                and entry.get('type') == stat.S_IFREG for name, entry in tree.items()),
             'outputs': read_json(root / '_execution/task.json')['outputs']}
     return sources
 
 
-def expected_predecessor_shape(profile, outputs):
+def expected_predecessor_shape(profile, outputs, *, draw_count=1):
     sources = profile.get('setup_profile_sources', {})
     if not sources:
         return None  # Locking is possible; admission must refuse missing profiles.
     source = sources['1']
     shape = dict(source['shape'])
+    # A fast scenario can represent several repetitions in its first leaf.
+    # Include one profile archive per potentially started repetition, bounded
+    # by the expansion. This is an admission shape, never a scientific archive.
+    copies = min(draw_count, max(1, math.ceil(profile['assumed_usable_per_leaf'] / profile['seconds_per_repetition'])))
+    shape['archive_bytes'] *= copies
     shape['record_count'] += len(set(outputs) - set(source['outputs'])) - len(set(source['outputs']) - set(outputs))
+    # A completed repetition publishes one individual result. A partial profile
+    # can have none yet; the expanded first leaf can finish several.
+    shape['record_count'] += copies - source.get('repetition_records', 0)
     require(shape['record_count'] > 0, 'invalid expanded predecessor shape')
     return shape
 
@@ -432,6 +443,11 @@ def synthetic_predecessor(request, config, task):
         'source_receipt': {'attempt': str(receipt_root), 'publication_hash': own[FINGERPRINT]['sha256']},
         'dependency_receipt': {'snapshot': snapshot, 'check': check},
         'scientific_execution': False}
+    reference_bytes = profile['setup_profile_sources']['1']['shape']['archive_bytes']
+    copies, remainder = divmod(expected['archive_bytes'], reference_bytes)
+    require(copies >= 1 and remainder == 0, 'invalid locked profile archive shape')
+    value['profile_archive_copies'] = copies
+    value['archive_shape_rule'] = 'cycle authenticated source bytes to the locked first-leaf byte count'
     if depth == 2:
         source_task = read_json(receipt_root / '_execution/task.json')
         source_config = read_json(receipt_root / '_execution/config.json')
@@ -447,9 +463,42 @@ def synthetic_predecessor(request, config, task):
         path = dependency(request, config, {'dependency': source_unit, 'path': name})
         destination = Path(request.output_dir) / name
         require(not destination.exists(), 'synthetic predecessor payload already exists')
-        shutil.copyfile(path, destination)
-        require(file_hash(destination) == profile_tree[name]['sha256'], 'synthetic profile copy mismatch')
-        artifacts.append(ArtifactRecord(path=name, sha256=profile_tree[name]['sha256'], kind='synthetic_profile_copy', lineage=lineage))
+        if name == 'continuation.tar':
+            combined = sha256()
+            remaining = expected['archive_bytes']
+            with destination.open('xb') as output:
+                while remaining:
+                    copied = sha256()
+                    with path.open('rb') as original:
+                        while chunk := original.read(1024 * 1024):
+                            copied.update(chunk)
+                            selected = chunk[:remaining]
+                            output.write(selected)
+                            combined.update(selected)
+                            remaining -= len(selected)
+                    require(copied.hexdigest() == profile_tree[name]['sha256'], 'synthetic profile copy mismatch')
+            expected_hash = combined.hexdigest()
+        else:
+            shutil.copyfile(path, destination)
+            expected_hash = profile_tree[name]['sha256']
+        require(file_hash(destination) == expected_hash, 'synthetic profile copy mismatch')
+        artifacts.append(ArtifactRecord(path=name, sha256=expected_hash, kind='synthetic_profile_copy', lineage=lineage))
+    # The normal runner contributes its controls after the worker returns.
+    # Fill the remaining record slots with profile metadata, never fake science.
+    control_names = {str(path.relative_to(request.output_dir))
+        for path in (Path(request.output_dir) / '_execution').rglob('*') if path.is_file()}
+    control_names.update((FINGERPRINT, RESULT, '_execution/dependency_check.json'))
+    base_records = len(control_names) + len(PROFILE_PAYLOADS) + 2  # probe and artifact manifest
+    require(base_records <= expected['record_count'], 'synthetic controls exceed locked publication shape')
+    profile_record = dependency(request, config, {'dependency': source_unit, 'path': 'result.json'})
+    for index in range(expected['record_count'] - base_records):
+        name = f'synthetic-records/profile-{index}.json'
+        destination = Path(request.output_dir) / name
+        destination.parent.mkdir(exist_ok=True)
+        shutil.copyfile(profile_record, destination)
+        require(file_hash(destination) == profile_tree['result.json']['sha256'], 'synthetic record copy mismatch')
+        artifacts.append(ArtifactRecord(path=name, sha256=profile_tree['result.json']['sha256'],
+            kind='synthetic_profile_copy', lineage=lineage))
     return publish(request, {'setup_probe.json': value}, status='pass', message='Synthetic predecessor; no scientific computation',
         extra_artifacts=tuple(artifacts))
 
