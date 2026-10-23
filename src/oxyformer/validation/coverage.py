@@ -106,6 +106,38 @@ def setup_overruns(leaves, allowance):
         "stopped": consecutive >= 2 or sum(flags) >= 3}
 
 
+def screening_setup_guard(request, config, task, lock, history):
+    """Refuse before continuation import or compute; diagnostics never authorize a budget."""
+    if lock is None or 'setup_safety_net' not in lock.get('budget', {}):
+        return {}
+    from oxyformer.validation.campaign_probe import (
+        require_admission, declared_publication_shape, compare_publication_shape)
+    admission = require_admission(request, config, task, lock)
+    allowance = admission['admission_measurements']['allowance_seconds']
+    result = {'allowance_seconds': allowance}
+
+    def refuse(reason, evidence):
+        atomic_json(request.output_dir, BUDGET_RECORD, {'schema_version': 1,
+            'diagnostic_only': True, 'status': reason, 'task_id': task['id'],
+            'chain': task['continuation'], 'setup_safety': evidence,
+            'authorizes_compute_or_reuse': False})
+        require(False, reason + ': chain stopped before compute; ' + canonical_json(evidence))
+
+    if history:
+        safety = setup_overruns(history, allowance)
+        if safety['stopped']:
+            refuse('allowance-exceeded', safety)
+        result['history'] = safety
+        if task['continuation']['step'] == 1:
+            expected = lock['budget']['expected_predecessor_shapes'][task['parameters']['scenario']['name']]
+            observed = declared_publication_shape(request, config, task['continuation']['predecessor'])
+            comparison = compare_publication_shape(expected, observed)
+            result['admission_shape'] = comparison
+            if comparison['status'] == 'admission-shape-mismatch':
+                refuse('admission-shape-mismatch', comparison)
+    return result
+
+
 def publication_reserve(seconds):
     """Post-check publication uses part of the existing finalization reserve."""
     return min(30., seconds / 20)
@@ -283,7 +315,8 @@ def load_budget(request, config, unit, *, expected_task=None):
     if expected_task is not None:
         require(task == expected_task, "budget expected task mismatch")
     terminal = StageResult.from_json(declared("_execution/result.json").read_text())
-    require(terminal.status == "pass", "budget stage did not pass")
+    require(terminal.status == "pass", "chain stopped: allowance-exceeded" if 'allowance-exceeded' in terminal.message
+        else "budget stage did not pass")
     require(terminal.request_hash == producer.content_hash, "budget request mismatch")
     verify_publication(root, terminal)
     records = [a for a in terminal.artifacts if a.path == BUDGET_RECORD]
@@ -1001,7 +1034,9 @@ def _run_chain(request, started):
     imported_at = time.monotonic()
     setup = imported_at - started
     history = []
+    setup_safety = {}
     if chain["predecessor"] is None:
+        setup_safety = screening_setup_guard(request, config, task, lock, history)
         states = [{"parts": [], "sample": {}, "pending": None, "record": None, "compute_seconds": 0.}
                   for _ in parameters["draws"]]
     else:
@@ -1009,9 +1044,10 @@ def _run_chain(request, started):
         require(previous["binding"]["chain"]["owner"] == chain["owner"]
             and previous["binding"]["chain"]["step"] + 1 == chain["step"], "budget chain drift")
         require(previous["binding"]["wall_seconds"] == seconds, "budget wall binding drift")
+        history = previous["leaves"]
+        setup_safety = screening_setup_guard(request, config, task, lock, history)
         archive = dependency(request, config, {"dependency": chain["predecessor"], "path": "continuation.tar"})
         states = _read_continuation(archive, binding, chain)
-        history = previous["leaves"]
     destinations = []
     for draw, state in zip(parameters["draws"], states):
         destination = output_path(root, "repetitions/" + draw["repetition_id"])
@@ -1095,6 +1131,8 @@ def _run_chain(request, started):
         "budget_exceeded": elapsed > seconds or (parameters.get("leaf_budget") is not None and
             compute_seconds > remaining_compute(budget, setup_seconds=setup, import_seconds=import_seconds,
                 export_seconds=export_seconds, publication_seconds=publication_seconds))}
+    if setup_safety:
+        leaf['setup_safety'] = setup_safety
     leaves = [*history, leaf]
     exceeded = leaf["budget_exceeded"]
     timing = {"chain": chain, "leaves": leaves, "wall_seconds": math.fsum(v["wall_seconds"] for v in leaves),

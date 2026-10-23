@@ -471,7 +471,9 @@ def build_screening_lock(request, config, task):
         "collector_gpu_hours": 0,
         "cpu_wall_hours_ceiling": (estimate["projected_leaf_count"] * leaf_allocation(p["wall_seconds"])["allocation_seconds"] / 60 + 40) / 60}
     from oxyformer.validation.campaign_probe import expected_predecessor_shape
-    budget['expected_predecessor_shapes'] = {name: expected_predecessor_shape(profile, LEAF_OUTPUTS + ['continuation.tar'])
+    counts = {batch['scenario']['name']: len(batch['draws']) for batch in batches}
+    budget['expected_predecessor_shapes'] = {name: expected_predecessor_shape(profile,
+        LEAF_OUTPUTS + ['continuation.tar'], draw_count=counts[name])
         for name, profile in profiles.items()}
     budget['setup_safety_net'] = {'noise_fraction_of_fresh': .1, 'consecutive_overruns': 2,
         'total_overruns': 3, 'overrunning_leaf_gpu_hours_bound': 12,

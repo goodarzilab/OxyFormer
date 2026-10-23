@@ -709,7 +709,25 @@ def screening_request(tmp_path, monkeypatch, screening_rates):
             'recipe_hash': coverage.digest(p['recipe']), 'device': 'cuda:0', 'gpu_seconds': rate + 4400.,
             'complete_repetition_seconds': [rate], 'wall_seconds': rate + 4400., 'setup_seconds': 4000.,
             'measurement_scope': 'complete_chain_return', 'leaves': leaves, **STAMPS})
-        seal_budget_fixture(root, task['id'], task)
+        for name in ('runtime.json', 'coverage_measurements.json', 'artifact_manifest.json'):
+            write(root / name, {'fixture': 'synthetic'})
+        (root / 'continuation.tar').write_bytes(b'profile continuation fixture\n' * 1024)
+        seal_budget_fixture(root, task['id'], task, complete_controls=True)
+        terminal_timing = coverage.read_json(root / 'timing.json')
+        for step, early_task in enumerate(tasks[index-39:index-37]):
+            early = deps[early_task['id']] = tmp_path / early_task['id']
+            value = coverage.read_json(root / 'result.json')
+            value['records'] = []
+            write(early / 'result.json', value)
+            timing = deepcopy(terminal_timing)
+            timing.update(leaves=deepcopy(leaves[:step+1]), complete=False, all_successful=False,
+                complete_repetition_seconds=[], wall_seconds=sum(row['wall_seconds'] for row in leaves[:step+1]),
+                setup_seconds=sum(row['setup_seconds'] for row in leaves[:step+1]))
+            write(early / 'timing.json', timing)
+            for name in ('runtime.json', 'coverage_measurements.json', 'artifact_manifest.json'):
+                write(early / name, {'fixture': 'synthetic'})
+            (early / 'continuation.tar').write_bytes(b'profile continuation fixture\n' * 1024)
+            seal_budget_fixture(early, early_task['id'], early_task, complete_controls=True)
     estimate_task = tasks[-1]
     estimate_task['parameters'].pop('calibration_probes')
     estimate_task['needs'].pop('campaign-calibration')
@@ -825,7 +843,8 @@ def test_month1_lock_requires_unchanged_prior_estimate(screening_request, tmp_pa
     assert not list(Path(req.output_dir).iterdir())
 
 
-def test_month1_bound_cell_executes_and_cpu_collector_scopes_one_scenario(screening_request, tmp_path, monkeypatch):
+@pytest.mark.parametrize('shape_percent', [None, 110, 120, 150, 151])
+def test_month1_bound_cell_executes_and_cpu_collector_scopes_one_scenario(screening_request, tmp_path, monkeypatch, shape_percent):
     from test_coverage import chain_request
     from oxyformer.training.fit import RecipeStudy
     req = screening_lock_request(screening_request, tmp_path)
@@ -841,7 +860,9 @@ def test_month1_bound_cell_executes_and_cpu_collector_scopes_one_scenario(screen
     deps['campaign-lock'] = root
     deps['campaign-admit'] = sealed_json_fixture(tmp_path / 'admit-fixture', 'campaign-admit',
         'campaign-admit', {'admission.json': {'admitted': True, 'lock_hash': coverage.digest(lock),
-                                           'estimate_hash': lock['estimate_hash']}})
+            'estimate_hash': lock['estimate_hash'], 'setup_policy': 'three-receipt-minima-v1',
+            'admission_measurements': {'setup_minima': {'fresh': 0., 'resumed_1': 0., 'resumed_2': 0.},
+                                       'allowance_seconds': 60.}}})
     calls = []
     def execute(draw, frame, scenario, template, recipe, destination, deadline, *, continuation, study):
         assert study == RecipeStudy(**campaign.SCREENING_CELL)
@@ -850,6 +871,19 @@ def test_month1_bound_cell_executes_and_cpu_collector_scopes_one_scenario(screen
         _, records = successful_records(1)
         return {**records[0], 'draw': draw, 'wall_seconds': .001}
     monkeypatch.setattr(coverage, 'execute_draw', execute)
+    if shape_percent is not None:
+        original_archive = coverage._write_continuation
+        expected_shape = lock['budget']['expected_predecessor_shapes']['null_effect']
+        def sized_archive(path, states, **kwargs):
+            original_archive(path, states, **kwargs)
+            if kwargs['chain']['step'] == 0:
+                target = expected_shape['archive_bytes'] * shape_percent // 100
+                assert path.stat().st_size <= target
+                # Valid tar padding models publication-size variance without
+                # changing the saved continuation state or scientific work.
+                with path.open('ab') as stream:
+                    stream.write(b'\0' * (target - path.stat().st_size))
+        monkeypatch.setattr(coverage, '_write_continuation', sized_archive)
     for leaf in plan['tasks'][:-1]:
         leaf_req = chain_request(tmp_path / leaf['id'], leaf, deps)
         cfg = coverage.read_json(leaf_req.config_path)
@@ -857,7 +891,18 @@ def test_month1_bound_cell_executes_and_cpu_collector_scopes_one_scenario(screen
         write(Path(leaf_req.config_path), cfg)
         leaf_req = replace(leaf_req, config_hash=file_hash(leaf_req.config_path))
         result = run_coverage(leaf_req)
+        if shape_percent == 151 and leaf['continuation']['step'] == 1:
+            assert result.status == 'blocked' and 'admission-shape-mismatch' in result.message
+            stopped = coverage.read_json(Path(leaf_req.output_dir) / coverage.BUDGET_RECORD)
+            assert stopped['diagnostic_only'] and stopped['status'] == 'admission-shape-mismatch'
+            assert not (Path(leaf_req.output_dir) / '_execution/fingerprint.json').exists()
+            return
         assert result.status == 'pass', result.message
+        if shape_percent is not None and leaf['continuation']['step'] == 1:
+            measured = coverage.read_json(Path(leaf_req.output_dir) / coverage.BUDGET_RECORD)['leaves'][-1]
+            shape = measured['setup_safety']['admission_shape']
+            assert shape['expected'] == expected_shape
+            assert shape['status'] == ('matched' if shape_percent == 110 else 'admission-shape-exceeded')
         # The spare carries completed draws without fitting them again.
         assert calls == lock['batches'][0]['draws']
         value = coverage.read_json(Path(leaf_req.output_dir) / 'result.json')
@@ -1318,7 +1363,7 @@ def seal_stage_fixture(req, result):
     return root
 
 
-def admission_fixture(screening_request, tmp_path, *, setup=0., probe_lock_hash=None):
+def admission_fixture(screening_request, tmp_path, *, setup=0., probe_lock_hash=None, setup_draws=None, mutate_receipt=None):
     req = screening_lock_request(screening_request, tmp_path)
     # The small-output bound reads publication manifests, as the real runner does.
     estimate_root = Path(screening_request.output_dir)
@@ -1339,13 +1384,27 @@ def admission_fixture(screening_request, tmp_path, *, setup=0., probe_lock_hash=
     deps['campaign-lock'] = lock_root
     post = probe_request_from_screening(req, tmp_path / 'post-probe', mode='admission', lock_root=lock_root)
     probe_value = campaign_probe.probe(post, coverage.read_json(post.config_path), coverage.read_json(post.task_path), measurer=lambda: setup)
-    if probe_lock_hash is not None:
-        probe_value['lock_hash'] = probe_lock_hash
-    deps['post-probe'] = sealed_json_fixture(tmp_path / 'probe-publication', 'post-probe',
-        'campaign-setup-probe', {'setup_probe.json': probe_value})
+    lock = coverage.read_json(lock_root / 'recipe_lock.json')
+    refs = {}
+    for key, depth in (('fresh', 0), ('resumed_1', 1), ('resumed_2', 2)):
+        value = deepcopy(probe_value)
+        values = setup_draws[key] if setup_draws is not None else [setup, setup]
+        value.update(mode='admission' if depth == 0 else 'admission-resumed', depth=depth,
+            setup_draws=values, setup_seconds=min(values))
+        if probe_lock_hash is not None:
+            value['lock_hash'] = probe_lock_hash
+        if depth:
+            shape = lock['budget']['expected_predecessor_shapes'][value['scenario']]
+            value.update(verification={'reuse_miss': False, 'ancestors_reused': 10},
+                predecessor_shape=campaign_probe.compare_publication_shape(deepcopy(shape), deepcopy(shape), synthetic=True))
+        if mutate_receipt is not None:
+            mutate_receipt(key, value)
+        unit = 'post-probe-' + key
+        deps[unit] = sealed_json_fixture(tmp_path / unit, unit, 'campaign-setup-probe', {'setup_probe.json': value})
+        refs[key] = {'dependency': unit, 'path': 'setup_probe.json'}
     task = {'id': 'campaign-admit', 'stage': 'campaign-admit', 'parameters': {
         'lock_input': {'dependency': 'campaign-lock', 'path': 'recipe_lock.json'},
-        'probe_input': {'dependency': 'post-probe', 'path': 'setup_probe.json'}}}
+        'probe_inputs': refs}}
     admitted = request(tmp_path / 'admit', task, deps, cfg['approvals'])
     return admitted, lock_root
 
@@ -1369,6 +1428,139 @@ def test_admission_is_only_authority_and_never_mutates_lock(screening_request, t
             assert task['needs']['campaign-admit'] == ['admission.json']
     # Resume predecessor dependencies differ, while the admitted spec inputs agree.
     assert plans[0]['tasks'][0]['needs'] != plans[0]['tasks'][1]['needs']
+
+
+@pytest.mark.parametrize('slow_draw', [0, 1])
+def test_admission_uses_three_minima_and_ignores_one_slow_repeat(screening_request, tmp_path, slow_draw):
+    draws = {key: [value, value] for key, value in [('fresh', 20.), ('resumed_1', 30.), ('resumed_2', 40.)]}
+    for values in draws.values():
+        values[slow_draw] = 20000.
+    req, lock_root = admission_fixture(screening_request, tmp_path, setup_draws=draws)
+    result = campaign_probe.run_stage(req)
+    assert result.status == 'pass', result.message
+    receipt = coverage.read_json(Path(req.output_dir) / 'admission.json')
+    measured = receipt['admission_measurements']
+    assert measured['setup_draws'] == draws
+    assert measured['setup_minima'] == {'fresh': 20., 'resumed_1': 30., 'resumed_2': 40.}
+    assert measured['allowance_seconds'] == 100.
+    assert measured['projection']['horizon'] == 0 and measured['projection']['growth'] == 10.
+
+
+@pytest.mark.parametrize('fault', ['one_draw', 'wrong_depth', 'wrong_estimate', 'reuse_miss', 'shape_reference', 'large_shape'])
+def test_admission_refuses_incomplete_or_mismatched_resumed_receipts(screening_request, tmp_path, fault):
+    def mutate(key, value):
+        if key != 'resumed_2':
+            return
+        if fault == 'one_draw':
+            value['setup_draws'].pop()
+        elif fault == 'wrong_depth':
+            value['depth'] = 1
+        elif fault == 'wrong_estimate':
+            value['estimate_hash'] = 'f' * 64
+        elif fault == 'reuse_miss':
+            value['verification']['reuse_miss'] = True
+        elif fault == 'shape_reference':
+            value['predecessor_shape']['expected']['archive_bytes'] += 1
+        else:
+            value['predecessor_shape']['observed']['archive_bytes'] *= 2
+    req, _ = admission_fixture(screening_request, tmp_path, mutate_receipt=mutate)
+    result = campaign_probe.run_stage(req)
+    assert result.status == 'blocked' and not result.artifacts
+    assert not (Path(req.output_dir) / 'admission.json').exists()
+
+
+def test_admission_requires_all_three_receipt_inputs(screening_request, tmp_path):
+    req, _ = admission_fixture(screening_request, tmp_path)
+    req = update_task(req, lambda p: p['probe_inputs'].pop('resumed_2'))
+    result = campaign_probe.run_stage(req)
+    assert result.status == 'blocked' and 'three admission probe receipts' in result.message
+
+
+@pytest.mark.parametrize('observed,status', [(110, 'matched'), (111, 'admission-shape-exceeded'),
+    (150, 'admission-shape-exceeded'), (151, 'admission-shape-mismatch'), (40, 'matched')])
+def test_runtime_shape_thresholds_use_one_locked_reference(observed, status):
+    expected = {'archive_bytes': 100, 'record_count': 100}
+    for field in expected:
+        actual = {**expected, field: observed}
+        assert campaign_probe.compare_publication_shape(expected, actual)['status'] == status
+        if observed > 110:
+            assert campaign_probe.compare_publication_shape(expected, actual, synthetic=True)['status'] == 'admission-shape-mismatch'
+
+
+@pytest.mark.parametrize('screening_rates', [(200000.,) * 4], indirect=True)
+@pytest.mark.parametrize('offsets,stop', [([300., 300.], True),
+    ([300., 0., 300., 0., 300.], True), ([200.] * 5, False),
+    ([300., 0., 0., 0., 0.], False)])
+def test_runtime_setup_safety_stops_before_import_and_collector_refuses(
+        screening_request, tmp_path, monkeypatch, offsets, stop):
+    """Measured setups enter real sealed budgets; successors authenticate them."""
+    from oxyformer.execution.integrity import FINGERPRINT, RESULT
+    from test_coverage import chain_request
+    req = screening_lock_request(screening_request, tmp_path)
+    assert campaign.run_stage(req).status == 'pass'
+    root = Path(req.output_dir)
+    lock = coverage.read_json(root / 'recipe_lock.json')
+    plan = next(p for p in coverage.read_json(root / 'expanded_units.json')['plans']
+        if p['spec']['work'][0]['parameters']['scenario']['name'] == 'null_effect')
+    cfg = coverage.read_json(req.config_path)
+    deps = {k: Path(v) for k, v in cfg['dependencies'].items()}
+    deps['campaign-lock'] = root
+    allowance = 3000.
+    deps['campaign-admit'] = sealed_json_fixture(tmp_path / 'admitted', 'campaign-admit', 'campaign-admit',
+        {'admission.json': {'admitted': True, 'lock_hash': coverage.digest(lock), 'estimate_hash': lock['estimate_hash'],
+            'setup_policy': 'three-receipt-minima-v1', 'admission_measurements': {
+                'setup_minima': dict.fromkeys(('fresh', 'resumed_1', 'resumed_2'), allowance - 60),
+                'allowance_seconds': allowance}}})
+    clock = [0.]
+    monkeypatch.setattr(coverage.time, 'monotonic', lambda: clock[0])
+    original_prepare = coverage.prepare_batch
+    setups = [2811., *[allowance + offset for offset in offsets], allowance]
+    def prepare(request):
+        prepared = original_prepare(request)
+        clock[0] += setups[prepared[0]['continuation']['step']]
+        return prepared
+    monkeypatch.setattr(coverage, 'prepare_batch', prepare)
+    def execute(draw, *args, **kwargs):
+        clock[0] += 1.
+        return {**successful_records(1)[1][0], 'draw': draw, 'wall_seconds': 1.}
+    monkeypatch.setattr(coverage, 'execute_draw', execute)
+    original_read = coverage._read_continuation
+    imports = []
+    def read(*args, **kwargs):
+        imports.append(1)
+        return original_read(*args, **kwargs)
+    monkeypatch.setattr(coverage, '_read_continuation', read)
+    for step, task in enumerate(plan['tasks'][:len(setups)]):
+        leaf = chain_request(tmp_path / task['id'], task, deps)
+        config = coverage.read_json(leaf.config_path)
+        config['approvals'] = cfg['approvals']
+        write(Path(leaf.config_path), config)
+        leaf = replace(leaf, config_hash=file_hash(leaf.config_path))
+        prior_imports = len(imports)
+        result = run_coverage(leaf)
+        leaf_root = Path(leaf.output_dir)
+        if stop and step == len(setups) - 1:
+            assert result.status == 'blocked' and 'allowance-exceeded' in result.message
+            assert len(imports) == prior_imports and not (leaf_root / 'repetitions').exists()
+            diagnostic = coverage.read_json(leaf_root / coverage.BUDGET_RECORD)
+            assert diagnostic['diagnostic_only'] and diagnostic['status'] == 'allowance-exceeded'
+            assert not (leaf_root / FINGERPRINT).exists()
+            # Failed worker controls are diagnostic, as in the normal runner.
+            write(leaf_root / '_execution/task.json', task)
+            (leaf_root / '_execution/request.json').write_text(leaf.to_json())
+            (leaf_root / RESULT).write_text(result.to_json())
+            deps[task['id']] = leaf_root
+            collector = request(tmp_path / 'stopped-collector', plan['tasks'][-1], deps, cfg['approvals'])
+            outcome = campaign.run_stage(collector)
+            assert outcome.status == 'blocked' and 'chain stopped: allowance-exceeded' in outcome.message
+            assert not (Path(collector.output_dir) / 'gate.json').exists()
+            assert not (Path(collector.output_dir) / FINGERPRINT).exists()
+        else:
+            assert result.status == 'pass', result.message
+            budget = coverage.read_json(leaf_root / coverage.BUDGET_RECORD)
+            assert budget['leaves'][-1]['setup_seconds'] == setups[step]
+            assert budget['leaves'][-1]['setup_safety']['measured']['overrun'] == (step > 0 and setups[step] > allowance + 281.1)
+            deps[task['id']] = leaf_root
 
 
 @pytest.mark.parametrize('fault', ['slow', 'wrong_lock', 'oversized', 'near_window', 'unequal_specs'])
@@ -1605,3 +1797,62 @@ def test_estimate_and_lock_record_historical_calibration_provenance(screening_re
     estimate = coverage.read_json(Path(estimate_req.output_dir) / 'budget_estimate.json')
     budget = coverage.read_json(Path(lock_req.output_dir) / 'budget.json')
     assert estimate['calibration']['records'] == budget['calibration']['records'] == expected
+
+
+@pytest.mark.parametrize('screening_rates', [(20000.,) * 4], indirect=True)
+@pytest.mark.parametrize('values,measured,refused', [([5599., 5792.], False, False),
+    ([5599., 5792., 6320.], True, True), ([3500.] * 3, True, False)])
+def test_estimate_and_lock_apply_same_lineage_projection(screening_request, tmp_path, values, measured, refused):
+    """Canonical sealed calibration records reach both public sizing paths."""
+    base = screening_request
+    config, task = coverage.read_json(base.config_path), coverage.read_json(base.task_path)
+    deps = {k: Path(v) for k, v in config['dependencies'].items()}
+    source = deps[task['parameters']['profiles']['null_effect']['dependency']]
+    timing = coverage.read_json(source / 'timing.json')
+    source_task = coverage.read_json(source / '_execution/task.json')
+    history = []
+    refs = []
+    for step, setup in enumerate([2811., *values]):
+        unit = f'calibrated-chain-{step}'
+        history.append({'task_id': unit, 'step': step, 'setup_seconds': setup, 'compute_seconds': 1.,
+            'import_seconds': 0., 'export_seconds': 0., 'publication_seconds': 1., 'wall_seconds': setup + 2.})
+        root = tmp_path / unit
+        result = coverage.read_json(source / 'result.json')
+        result['records'] = []
+        write(root / 'result.json', result)
+        write(root / 'timing.json', {**timing, 'leaves': deepcopy(history), 'complete': False,
+            'all_successful': False, 'complete_repetition_seconds': [],
+            'wall_seconds': sum(row['wall_seconds'] for row in history),
+            'setup_seconds': sum(row['setup_seconds'] for row in history)})
+        producer = deepcopy(source_task)
+        producer.update(id=unit, continuation={'owner': 'calibrated-chain', 'step': step,
+            'predecessor': f'calibrated-chain-{step-1}' if step else None})
+        seal_budget_fixture(root, unit, producer)
+        deps[unit] = root
+        refs.append({'dependency': unit, 'path': coverage.BUDGET_RECORD})
+    task['parameters']['setup_calibration'] = refs
+    req = request(tmp_path / 'projected-estimate', task, deps, config['approvals'])
+    if refused:
+        result = campaign_estimate.run_stage(req)
+        assert result.status == 'blocked' and 'setup allowance does not fit' in result.message
+        for field in ('fresh', 'points', 'growth', 'projected', 'longest_chain', 'ceiling'):
+            assert field in result.message
+        assert '360.5' in result.message
+        lock_task = deepcopy(task)
+        lock_task['stage'] = 'campaign-lock'
+        with pytest.raises(ContractError, match='setup allowance does not fit'):
+            campaign.build_screening_lock(req, coverage.read_json(req.config_path), lock_task)
+        assert not list(Path(req.output_dir).iterdir())
+    else:
+        lock_req = screening_lock_request(req, tmp_path / 'projected')
+        result = campaign.run_stage(lock_req)
+        assert result.status == 'pass', result.message
+        estimate = coverage.read_json(Path(req.output_dir) / 'budget_estimate.json')
+        budget = coverage.read_json(Path(lock_req.output_dir) / 'budget.json')
+        projection = estimate['calibration']['setup_projection']
+        assert projection == budget['calibration']['setup_projection']
+        assert projection['status'] == ('measured' if measured else 'unmeasured')
+        assert projection['chains'][0]['resumed'] == values
+        if measured:
+            assert projection['chains'][0]['growth'] == 0.
+            assert projection['chains'][0]['allowance'] == 3560.
