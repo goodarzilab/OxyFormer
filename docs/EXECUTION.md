@@ -868,6 +868,9 @@ ancestors using these sealed receipts:
   manifest; malformed entries fall back to current verification. This metadata
   must remain readable. Reuse avoids rehashing transitive payloads, not the
   metadata needed to establish which publications the receipt covers.
+  Direct-parent identities are read once from their currently verified
+  publications and cached within this walk, including when older leaves share
+  those parents; the cache never carries across attempts.
 * Continuation validation retains its owner, consecutive step, stage, campaign,
   parameters and recipe checks. For resumed leaves it uses the current walk's
   verified publications and budget-authority cache. This removes a second full
