@@ -752,8 +752,8 @@ as non-authority calibration measurements. No receipt is rebound or resealed.
 
 Dependencies declared under an estimate or lock task's `setup_calibration` are
 measurement inputs, so they and ancestors reachable only through those edges do
-not enter that consumer's recipe drift comparison. Each descendant computes this
-exclusion over its own full dependency walk: any ordinary path to a record keeps
+not enter that consumer's recipe drift comparison. A full dependency walk computes
+this exclusion per consumer: any ordinary path to a record keeps
 that record scientific. Publication receipts, artifact hashes, request identity,
 pass status and attempt ownership remain verified throughout the walk; the existing
 budget-authority skips remain recorded in `measurement_only_dependencies.json`.
@@ -761,3 +761,73 @@ The estimate's `budget_estimate.json` and the lock's `budget.json` retain each
 calibration record's hash, task ID, budget generation, scientific fingerprint and
 environment hash as sealed provenance. Scientific profiles, estimates and locks
 retain their existing fingerprint equality requirements.
+
+### Dependency verification receipts and diagnostics
+
+Fresh leaves, collectors, estimates, locks, admission and fresh setup probes keep
+the full verification walk on current bytes. Resumed `coverage` and
+`simulation-smoke` leaves, and `admission-resumed` probes, can attest transitive
+ancestors using these sealed receipts:
+
+* The estimate's version-2 `measurement_only_dependencies.json` contains the
+  measurement-only publication snapshots and the same `calibration.records`
+  hashes, fingerprints and environment hashes as `budget_estimate.json`. Its
+  publication is verified now. Calibration record hashes must also agree with
+  the estimate's declared request inputs. Ordinary edges do not acquire the
+  measurement-only exception. Older estimates without this attestation require
+  another valid receipt or the full walk.
+* The predecessor's publication is verified now, including its
+  `_execution/dependency_check.json`. Its passing check must match the startup
+  `_execution/dependencies.json`, which must itself be hash-bound by the
+  predecessor's request. Each shared ancestor's publication hash must agree with
+  the current producer manifest. Missing or inconsistent entries receive a full
+  verification; an unbound receipt cannot authorize reuse. True post-seal changes
+  to the predecessor's own receipt fail its current publication check.
+* Continuation validation retains its owner, consecutive step, stage, campaign,
+  parameters and recipe checks. For resumed leaves it uses the current walk's
+  verified publications and budget-authority cache. This removes a second full
+  lineage traversal; its evidence is the current verified predecessor publication
+  and the same bound receipt, not an unchecked continuation flag.
+
+These exceptions never substitute evidence for a leaf's direct inputs. The
+continuation archive, predecessor records, profiles, real-frame inputs, estimate
+outputs and lock retain current hash, publication and recipe checks. The current
+leaf's science fingerprint freeze and sealed budget formula/generation are
+unchanged. Shared transitive recipe comparisons are attested by the predecessor's
+same-recipe check; direct recipe comparisons remain current. Publication
+post-checks and authority checks cover the currently verified roots. The next
+receipt also retains the attested snapshots, labelled `attested_by`, without
+claiming that their bytes were re-read. Read observations still cover these
+snapshots if a worker actually accesses them.
+
+The trust boundary is deliberate: a transitive-only ancestor whose stored bytes
+no attempt in the leaf's lineage reads any more is attested by its sealed
+consumer's receipt. A post-seal modification changes no consumed result and is
+**not detected by a resumed leaf**. Every chain's fresh leaf and the repetition's
+collector perform the full walk on current bytes; the collector detects such
+drift and refuses to seal the repetition. The pre-existing verify-at-setup /
+read-at-compute window is unchanged and outside this change's scope. This is not
+a defense against forging the independent publication authority or changing the
+trusted runner itself.
+
+`_execution/dependency_check.json` adds `timings`: exclusive per-root wall seconds
+and calls for `hashing`, `publication_receipt`, `recipe_drift` and `lineage_walk`.
+Hashing includes existing safe-read observations and counts all bytes actually
+read, including repeated hashes. `total_seconds` covers the verification interval;
+the diagnostic continuation subtotal overlaps these components. Direct-input
+bookkeeping without an active publication is named `direct_inputs`. Resumed
+timings also report `ancestors_reused`, `ancestors_rewalked`, current
+`verified_roots`, source publication hashes and `reuse_miss`. Counts refer to
+attempts: a predecessor adds one publication. More than one transitive ancestor
+re-walked is recorded as `reuse-miss` in the leaf's budget record. Required direct
+input checks are not counted as transitive re-walks.
+
+Run `python -m oxyformer.execution.runner --verify-only ATTEMPT --scratch NEW_DIR`
+on a CPU compute node to replay a sealed attempt's declared inputs. `--successor`
+uses the unique next leaf already declared by its sealed lock, with that sealed
+attempt as predecessor. `--full-walk` disables receipt reuse for a diagnostic
+comparison. The resolved scratch path must be new and outside the input attempts.
+The diagnostic authenticates its source before timing, uses the source's sealed
+recipe for ancestry comparisons, never calls `load_lock`, never computes and
+never publishes or seals. It writes only the scratch dependency-check report;
+refused diagnostic reads do not write taints into the original campaign.
