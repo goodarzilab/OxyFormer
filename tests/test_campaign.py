@@ -89,7 +89,7 @@ def write(path, value):
     return path
 
 
-def seal_budget_fixture(root, unit, task=None):
+def seal_budget_fixture(root, unit, task=None, *, complete_controls=False):
     """Publish synthetic measurements through the real immutable sealing path."""
     from oxyformer.execution.integrity import publish_result, RESULT, FINGERPRINT
     from oxyformer.provenance import ArtifactRecord, ArtifactLineage
@@ -110,8 +110,17 @@ def seal_budget_fixture(root, unit, task=None):
             task['outputs'] = ['result.json', 'continuation.tar']
     config = write(root / '_execution/config.json', {})
     task_path = write(root / '_execution/task.json', task)
+    inputs = ()
+    if complete_controls:
+        snapshot = write(root / '_execution/dependencies.json', {})
+        inputs = (str(snapshot),)
+        write(root / '_execution/dependency_check.json', {'status': 'pass', 'attempts': {}})
+        write(root / '_execution/environment.json', {'fixture': 'synthetic'})
+        write(root / '_execution/identity.json', {'head': 'c' * 40,
+            'scientific_fingerprint': timing['scientific_fingerprint']})
     producer = StageRequest(stage=task['stage'], config_path=str(config), config_hash=file_hash(config),
-        task_path=str(task_path), task_hash=file_hash(task_path), dependency_paths=(), dependency_hashes=(),
+        task_path=str(task_path), task_hash=file_hash(task_path), dependency_paths=inputs,
+        dependency_hashes=tuple(file_hash(p) for p in inputs),
         output_dir=str(root), code_identity='c' * 40)
     (root / '_execution/request.json').write_text(producer.to_json())
     wall = task['parameters']['wall_seconds']
@@ -149,7 +158,7 @@ def seal_budget_fixture(root, unit, task=None):
         parent_hashes=(), split_hash=None, config_hash=producer.config_hash, model_hash=None,
         environment=(("fixture", "synthetic"),), seed=None, parameter_count=None)
     artifacts = tuple(ArtifactRecord(path=p.name, sha256=file_hash(p), kind='fixture', lineage=lineage)
-        for p in sorted(root.glob('*.json')))
+        for p in sorted([*root.glob('*.json'), *root.glob('*.tar')]))
     terminal = StageResult(request_hash=producer.content_hash, status='fail' if failed else 'pass',
         artifacts=artifacts, message='synthetic measured fixture')
     for name in (RESULT, FINGERPRINT):

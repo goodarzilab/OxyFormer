@@ -347,7 +347,8 @@ class DependencyReuse:
     def publication(self, root):
         if root not in self.publications:
             terminal = StageResult.from_json(read_regular(root / RESULT))
-            require(terminal.status == 'pass', 'dependency stage did not pass')
+            require(terminal.status == 'pass', 'chain stopped: allowance-exceeded'
+                if 'allowance-exceeded' in terminal.message else 'dependency stage did not pass')
             tree = verify_published_tree(root, terminal)
             request = StageRequest.from_json(read_regular(root / '_execution/request.json'))
             require(request.content_hash == terminal.request_hash and Path(request.output_dir) == root,
@@ -379,13 +380,21 @@ class DependencyReuse:
         except (ContractError, KeyError, TypeError, ValueError):
             return  # An unbound receipt cannot prune any branch.
         for name in set(snapshot) | set(attempts):
+            if not isinstance(name, str):
+                continue
             path = Path(name)
             before, after = snapshot.get(name), attempts.get(name, {})
-            if not path.is_absolute() or not isinstance(before, dict):
-                if isinstance(after.get('fingerprint'), dict):
-                    self.rewalk[path] = after['fingerprint'].get(FINGERPRINT, {}).get('sha256')
+            after = after if isinstance(after, dict) else {}
+            if not path.is_absolute():
                 continue
-            expected = before.get(FINGERPRINT, {}).get('sha256')
+            if not isinstance(before, dict):
+                observed = after.get('fingerprint', {})
+                publication = observed.get(FINGERPRINT, {}) if isinstance(observed, dict) else {}
+                if isinstance(publication, dict) and publication.get('sha256'):
+                    self.rewalk[path] = publication['sha256']
+                continue
+            publication = before.get(FINGERPRINT, {})
+            expected = publication.get('sha256') if isinstance(publication, dict) else None
             # Acquisition evidence is never a reusable publication receipt.
             if expected is None:
                 continue
@@ -587,7 +596,8 @@ def _verify_dependency_result(root, *, expected_hash, trees, active, verified, o
                         request = StageRequest.from_json(read_regular(dependency_file(current, '_execution/request.json')))
                         result = StageResult.from_json(read_regular(dependency_file(current, RESULT)))
                         require(Path(request.output_dir).resolve() == current, 'dependency attempt owner mismatch')
-                        require(result.status == 'pass', 'dependency stage did not pass')
+                        require(result.status == 'pass', 'chain stopped: allowance-exceeded'
+                            if 'allowance-exceeded' in result.message else 'dependency stage did not pass')
                         cached = reuse.publications.get(current) if reuse is not None else None
                         if cached is None:
                             tree = verify_published_tree(current, result, expected)
@@ -800,6 +810,10 @@ def finalize_coverage_budget(request, result, started):
             'setup_seconds': timing['setup_seconds'], 'import_seconds': 0., 'export_seconds': 0.}
     # Runner preparation precedes the worker clock; charge it once as setup.
     leaf['setup_seconds'] += max(0., raw['started_monotonic'] - started)
+    if leaf.get('setup_safety'):
+        from oxyformer.validation.coverage import setup_overruns
+        leaf['setup_safety']['measured'] = setup_overruns([*history, leaf],
+            leaf['setup_safety']['allowance_seconds'])
     check_path = Path(request.output_dir) / DEPENDENCY_CHECK
     verification = read_mapping(check_path).get('timings', {}) if check_path.is_file() else {}
     if 'ancestors_reused' in verification:
