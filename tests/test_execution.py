@@ -267,6 +267,47 @@ def source(runtime, tmp_path, monkeypatch):
     return make_source(runtime[0], tmp_path / 'source', monkeypatch)
 
 
+def test_verification_timings_and_diagnostic_never_execute_or_seal(runtime, source, tmp_path, monkeypatch):
+    from oxyformer.execution import runner, integrity
+    from oxyformer.validation import campaign
+    repo, out = runtime
+    assert_pass(run_task(repo, out, needs=SOURCE_NEEDS))
+    measured = read_check(out)['timings']
+    assert measured['roots'][str(source)]['hashing']['bytes'] > 0
+    assert measured['roots'][str(source)]['publication_receipt']['calls'] > 0
+    assert measured['roots'][str(source)]['lineage_walk']['seconds'] >= 0
+    before = fingerprint_tree(out)
+    def forbidden(*args, **kwargs):
+        raise AssertionError('diagnostic attempted execution, lock load or publication')
+    monkeypatch.setattr(campaign, 'load_lock', forbidden)
+    monkeypatch.setattr(runner, 'run', forbidden)
+    monkeypatch.setattr(runner, 'publish_result', forbidden)
+    monkeypatch.setattr(integrity, 'record_publication', forbidden)
+    scratch = tmp_path / 'diagnostic'
+    value = runner.verify_only(out, scratch)
+    assert value['diagnostic'] is True and value['status'] == 'pass'
+    assert value['timings']['verified_roots'] == 1
+    assert read_check(scratch) == value
+    assert not (scratch / RESULT).exists() and not (scratch / FINGERPRINT).exists()
+    assert not integrity.publication_receipt(scratch).exists()
+    assert fingerprint_tree(out) == before
+
+
+def test_verify_only_cli_keeps_tamper_refusal(runtime, source, tmp_path):
+    from oxyformer.execution.integrity import publication_receipt
+    repo, out = runtime
+    assert_pass(run_task(repo, out, needs=SOURCE_NEEDS))
+    (source / 'data.json').write_text('{"changed":true}')
+    scratch = tmp_path / 'diagnostic'
+    result = subprocess.run([sys.executable, '-m', 'oxyformer.execution.runner',
+        '--verify-only', str(out), '--scratch', str(scratch)],
+        env=fixture_env(), capture_output=True, text=True, timeout=30)
+    assert result.returncode != 0
+    assert 'fingerprint mismatch' in result.stderr
+    assert not scratch.exists()
+    assert not Path(str(publication_receipt(source)) + '.tainted').exists()
+
+
 def seal_source(repo, source):
     source_files(source)
     publish_source(repo, source)
