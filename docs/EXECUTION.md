@@ -861,6 +861,13 @@ ancestors using these sealed receipts:
   verification; change and taint fields must be empty lists, and an unbound
   receipt cannot authorize reuse. True post-seal changes
   to the predecessor's own receipt fail its current publication check.
+  Before pruning, the runner authenticates each attested publication's small
+  result, manifest, request, config and task records and checks its declared
+  parent hashes against the receipt. A parent absent from both receipt maps
+  still receives a full walk. Snapshot entries must match the publication's
+  manifest; malformed entries fall back to current verification. This metadata
+  must remain readable. Reuse avoids rehashing transitive payloads, not the
+  metadata needed to establish which publications the receipt covers.
 * Continuation validation retains its owner, consecutive step, stage, campaign,
   parameters and recipe checks. For resumed leaves it uses the current walk's
   verified publications and budget-authority cache. This removes a second full
@@ -911,3 +918,6 @@ The diagnostic authenticates its source before timing, uses the source's sealed
 recipe for ancestry comparisons, never calls `load_lock`, never computes and
 never publishes or seals. It writes only the scratch dependency-check report;
 refused diagnostic reads do not write taints into the original campaign.
+The leaf diagnostic supports stage-publication inputs, including their existing
+sealed acquisition ancestry. Attempts with direct acquisition inputs are outside
+this diagnostic's envelope and are refused before any scratch output is written.
