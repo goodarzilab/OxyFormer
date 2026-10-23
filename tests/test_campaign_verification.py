@@ -186,6 +186,18 @@ def test_receipt_boundary_and_collector_backstop(verification_chain, tmp_path, m
         assert not (tmp_path / 'collector' / FINGERPRINT).exists()
 
 
+@pytest.mark.parametrize('name', ['_execution/task.json', '_execution/result.json'])
+def test_unused_transitive_control_payload_is_attested(verification_chain, tmp_path, name):
+    chain = verification_chain
+    chain.leaf(0)
+    (chain.source / name).write_text('{"unused_payload_changed":true}')
+    resumed = chain.leaf(1)
+    assert read_check(resumed)['timings']['ancestors_rewalked'] == 0
+    with raises(ContractError):
+        chain.produce('collector', 'campaign-collect', {'leaf-1': ['result.json']}, outputs=['value.json'])
+    assert not (tmp_path / 'collector' / FINGERPRINT).exists()
+
+
 @pytest.mark.parametrize('fault', ['tampered', 'missing', 'multiple_missing', 'malformed', 'unbound'])
 def test_invalid_predecessor_dependency_receipt_rewalks_shared_ancestor(verification_chain, monkeypatch, fault):
     from oxyformer.execution import runner
