@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 import time
 from dataclasses import replace
@@ -14,14 +15,15 @@ from dataclasses import replace
 import yaml
 
 from oxyformer.contracts import StageRequest, StageResult
-from oxyformer.provenance import ContractError, canonical_json, relative_artifact_path, require
+from oxyformer.provenance import ArtifactRecord, ContractError, canonical_json, relative_artifact_path, require
 from .integrity import (DEPENDENCY_CHECK, FINGERPRINT, RESULT, _replace_control, _repair_control_directory,
     post_execution_check, publish_result, record_taints, snapshot_dependency_identities, observe_dependencies,
     directory_path, read_regular, regular_file_stat, regular_file_hash as file_hash,
     fingerprint_tree, publication_receipt, InputChanged, acquisition_read, _acquisition_binding,
-    integrity_observation,
+    integrity_observation, verification_timings, verification_span, timed_verification, verification_diagnostic,
     acquisition_changed_paths, verify_input_hash, authority_exists,
-    verify_inputs, verify_result, verify_published_tree, verify_publication)
+    verify_inputs, verify_result, verify_published_tree, verify_publication,
+    publication_view, _legacy_publication_scope, PUBLICATION_EXCLUSIONS)
 from .identity import git_bytes, code_identity, environment_record, scientific_fingerprint, verify_recipe
 from .paths import atomic_json, atomic_write, output_path
 
@@ -278,16 +280,16 @@ def _recorded_acquisition_inputs(current, parent, receipt, hashes):
 
 
 def _verify_publication_result(result, request, recorded_inputs):
-    """Verify a historical result, substituting sealed evidence only for acquisitions.
+    """Verify a historical result with explicitly authenticated input evidence.
 
     Live stages still use verify_result, including full input verification.
-    Publication artifacts and every other request input keep their live checks.
+    Publication artifacts and inputs without an attestation keep live checks.
     """
     require(result.request_hash == request.content_hash, 'stage request mismatch')
     for path, digest in zip((request.config_path, request.task_path) + request.dependency_paths,
             (request.config_hash, request.task_hash) + request.dependency_hashes):
         if path in recorded_inputs:
-            require(recorded_inputs[path] == digest, 'acquisition baseline hash mismatch')
+            require(recorded_inputs[path] == digest, 'sealed input baseline hash mismatch')
         else:
             verify_input_hash(path, digest)
     root = directory_path(request.output_dir)
@@ -314,17 +316,335 @@ def measurement_dependencies(task):
     return {ref['dependency'] for ref in refs}
 
 
+def scientific_ancestors(task, deps, edges, acquisitions=()):
+    pending = [root for unit, root in deps.items()
+        if unit not in measurement_dependencies(task) and unit not in acquisitions]
+    selected = set()
+    while pending:
+        root = pending.pop()
+        if root not in selected:
+            selected.add(root)
+            pending.extend(edges[root])
+    return selected
+
+
+class DependencyReuse:
+    """Attest transitive bytes; never substitute evidence for a direct input.
+
+    A receipt is useful only inside its currently verified producer publication.
+    Its startup snapshot is separately hash-bound by that producer's request,
+    and its passing post-check must agree entry-for-entry with the snapshot.
+    Missing or inconsistent entries are verified in full before any pruning.
+    """
+    def __init__(self, deps):
+        self.direct = set(deps.values())
+        self.publications = {}
+        self.entries = {}
+        self.sources = {}
+        self.rewalk = {}
+        self.measurements = set()
+        self.shared = set()
+        self.predecessor = None
+
+    def publication(self, root):
+        if root not in self.publications:
+            terminal = StageResult.from_json(read_regular(root / RESULT))
+            require(terminal.status == 'pass', 'chain stopped: allowance-exceeded'
+                if 'allowance-exceeded' in terminal.message else 'dependency stage did not pass')
+            tree = verify_published_tree(root, terminal)
+            request = StageRequest.from_json(read_regular(root / '_execution/request.json'))
+            require(request.content_hash == terminal.request_hash and Path(request.output_dir) == root,
+                'receipt producer request mismatch')
+            self.publications[root] = (terminal, tree)
+        return self.publications[root]
+
+    def add_receipt(self, root, *, payload=None):
+        terminal, own = self.publication(root)
+        fingerprint = next(a.sha256 for a in terminal.artifacts if a.path == FINGERPRINT)
+        try:
+            if payload is None:
+                request = StageRequest.from_json(read_regular(root / '_execution/request.json'))
+                snapshot_path = root / '_execution/dependencies.json'
+                hashes = dict(zip(request.dependency_paths, request.dependency_hashes))
+                require(hashes.get(str(snapshot_path)) == own['_execution/dependencies.json']['sha256'],
+                    'dependency receipt snapshot is unbound')
+                # Both files were checked against this publication, above.
+                require(DEPENDENCY_CHECK in own, 'dependency receipt is unbound')
+                snapshot = read_mapping(snapshot_path)
+                check = read_mapping(root / DEPENDENCY_CHECK)
+            else:
+                # Only the registered synthetic-predecessor producer supplies
+                # this payload, as a declared, currently checked output.
+                snapshot, check = payload['snapshot'], payload['check']
+            require(check['status'] == 'pass' and isinstance(snapshot, dict), 'dependency receipt did not pass')
+            attempts = check['attempts']
+            require(isinstance(attempts, dict), 'invalid dependency receipt')
+        except (ContractError, KeyError, TypeError, ValueError):
+            return  # An unbound receipt cannot prune any branch.
+        for name in set(snapshot) | set(attempts):
+            if not isinstance(name, str):
+                continue
+            path = Path(name)
+            before, after = snapshot.get(name), attempts.get(name, {})
+            after = after if isinstance(after, dict) else {}
+            if not path.is_absolute():
+                continue
+            if not isinstance(before, dict):
+                observed = after.get('fingerprint', {})
+                publication = observed.get(FINGERPRINT, {}) if isinstance(observed, dict) else {}
+                if isinstance(publication, dict) and publication.get('sha256'):
+                    self.rewalk[path] = publication['sha256']
+                continue
+            publication = before.get(FINGERPRINT, {})
+            expected = publication.get('sha256') if isinstance(publication, dict) else None
+            # Acquisition evidence is never a reusable publication receipt.
+            if expected is None:
+                continue
+            if (after.get('status') != 'unchanged' or after.get('changed_paths') != []
+                    or after.get('tainted_paths') != [] or after.get('fingerprint') != before):
+                self.rewalk[path] = expected
+                continue
+            if path in self.entries and self.entries[path] != before:
+                self.rewalk[path] = expected
+                continue
+            self.entries[path] = before
+            self.sources[path] = {'attempt': str(root), 'publication_hash': fingerprint}
+
+    def metadata(self, root):
+        """Authenticate a receipt's tree and parent edges without reading payloads."""
+        tree = self.entries[root]
+        require(all(isinstance(entry, dict)
+            and all(type(entry.get(key)) is int for key in ('type', 'mode', 'size'))
+            for entry in tree.values()), 'invalid attested file metadata')
+
+        def read_bound(path, expected):
+            raw = read_regular(path)
+            require(isinstance(expected, str) and sha256(raw).hexdigest() == expected,
+                'attested metadata hash mismatch')
+            return raw
+
+        digest = tree[FINGERPRINT]['sha256']
+        value = json.loads(read_bound(root / FINGERPRINT, digest))
+        require(value['schema_version'] in (1, 2) and value['attempt'] == str(root)
+            and value['excluded'] == list(PUBLICATION_EXCLUSIONS), 'invalid attested publication manifest')
+        original = StageResult.from_json(canonical_json(value['stage_result']))
+        require(original.status == 'pass' and all(a.path != FINGERPRINT for a in original.artifacts),
+            'invalid attested original result')
+        # Publication deterministically appends this artifact. Authenticate the
+        # reconstructed result without rereading an unused transitive payload.
+        result = replace(original, artifacts=(*original.artifacts,
+            ArtifactRecord(path=FINGERPRINT, sha256=digest, kind='attempt_fingerprint',
+                lineage=original.artifacts[0].lineage)))
+        serialized = result.to_json().encode()
+        require(tree[RESULT] == {'type': stat.S_IFREG, 'mode': value['control_modes'][RESULT],
+            'size': len(serialized), 'sha256': sha256(serialized).hexdigest(), 'target': None},
+            'attested result metadata mismatch')
+        verify_publication(root, result)
+        selected = tuple(sorted({'_execution', *(a.path for a in original.artifacts)}))
+        expected = value['entries']
+        if value['schema_version'] == 1:
+            expected = _legacy_publication_scope(expected, selected)
+        require(publication_view(tree) == expected
+            and tree['.'].get('published') == list(selected), 'attested snapshot differs from publication')
+        observed = regular_file_stat(root / FINGERPRINT)
+        require(tree[FINGERPRINT] == {'type': stat.S_IFREG, 'mode': stat.S_IMODE(observed.st_mode),
+            'size': observed.st_size, 'sha256': digest, 'target': None}
+            and tree[FINGERPRINT]['mode'] == value['control_modes'][FINGERPRINT],
+            'invalid attested control metadata')
+        request = StageRequest.from_json(read_bound(root / '_execution/request.json',
+            expected['_execution/request.json']['sha256']))
+        require(request.content_hash == result.request_hash and Path(request.output_dir) == root,
+            'attested request owner mismatch')
+        config = json.loads(read_bound(Path(request.config_path), request.config_hash))
+        hashes = dict(zip(request.dependency_paths, request.dependency_hashes))
+        parents = []
+        for unit, parent in config.get('dependencies', {}).items():
+            if unit in config.get('acquisitions', {}):
+                continue  # Historical acquisition payloads keep their sealed-consumer boundary.
+            parent = Path(parent)
+            digest = hashes.get(str(parent / FINGERPRINT))
+            require(parent.is_absolute() and isinstance(digest, str), 'attested parent identity missing')
+            parents.append((parent, digest, unit))
+        return parents
+
+    def validate_closure(self):
+        """A pruned publication may not hide an uncovered parent or malformed tree."""
+        nodes = {}
+        for root in list(self.entries):
+            try:
+                with integrity_observation(root), verification_span(root, 'lineage_walk'):
+                    nodes[root] = self.metadata(root)
+            except (ContractError, KeyError, TypeError, ValueError, AttributeError, OSError):
+                # Its authenticated parent's edge supplies the authoritative
+                # hash for fallback, not this malformed receipt entry.
+                self.entries.pop(root)
+        direct = {}
+        for parents in nodes.values():
+            for parent, expected, unit in parents:
+                if parent in self.direct:
+                    if parent not in direct:
+                        _, tree = self.publication(parent)
+                        direct[parent] = tree, read_mapping(parent / '_execution/task.json').get('id')
+                    tree, identity = direct[parent]
+                else:
+                    tree = self.entries.get(parent, {})
+                matches = tree.get(FINGERPRINT, {}).get('sha256') == expected
+                if parent in self.direct:
+                    matches = matches and identity == unit
+                # A transitive producer's task identity was checked by its
+                # sealed consumer; its publication hash anchors this edge.
+                if not matches:
+                    self.rewalk[parent] = expected
+        active, visited = set(), set()
+        for first in nodes:
+            stack = [(first, False)]
+            while stack:
+                root, ready = stack.pop()
+                if ready:
+                    active.remove(root)
+                    visited.add(root)
+                elif root in active:
+                    self.rewalk[root] = self.entries[root][FINGERPRINT]['sha256']
+                elif root not in visited and root in nodes:
+                    active.add(root)
+                    stack.append((root, True))
+                    stack.extend((parent, False) for parent, _, _ in nodes[root])
+
+    def reusable(self, root, expected=None, *, measurement_path=None):
+        if root in self.direct or root in self.rewalk or root not in self.entries:
+            return False
+        if measurement_path is False and root in self.measurements and root not in self.shared:
+            return False
+        if expected is not None and self.entries[root][FINGERPRINT]['sha256'] != expected:
+            self.rewalk[root] = expected
+            return False
+        return True
+
+    def recorded_inputs(self, request, *, measurement_path, measurement_parents):
+        records = {}
+        roots = sorted(self.entries, key=lambda p: len(p.parts), reverse=True)
+        for name, expected in zip(request.dependency_paths, request.dependency_hashes):
+            path = Path(name)
+            # Direct inputs retain every current-byte check, including a file
+            # nested beneath another attested root.
+            if any(path.is_relative_to(root) for root in self.direct):
+                continue
+            for root in roots:
+                if path.is_relative_to(root) and self.reusable(root):
+                    if root not in self.shared and root in self.measurements and not (
+                            measurement_path or any(path.is_relative_to(parent) for parent in measurement_parents)):
+                        continue
+                    entry = self.entries[root].get(str(path.relative_to(root)), {})
+                    if isinstance(entry, dict) and entry.get('sha256') == expected:
+                        records[name] = expected
+                    else:
+                        self.rewalk[root] = self.entries[root][FINGERPRINT]['sha256']
+                    break
+        return records
+
+    def reused(self, verified):
+        return {str(root): tree for root, tree in self.entries.items()
+            if root not in verified and self.reusable(root)}
+
+    def annotate(self, timings, verified):
+        reused = self.reused(verified)
+        walked = set(verified) - self.direct
+        timings.update(ancestors_reused=len(reused), ancestors_rewalked=len(walked),
+            measurement_ancestors_reused=sum(Path(root) in self.measurements for root in reused),
+            predecessor_publications_added=1,
+            reuse_miss=len(walked) > 1,
+            receipt_sources={root: self.sources[Path(root)] for root in reused})
+
+
+def dependency_reuse(task, deps, *, output_dir=None):
+    chain = task.get('continuation', {})
+    resumed = task['stage'] in ('coverage', 'simulation-smoke') and chain.get('predecessor')
+    probe = task['stage'] == 'campaign-setup-probe' and task.get('parameters', {}).get('mode') == 'admission-resumed'
+    if not (resumed or probe):
+        return None
+    policy = DependencyReuse(deps)
+    if probe:
+        from oxyformer.validation.campaign_probe import resumed_probe_receipt
+        root, payload = resumed_probe_receipt(task, deps, policy.publication)
+        policy.predecessor = root
+        policy.add_receipt(root, payload=payload)
+    else:
+        require(chain['predecessor'] in deps, 'continuation predecessor must be an explicit dependency')
+        policy.predecessor = deps[chain['predecessor']]
+        policy.add_receipt(policy.predecessor)
+    policy.shared = set(policy.entries)
+    # The estimate's attestation is additive. Older estimates lack it; their
+    # ancestors still need a bound predecessor receipt or the full walk.
+    for root in deps.values():
+        task_path = root / '_execution/task.json'
+        producer = read_mapping(task_path)
+        if producer.get('stage') != 'campaign-estimate':
+            continue
+        terminal, tree = policy.publication(root)
+        if 'measurement_only_dependencies.json' not in tree:
+            continue
+        attestation = read_mapping(root / 'measurement_only_dependencies.json')
+        if attestation.get('schema_version') != 2:
+            continue
+        estimate = read_mapping(root / 'budget_estimate.json')
+        records = estimate.get('calibration', {}).get('records', [])
+        if not records or attestation.get('records') != records:
+            continue
+        payload = attestation.get('dependency_receipt', {})
+        try:
+            units = measurement_dependencies(producer)
+            request = StageRequest.from_json(read_regular(root / '_execution/request.json'))
+            hashes = dict(zip(request.dependency_paths, request.dependency_hashes))
+            config = read_mapping(request.config_path)
+            require(set(attestation['measurement_only_dependencies']) == units
+                == {record['task_id'] for record in records}, 'measurement attestation identity mismatch')
+            for record in records:
+                path = Path(config['dependencies'][record['task_id']])
+                require(payload['snapshot'][str(path)]['budget_record.json']['sha256']
+                    == hashes[str(path / 'budget_record.json')] == record['record_hash'],
+                    'measurement attestation hash mismatch')
+        except (ContractError, KeyError, TypeError, ValueError):
+            continue
+        previous = set(policy.entries)
+        policy.add_receipt(root, payload=payload)
+        policy.measurements.update(set(policy.entries) - previous)
+        policy.measurements.update(Path(name) for name in payload.get('snapshot', {}))
+    policy.validate_closure()
+    if output_dir is not None:
+        # Pruning a branch must not prune its output-isolation check. Include
+        # deeper receipt entries that traversal will never visit at all.
+        for ancestor in set(policy.entries) | set(policy.rewalk):
+            require(not output_dir.is_relative_to(ancestor) and not ancestor.is_relative_to(output_dir),
+                f'output overlaps an attested ancestor: {ancestor}')
+    return policy
+
+
+def rewalk_receipt_misses(policy, trees, verified, output_dir, consumer_task, edges, budgets):
+    if policy is None:
+        return
+    for root, expected in policy.rewalk.items():
+        # A fresh cache is essential: an earlier pruned visit is not a full
+        # verification of this branch. Rechecking a miss is intentionally slow.
+        checked = {}
+        verify_dependency_result(root, expected_hash=expected, trees=trees, verified=checked,
+            output_dir=output_dir, consumer_task=consumer_task, scientific_edges=edges,
+            budget_authorities=budgets)
+        verified.update(checked)
+
+
 def verify_dependency_result(root, *, expected_hash=None, trees=None, active=None, verified=None,
-    output_dir=None, consumer_task=None, measurement_only_dependencies=None, budget_authorities=None, scientific_edges=None):
+    output_dir=None, consumer_task=None, measurement_only_dependencies=None, budget_authorities=None, scientific_edges=None,
+    reuse=None):
     with integrity_observation(root):
         return _verify_dependency_result(root, expected_hash=expected_hash, trees=trees,
             active=active, verified=verified, output_dir=output_dir, consumer_task=consumer_task,
             measurement_only_dependencies=measurement_only_dependencies, budget_authorities=budget_authorities,
-            scientific_edges=scientific_edges)
+            scientific_edges=scientific_edges, reuse=reuse)
 
 
 def _verify_dependency_result(root, *, expected_hash, trees, active, verified, output_dir,
-                              consumer_task=None, measurement_only_dependencies=None, budget_authorities=None, scientific_edges=None):
+                              consumer_task=None, measurement_only_dependencies=None, budget_authorities=None, scientific_edges=None,
+                              reuse=None):
     """Verify all lineage publications; only live stages observe acquisitions."""
     root = directory_path(root)
     active = set() if active is None else active
@@ -333,7 +653,7 @@ def _verify_dependency_result(root, *, expected_hash, trees, active, verified, o
     budget_authorities = set() if budget_authorities is None else budget_authorities
     pending = {}
     allowed_measurements = measurement_dependencies(consumer_task) if consumer_task else set()
-    stack = [(root, expected_hash, None, False, allowed_measurements)]
+    stack = [(root, expected_hash, None, False, allowed_measurements, False)]
     def verify_budget_authority(current, request, task, allowed):
         measurement_dependencies(task)
         if request.stage not in ('coverage', 'simulation-smoke'):
@@ -353,70 +673,87 @@ def _verify_dependency_result(root, *, expected_hash, trees, active, verified, o
 
     try:
         while stack:
-            current, expected, unit, ready, allowed_measurements = stack.pop()
-            if ready:
-                result, tree = pending.pop(current)
-                if trees is not None:
-                    trees[str(current)] = tree
-                verified[current] = result
-                active.remove(current)
-            else:
-                current = directory_path(current)
-                if output_dir is not None:
-                    require(not output_dir.is_relative_to(current) and not current.is_relative_to(output_dir),
-                        f'output overlaps an upstream attempt: {current}')
-                require(current not in active, 'dependency publication cycle')
-                if current in verified:
-                    result = verified[current]
-                    require(expected is None or any(a.path == FINGERPRINT and a.sha256 == expected
-                            for a in result.artifacts),
-                        'dependency published fingerprint identity changed')
-                    verify_budget_authority(current,
-                        StageRequest.from_json(read_regular(dependency_file(current, '_execution/request.json'))),
-                        read_mapping(current / '_execution/task.json'), allowed_measurements)
+            current, expected, unit, ready, allowed_measurements, measurement_path = stack.pop()
+            with verification_span(current, 'lineage_walk'):
+                if ready:
+                    result, tree = pending.pop(current)
+                    if trees is not None:
+                        trees[str(current)] = tree
+                    verified[current] = result
+                    active.remove(current)
                 else:
-                    active.add(current)
-                    entered.add(current)
-                    request = StageRequest.from_json(read_regular(dependency_file(current, '_execution/request.json')))
-                    result = StageResult.from_json(read_regular(dependency_file(current, RESULT)))
-                    require(Path(request.output_dir).resolve() == current, 'dependency attempt owner mismatch')
-                    require(result.status == 'pass', 'dependency stage did not pass')
-                    tree = verify_published_tree(current, result, expected)
-                    producer_task = read_mapping(current / '_execution/task.json')
-                    own_measurements = measurement_dependencies(producer_task)
-                    child_measurements = allowed_measurements | own_measurements
-                    config = read_mapping(request.config_path)
-                    hashes = dict(zip(request.dependency_paths, request.dependency_hashes))
-                    parents = []
-                    recorded_inputs = {}
-                    for parent_unit, parent in config.get('dependencies', {}).items():
-                        parent = Path(parent)
-                        require(parent.is_absolute(), 'dependency publication path must be absolute')
-                        acquisition = config.get('acquisitions', {}).get(parent_unit)
-                        if acquisition is not None:
-                            if output_dir is not None:
-                                require(not output_dir.is_relative_to(parent) and not parent.is_relative_to(output_dir),
-                                    f'output overlaps an upstream attempt: {parent}')
-                            recorded_inputs.update(_recorded_acquisition_inputs(
-                                current, parent, acquisition, hashes))
+                    if reuse is not None and reuse.reusable(current, expected, measurement_path=measurement_path):
+                        if scientific_edges is not None:
+                            scientific_edges[current] = ()
+                        continue
+                    current = directory_path(current)
+                    if output_dir is not None:
+                        require(not output_dir.is_relative_to(current) and not current.is_relative_to(output_dir),
+                            f'output overlaps an upstream attempt: {current}')
+                    require(current not in active, 'dependency publication cycle')
+                    if current in verified:
+                        result = verified[current]
+                        require(expected is None or any(a.path == FINGERPRINT and a.sha256 == expected
+                                for a in result.artifacts),
+                            'dependency published fingerprint identity changed')
+                        verify_budget_authority(current,
+                            StageRequest.from_json(read_regular(dependency_file(current, '_execution/request.json'))),
+                            read_mapping(current / '_execution/task.json'), allowed_measurements)
+                    else:
+                        active.add(current)
+                        entered.add(current)
+                        request = StageRequest.from_json(read_regular(dependency_file(current, '_execution/request.json')))
+                        result = StageResult.from_json(read_regular(dependency_file(current, RESULT)))
+                        require(Path(request.output_dir).resolve() == current, 'dependency attempt owner mismatch')
+                        require(result.status == 'pass', 'chain stopped: allowance-exceeded'
+                            if 'allowance-exceeded' in result.message else 'dependency stage did not pass')
+                        cached = reuse.publications.get(current) if reuse is not None else None
+                        if cached is None:
+                            tree = verify_published_tree(current, result, expected)
                         else:
-                            parent = directory_path(parent)
-                            digest = hashes.get(str(parent / FINGERPRINT))
-                            require(digest is not None, 'dependency fingerprint absent from published request')
-                            parents.append((parent, digest, parent_unit, False, child_measurements))
-                    if scientific_edges is not None:
-                        # Edge ownership matters: an ancestor's calibration list
-                        # cannot classify an ordinary edge owned by this task.
-                        scientific_edges[current] = tuple(parent for parent, _, parent_unit, *_ in parents
-                            if parent_unit not in own_measurements)
-                    _verify_publication_result(result, request, recorded_inputs)
-                    verify_budget_authority(current, request, producer_task, allowed_measurements)
-                    pending[current] = (result, tree)
-                    stack.append((current, expected, unit, True, allowed_measurements))
-                    stack.extend(reversed(parents))
-                    continue
-            if unit is not None:
-                verify_dependency_id(current, unit)
+                            require(result == cached[0] and (expected is None or
+                                cached[1][FINGERPRINT]['sha256'] == expected), 'cached publication identity changed')
+                            tree = cached[1]
+                        producer_task = read_mapping(current / '_execution/task.json')
+                        own_measurements = measurement_dependencies(producer_task)
+                        child_measurements = allowed_measurements | own_measurements
+                        config = read_mapping(request.config_path)
+                        hashes = dict(zip(request.dependency_paths, request.dependency_hashes))
+                        parents = []
+                        recorded_inputs = {}
+                        for parent_unit, parent in config.get('dependencies', {}).items():
+                            parent = Path(parent)
+                            require(parent.is_absolute(), 'dependency publication path must be absolute')
+                            acquisition = config.get('acquisitions', {}).get(parent_unit)
+                            if acquisition is not None:
+                                if output_dir is not None:
+                                    require(not output_dir.is_relative_to(parent) and not parent.is_relative_to(output_dir),
+                                        f'output overlaps an upstream attempt: {parent}')
+                                recorded_inputs.update(_recorded_acquisition_inputs(
+                                    current, parent, acquisition, hashes))
+                            else:
+                                parent = directory_path(parent)
+                                digest = hashes.get(str(parent / FINGERPRINT))
+                                require(digest is not None, 'dependency fingerprint absent from published request')
+                                parents.append((parent, digest, parent_unit, False, child_measurements,
+                                    measurement_path or parent_unit in own_measurements))
+                        if scientific_edges is not None:
+                            # Edge ownership matters: an ancestor's calibration list
+                            # cannot classify an ordinary edge owned by this task.
+                            scientific_edges[current] = tuple(parent for parent, _, parent_unit, *_ in parents
+                                if parent_unit not in own_measurements)
+                        if reuse is not None:
+                            recorded_inputs.update(reuse.recorded_inputs(request, measurement_path=measurement_path,
+                                measurement_parents=[parent for parent, _, parent_unit, *_ in parents
+                                    if parent_unit in own_measurements]))
+                        _verify_publication_result(result, request, recorded_inputs)
+                        verify_budget_authority(current, request, producer_task, allowed_measurements)
+                        pending[current] = (result, tree)
+                        stack.append((current, expected, unit, True, allowed_measurements, measurement_path))
+                        stack.extend(reversed(parents))
+                        continue
+                if unit is not None:
+                    verify_dependency_id(current, unit)
         return verified[root]
     finally:
         active.difference_update(entered)
@@ -427,6 +764,7 @@ def verify_dependency_id(root, unit):
     require(producer.get('id') == unit, f'dependency producer identity mismatch: {unit}')
 
 
+@timed_verification("recipe_drift")
 def verify_dependency_recipe(root, lock):
     """Bind locked upstream science to this recipe; preserve pre-lock inputs."""
     request = StageRequest.from_json(read_regular(dependency_file(root, '_execution/request.json')))
@@ -443,7 +781,7 @@ def verify_dependency_recipe(root, lock):
     return [task_path, identity_path]
 
 
-def verify_continuation(task, deps):
+def verify_continuation(task, deps, *, verification=None):
     chain = task.get('continuation')
     if chain is None:
         return
@@ -463,7 +801,87 @@ def verify_continuation(task, deps):
     require(previous.get('recipe_lock') == task.get('recipe_lock'), 'continuation recipe mismatch')
     for field in ('stage', 'campaign', 'parameters'):
         require(previous.get(field) == task.get(field), f'continuation {field} mismatch')
-    verify_dependency_result(deps[predecessor])
+    verify_dependency_result(deps[predecessor], **(verification or {}))
+
+
+def verify_only(attempt, scratch, *, successor=False, full_walk=False):
+    """Replay sealed declared inputs without loading a lock or executing a stage.
+
+    Recipe comparisons use the sealed consumer's lock, never this checkout's
+    fingerprint. This diagnostic cannot authorize a scientific execution.
+    """
+    attempt, scratch = Path(attempt).resolve(strict=True), Path(scratch).resolve(strict=False)
+    require(not scratch.exists(), 'diagnostic scratch must be new')
+    require(not scratch.is_relative_to(attempt), 'diagnostic scratch overlaps attempt')
+    with verification_diagnostic():
+        terminal = StageResult.from_json(read_regular(attempt / RESULT))
+        require(terminal.status == 'pass', 'diagnostic requires a sealed passing attempt')
+        own_tree = verify_published_tree(attempt, terminal)
+        request = StageRequest.from_json(read_regular(attempt / '_execution/request.json'))
+        require(request.content_hash == terminal.request_hash, 'diagnostic request mismatch')
+        config, task = read_mapping(request.config_path), read_mapping(request.task_path)
+        deps = {unit: Path(root) for unit, root in config.get('dependencies', {}).items()}
+        require(not config.get('acquisitions'), 'diagnostic requires stage-publication inputs')
+        require(all(not scratch.is_relative_to(root) and not root.is_relative_to(scratch)
+            for root in deps.values()), 'diagnostic scratch overlaps dependency')
+        hashes = dict(zip(request.dependency_paths, request.dependency_hashes))
+        if successor:
+            # The sealed lock declares the next leaf even when the campaign was
+            # stopped before that leaf could publish. Never invent its task.
+            ref = task['recipe_lock']
+            expansion_path = deps[ref['dependency']] / 'expanded_units.json'
+            verify_input_hash(expansion_path, hashes[str(expansion_path)])
+            expansion = read_mapping(expansion_path)
+            candidates = [leaf for plan in expansion['plans'] for leaf in plan['tasks']
+                if leaf.get('continuation', {}).get('predecessor') == task['id']]
+            require(len(candidates) == 1, 'diagnostic requires one lock-declared successor')
+            previous_task = task
+            task = candidates[0]
+            deps = {unit: root for unit, root in deps.items() if unit in task['needs']}
+            deps[previous_task['id']] = attempt
+            require(set(deps) == set(task['needs']), 'diagnostic successor input set unavailable')
+            hashes[str(attempt / FINGERPRINT)] = next(
+                a.sha256 for a in terminal.artifacts if a.path == FINGERPRINT)
+        trees, verified, edges, budget_authorities = {}, {}, {}, set()
+        with verification_timings() as timings:
+            reuse = None if full_walk else dependency_reuse(task, deps, output_dir=scratch)
+            rewalk_receipt_misses(reuse, trees, verified, scratch, task, edges, budget_authorities)
+            for unit, root in deps.items():
+                verify_dependency_result(root, expected_hash=hashes[str(root / FINGERPRINT)],
+                    trees=trees, verified=verified, output_dir=scratch, consumer_task=task,
+                    budget_authorities=budget_authorities, scientific_edges=edges, reuse=reuse)
+                verify_dependency_id(root, unit)
+            rewalk_receipt_misses(reuse, trees, verified, scratch, task, edges, budget_authorities)
+            primary_seconds = time.monotonic()
+            verify_continuation(task, deps, verification={'trees': trees, 'verified': verified,
+                'budget_authorities': budget_authorities, 'scientific_edges': edges, 'reuse': reuse}
+                if reuse is not None else None)
+            continuation_seconds = time.monotonic() - primary_seconds
+            if task.get('recipe_lock'):
+                ref = task['recipe_lock']
+                lock_path = dependency_file(deps[ref['dependency']], ref['path'])
+                require(file_hash(lock_path) == ref['sha256'], 'diagnostic recipe hash mismatch')
+                lock = read_mapping(lock_path)
+                for root in scientific_ancestors(task, deps, edges) & set(verified):
+                    verify_dependency_recipe(root, lock)
+            if successor or reuse is not None:
+                for unit, root in deps.items():
+                    for name in task['needs'][unit]:
+                        path = root / name
+                        expected = own_tree[name]['sha256'] if root == attempt else hashes[str(path)]
+                        verify_input_hash(path, expected)
+            else:
+                verify_inputs(request)
+        timings['continuation_walk_seconds'] = continuation_seconds
+        timings['verified_roots'] = len(verified)
+        if reuse is not None:
+            reuse.annotate(timings, verified)
+        value = {'diagnostic': True, 'successor': successor, 'status': 'pass', 'attempt': str(attempt),
+            'task_id': task['id'], 'continuation': task.get('continuation'),
+            'request_hash': request.content_hash, 'timings': timings}
+        scratch.mkdir(parents=True)
+        atomic_json(scratch, DEPENDENCY_CHECK, value)
+        return value
 
 
 def finalize_coverage_budget(request, result, started):
@@ -501,6 +919,17 @@ def finalize_coverage_budget(request, result, started):
             'setup_seconds': timing['setup_seconds'], 'import_seconds': 0., 'export_seconds': 0.}
     # Runner preparation precedes the worker clock; charge it once as setup.
     leaf['setup_seconds'] += max(0., raw['started_monotonic'] - started)
+    if leaf.get('setup_safety'):
+        from oxyformer.validation.coverage import setup_overruns
+        leaf['setup_safety']['measured'] = setup_overruns([*history, leaf],
+            leaf['setup_safety']['allowance_seconds'])
+    check_path = Path(request.output_dir) / DEPENDENCY_CHECK
+    verification = read_mapping(check_path).get('timings', {}) if check_path.is_file() else {}
+    if 'ancestors_reused' in verification:
+        leaf['verification'] = {key: verification[key] for key in
+            ('ancestors_reused', 'ancestors_rewalked', 'predecessor_publications_added', 'reuse_miss')}
+        if verification['reuse_miss']:
+            leaf['verification']['status'] = 'reuse-miss'
     elapsed = time.monotonic() - started
     leaf['wall_seconds'] = elapsed
     leaf['publication_seconds'] = elapsed - sum(leaf[k] for k in
@@ -597,85 +1026,105 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     scientific_edges = {}
     budget_authorities = set()
     acquisitions = {}
-    for unit, root in deps.items():
-        require(not out.is_relative_to(root) and not root.is_relative_to(out),
-            f'output overlaps an upstream attempt: {root}')
-        require(isinstance(needs[unit], list) and needs[unit], 'dependency requires explicit files')
-        acquisition_receipt = settings.get('acquisition_receipts', {}).get(unit)
-        if acquisition_receipt is not None:
-            require(acquisition_receipt in needs[unit], 'acquisition receipt must be a declared input')
-            require('payload.tar' in needs[unit], 'acquisition payload must be a declared input')
-            dependency_trees[str(root)] = verify_acquisition(root, acquisition_receipt)
-            acquisitions[unit] = acquisition_receipt
-        for relative in needs[unit]:
-            path = dependency_file(root, relative)
-            files.append(path)
+    with verification_timings() as timings:
+        reuse = dependency_reuse(task, deps, output_dir=out)
+        rewalk_receipt_misses(reuse, dependency_trees, verified_dependencies, out, task,
+            scientific_edges, budget_authorities)
+        for unit, root in deps.items():
+            require(not out.is_relative_to(root) and not root.is_relative_to(out),
+                f'output overlaps an upstream attempt: {root}')
+            require(isinstance(needs[unit], list) and needs[unit], 'dependency requires explicit files')
+            acquisition_receipt = settings.get('acquisition_receipts', {}).get(unit)
             if acquisition_receipt is not None:
-                acquisition_hashes[path] = dependency_trees[str(root)][relative]['sha256']
-        if acquisition_receipt is not None:
-            continue
-        require((root / '_execution/result.json').is_file(), f'stage receipt missing or not regular: {root / "_execution/result.json"}')
-        result = verify_dependency_result(root, trees=dependency_trees, verified=verified_dependencies,
-            output_dir=out, consumer_task=task, measurement_only_dependencies=measurement_only_dependencies,
-            budget_authorities=budget_authorities, scientific_edges=scientific_edges)
-        verify_dependency_id(root, unit)
-        published_hashes[root / FINGERPRINT] = next(
-            a.sha256 for a in result.artifacts if a.path == FINGERPRINT)
-        allowed = {a.path for a in result.artifacts} | {
-            '_execution/task.json', '_execution/request.json', '_execution/result.json',
-            '_execution/environment.json', '_execution/identity.json'}
-        require(set(needs[unit]) <= allowed, 'dependency file not declared by passing stage')
-        producer = StageRequest.from_json(read_regular(root / '_execution/request.json'))
-        budget_files = ('_execution/task.json', 'budget_record.json') if producer.stage in ('coverage', 'simulation-smoke') else ()
-        for relative in ('_execution/request.json', '_execution/result.json', FINGERPRINT, *budget_files):
-            path = dependency_file(root, relative)
-            if path not in files:
+                require(acquisition_receipt in needs[unit], 'acquisition receipt must be a declared input')
+                require('payload.tar' in needs[unit], 'acquisition payload must be a declared input')
+                dependency_trees[str(root)] = verify_acquisition(root, acquisition_receipt)
+                acquisitions[unit] = acquisition_receipt
+            else:
+                # Stopped leaves never create scientific payloads. Report their
+                # terminal refusal before checking for those absent files.
+                with verification_span(root, 'lineage_walk'):
+                    require((root / RESULT).is_file(), f'stage receipt missing or not regular: {root / RESULT}')
+                    terminal = StageResult.from_json(read_regular(root / RESULT))
+                    require(terminal.status == 'pass', 'chain stopped: allowance-exceeded'
+                        if 'allowance-exceeded' in terminal.message else 'dependency stage did not pass')
+            for relative in needs[unit]:
+                path = dependency_file(root, relative)
                 files.append(path)
-    require(len(set(files)) == len(files), 'duplicate dependency files')
-    for relative in task.get('outputs', []):
-        require(not relative.startswith('_execution/'), 'reserved execution output')
-        path = output_path(out, relative)
-        require(not path.is_relative_to(repo), 'output overlaps cloned repository')
-        require(not path.exists(), f'output already exists: {relative}')
-    output_path(out, '_execution').mkdir()
-    verify_continuation(task, deps)
-    lock_ref = task.get('recipe_lock')
-    if settings.get('requires_recipe', False) or 'campaign' in task:
-        require(bool(lock_ref), 'locked stage or campaign task requires a recipe lock')
-    if lock_ref:
-        require(set(lock_ref) == {'dependency', 'path', 'sha256'}, 'invalid recipe reference')
-        require(lock_ref['dependency'] in deps, 'recipe lock dependency missing')
-        lock_file = dependency_file(deps[lock_ref['dependency']], lock_ref['path'])
-        require(lock_file in files, 'recipe lock must be a declared input')
-        require(file_hash(lock_file) == lock_ref['sha256'], 'recipe lock hash mismatch')
-        lock = read_mapping(lock_file)
-        verify_recipe(repo, lock)
-        # Compute reachability afresh for this consumer, across all its roots.
-        # A record is scientific if ANY path to it uses only ordinary edges.
-        measurements = measurement_dependencies(task)
-        pending = [root for unit, root in deps.items() if unit not in measurements and unit not in acquisitions]
-        scientific = set()
-        while pending:
-            root = pending.pop()
-            if root not in scientific:
-                scientific.add(root)
-                pending.extend(scientific_edges[root])
-        for root in verified_dependencies:
-            if root not in scientific:
+                if acquisition_receipt is not None:
+                    acquisition_hashes[path] = dependency_trees[str(root)][relative]['sha256']
+            if acquisition_receipt is not None:
                 continue
-            for path in verify_dependency_recipe(root, lock):
+            result = verify_dependency_result(root, trees=dependency_trees, verified=verified_dependencies,
+                output_dir=out, consumer_task=task, measurement_only_dependencies=measurement_only_dependencies,
+                budget_authorities=budget_authorities, scientific_edges=scientific_edges, reuse=reuse)
+            verify_dependency_id(root, unit)
+            published_hashes[root / FINGERPRINT] = next(
+                a.sha256 for a in result.artifacts if a.path == FINGERPRINT)
+            allowed = {a.path for a in result.artifacts} | {
+                '_execution/task.json', '_execution/request.json', '_execution/result.json',
+                '_execution/environment.json', '_execution/identity.json',
+                DEPENDENCY_CHECK, '_execution/dependencies.json'}
+            require(set(needs[unit]) <= allowed, 'dependency file not declared by passing stage')
+            producer = StageRequest.from_json(read_regular(root / '_execution/request.json'))
+            budget_files = ('_execution/task.json', 'budget_record.json') if producer.stage in ('coverage', 'simulation-smoke') else ()
+            for relative in ('_execution/request.json', '_execution/result.json', FINGERPRINT, *budget_files):
+                path = dependency_file(root, relative)
                 if path not in files:
                     files.append(path)
-        require(file_hash(approvals_file) == file_hash(repo / 'configs/approvals.yaml'),
-            'locked approvals differ from fingerprinted repository config')
+        rewalk_receipt_misses(reuse, dependency_trees, verified_dependencies, out, task,
+            scientific_edges, budget_authorities)
+        require(len(set(files)) == len(files), 'duplicate dependency files')
+        for relative in task.get('outputs', []):
+            require(not relative.startswith('_execution/'), 'reserved execution output')
+            path = output_path(out, relative)
+            require(not path.is_relative_to(repo), 'output overlaps cloned repository')
+            require(not path.exists(), f'output already exists: {relative}')
+        output_path(out, '_execution').mkdir()
+        verify_continuation(task, deps, verification={'trees': dependency_trees,
+            'verified': verified_dependencies, 'budget_authorities': budget_authorities,
+            'scientific_edges': scientific_edges, 'reuse': reuse} if reuse is not None else None)
+        lock_ref = task.get('recipe_lock')
+        if settings.get('requires_recipe', False) or 'campaign' in task:
+            require(bool(lock_ref), 'locked stage or campaign task requires a recipe lock')
+        if lock_ref:
+            require(set(lock_ref) == {'dependency', 'path', 'sha256'}, 'invalid recipe reference')
+            require(lock_ref['dependency'] in deps, 'recipe lock dependency missing')
+            lock_file = dependency_file(deps[lock_ref['dependency']], lock_ref['path'])
+            require(lock_file in files, 'recipe lock must be a declared input')
+            require(file_hash(lock_file) == lock_ref['sha256'], 'recipe lock hash mismatch')
+            lock = read_mapping(lock_file)
+            verify_recipe(repo, lock)
+            # Compute reachability afresh for this consumer, across all its roots.
+            # A record is scientific if ANY path to it uses only ordinary edges.
+            scientific = scientific_ancestors(task, deps, scientific_edges, acquisitions)
+            for root in verified_dependencies:
+                if root not in scientific:
+                    continue
+                for path in verify_dependency_recipe(root, lock):
+                    if path not in files:
+                        files.append(path)
+            require(file_hash(approvals_file) == file_hash(repo / 'configs/approvals.yaml'),
+                'locked approvals differ from fingerprinted repository config')
+    timings['verified_roots'] = len(verified_dependencies)
+    if reuse is not None:
+        reuse.annotate(timings, verified_dependencies)
+    attested = reuse.reused(verified_dependencies) if reuse is not None else {}
+    # Persist the full receipt for successors; only currently consumed trees
+    # enter the current-byte post-check and publication-authority check.
+    receipt_trees = {**attested, **dependency_trees}
     config = {'stage': stage, 'settings': settings, 'approvals': approvals_value,
         'input_sources': sources, 'dependencies': {k: str(v) for k, v in deps.items()},
         'acquisitions': acquisitions, 'yaml_timestamp_policy': 'preserve_scalar_text'}
+    if stage == 'campaign-setup-probe':
+        config['verification_summary'] = {key: timings[key] for key in
+            ('verified_roots', 'ancestors_reused', 'ancestors_rewalked',
+             'predecessor_publications_added', 'reuse_miss') if key in timings}
     if stage in ('coverage', 'simulation-smoke'):
         config['coverage_started_monotonic'] = started
     config_path = atomic_json(out, '_execution/config.json', config)
     task_path = atomic_json(out, '_execution/task.json', task)
-    tree_path = atomic_json(out, '_execution/dependencies.json', dependency_trees)
+    tree_path = atomic_json(out, '_execution/dependencies.json', receipt_trees)
     files.append(tree_path)
     request = StageRequest(stage=stage, config_path=str(config_path), config_hash=file_hash(config_path),
         task_path=str(task_path), task_hash=file_hash(task_path),
@@ -691,7 +1140,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
     atomic_json(out, '_execution/identity.json', {'head': head, 'scientific_fingerprint': scientific_fingerprint(repo)})
     immutable_controls = {str(out / ('_execution/' + name)): file_hash(out / ('_execution/' + name))
         for name in ('request.json', 'environment.json', 'identity.json')}
-    with observe_dependencies(out, dependency_trees):
+    with observe_dependencies(out, receipt_trees):
         dependency_identities = snapshot_dependency_identities(dependency_trees)
         try:
             verify_inputs(request)
@@ -705,8 +1154,19 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
             require(isinstance(result, StageResult), 'stage did not return StageResult')
             if measurement_only_dependencies and result.status == 'pass':
                 from oxyformer.provenance import ArtifactRecord
+                measurement_record = {'measurement_only_dependencies': sorted(measurement_only_dependencies)}
+                estimate_path = out / 'budget_estimate.json'
+                if stage == 'campaign-estimate' and estimate_path.is_file():
+                    scientific = scientific_ancestors(task, deps, scientific_edges, acquisitions)
+                    measured = {name: tree for name, tree in dependency_trees.items()
+                        if Path(name) not in scientific and FINGERPRINT in tree}
+                    measurement_record.update(schema_version=2,
+                        records=read_mapping(estimate_path).get('calibration', {}).get('records', []),
+                        dependency_receipt={'snapshot': measured, 'check': {'status': 'pass',
+                            'attempts': {name: {'status': 'unchanged', 'changed_paths': [],
+                                'tainted_paths': [], 'fingerprint': tree} for name, tree in measured.items()}}})
                 path = atomic_json(out, 'measurement_only_dependencies.json',
-                    {'measurement_only_dependencies': sorted(measurement_only_dependencies)})
+                    measurement_record)
                 result = replace(result, artifacts=(*result.artifacts, ArtifactRecord(
                     path=path.name, kind='measurement_only_dependencies', sha256=file_hash(path),
                     lineage=result.artifacts[0].lineage)))
@@ -716,6 +1176,7 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
         changed = []
         try:
             check = post_execution_check(dependency_trees, observed_changes=changed, identities=dependency_identities)
+            check['timings'] = timings
             # Another consumer may have observed a write that was restored before
             # this final snapshot. Such observed taints remain permanent.
             for root, detail in check['attempts'].items():
@@ -729,6 +1190,10 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
                     check['status'] = 'fail'
             changed = [str(Path(root) / name) for root, detail in check['attempts'].items()
                 for name in detail['changed_paths']]
+            for root, tree in attested.items():
+                check['attempts'][root] = {'status': 'unchanged', 'changed_paths': [],
+                    'tainted_paths': [], 'fingerprint': tree,
+                    'attested_by': reuse.sources[Path(root)]}
             record_taints(check)
             control_directory_changed = _repair_control_directory(out)
             collisions = [str(out / name) for name in (DEPENDENCY_CHECK, RESULT, FINGERPRINT)
@@ -778,3 +1243,16 @@ def run(stage, out, repo, *, deps_env=False, task_file=None, task_id=None, appro
                 message += '; upstream attempt changed; changed paths: ' + ', '.join(changed)
             print('failed: ' + message, file=sys.stderr)
             return StageResult(request_hash=request.content_hash, status='fail', artifacts=(), message=message)
+
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description='Diagnostic dependency verification only; never executes or seals.')
+    parser.add_argument('--verify-only', required=True, metavar='ATTEMPT')
+    parser.add_argument('--scratch', required=True, metavar='NEW_DIRECTORY')
+    parser.add_argument('--successor', action='store_true', help='Verify the lock-declared next leaf using this sealed predecessor.')
+    parser.add_argument('--full-walk', action='store_true', help='Diagnostic comparison: disable resumed receipt reuse.')
+    arguments = parser.parse_args()
+    report = verify_only(arguments.verify_only, arguments.scratch, successor=arguments.successor,
+        full_walk=arguments.full_walk)
+    print(canonical_json(report))

@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import replace
 from hashlib import sha256
+from functools import wraps
 import errno
 import fcntl
 import json
@@ -12,6 +13,7 @@ import os
 from pathlib import Path
 import stat
 import tempfile
+import time
 
 from oxyformer.contracts import StageResult
 from oxyformer.provenance import ArtifactRecord, ContractError, canonical_json, require
@@ -25,6 +27,69 @@ _ACQUISITION_READS = ContextVar('acquisition_reads', default=())
 _OBSERVATION_STATES = {}
 _RECORDING_REFUSAL = ContextVar('recording_refusal', default=False)
 _OBSERVATION_ENV = 'OXYFORMER_OBSERVATION_ATTEMPT'
+_VERIFICATION_TIMINGS = ContextVar('verification_timings', default=None)
+_VERIFICATION_SPAN = ContextVar('verification_span', default=None)
+_DIAGNOSTIC = ContextVar('verification_diagnostic', default=False)
+
+
+@contextmanager
+def verification_diagnostic():
+    """Diagnostics report refusals without changing external authority state."""
+    token = _DIAGNOSTIC.set(True)
+    try:
+        yield
+    finally:
+        _DIAGNOSTIC.reset(token)
+
+
+@contextmanager
+def verification_timings():
+    """Collect exclusive wall times; instrumentation never decides acceptance."""
+    value = {'schema_version': 1, 'roots': {}}
+    token = _VERIFICATION_TIMINGS.set(value)
+    started = time.monotonic()
+    try:
+        yield value
+    finally:
+        value['total_seconds'] = time.monotonic() - started
+        _VERIFICATION_TIMINGS.reset(token)
+
+
+@contextmanager
+def verification_span(root, component):
+    timings = _VERIFICATION_TIMINGS.get()
+    if timings is None:
+        yield None
+        return
+    parent = _VERIFICATION_SPAN.get()
+    now = time.monotonic()
+    if parent is not None:
+        parent['record']['seconds'] += now - parent['started']
+    root = str(root) if root is not None else parent['root'] if parent else 'direct_inputs'
+    record = timings['roots'].setdefault(root, {}).setdefault(component,
+        {'seconds': 0., 'calls': 0, 'bytes': 0})
+    record['calls'] += 1
+    span = {'record': record, 'started': now, 'root': root}
+    token = _VERIFICATION_SPAN.set(span)
+    try:
+        yield record
+    finally:
+        now = time.monotonic()
+        record['seconds'] += now - span['started']
+        _VERIFICATION_SPAN.reset(token)
+        if parent is not None:
+            parent['started'] = now
+
+
+
+def timed_verification(component):
+    def decorate(function):
+        @wraps(function)
+        def measured(root, *args, **kwargs):
+            with verification_span(root, component):
+                return function(root, *args, **kwargs)
+        return measured
+    return decorate
 
 
 
@@ -161,6 +226,7 @@ def record_publication(root, result, *, dependency_roots=(), dependency_identiti
             'result_sha256': sha256(result.to_json().encode()).hexdigest()})
 
 
+@timed_verification("publication_receipt")
 def verify_publication(root, result):
     receipt = publication_receipt(root)
     require(not authority_exists(str(receipt) + '.tainted'), f'tainted upstream fingerprint: {root}')
@@ -170,6 +236,8 @@ def verify_publication(root, result):
 
 
 def record_taints(check):
+    if _DIAGNOSTIC.get():
+        return
     for root, detail in check['attempts'].items():
         tainted = detail.get('tainted_paths', detail['changed_paths'])
         if tainted:
@@ -239,7 +307,10 @@ def observe_acquisition(path, *, metadata=None, digest=None):
     old = binding[2].get(binding[1])
     known = {} if metadata is None else dict(type=stat.S_IFMT(metadata.st_mode),
         mode=stat.S_IMODE(metadata.st_mode), size=metadata.st_size)
-    if old is not None and old.get('partial') and known.get('type') == stat.S_IFDIR:
+    if known.get('type') == stat.S_IFDIR:
+        # Directory size describes filesystem storage, not a particular input.
+        # Let the file read retain its own namespace evidence; complete tree
+        # verification still detects added/removed entries and directory drift.
         known.pop('size', None)
     if digest is not None:
         known['sha256'] = digest
@@ -454,20 +525,26 @@ def open_regular(path):
 
 
 def read_regular(path):
-    with open_regular(path) as stream:
-        raw = stream.read()
-        observe_acquisition(path, digest=sha256(raw).hexdigest())
-    return raw
+    with verification_span(None, 'hashing') as measurement:
+        with open_regular(path) as stream:
+            raw = stream.read()
+            if measurement is not None:
+                measurement['bytes'] += len(raw)
+            observe_acquisition(path, digest=sha256(raw).hexdigest())
+        return raw
 
 
 def regular_file_hash(path):
-    digest = sha256()
-    with open_regular(path) as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
-            digest.update(chunk)
-        value = digest.hexdigest()
-        observe_acquisition(path, digest=value)
-    return value
+    with verification_span(None, 'hashing') as measurement:
+        digest = sha256()
+        with open_regular(path) as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                digest.update(chunk)
+                if measurement is not None:
+                    measurement['bytes'] += len(chunk)
+            value = digest.hexdigest()
+            observe_acquisition(path, digest=value)
+        return value
 
 
 def verify_inputs(request):
@@ -524,20 +601,23 @@ def fingerprint_tree(root, *, exclude=(), include=None):
             if stat.S_ISLNK(kind):
                 entry['target'] = os.readlink(path)
             elif stat.S_ISREG(kind):
-                digest = sha256()
-                fd = _open_observed_regular(path)
-                with os.fdopen(fd, 'rb') as stream:
-                    opened = os.fstat(stream.fileno())
-                    if _stable(opened) != _stable(before):
-                        raise InputChanged(path, 'entry changed before hashing',
-                            content_changed=_content_metadata(opened) != _content_metadata(before))
-                    for chunk in iter(lambda: stream.read(1024 * 1024), b''):
-                        digest.update(chunk)
-                    entry['sha256'] = digest.hexdigest()
-                    after = os.fstat(stream.fileno())
-                    if _stable(after) != _stable(before):
-                        raise InputChanged(path, 'entry changed while hashing',
-                            content_changed=_content_metadata(after) != _content_metadata(before))
+                with verification_span(None, 'hashing') as measurement:
+                    digest = sha256()
+                    fd = _open_observed_regular(path)
+                    with os.fdopen(fd, 'rb') as stream:
+                        opened = os.fstat(stream.fileno())
+                        if _stable(opened) != _stable(before):
+                            raise InputChanged(path, 'entry changed before hashing',
+                                content_changed=_content_metadata(opened) != _content_metadata(before))
+                        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                            digest.update(chunk)
+                            if measurement is not None:
+                                measurement['bytes'] += len(chunk)
+                        entry['sha256'] = digest.hexdigest()
+                        after = os.fstat(stream.fileno())
+                        if _stable(after) != _stable(before):
+                            raise InputChanged(path, 'entry changed while hashing',
+                                content_changed=_content_metadata(after) != _content_metadata(before))
             elif stat.S_ISDIR(kind):
                 if partial(relative):
                     # Only traverse selected children; never open or enumerate

@@ -539,18 +539,35 @@ Screening locks no longer perform in-process admission. They publish immutable
 outputs with `gate.json.admitted: false`. The separate CPU
 `campaign-setup-probe` in `admission` mode measures clone, environment startup
 and the runner's full verification of the first expanded leaf's input set,
-including lock outputs and excluding only its not-yet-created admission
-receipt. The launcher sets `OXYFORMER_SETUP_STARTED` before cloning. The probe
-receipt binds both the verified input digests and `lock_hash`.
+including lock outputs and excluding its not-yet-created admission receipt.
+The launcher sets `OXYFORMER_SETUP_STARTED` before cloning. The new
+`admission-resumed` mode measures that base plus a synthetic predecessor at
+`depth: 1` or `depth: 2`. Each logical probe runs in two separate jobs, with
+separate clones, requests and publications. Its final receipt carries both
+`setup_draws` and their minimum, `setup_seconds`. One slow repeat cannot raise
+the minimum. Every receipt binds the lock, estimate, scenario and base input
+digests. The second draw additionally authenticates the first draw's receipt.
 
-`campaign-admit` asserts equality of all batch-level spec `inputs` (never
-per-leaf `needs`, whose predecessor changes), checks the probe's lock and input
-digests, and recomputes every batch with setup equal to the greater of its
-allowance and `probe + 60 s`. It refuses if a count exceeds its locked count or
-forty, or if estimate and lock outputs plus the serialized admission candidate
-exceed 50 MB. Refusal never resizes or mutates the lock. The orchestrator may
-run one new probe attempt and re-admit; two consecutive refusals go to the owner
-as **admission not established**, with both draws.
+The lock's `expanded_units.json.admission` declares eight setup jobs (six draws
+and two synthetic predecessor builders) followed by `campaign-admit`.
+`task_manifest.json.admission_tasks` declares their inputs and outputs. The
+builders run on CPU in the probe stage's internal `admission-predecessor` mode.
+They require sealed profile leaves 1 and 2 from the same scenario, scientific
+tree and environment as the final lock. Depth 1 uses the fresh probe's sealed
+dependency check, bound through its request snapshot and current publication;
+depth 2 uses the depth-1 probe's check, including the synthetic grand-predecessor.
+The profile's old dependency receipt never substitutes for the final lineage.
+A resumed probe refuses `reuse-miss` when the re-walk exceeds the one added
+predecessor publication, and requires positive ancestor reuse.
+
+`campaign-admit` requires three final two-draw receipts: `fresh`, `resumed_1`,
+and `resumed_2`. It checks equality of batch-level spec `inputs` (per-leaf
+`needs` differ), all receipt bindings, shape evidence and reuse results.
+Allowance is `max(fresh minimum, resumed-1 minimum, resumed-2 minimum) + 60 s`.
+It applies the fit predicate below to every locked batch. Estimate and lock
+outputs plus the serialized admission candidate must also fit within 50 MB.
+Refusal never resizes or mutates the lock. Ordering remains estimate, lock,
+probes, admit, leaves; admission measurements never feed back into sizing.
 
 `admission.json` is the only authority for screening admission. Every expanded
 screening leaf and collector declares it as an input and verifies `admitted`,
@@ -560,14 +577,74 @@ change. The lock gate remains false permanently. Specs without an
 retain their expansion contract. Final `build_lock` shares the new window and
 slice arithmetic but retains its existing in-process admission.
 
-The probe samples the first leaf. Shared spec inputs make its base dependency
-shape representative across scenarios. Campaign calibration includes resumed
-leaves' predecessor verification; fallback covers that extra work only through
-1.5x headroom, the unchanged overrun rule and gates. No throughput guarantee is
-claimed. The scientific fingerprint freeze is unchanged: old profiles require
+The three probes sample the first expanded scenario; shared spec inputs cover
+the common base lineage. Each scenario's first resumed leaf independently
+checks its own locked publication shape. No throughput guarantee is claimed.
+The scientific fingerprint freeze is unchanged: old profiles require
 an owner-approved re-profile on the final tree before a new estimate/lock run.
 The sealed fixtures prove sizing; CPU probe exercises can verify the old
 campaign's dependency shape without authorizing its science.
+
+`budget.expected_predecessor_shapes` records archive bytes and regular-file
+count from each scenario's first sealed profile publication and expanded leaf
+outputs. Each early profile must match the terminal profile's chain owner and
+recipe, and its current publication hash must appear in the terminal profile's
+declared inputs or request-bound dependency snapshot. Equal task IDs or measured
+times from another attempt do not establish this relationship.
+For a fast scenario, archive bytes include one copy per potentially
+started repetition: `min(draw count, max(1, ceil(sized usable compute / measured
+seconds per repetition)))`. Record count replaces the profile's individually
+published repetition records with one slot per potentially completed draw.
+Synthetic archives cycle the appropriate authenticated profile archive's bytes
+to the locked byte count (a final prefix is allowed); additional record slots
+copy authenticated profile result metadata. These are hashing workloads, never
+scientific continuation inputs. Their stage, ownership and budget bindings
+cannot authorize a scientific successor. A missing same-tree profile refuses
+the probe. The sealed synthetic publication must be within 10% of the locked
+shape in both dimensions. The first real resumed leaf compares its predecessor
+against that **same** locked reference: above 10% it records
+`admission-shape-exceeded` and runs; above 50% it writes an unsealed diagnostic
+budget with `admission-shape-mismatch` and refuses before continuation import
+or compute. Exactly 10% and 50% are inclusive. Smaller real publications are
+allowed. These are conservative size estimates, not forecasts of payload
+content or throughput; scenarios whose first-leaf publication exceeds this
+envelope require remeasurement.
+
+### Setup projection and runtime stop policy
+
+The shared `projected_setup_allowance` implementation serves estimate, lock and
+admission. Estimate groups calibration records by chain origin, scenario,
+recipe, lock, chain owner, scientific fingerprint, environment and budget
+generation. With at least three resumed observations in one group, growth is
+the nonnegative median of **all** pairwise slopes using actual leaf indices.
+For longest expanded chain length `L` and last measured index `n`, projected
+setup is `max(observed resumed setups) + growth * max(0, L - n)`. Allowance is
+`max(fresh setup, projected setup) + 60 s`. Fewer than three resumed observations
+are explicitly `unmeasured`. Lock construction recomputes the same estimate.
+The unchanged fit predicate is `window - allowance - resume reserve >= sized
+usable compute`. A refusal names fresh, points, growth, projected setup, `L`
+and the allowance ceiling. Admission uses the same function without extrapolation;
+its two-depth difference is recorded only as informative growth.
+
+At the reviewed month-1 ceiling of 4,629 seconds, fresh 2,811 and resumed
+5,599 / 5,792 / 6,320 project to 16,774.5 at `L=33` (growth 360.5), hence refuse
+at allowance 16,834.5. A concave 3,000 / 3,600 / 4,000 chain also refuses,
+even if it might later plateau. An end-point 2,800 / 2,800 / 3,100 transient
+refuses at `L=33` but fits at `L=10`. This is an explicit conservative policy;
+three observations cannot distinguish a future plateau from continuing growth.
+Late growth may still pass projection and is bounded by the runtime stop rule.
+
+New screening locks declare `budget.setup_safety_net`. Each resumed leaf's
+measured setup is an overrun only above the admitted allowance plus 10% of the
+chain's **actual fresh setup**. Two consecutive overruns or three in total
+cause the next leaf to refuse before continuation import or compute, writing
+`allowance-exceeded` in its unsealed diagnostic budget. The collector reports
+the chain as stopped and refuses to seal. Thus at most three overrunning
+leaves (12 GPU-hours) can be spent, and sustained growth stops after two.
+Budgets retain their formula, generation, owner factor and compute accounting;
+these diagnostics never grant execution or reuse authority. The science,
+continuation semantics, fingerprint freeze, 40-leaf and four-GPU limits remain
+unchanged.
 
 The bounds remain 4 GPU-hours per leaf and 40 leaves **per campaign spec**.
 Screening and final instances are still formed as before, and all generated
@@ -752,8 +829,8 @@ as non-authority calibration measurements. No receipt is rebound or resealed.
 
 Dependencies declared under an estimate or lock task's `setup_calibration` are
 measurement inputs, so they and ancestors reachable only through those edges do
-not enter that consumer's recipe drift comparison. Each descendant computes this
-exclusion over its own full dependency walk: any ordinary path to a record keeps
+not enter that consumer's recipe drift comparison. A full dependency walk computes
+this exclusion per consumer: any ordinary path to a record keeps
 that record scientific. Publication receipts, artifact hashes, request identity,
 pass status and attempt ownership remain verified throughout the walk; the existing
 budget-authority skips remain recorded in `measurement_only_dependencies.json`.
@@ -761,3 +838,96 @@ The estimate's `budget_estimate.json` and the lock's `budget.json` retain each
 calibration record's hash, task ID, budget generation, scientific fingerprint and
 environment hash as sealed provenance. Scientific profiles, estimates and locks
 retain their existing fingerprint equality requirements.
+
+### Dependency verification receipts and diagnostics
+
+Fresh leaves, collectors, estimates, locks, admission and fresh setup probes keep
+the full verification walk on current bytes. Resumed `coverage` and
+`simulation-smoke` leaves, and `admission-resumed` probes, can attest transitive
+ancestors using these sealed receipts:
+
+* The estimate's version-2 `measurement_only_dependencies.json` contains the
+  measurement-only publication snapshots and the same `calibration.records`
+  hashes, fingerprints and environment hashes as `budget_estimate.json`. Its
+  publication is verified now. Calibration record hashes must also agree with
+  the estimate's declared request inputs. Ordinary edges do not acquire the
+  measurement-only exception. Older estimates without this attestation require
+  another valid receipt or the full walk.
+* The predecessor's publication is verified now, including its
+  `_execution/dependency_check.json`. Its passing check must match the startup
+  `_execution/dependencies.json`, which must itself be hash-bound by the
+  predecessor's request. Each shared ancestor's publication hash must agree with
+  the current producer manifest. Missing or inconsistent entries receive a full
+  verification; change and taint fields must be empty lists, and an unbound
+  receipt cannot authorize reuse. True post-seal changes
+  to the predecessor's own receipt fail its current publication check.
+  Before pruning, the runner authenticates each attested publication's small
+  manifest, request and config records and checks its declared
+  parent hashes against the receipt. A parent absent from both receipt maps
+  still receives a full walk. Snapshot entries must match the publication's
+  manifest; malformed entries fall back to current verification. This metadata
+  must remain readable. Reuse avoids rehashing transitive payloads, not the
+  metadata needed to establish which publications the receipt covers.
+  The terminal result is reconstructed from the manifest's original result and
+  fingerprint artifact, then checked against both the sealed snapshot and the
+  independent publication authority. Unused stored result and task payloads are
+  attested rather than reread; the sealed consumer already checked the producer
+  identity, and the authenticated parent edge binds its publication hash.
+  Their post-seal drift has the same full-walk collector backstop as other
+  unused transitive payloads. Direct task/result inputs remain checked now.
+  Direct-parent identities are read once from their currently verified
+  publications and cached within this walk, including when older leaves share
+  those parents; the cache never carries across attempts.
+* Continuation validation retains its owner, consecutive step, stage, campaign,
+  parameters and recipe checks. For resumed leaves it uses the current walk's
+  verified publications and budget-authority cache. This removes a second full
+  lineage traversal; its evidence is the current verified predecessor publication
+  and the same bound receipt, not an unchecked continuation flag.
+
+These exceptions never substitute evidence for a leaf's direct inputs. The
+continuation archive, predecessor records, profiles, real-frame inputs, estimate
+outputs and lock retain current hash, publication and recipe checks. The current
+leaf's science fingerprint freeze and sealed budget formula/generation are
+unchanged. Shared transitive recipe comparisons are attested by the predecessor's
+same-recipe check; direct recipe comparisons remain current. Publication
+post-checks and authority checks cover the currently verified roots. The next
+receipt also retains the attested snapshots, labelled `attested_by`, without
+claiming that their bytes were re-read. Read observations still cover these
+snapshots if a worker actually accesses them.
+
+The trust boundary is deliberate: a transitive-only ancestor whose stored bytes
+no attempt in the leaf's lineage reads any more is attested by its sealed
+consumer's receipt. A post-seal modification changes no consumed result and is
+**not detected by a resumed leaf**. Every chain's fresh leaf and the repetition's
+collector perform the full walk on current bytes; the collector detects such
+drift and refuses to seal the repetition. The pre-existing verify-at-setup /
+read-at-compute window is unchanged and outside this change's scope. This is not
+a defense against forging the independent publication authority or changing the
+trusted runner itself.
+
+`_execution/dependency_check.json` adds `timings`: exclusive per-root wall seconds
+and calls for `hashing`, `publication_receipt`, `recipe_drift` and `lineage_walk`.
+Within the ancestry walk, hashing includes safe-read observations and repeated
+hashes. `total_seconds` covers that interval; normal request construction and the
+final `verify_inputs` pass occur outside it and are not included. These timings
+do not claim to measure all setup I/O or total production setup. The
+diagnostic continuation subtotal overlaps these components. Direct-input
+bookkeeping without an active publication is named `direct_inputs`. Resumed
+timings also report `ancestors_reused`, `ancestors_rewalked`, current
+`verified_roots`, source publication hashes and `reuse_miss`. Counts refer to
+attempts: a predecessor adds one publication. More than one transitive ancestor
+re-walked is recorded as `reuse-miss` in the leaf's budget record. Required direct
+input checks are not counted as transitive re-walks.
+
+Run `python -m oxyformer.execution.runner --verify-only ATTEMPT --scratch NEW_DIR`
+on a CPU compute node to replay a sealed attempt's declared inputs. `--successor`
+uses the unique next leaf already declared by its sealed lock, with that sealed
+attempt as predecessor. `--full-walk` disables receipt reuse for a diagnostic
+comparison. The resolved scratch path must be new and outside the input attempts.
+The diagnostic authenticates its source before timing, uses the source's sealed
+recipe for ancestry comparisons, never calls `load_lock`, never computes and
+never publishes or seals. It writes only the scratch dependency-check report;
+refused diagnostic reads do not write taints into the original campaign.
+The leaf diagnostic supports stage-publication inputs, including their existing
+sealed acquisition ancestry. Attempts with direct acquisition inputs are outside
+this diagnostic's envelope and are refused before any scratch output is written.

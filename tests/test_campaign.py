@@ -18,6 +18,63 @@ STAMPS = {"scientific_fingerprint": {"algorithm": "tracked-science-v2", "sha256"
           "environment_hash": "b" * 64}
 
 
+@pytest.mark.parametrize('fresh,resumed,length,growth,projected,allowance,fits', [
+    (2811, [5599, 5792, 6320], 33, 360.5, 16774.5, 16834.5, False),
+    (2811, [3000, 3600, 4000], 33, 500, 18500, 18560, False),
+    (2811, [2800, 2800, 3100], 33, 150, 7450, 7510, False),
+    (2811, [2800, 2800, 3100], 10, 150, 4000, 4060, True),
+    (3000, [3500] * 4, 33, 0, 3500, 3560, True),
+    (2811, [2800, 2800, 3000, 2800], 33, 0, 3000, 3060, True),
+    (2811, [2800 + 60 * k for k in range(10)], 12, 60, 3400, 3460, True),
+    (2811, [2800] * 8 + [3500, 4200], 12, 0, 4200, 4260, True),
+    (2811, [5000, 1000, 1500, 2000, 2500, 3000], 3, 500, 5000, 5060, False),
+])
+def test_projected_setup_allowance_reviewed_fixtures(fresh, resumed, length, growth, projected, allowance, fits):
+    value = coverage.projected_setup_allowance(fresh, resumed, length)
+    assert value['growth'] == growth
+    assert value['projected'] == projected
+    assert value['allowance'] == allowance
+    if fits:
+        assert coverage.require_setup_fits(value, window=14100, resume_reserve=907, usable_compute=8564)['ceiling'] == 4629
+    else:
+        with pytest.raises(ContractError, match='setup allowance does not fit') as error:
+            coverage.require_setup_fits(value, window=14100, resume_reserve=907, usable_compute=8564)
+        assert all(name in str(error.value) for name in ('fresh', 'points', 'growth', 'projected', 'longest_chain', 'ceiling'))
+
+
+@pytest.mark.parametrize('fresh,resumed,expected', [(2400, [2760, 2809], 2869), (2811, [2800, 2860], 2920)])
+def test_setup_admission_uses_depth_minima_without_extrapolation(fresh, resumed, expected):
+    value = coverage.projected_setup_allowance(fresh, resumed, 40, extrapolate=False)
+    assert value['horizon'] == 0 and value['allowance'] == expected
+    assert value['growth'] == resumed[1] - resumed[0]
+    coverage.require_setup_fits(value, window=14100, resume_reserve=907, usable_compute=8564)
+
+
+@pytest.mark.parametrize('offsets,refused_leaf', [
+    ([300, 300], 4), ([300, 0, 300, 0, 300], 7),
+    ([200] * 20, None), ([300, 0, 0, 0], None),
+])
+def test_setup_runtime_overrun_bound(offsets, refused_leaf):
+    allowance = 3000
+    leaves = [{'setup_seconds': 2811}]
+    stopped_at = None
+    for index, offset in enumerate(offsets, start=2):
+        assert not coverage.setup_overruns(leaves, allowance)['stopped']
+        leaves.append({'setup_seconds': allowance + offset})
+        value = coverage.setup_overruns(leaves, allowance)
+        assert value['tolerance'] == pytest.approx(281.1)
+        if value['stopped']:
+            stopped_at = index + 1
+            break
+    assert stopped_at == refused_leaf
+
+
+def test_setup_projection_preserves_sparse_leaf_indices_and_clamps_horizon():
+    value = coverage.projected_setup_allowance(2800, [3000, 3200, 3600], 12, leaf_indices=[2, 4, 8])
+    assert value['growth'] == 100 and value['projected'] == 4000
+    assert coverage.projected_setup_allowance(2800, [3000, 3200, 3600], 3, leaf_indices=[2, 4, 8])['projected'] == 3600
+
+
 @pytest.fixture(autouse=True)
 def frozen_fingerprint(monkeypatch, tmp_path):
     monkeypatch.setenv("OXYFORMER_PUBLICATION_STORE", str(tmp_path / ".publications"))
@@ -32,7 +89,7 @@ def write(path, value):
     return path
 
 
-def seal_budget_fixture(root, unit, task=None):
+def seal_budget_fixture(root, unit, task=None, *, complete_controls=False, dependency_snapshots=None):
     """Publish synthetic measurements through the real immutable sealing path."""
     from oxyformer.execution.integrity import publish_result, RESULT, FINGERPRINT
     from oxyformer.provenance import ArtifactRecord, ArtifactLineage
@@ -53,8 +110,19 @@ def seal_budget_fixture(root, unit, task=None):
             task['outputs'] = ['result.json', 'continuation.tar']
     config = write(root / '_execution/config.json', {})
     task_path = write(root / '_execution/task.json', task)
+    inputs = ()
+    if complete_controls:
+        snapshot = write(root / '_execution/dependencies.json', dependency_snapshots or {})
+        inputs = (str(snapshot),)
+        write(root / '_execution/dependency_check.json', {'status': 'pass', 'attempts': {
+            name: {'status': 'unchanged', 'changed_paths': [], 'tainted_paths': [], 'fingerprint': tree}
+            for name, tree in (dependency_snapshots or {}).items()}})
+        write(root / '_execution/environment.json', {'fixture': 'synthetic'})
+        write(root / '_execution/identity.json', {'head': 'c' * 40,
+            'scientific_fingerprint': timing['scientific_fingerprint']})
     producer = StageRequest(stage=task['stage'], config_path=str(config), config_hash=file_hash(config),
-        task_path=str(task_path), task_hash=file_hash(task_path), dependency_paths=(), dependency_hashes=(),
+        task_path=str(task_path), task_hash=file_hash(task_path), dependency_paths=inputs,
+        dependency_hashes=tuple(file_hash(p) for p in inputs),
         output_dir=str(root), code_identity='c' * 40)
     (root / '_execution/request.json').write_text(producer.to_json())
     wall = task['parameters']['wall_seconds']
@@ -92,7 +160,7 @@ def seal_budget_fixture(root, unit, task=None):
         parent_hashes=(), split_hash=None, config_hash=producer.config_hash, model_hash=None,
         environment=(("fixture", "synthetic"),), seed=None, parameter_count=None)
     artifacts = tuple(ArtifactRecord(path=p.name, sha256=file_hash(p), kind='fixture', lineage=lineage)
-        for p in sorted(root.glob('*.json')))
+        for p in sorted([*root.glob('*.json'), *root.glob('*.tar')]))
     terminal = StageResult(request_hash=producer.content_hash, status='fail' if failed else 'pass',
         artifacts=artifacts, message='synthetic measured fixture')
     for name in (RESULT, FINGERPRINT):

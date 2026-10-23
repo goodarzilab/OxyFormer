@@ -228,6 +228,25 @@ def task_file(out, **changes):
     return path
 
 
+def test_stopped_chain_reason_precedes_missing_scientific_payload(runtime, tmp_path, monkeypatch):
+    repo, out = runtime
+    stopped = new_attempt(repo, tmp_path / 'stopped')
+    def refuse(request, *unused):
+        atomic_json(request.output_dir, 'budget_record.json', {'diagnostic_only': True,
+            'status': 'allowance-exceeded', 'authorizes_compute_or_reuse': False})
+        return StageResult(request_hash=request.content_hash, status='blocked', artifacts=(),
+            message='allowance-exceeded: chain stopped before compute')
+    result = run_worker('dummy', stopped, repo, task_file=task_file(stopped, id='stopped'), execute=refuse)
+    assert result.status == 'blocked' and not (stopped / 'value.json').exists()
+    assert not (stopped / FINGERPRINT).exists()
+    monkeypatch.setenv(dependency_variable('stopped'), str(stopped))
+    with raises(ContractError, match='chain stopped: allowance-exceeded'):
+        run_worker('dummy', out, repo, deps_env=True,
+            task_file=task_file(out, needs={'stopped': ['value.json']}),
+            execute=lambda *args: pytest.fail('collector computed after a stopped dependency'))
+    assert not (out / FINGERPRINT).exists()
+
+
 def publish_source(repo, root, *, parent=None, head=None):
     """Seal the synthetic producer attempt."""
     dependencies = {} if parent is None else {'data-unit': str(parent)}
@@ -265,6 +284,72 @@ def make_source(repo, source, monkeypatch=None):
 @pytest.fixture
 def source(runtime, tmp_path, monkeypatch):
     return make_source(runtime[0], tmp_path / 'source', monkeypatch)
+
+
+def test_verification_timings_and_diagnostic_never_execute_or_seal(runtime, source, tmp_path, monkeypatch):
+    from oxyformer.execution import runner, integrity
+    from oxyformer.validation import campaign
+    repo, out = runtime
+    assert_pass(run_task(repo, out, needs=SOURCE_NEEDS))
+    measured = read_check(out)['timings']
+    assert measured['roots'][str(source)]['hashing']['bytes'] > 0
+    assert measured['roots'][str(source)]['publication_receipt']['calls'] > 0
+    assert measured['roots'][str(source)]['lineage_walk']['seconds'] >= 0
+    before = fingerprint_tree(out)
+    def forbidden(*args, **kwargs):
+        raise AssertionError('diagnostic attempted execution, lock load or publication')
+    monkeypatch.setattr(campaign, 'load_lock', forbidden)
+    monkeypatch.setattr(runner, 'run', forbidden)
+    monkeypatch.setattr(runner, 'publish_result', forbidden)
+    monkeypatch.setattr(integrity, 'record_publication', forbidden)
+    scratch = tmp_path / 'diagnostic'
+    value = runner.verify_only(out, scratch)
+    assert value['diagnostic'] is True and value['status'] == 'pass'
+    assert value['timings']['verified_roots'] == 1
+    assert read_check(scratch) == value
+    assert not (scratch / RESULT).exists() and not (scratch / FINGERPRINT).exists()
+    assert not integrity.publication_receipt(scratch).exists()
+    assert fingerprint_tree(out) == before
+
+
+def test_verify_only_cli_keeps_tamper_refusal(runtime, source, tmp_path):
+    from oxyformer.execution.integrity import publication_receipt
+    repo, out = runtime
+    assert_pass(run_task(repo, out, needs=SOURCE_NEEDS))
+    (source / 'data.json').write_text('{"changed":true}')
+    scratch = tmp_path / 'diagnostic'
+    result = subprocess.run([sys.executable, '-m', 'oxyformer.execution.runner',
+        '--verify-only', str(out), '--scratch', str(scratch)],
+        env=fixture_env(), capture_output=True, text=True, timeout=30)
+    assert result.returncode != 0
+    assert 'fingerprint mismatch' in result.stderr
+    assert not scratch.exists()
+    assert not Path(str(publication_receipt(source)) + '.tainted').exists()
+
+
+def test_leaf_diagnostic_refuses_direct_acquisition_inputs(runtime, acquisition, tmp_path):
+    from oxyformer.execution.runner import verify_only
+    repo, out = runtime
+    assert_pass(run_task(repo, out, needs={'fetch-data': ['payload.tar', 'receipts.json']}))
+    scratch = tmp_path / 'unsupported-acquisition-diagnostic'
+    with raises(ContractError, match='diagnostic requires stage-publication inputs'):
+        verify_only(out, scratch)
+    assert not scratch.exists()
+
+
+@pytest.mark.parametrize('target', ['attempt', 'dependency'])
+def test_verify_only_refuses_scratch_through_symlink_parent(runtime, source, tmp_path, target):
+    from oxyformer.execution.runner import verify_only
+    repo, out = runtime
+    assert_pass(run_task(repo, out, needs=SOURCE_NEEDS))
+    protected = out if target == 'attempt' else source
+    before = fingerprint_tree(protected)
+    alias = tmp_path / 'scratch-parent'
+    alias.symlink_to(protected, target_is_directory=True)
+    with raises(ContractError, match='diagnostic scratch overlaps'):
+        verify_only(out, alias / 'new-scratch')
+    assert not (protected / 'new-scratch').exists()
+    assert fingerprint_tree(protected) == before
 
 
 def seal_source(repo, source):

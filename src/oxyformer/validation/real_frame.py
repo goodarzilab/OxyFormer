@@ -284,7 +284,7 @@ def screening_profile_tasks(endpoint, frame, approvals, *, setup_calibration=Non
     resources = {'cpus_per_task': 8, 'gpus': 1, 'wall_seconds': allocation['allocation_seconds'], 'partition': 'standard'}
     outputs = ['result.json', 'timing.json', 'runtime.json', 'artifact_manifest.json', BUDGET_RECORD, 'continuation.tar']
     receipt_inputs = ['_execution/task.json', '_execution/request.json', '_execution/result.json', *outputs]
-    tasks, profiles = [], {}
+    tasks, profiles, probe_profiles = [], {}, {}
     for original in legacy[:4]:
         parameters = {**deepcopy(original['parameters']), 'recipe': recipe, **metadata,
                       'study': decision['recipe'], 'wall_seconds': stage_seconds,
@@ -293,6 +293,7 @@ def screening_profile_tasks(endpoint, frame, approvals, *, setup_calibration=Non
         parameters['draws'] = repetition_plan(digest(['month1-screening-profile', recipe]), name, 1)
         owner = digest(['month1-profile-chain', parameters])
         predecessor = None
+        probe_profiles[name] = {}
         for step in range(decision['month1_sizing']['leaves_per_scenario_max']):
             task_id = original['id'] + '-' + str(step)
             needs = deepcopy(original['needs'])
@@ -303,6 +304,8 @@ def screening_profile_tasks(endpoint, frame, approvals, *, setup_calibration=Non
                 'parameters': deepcopy(parameters),
                 'continuation': {'owner': owner, 'step': step, 'predecessor': predecessor}})
             predecessor = task_id
+            if step < 2:
+                probe_profiles[name][str(step + 1)] = {'dependency': task_id, 'path': BUDGET_RECORD}
         profiles[name] = {'dependency': predecessor, 'path': 'result.json'}
     tasks.append({'id': 'campaign-estimate', 'stage': 'campaign-estimate', **metadata,
         'resources': dict(resources),
@@ -310,8 +313,12 @@ def screening_profile_tasks(endpoint, frame, approvals, *, setup_calibration=Non
                   **{ref['dependency']: receipt_inputs for ref in profiles.values()}},
         'outputs': ['budget_estimate.json', 'artifact_manifest.json'],
         'parameters': {**{k: deepcopy(legacy[4]['parameters'][k]) for k in ('endpoint_input', 'frame_input')},
-            'recipe': recipe, 'profiles': profiles, **resources, 'wall_seconds': stage_seconds,
+            'recipe': recipe, 'profiles': profiles, 'probe_profiles': probe_profiles, **resources, 'wall_seconds': stage_seconds,
             'profile_safety_factor': campaign.screening_safety_factor(approvals)['profile_safety_factor']}})
+    from oxyformer.validation.campaign_probe import PROFILE_SETUP_INPUTS
+    for refs in probe_profiles.values():
+        for ref in refs.values():
+            tasks[-1]['needs'][ref['dependency']] = list(PROFILE_SETUP_INPUTS)
     tasks[-1] = sizing_task_inputs(tasks[-1], setup_calibration=setup_calibration, calibration_probes=calibration_probes)
     return {'schema_version': 1, **metadata, 'gpu_concurrency_max': 4, 'tasks': tasks}
 

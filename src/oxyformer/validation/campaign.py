@@ -353,7 +353,12 @@ def screening_estimate(request, config, parameters):
     stamps = fingerprint()
     profiles = {s["name"]: _profile(request, config, parameters["profiles"][s["name"]], s, recipe, stamps)
                 for s in scenarios}
-    from oxyformer.validation.campaign_probe import calibrate
+    from oxyformer.validation.campaign_probe import calibrate, profile_setup_sources
+    for scenario in scenarios:
+        name = scenario['name']
+        refs = parameters.get('probe_profiles', {}).get(name)
+        profiles[name]['setup_profile_sources'] = (profile_setup_sources(request, config, refs,
+            scenario, profiles[name], stamps) if refs is not None else {})
     profiles, calibration = calibrate(request, config, parameters, profiles)
     rows = {}
     requested_counts = {}
@@ -384,6 +389,23 @@ def screening_estimate(request, config, parameters):
         require(leaves <= 40, "requested leaf wall cannot fit the owner-maximal repetition count with its required spare slice: " + name)
         rows[name] = {"repetitions": count, "leaves": leaves,
                       "gpu_hours": leaves * allocation / 3600}
+    from oxyformer.validation.coverage import projected_setup_allowance, require_setup_fits
+    longest = max(row['leaves'] for row in rows.values())
+    projections = []
+    for chain in calibration.get('setup_chains', []):
+        if len(chain['resumed']) < 3:
+            projections.append({**chain, 'status': 'unmeasured', 'reason': 'fewer than three resumed leaves'})
+            continue
+        profile = profiles[chain['scenario']]
+        projected = projected_setup_allowance(chain['fresh'], chain['resumed'], longest,
+            leaf_indices=chain['leaf_indices'])
+        evidence = require_setup_fits(projected, window=wall,
+            resume_reserve=profile['resume_overhead_seconds'],
+            usable_compute=profile['assumed_usable_per_leaf'])
+        projections.append({**chain, **evidence, 'status': 'measured'})
+    calibration['setup_projection'] = {'longest_chain': longest,
+        'status': 'measured' if any(p['status'] == 'measured' for p in projections) else 'unmeasured',
+        'chains': projections, 'policy': 'nonnegative median of all pairwise slopes; max observed plus remaining horizon; +60 seconds'}
     calibration['requested_batch_counts'] = requested_counts
     calibration['second_probe_recommended'] = (calibration['source'] == 'pre_lock_probe'
         and len(calibration['draws']) == 1 and any(n > 40 for n in requested_counts.values()))
@@ -448,6 +470,14 @@ def build_screening_lock(request, config, task):
         "concurrency_limits": {"gpu": 4, "cpu": 6}, "run_gpu_hours_ceiling": 3600,
         "collector_gpu_hours": 0,
         "cpu_wall_hours_ceiling": (estimate["projected_leaf_count"] * leaf_allocation(p["wall_seconds"])["allocation_seconds"] / 60 + 40) / 60}
+    from oxyformer.validation.campaign_probe import expected_predecessor_shape
+    counts = {batch['scenario']['name']: len(batch['draws']) for batch in batches}
+    budget['expected_predecessor_shapes'] = {name: expected_predecessor_shape(profile,
+        LEAF_OUTPUTS + ['continuation.tar'], draw_count=counts[name])
+        for name, profile in profiles.items()}
+    budget['setup_safety_net'] = {'noise_fraction_of_fresh': .1, 'consecutive_overruns': 2,
+        'total_overruns': 3, 'overrunning_leaf_gpu_hours_bound': 12,
+        'policy': 'conservative projection, three-receipt admission, next-leaf refusal'}
     require(budget["gpu_hours"] + budget["collector_gpu_hours"] <= 3600, "screening allocation exceeded")
     require(finite(p["cpu_wall_hours_budget"], "CPU hours budget") >= budget["cpu_wall_hours_ceiling"],
             "infeasible CPU budget")
@@ -801,9 +831,15 @@ def run_stage(request: StageRequest) -> StageResult:
         require(task["stage"] == request.stage, "stage mismatch")
         if request.stage == "campaign-lock":
             lock, plans, budget = build_lock(request, config, task)
+            admission = None
+            if screening_metadata(lock['recipe']):
+                from oxyformer.validation.campaign_probe import setup_admission_plan
+                admission = setup_admission_plan(lock, plans, task['id'], config['approvals'])
             values = {"recipe_lock.json": lock, "task_manifest.json": {"lock_hash": digest(lock),
-                "tasks": [t for plan in plans for t in plan["tasks"]]},
-                "expanded_units.json": {"lock_hash": digest(lock), "plans": plans},
+                "tasks": [t for plan in plans for t in plan["tasks"]],
+                **({'admission_tasks': admission['tasks']} if admission else {})},
+                "expanded_units.json": {"lock_hash": digest(lock), "plans": plans,
+                    **({'admission': admission} if admission else {})},
                 "budget.json": budget, "gate.json": {"pass": True, "admitted": not bool(screening_metadata(lock["recipe"])),
                     "lock_hash": digest(lock), "submission_performed": False, "screening_complete": False,
                     "certifies_production_coverage": False}}
