@@ -217,6 +217,29 @@ def test_postseal_predecessor_receipt_tamper_never_authorizes_reuse(verification
         chain.leaf(1)
 
 
+@pytest.mark.parametrize('field', ['changed_paths', 'tainted_paths'])
+@pytest.mark.parametrize('value', [False, None, 0, '', {}])
+def test_falsey_receipt_lists_force_full_verification(verification_chain, tmp_path, monkeypatch, field, value):
+    from oxyformer.execution import runner
+    chain = verification_chain
+    original = runner._replace_control
+
+    def replace_control(root, name, text):
+        if Path(root).name == 'leaf-0' and name == runner.DEPENDENCY_CHECK:
+            check = json.loads(text)
+            check['attempts'][str(chain.source)][field] = value
+            text = canonical_json(check)
+        return original(root, name, text)
+
+    with monkeypatch.context() as injection:
+        injection.setattr(runner, '_replace_control', replace_control)
+        chain.leaf(0)
+    (chain.source / 'data.json').write_text('{"changed_after_seal":true}')
+    with raises(ContractError, match='(fingerprint|input hash) mismatch'):
+        chain.leaf(1)
+    assert not (tmp_path / 'leaf-1' / FINGERPRINT).exists()
+
+
 @pytest.mark.parametrize('ancestor', ['source', 'heavy'])
 def test_diagnostic_scratch_cannot_enter_attested_transitive_ancestor(verification_chain, ancestor):
     from oxyformer.execution.runner import verify_only
