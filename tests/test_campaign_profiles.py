@@ -684,6 +684,8 @@ def screening_rates(request):
 @pytest.fixture
 def screening_request(tmp_path, monkeypatch, screening_rates):
     import torch
+    from oxyformer.contracts import StageResult
+    from oxyformer.execution.integrity import verify_published_tree
     monkeypatch.setattr(campaign, 'fingerprint', lambda: deepcopy(STAMPS))
     monkeypatch.setattr(campaign, 'resolve_device', lambda: torch.device('cuda:0'))
     approvals = read_mapping(ROOT / 'configs/approvals.yaml')
@@ -712,8 +714,8 @@ def screening_request(tmp_path, monkeypatch, screening_rates):
         for name in ('runtime.json', 'coverage_measurements.json', 'artifact_manifest.json'):
             write(root / name, {'fixture': 'synthetic'})
         (root / 'continuation.tar').write_bytes(b'profile continuation fixture\n' * 1024)
-        seal_budget_fixture(root, task['id'], task, complete_controls=True)
         terminal_timing = coverage.read_json(root / 'timing.json')
+        snapshots = {}
         for step, early_task in enumerate(tasks[index-39:index-37]):
             early = deps[early_task['id']] = tmp_path / early_task['id']
             value = coverage.read_json(root / 'result.json')
@@ -728,6 +730,9 @@ def screening_request(tmp_path, monkeypatch, screening_rates):
                 write(early / name, {'fixture': 'synthetic'})
             (early / 'continuation.tar').write_bytes(b'profile continuation fixture\n' * 1024)
             seal_budget_fixture(early, early_task['id'], early_task, complete_controls=True)
+            snapshots[str(early)] = verify_published_tree(early,
+                StageResult.from_json((early / '_execution/result.json').read_text()))
+        seal_budget_fixture(root, task['id'], task, complete_controls=True, dependency_snapshots=snapshots)
     estimate_task = tasks[-1]
     estimate_task['parameters'].pop('calibration_probes')
     estimate_task['needs'].pop('campaign-calibration')
@@ -735,6 +740,33 @@ def screening_request(tmp_path, monkeypatch, screening_rates):
         {'dependency': ref['dependency'], 'path': coverage.BUDGET_RECORD}
         for ref in estimate_task['parameters']['profiles'].values()]
     return request(tmp_path / 'screening-estimate', estimate_task, deps, approvals)
+
+
+@pytest.mark.parametrize('foreign_owner', [False, True])
+def test_profile_setup_sources_bind_terminal_profile_publications(screening_request, tmp_path, foreign_owner):
+    import shutil
+    config = coverage.read_json(screening_request.config_path)
+    task = coverage.read_json(screening_request.task_path)
+    scenario, refs = next(iter(task['parameters']['probe_profiles'].items()))
+    unit = refs['1']['dependency']
+    original = Path(config['dependencies'][unit])
+    foreign = tmp_path / 'another-profile-attempt'
+    foreign.mkdir()
+    for path in original.iterdir():
+        if path.is_file() and path.suffix in ('.json', '.tar'):
+            shutil.copyfile(path, foreign / path.name)
+    producer = coverage.read_json(original / '_execution/task.json')
+    if foreign_owner:
+        producer['continuation']['owner'] = 'another-profile-chain'
+    archive = foreign / 'continuation.tar'
+    archive.write_bytes(archive.read_bytes() * 3)
+    seal_budget_fixture(foreign, unit, producer, complete_controls=True)
+    deps = {key: Path(value) for key, value in config['dependencies'].items()}
+    deps[unit] = foreign
+    revised = request(tmp_path / 'cross-profile-estimate', task, deps, config['approvals'])
+    with pytest.raises(ContractError, match='same.*profile|profile.*chain'):
+        campaign_estimate.estimate_budget(revised)
+    assert not list(Path(revised.output_dir).iterdir())
 
 
 def screening_lock_request(req, tmp_path):
