@@ -60,6 +60,20 @@ def profile_setup_sources(request, config, refs, scenario, profile, stamps):
     from oxyformer.execution.integrity import FINGERPRINT, verify_published_tree
     from oxyformer.validation.coverage import load_budget
     require(set(refs) == {'1', '2'}, 'two early profile leaves required for resumed admission')
+    terminal_unit = profile['source_unit']
+    terminal_record = load_budget(request, config, terminal_unit)
+    require(terminal_record['record_hash'] == profile['budget_record_hash'], 'terminal profile record mismatch')
+    terminal_root = Path(config['dependencies'][terminal_unit]).resolve()
+    terminal = StageResult.from_json((terminal_root / '_execution/result.json').read_text())
+    terminal_tree = verify_published_tree(terminal_root, terminal)
+    producer = StageRequest.from_json((terminal_root / '_execution/request.json').read_text())
+    hashes = dict(zip(producer.dependency_paths, producer.dependency_hashes))
+    snapshot_name = '_execution/dependencies.json'
+    snapshot = {}
+    if (snapshot_name in terminal_tree and hashes.get(str(terminal_root / snapshot_name))
+            == terminal_tree[snapshot_name]['sha256']):
+        snapshot = read_json(terminal_root / snapshot_name)
+    require(isinstance(snapshot, dict), 'terminal profile chain snapshot is invalid')
     sources = {}
     for depth, ref in refs.items():
         unit = ref['dependency']
@@ -68,13 +82,23 @@ def profile_setup_sources(request, config, refs, scenario, profile, stamps):
         require(record['binding']['mode'] == 'profile'
             and record['binding']['scenario'] == scenario
             and record['binding']['draws'] == profile['draws']
+            and record['chained'] and terminal_record['chained']
+            and record['binding']['chain']['owner'] == terminal_record['binding']['chain']['owner']
+            and record['binding']['recipe_hash'] == terminal_record['binding']['recipe_hash']
             and record['leaves'][-1] == profile['leaf_measurements'][int(depth) - 1],
             'resumed admission requires the same scenario profile chain')
         require(all(record['profile'][key] == stamps[key] for key in ('scientific_fingerprint', 'environment_hash')),
             'resumed admission requires same-tree profile leaves')
-        root = Path(config['dependencies'][unit])
+        root = Path(config['dependencies'][unit]).resolve()
         terminal = StageResult.from_json((root / '_execution/result.json').read_text())
         tree = verify_published_tree(root, terminal)
+        # Match an actual publication consumed by the terminal profile, not
+        # merely equal leaf measurements or a repeat of the same owner/task ID.
+        ancestor = snapshot.get(str(root), {})
+        sealed = ancestor.get(FINGERPRINT, {}) if isinstance(ancestor, dict) else {}
+        attested_hash = sealed.get('sha256') if isinstance(sealed, dict) else None
+        require(tree[FINGERPRINT]['sha256'] in (hashes.get(str(root / FINGERPRINT)), attested_hash),
+            'resumed admission requires the same profile chain publication')
         sources[depth] = {'reference': ref, 'publication_hash': tree[FINGERPRINT]['sha256'],
             'archive_hash': tree['continuation.tar']['sha256'], 'shape': publication_shape(tree),
             'repetition_records': sum(name.startswith('repetitions/') and name.endswith('/result.json')
@@ -432,7 +456,7 @@ def synthetic_predecessor(request, config, task):
     snapshot = read_json(snapshot_path)
     check = read_json(dependency(request, config, {'dependency': ref['dependency'], 'path': '_execution/dependency_check.json'}))
     require(check['status'] == 'pass' and set(check['attempts']) == set(snapshot)
-        and all(detail['status'] == 'unchanged' and not detail['changed_paths'] and not detail['tainted_paths']
+        and all(detail['status'] == 'unchanged' and detail['changed_paths'] == [] and detail['tainted_paths'] == []
             and detail['fingerprint'] == snapshot[root] for root, detail in check['attempts'].items()),
         'source dependency receipt is incomplete or mismatched')
     snapshot[str(receipt_root)] = own
