@@ -398,8 +398,8 @@ class DependencyReuse:
             # Acquisition evidence is never a reusable publication receipt.
             if expected is None:
                 continue
-            if (after.get('status') != 'unchanged' or after.get('changed_paths')
-                    or after.get('tainted_paths') or after.get('fingerprint') != before):
+            if (after.get('status') != 'unchanged' or after.get('changed_paths') != []
+                    or after.get('tainted_paths') != [] or after.get('fingerprint') != before):
                 self.rewalk[path] = expected
                 continue
             if path in self.entries and self.entries[path] != before:

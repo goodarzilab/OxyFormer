@@ -587,7 +587,11 @@ campaign's dependency shape without authorizing its science.
 
 `budget.expected_predecessor_shapes` records archive bytes and regular-file
 count from each scenario's first sealed profile publication and expanded leaf
-outputs. For a fast scenario, archive bytes include one copy per potentially
+outputs. Each early profile must match the terminal profile's chain owner and
+recipe, and its current publication hash must appear in the terminal profile's
+declared inputs or request-bound dependency snapshot. Equal task IDs or measured
+times from another attempt do not establish this relationship.
+For a fast scenario, archive bytes include one copy per potentially
 started repetition: `min(draw count, max(1, ceil(sized usable compute / measured
 seconds per repetition)))`. Record count replaces the profile's individually
 published repetition records with one slot per potentially completed draw.
@@ -854,7 +858,8 @@ ancestors using these sealed receipts:
   `_execution/dependencies.json`, which must itself be hash-bound by the
   predecessor's request. Each shared ancestor's publication hash must agree with
   the current producer manifest. Missing or inconsistent entries receive a full
-  verification; an unbound receipt cannot authorize reuse. True post-seal changes
+  verification; change and taint fields must be empty lists, and an unbound
+  receipt cannot authorize reuse. True post-seal changes
   to the predecessor's own receipt fail its current publication check.
 * Continuation validation retains its owner, consecutive step, stage, campaign,
   parameters and recipe checks. For resumed leaves it uses the current walk's
@@ -885,9 +890,11 @@ trusted runner itself.
 
 `_execution/dependency_check.json` adds `timings`: exclusive per-root wall seconds
 and calls for `hashing`, `publication_receipt`, `recipe_drift` and `lineage_walk`.
-Hashing includes existing safe-read observations and counts all bytes actually
-read, including repeated hashes. `total_seconds` covers the verification interval;
-the diagnostic continuation subtotal overlaps these components. Direct-input
+Within the ancestry walk, hashing includes safe-read observations and repeated
+hashes. `total_seconds` covers that interval; normal request construction and the
+final `verify_inputs` pass occur outside it and are not included. These timings
+do not claim to measure all setup I/O or total production setup. The
+diagnostic continuation subtotal overlaps these components. Direct-input
 bookkeeping without an active publication is named `direct_inputs`. Resumed
 timings also report `ancestors_reused`, `ancestors_rewalked`, current
 `verified_roots`, source publication hashes and `reuse_miss`. Counts refer to
