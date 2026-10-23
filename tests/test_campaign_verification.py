@@ -120,24 +120,28 @@ def verification_chain(runtime, source, tmp_path, monkeypatch):
 def test_five_leaf_receipt_reuse_bounds_verification_work(verification_chain, tmp_path):
     from oxyformer.execution.runner import verify_only
     chain = verification_chain
-    rows = []
+    rows, full_rows = [], []
     for step in range(5):
         root = chain.leaf(step)
         rows.append(read_check(root)['timings'])
+        full_rows.append(verify_only(root, tmp_path / f'full-depth-{step+1}', full_walk=True)['timings'])
     assert rows[0]['verified_roots'] >= 10
+    assert [row['verified_roots'] for row in full_rows] == [10, 11, 12, 13, 14]
     assert all(row['verified_roots'] == 3 and row['ancestors_reused'] >= 8
         and row['ancestors_rewalked'] == 0 and not row['reuse_miss'] for row in rows[1:])
     assert all(row['measurement_ancestors_reused'] == 7 for row in rows[1:])
     hashed = lambda row: sum(v.get('hashing', {}).get('bytes', 0) for v in row['roots'].values())
     assert max(map(hashed, rows[1:])) < 1.2 * hashed(rows[0])
     assert hashed(rows[4]) <= 1.1 * hashed(rows[1])
-    full = verify_only(chain.roots['leaf-4'], tmp_path / 'full-replay', full_walk=True)['timings']
+    full = full_rows[-1]
     reused = verify_only(chain.roots['leaf-4'], tmp_path / 'reused-replay')['timings']
     assert full['verified_roots'] >= 14 and reused['verified_roots'] == 3
     assert hashed(reused) < .5 * hashed(full)
     print('SYNTHETIC_VERIFICATION_TIMINGS=' + json.dumps([
         {'depth': i + 1, 'seconds': row['total_seconds'], 'bytes': hashed(row),
-         'verified_roots': row['verified_roots'], 'reused': row.get('ancestors_reused', 0)}
+         'verified_roots': row['verified_roots'], 'reused': row.get('ancestors_reused', 0),
+         'full_walk_seconds': full_rows[i]['total_seconds'],
+         'full_walk_bytes': hashed(full_rows[i]), 'full_walk_roots': full_rows[i]['verified_roots']}
         for i, row in enumerate(rows)]))
 
 
