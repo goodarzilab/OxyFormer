@@ -13,6 +13,7 @@ from oxyformer.execution.identity import scientific_fingerprint
 from oxyformer.execution.integrity import FINGERPRINT, fingerprint_tree
 from oxyformer.execution.runner import dependency_variable, run as run_worker
 from oxyformer.provenance import ArtifactRecord, ContractError, canonical_json, file_hash
+from test_campaign_profiles import ADMISSION_SHAPE_CASES, admission_shape_fixture
 from test_execution import (publication_authority, runtime, source, assert_pass, commit,
     new_attempt, task_file, read_json, read_check, inline_fixture_stage, lineage_for, SOURCE_NEEDS)
 
@@ -494,3 +495,16 @@ def test_resumed_probe_refuses_reuse_miss(probe_pipeline, monkeypatch, depth):
     pytest.fail('expected resumed probe task')
 
 
+
+
+@pytest.mark.parametrize('admission_shape_fixture', ADMISSION_SHAPE_CASES, indirect=True)
+def test_resumed_receipt_synthetic_shape_matches_r5_lock(admission_shape_fixture):
+    from oxyformer.validation import campaign_probe
+    req, config, task, deps, tree, receipt, status = admission_shape_fixture
+    publication = lambda root: (None, tree)
+    if status == 'admission-shape-mismatch':
+        with raises(ContractError, match=status):
+            campaign_probe.resumed_probe_receipt(task, deps, publication)
+    else:
+        assert campaign_probe.resumed_probe_receipt(task, deps, publication) == (
+            deps['predecessor'], receipt['dependency_receipt'])

@@ -40,6 +40,12 @@ def publication_shape(tree):
     return shape
 
 
+def synthetic_publication_shape(tree, producer):
+    """Count the locked payload shape without the builder's own receipts."""
+    receipts = set(producer['outputs']) - set(PROFILE_PAYLOADS)
+    return publication_shape({name: entry for name, entry in tree.items() if name not in receipts})
+
+
 def compare_publication_shape(expected, observed, *, synthetic=False):
     require(set(expected) == set(observed) == {'archive_bytes', 'record_count'}
         and all(type(value) is int and value > 0 for value in (*expected.values(), *observed.values())),
@@ -160,14 +166,18 @@ def two_draws(receipt):
     return min(values)
 
 
-def declared_publication_shape(request, config, unit):
+def declared_publication_shape(request, config, unit, *, synthetic=False):
     from oxyformer.execution.integrity import FINGERPRINT, RESULT
     path = dependency(request, config, {'dependency': unit, 'path': FINGERPRINT})
     hashes = dict(zip(request.dependency_paths, request.dependency_hashes))
     require(file_hash(path) == hashes[str(path)], 'predecessor manifest hash mismatch')
     value = read_json(path)
-    return publication_shape({**value['entries'], FINGERPRINT: {'type': stat.S_IFREG},
-        RESULT: {'type': stat.S_IFREG}})
+    tree = {**value['entries'], FINGERPRINT: {'type': stat.S_IFREG},
+        RESULT: {'type': stat.S_IFREG}}
+    if synthetic:
+        producer = read_json(dependency(request, config, {'dependency': unit, 'path': '_execution/task.json'}))
+        return synthetic_publication_shape(tree, producer)
+    return publication_shape(tree)
 
 
 def resumed_probe_receipt(task, deps, publication):
@@ -190,7 +200,7 @@ def resumed_probe_receipt(task, deps, publication):
         'synthetic predecessor lock/scenario mismatch')
     expected = lock['budget']['expected_predecessor_shapes'][p['scenario']]
     require(expected is not None, 'same-tree profile leaves unavailable for resumed admission')
-    compared = compare_publication_shape(expected, publication_shape(tree), synthetic=True)
+    compared = compare_publication_shape(expected, synthetic_publication_shape(tree, producer), synthetic=True)
     require(compared['status'] == 'matched', 'admission-shape-mismatch: ' + canonical_json(compared))
     payload = value['dependency_receipt']
     if p['depth'] == 2:
@@ -376,7 +386,7 @@ def probe(request, config, task, *, measurer=None):
         summary = config.get('verification_summary', {})
         require(summary.get('ancestors_reused', 0) > 0 and summary.get('reuse_miss') is False,
             'reuse-miss: resumed probe did not reuse the locked lineage')
-        observed = declared_publication_shape(request, config, ref['dependency'])
+        observed = declared_publication_shape(request, config, ref['dependency'], synthetic=True)
         compared = compare_publication_shape(lock['budget']['expected_predecessor_shapes'][scenario], observed, synthetic=True)
         require(compared['status'] == 'matched', 'admission-shape-mismatch: ' + canonical_json(compared))
         details.update(predecessor_shape=compared, verification=summary,

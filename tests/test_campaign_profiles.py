@@ -1888,3 +1888,92 @@ def test_estimate_and_lock_apply_same_lineage_projection(screening_request, tmp_
         if measured:
             assert projection['chains'][0]['growth'] == 0.
             assert projection['chains'][0]['allowance'] == 3560.
+
+
+# Exact r8 profile / r5 lock dimensions; all bytes below are synthetic.
+ADMISSION_SHAPE_CASES = [
+    (66058240, 0, False, 'matched'),
+    (66058240, 1, False, 'matched'),
+    (66058240, 2, False, 'admission-shape-mismatch'),
+    (72664064, 0, False, 'matched'),  # exactly 10% is accepted
+    (72664065, 0, False, 'admission-shape-mismatch'),
+    (66058240, 0, True, 'matched'),  # additional declared builder receipt
+]
+
+
+@pytest.fixture
+def admission_shape_fixture(tmp_path, request):
+    from oxyformer.execution.integrity import FINGERPRINT, RESULT, fingerprint_tree
+    archive_bytes, extra_payloads, extra_receipt, status = request.param
+    fixture = coverage.read_json(ROOT / 'tests/fixtures/admission_shape_r5.json')
+    profile = {'setup_profile_sources': {'1': fixture['profile_source']},
+        'assumed_usable_per_leaf': 100., 'seconds_per_repetition': 100.}
+    expected = campaign_probe.expected_predecessor_shape(profile, fixture['campaign_outputs'], draw_count=1)
+    assert expected == fixture['expected'] == {'archive_bytes': 66058240, 'record_count': 18}
+    predecessor = tmp_path / 'predecessor'
+    for name in fixture['builder_records']:
+        write(predecessor / name, {})
+    with (predecessor / 'continuation.tar').open('wb') as stream:
+        stream.truncate(archive_bytes)
+    for i in range(extra_payloads):
+        write(predecessor / f'synthetic-records/extra-{i}.json', {'payload': i})
+    outputs = list(fixture['builder_outputs'])
+    if extra_receipt:
+        outputs.append('builder-diagnostic.json')
+        write(predecessor / outputs[-1], {'receipt': True})
+    write(predecessor / '_execution/task.json', {'stage': 'campaign-setup-probe',
+        'parameters': {'mode': 'admission-predecessor', 'depth': 1}, 'outputs': outputs})
+    estimate = tmp_path / 'estimate'
+    write(estimate / 'budget_estimate.json', {})
+    lock_root = tmp_path / 'lock'
+    lock = {'estimate_input': {'dependency': 'estimate', 'path': 'budget_estimate.json'},
+        'estimate_hash': file_hash(estimate / 'budget_estimate.json'),
+        'budget': {'expected_predecessor_shapes': {'null_effect': expected}}}
+    lock_path = write(lock_root / 'recipe_lock.json', lock)
+    needs = {'lock': ['recipe_lock.json', 'expanded_units.json'], 'estimate': ['budget_estimate.json']}
+    write(lock_root / 'expanded_units.json', {'lock_hash': file_hash(lock_path),
+        'plans': [{'tasks': [{'needs': needs, 'parameters': {'scenario': {'name': 'null_effect'}}}]}]})
+    receipt = {'mode': 'admission-predecessor', 'depth': 1, 'scenario': 'null_effect',
+        'lock_hash': file_hash(lock_path), 'estimate_hash': lock['estimate_hash'],
+        'dependency_receipt': {'snapshot': {}}}
+    write(predecessor / 'setup_probe.json', receipt)
+    tree = fingerprint_tree(predecessor)
+    assert campaign_probe.publication_shape(tree) == {
+        'archive_bytes': archive_bytes, 'record_count': 20 + extra_payloads + int(extra_receipt)}
+    write(predecessor / FINGERPRINT, {'entries': {k: v for k, v in tree.items() if k not in (FINGERPRINT, RESULT)}})
+    task = {'id': 'resumed', 'stage': 'campaign-setup-probe',
+        'needs': {**needs, 'predecessor': ['setup_probe.json', *campaign_probe.PROFILE_PAYLOADS]},
+        'recipe_lock': {'sha256': file_hash(lock_path)},
+        'parameters': {'mode': 'admission-resumed', 'depth': 1, 'scenario': 'null_effect',
+            'lock_input': {'dependency': 'lock', 'path': 'recipe_lock.json'},
+            'predecessor_input': {'dependency': 'predecessor', 'path': 'setup_probe.json'}}}
+    deps = {'lock': lock_root, 'estimate': estimate, 'predecessor': predecessor}
+    # The focused fixture supplies publication metadata; full runner authentication
+    # remains covered by test_two_depth_probe_pipeline_uses_fresh_and_grand_predecessor_receipts.
+    from test_campaign import request as make_request
+    req = make_request(tmp_path / 'probe', task, deps)
+    archive = str(predecessor / 'continuation.tar')
+    req = replace(req, dependency_paths=(*req.dependency_paths, archive),
+        dependency_hashes=(*req.dependency_hashes, file_hash(archive)))
+    config = coverage.read_json(req.config_path)
+    config['verification_summary'] = {'ancestors_reused': 1, 'reuse_miss': False}
+    return req, config, task, deps, tree, receipt, status
+
+
+@pytest.mark.parametrize('admission_shape_fixture', ADMISSION_SHAPE_CASES, indirect=True)
+def test_admit_side_synthetic_shape_matches_r5_lock(admission_shape_fixture, monkeypatch):
+    req, config, task, deps, tree, receipt, status = admission_shape_fixture
+    # Isolate receipt authentication, not the shape extraction or comparison.
+    monkeypatch.setattr(campaign_probe, 'read_receipt', lambda *args: receipt)
+    if status == 'admission-shape-mismatch':
+        with pytest.raises(ContractError, match=status):
+            campaign_probe.probe(req, config, task, measurer=lambda: 0.)
+        return
+    shape = campaign_probe.probe(req, config, task, measurer=lambda: 0.)['predecessor_shape']
+    assert shape['status'] == status
+    assert shape['expected'] == {'archive_bytes': 66058240, 'record_count': 18}
+    observed_records = sum(name.startswith('synthetic-records/extra-') for name in tree) + 18
+    assert shape['observed'] == {'archive_bytes': tree['continuation.tar']['size'], 'record_count': observed_records}
+    assert shape['relative_difference'] == {
+        'archive_bytes': (tree['continuation.tar']['size'] - 66058240) / 66058240,
+        'record_count': (observed_records - 18) / 18}
