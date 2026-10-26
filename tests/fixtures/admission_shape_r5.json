@@ -1,0 +1,61 @@
+{
+  "profile_source": {
+    "shape": {
+      "archive_bytes": 66058240,
+      "record_count": 17
+    },
+    "repetition_records": 0,
+    "outputs": [
+      "result.json",
+      "timing.json",
+      "runtime.json",
+      "artifact_manifest.json",
+      "budget_record.json",
+      "continuation.tar"
+    ]
+  },
+  "campaign_outputs": [
+    "budget_record.json",
+    "result.json",
+    "timing.json",
+    "artifact_manifest.json",
+    "runtime.json",
+    "continuation.tar"
+  ],
+  "builder_outputs": [
+    "setup_probe.json",
+    "artifact_manifest.json",
+    "budget_record.json",
+    "result.json",
+    "timing.json",
+    "runtime.json",
+    "coverage_measurements.json",
+    "continuation.tar"
+  ],
+  "builder_records": [
+    "_execution/config.json",
+    "_execution/dependencies.json",
+    "_execution/dependency_check.json",
+    "_execution/environment.json",
+    "_execution/identity.json",
+    "_execution/request.json",
+    "_execution/task.json",
+    "_execution/worker-result.json",
+    "_execution/fingerprint.json",
+    "_execution/result.json",
+    "artifact_manifest.json",
+    "budget_record.json",
+    "continuation.tar",
+    "coverage_measurements.json",
+    "measurement_only_dependencies.json",
+    "result.json",
+    "runtime.json",
+    "setup_probe.json",
+    "synthetic-records/profile-0.json",
+    "timing.json"
+  ],
+  "expected": {
+    "archive_bytes": 66058240,
+    "record_count": 18
+  }
+}
