@@ -261,6 +261,34 @@ owner_decisions:
     accepted_risk: "a repetition slower than 1.25 times its profile can leave a chain's last repetition incomplete, which fails that scenario's screening gate safely"
     deferred: "any other factor, more leaves per scenario, or the preemptible partition are separate owner decisions"
 
+  # Owner decision 2026-10-31 (month-2 start; mandate stop-and-ask item 7). The month-1 screening campaign m1-screening-D completed on
+  # 2026-10-31 (140/140 leaves, four collectors passed the screening gate, certifies_release_criteria false). The orchestrator reported the
+  # measured cost (Slurm accounting: 469 H100-hours over 235 GPU jobs for 8 repetitions, about 59 H100-hours per repetition on the
+  # screening cell including leaf overhead; 1,000 repetitions x 4 scenarios about 236,000 H100-hours, infeasible at 4 GPUs), the
+  # sign-changing attenuation (both repetitions negative, -0.0123 and -0.0047, against the planted +0.0178; |bias|/empirical SD about 4.9
+  # at n=2, which two repetitions cannot settle) and recommended (1) a sign-changing diagnostic campaign of about 20 repetitions on the
+  # screening cell, (2) a cost study of the registered production recipe, (3) final cells sized from those measurements. The owner
+  # answered, verbatim: "Use preemptible up to 16 GPUs. No bound on GPU hours... will do what is needed. Let's start with fewer reps and
+  # increase as needed? Go with your recommendations".
+  month2_followon:
+    decided_on: "2026-10-31"
+    partitions: [standard, preemptible]            # account root on both; no other partition or account
+    gpu_concurrency_max: {standard: 4, preemptible: 16}   # the standing 4-GPU rule is unchanged for standard; preemptible units hold at most 16 GPUs at once
+    gpu_hours_ceiling: none                        # "No bound on GPU hours"; actual Slurm accounting is still reported hourly and in the evidence report
+    diagnostic_campaign:
+      scenarios: [sign_changing]
+      repetitions: 20                              # explicit owner-approved count; later increases are separate owner decisions ("start with fewer reps and increase as needed")
+      recipe: {reference_cap: 32, frozen_epochs: 30, grid_points: 2, seed_count: 1}   # the screening cell, unchanged
+      partition: preemptible
+      gpu_hours_per_leaf_max: 4                    # unchanged leaf bound; a preempted leaf loses at most its own compute and is retried in a fresh attempt root
+      leaves_per_chain_max: 40                     # the month-1 per-instance leaf bound applies to each sequential continuation chain
+      parallel_chains: true                        # repetitions are split over independent sequential chains so the campaign can use the 16-GPU allowance
+      draws_continue_from: m1-screening-D          # the month-1 lock is listed in prior_locks and the new lock draws under a new seed namespace; no month-1 repetition is reused
+      certifies_release_criteria: false
+      purpose: "estimate bias and SE/SD of one-step and CV-TMLE on sign_changing with enough repetitions to tell attenuation from noise; coverage and null-rejection bounds need at least 39 repetitions and are not certified here"
+    recipe_cost_study: "bounded-slice measurement of the registered production recipe and intermediate cells at the current tree, reported to the owner before any final-cell sizing"
+    final_cells: "sized from the diagnostic and cost-study measurements; repetitions, recipe and scenarios for the final cells are a later owner decision; release_gates are unchanged"
+
 # Not yet approved. A unit that needs one of these must stop and report; the orchestrator brings it to the owner.
 pending_owner_approval:
   - any relief, flag or distance sensitivity analyses beyond plan_fixed
