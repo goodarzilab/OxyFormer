@@ -761,7 +761,8 @@ GPUs. Collectors use CPU and verify the locked scientific code and sealed
 profile receipts; they do not fit or require the accelerator environment. Leaf
 reservations sum to at most 640 GPU-hours, checked against the 3,600-hour ceiling. Profiles and retries
 remain separately accounted work. All task resources and expanded Slurm units
-use `standard` / `root`; preemptible and all other partitions are refused.
+use `standard` / `root`; screening refuses other partitions. Diagnostic campaigns
+use the separately approved partition described below.
 Screening publications carry the recorded final-cell deferral and certify no
 release criterion. Production/final code paths retain their existing gates.
 
@@ -931,3 +932,28 @@ refused diagnostic reads do not write taints into the original campaign.
 The leaf diagnostic supports stage-publication inputs, including their existing
 sealed acquisition ancestry. Attempts with direct acquisition inputs are outside
 this diagnostic's envelope and are refused before any scratch output is written.
+
+### Month-2 diagnostic campaigns
+
+`campaign_mode: diagnostic` is bound to the read-only
+`owner_decisions.month2_followon` block. It certifies no release criterion.
+`real_frame.diagnostic_profile_tasks` emits profiles for the approved scenarios,
+then estimate and lock tasks. The caller supplies the campaign ID, fresh evaluation
+namespace, prior-lock references and CPU budget. The prior locks must include
+exactly one campaign matching `draws_continue_from`.
+
+Each approved repetition runs in its own sequential continuation chain. Sizing
+uses the same measured leaf costs and publication reserve as screening, with a
+default safety factor of 2.0, at most 40 leaves per chain and four GPU-hours per
+leaf. Counts are never reduced to fit a budget; infeasible chains are refused.
+The month-1 total-hour ceilings do not apply. GPU concurrency is campaign-wide,
+read from the decision (currently 16 on `preemptible`). Expanded leaves use
+`--no-requeue`, three attempts and restart in a fresh attempt root after
+preemption. First leaves restart from initial inputs; later leaves import only
+the predecessor's sealed continuation, never the interrupted attempt's files.
+
+Admission still requires the three probe minima, using the first approved
+scenario. Diagnostic collection reports bias, empirical SD, SE/SD and exact
+binomial bounds, with `production_equivalent: false` and
+`certifies_release_criteria: false`. Final release gates and their repetition
+minimum remain unchanged.

@@ -583,6 +583,10 @@ def setup_admission_plan(lock, plans, lock_unit, approvals):
         'recipe_lock': recipe_ref, 'parameters': {'lock_input': lock_ref, 'probe_inputs': receipts},
         'needs': {**base, **{ref['dependency']: ['setup_probe.json'] for ref in receipts.values()}},
         'outputs': ['admission.json', 'artifact_manifest.json']})
+    if lock.get('campaign_mode') == 'diagnostic':
+        from oxyformer.validation.campaign import screening_metadata
+        for task in tasks:
+            task.update(screening_metadata(lock['recipe']))
     units = [_unit({'id': lock['campaign_id'], 'campaign_mode': 'screening'}, task, [], 0, 14400, 'admission')
              for task in tasks]
     return {'schema_version': 1, 'lock_hash': lock_hash, 'receipt_inputs': receipts, 'tasks': tasks, 'units': units}

@@ -1977,3 +1977,88 @@ def test_admit_side_synthetic_shape_matches_r5_lock(admission_shape_fixture, mon
     assert shape['relative_difference'] == {
         'archive_bytes': (tree['continuation.tar']['size'] - 66058240) / 66058240,
         'record_count': (observed_records - 18) / 18}
+
+
+def test_month2_decision_json_and_key_refusals():
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    value = campaign.month2_decision(approvals)
+    assert value['gpu_hours_ceiling'] is None
+    assert json.loads(json.dumps(value)) == value
+    assert value['diagnostic_campaign']['repetitions'] == 20
+    for key in value:
+        changed = deepcopy(approvals)
+        del changed['owner_decisions']['month2_followon'][key]
+        with pytest.raises(ContractError, match='month2_followon.*' + key):
+            campaign.month2_decision(changed)
+    for key in value['diagnostic_campaign']:
+        changed = deepcopy(approvals)
+        del changed['owner_decisions']['month2_followon']['diagnostic_campaign'][key]
+        with pytest.raises(ContractError, match='month2_followon.*' + key):
+            campaign.month2_decision(changed)
+
+
+@pytest.mark.parametrize('key,value', [('scenarios', []), ('scenarios', ['sign_changing'] * 2),
+    ('scenarios', ['unknown']), ('repetitions', True), ('repetitions', 0), ('recipe', {}),
+    ('partition', 'idle'), ('gpu_hours_per_leaf_max', 4.01), ('gpu_hours_per_leaf_max', float('nan')),
+    ('leaves_per_chain_max', 41), ('parallel_chains', False), ('certifies_release_criteria', True),
+    ('purpose', ''), ('draws_continue_from', '')])
+def test_month2_refuses_malformed_campaign(key, value):
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    approvals['owner_decisions']['month2_followon']['diagnostic_campaign'][key] = value
+    with pytest.raises(ContractError, match='month2_followon.*' + key):
+        campaign.month2_decision(approvals)
+
+
+@pytest.mark.parametrize('value', [0, True, 17, 1.5])
+def test_month2_concurrency_ceiling(value):
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    approvals['owner_decisions']['month2_followon']['gpu_concurrency_max']['preemptible'] = value
+    with pytest.raises(ContractError, match='gpu_concurrency_max'):
+        campaign.month2_decision(approvals)
+
+
+def test_diagnostic_arithmetic_keeps_twenty_independent_chains_and_no_total_cap():
+    profile = {'seconds_per_repetition': 100000., 'publication_verification_seconds': 400.,
+        'leaf_overheads': {'setup_seconds': 100., 'import_seconds': 2., 'export_seconds': 3., 'publication_seconds': 5.}}
+    decision = campaign.month2_decision()
+    row = campaign.diagnostic_sizing({'sign_changing': profile}, decision, 14100)['sign_changing']
+    assert row['repetitions'] == row['chains'] == 20
+    assert row['per_chain']['repetitions'] == 1
+    assert row['leaves'] == 20 * row['per_chain']['leaves']
+    assert row['gpu_hours'] > 640
+    assert row['gpu_hours'] == 20 * row['per_chain']['gpu_hours']
+    profile['seconds_per_repetition'] = 1e8
+    with pytest.raises(ContractError, match='chain requires .* leaves > 40'):
+        campaign.diagnostic_sizing({'sign_changing': profile}, decision, 14100)
+
+
+def test_diagnostic_emitter_subset_dependencies_and_screening_unchanged(built):
+    approvals, (endpoint, frame, _, _) = built
+    approvals = approvals['approvals']
+    before = json.dumps(real_frame.screening_profile_tasks(endpoint, frame, approvals), sort_keys=True)
+    manifest = real_frame.diagnostic_profile_tasks(endpoint, frame, approvals, campaign_id='m2-diagnostic',
+        evaluation_namespace='m2-diagnostic-new', prior_locks=[{'dependency': 'old-lock', 'path': 'recipe_lock.json'}],
+        cpu_wall_hours_budget=10000)
+    assert manifest['gpu_concurrency_max'] == 16
+    profiles = manifest['tasks'][:-2]
+    assert len(profiles) == 40
+    assert {t['parameters']['scenario']['name'] for t in profiles} == {'sign_changing'}
+    estimate, lock = manifest['tasks'][-2:]
+    assert estimate['parameters']['profile_safety_factor'] == 2.0
+    assert estimate['id'] in lock['needs'] and 'old-lock' in lock['needs']
+    assert set(estimate['parameters']['profiles']) == {'sign_changing'}
+    assert all(t['campaign_mode'] == 'diagnostic' and not t['certifies_release_criteria'] for t in manifest['tasks'])
+    assert json.dumps(real_frame.screening_profile_tasks(endpoint, frame, approvals), sort_keys=True) == before
+
+
+def test_diagnostic_summary_known_bias_is_not_release():
+    draws, records = successful_records(20)
+    result = campaign.diagnostic_summary(records, draws, null_scenario=True)
+    assert result['coverage_pass'] is False and result['coverage_pass_reason'] == 'diagnostic'
+    assert result['production_equivalent'] is False
+    for method, row in result['diagnostic_summary'].items():
+        assert row['n'] == 20 and row['numerical_failures'] == 0
+        assert row['bias'] == pytest.approx(row['mean_estimate'] - row['truth'])
+        assert row['coverage_lower'] == coverage.binomial_bound(row['coverage_count'], 20, side='lower')
+        assert row['rejection_upper'] == coverage.binomial_bound(row['rejections'], 20, side='upper')
+        assert row['certifies_release_criteria'] is False
