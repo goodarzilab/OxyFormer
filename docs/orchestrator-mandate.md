@@ -72,6 +72,28 @@ Anything beyond that is a follow-up issue, never a blocker.
 Read-only status and diagnosis; keep the advance loop alive; drain start and close intents that carry evidence; report.
 No merges, no plan changes, and no dispatch beyond what `advance` does on its own.
 
+## Month-2 amendment (2026-10-31)
+Owner decision in the orchestrating session on 2026-10-31 22:15 UTC, verbatim: "Use preemptible up to 16 GPUs. No bound on
+GPU hours... will do what is needed. Let's start with fewer reps and increase as needed? Go with your recommendations". It
+answers the orchestrator's month-2 report (campaign m1-screening-D complete; measured cost about 59 H100-hours per screening
+repetition, so 1,000 repetitions per scenario are infeasible at 4 GPUs; sign-changing attenuation at n=2) and its recommended
+order: (1) a sign-changing diagnostic campaign of about 20 repetitions on the screening cell, (2) a cost study of the registered
+production recipe, (3) final cells sized from those measurements. The decision is recorded in
+`configs/approvals.yaml` under `owner_decisions.month2_followon`. Effect on this mandate:
+
+- **Run and validity.** The run extends to the months 2-6 follow-on along the recommended path above; stop-and-ask item 7 is
+  satisfied for that path only. Other months 2-6 work (US lung and Mexico pipelines, adapters, anchors, refit audits, any
+  final-cell campaign) still stops and asks. Valid until the final-cell sizing decision or 2026-12-31, whichever comes first.
+- **Bounded item 1.** No H100-hour ceiling; actual Slurm accounting is reported hourly and in the evidence report. GPU
+  concurrency: at most 4 GPU units on `standard` and at most 16 on `preemptible`, counted separately; CPU and code-agent caps
+  unchanged. Partitions `standard` and `preemptible`, account `root` only.
+- **Granted item 4.** Leaf expansion keeps at most 4 GPU-hours per leaf and at most 40 leaves per sequential continuation
+  chain; the number of parallel chains per campaign follows `month2_followon.diagnostic_campaign`.
+- **Stop-and-ask item 4.** Unchanged except as relaxed above: a leaf above 4 GPU-hours, any other partition or account, and
+  the final-coverage, anchor or refit-audit campaigns still need their own approval.
+- Repetition increases beyond the approved 20, and any change to the recipe or scenarios, are separate owner decisions.
+- Everything else in this mandate is unchanged.
+
 ## Concurrence party
 The step-back committee of hanig-review-gate: two members on contrasting providers, the author excluded. Hani Goodarzi
 remains the owner and can take any decision back.
