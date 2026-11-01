@@ -5,9 +5,10 @@ hanig-orchestrate's merge_unit.py runs this pinned file inside a disposable cand
 into the exact dev commit, and treats exit status 0 as a pass. It runs the whole pytest suite with the run's
 environment, CPU only, the same way .github/workflows/ci.yml does, so a merge is refused when the merged tree's
 tests fail even if each branch passed on its own. Exit status 5 (no tests collected) counts as a pass, as in CI.
-Inside the disposable copy the candidate's .git is discarded and a fresh repository is built from the tree alone before
-pytest, so HEAD matches the tree as in CI; commit author, subject and history are synthetic, so tests must not depend on
-commit metadata or history (CI on the real commit covers that).
+Inside the disposable copy the candidate's tracked-file list is taken from its metadata, the metadata is discarded, and a
+fresh repository (empty template, no inherited configuration) is built holding exactly those files before pytest, so HEAD
+matches the tree as in CI; commit author, subject and history are synthetic, so tests must not depend on commit metadata
+or history (CI on the real commit covers that).
 """
 import os
 import shutil
@@ -40,21 +41,19 @@ UNOWNED_GRACE_SECONDS = 24 * 3600
 HOST = socket.gethostname()
 JOB = (
     'set -u; d=$(mktemp -d /tmp/v-XXXXXX); trap \'chmod -R u+w "$d" 2>/dev/null; rm -rf "$d"\' EXIT HUP INT QUIT TERM USR1 USR2 ALRM XCPU XFSZ VTALRM PROF; '
-    'cp -a "$OXYFORMER_VERIFY_STAGED" "$d/tree" && cd "$d/tree" || exit 97; '
-    # The candidate checkout starts at the exact target commit with the merged tree as uncommitted changes. CI runs on a
-    # commit whose HEAD matches its tree, and HEAD-anchored inputs (configs/approvals.yaml is read with expected_bytes
-    # from HEAD) would otherwise refuse any candidate that changes them. Committing the staged tree inside the disposable
-    # copy reproduces CI's condition without changing a byte of the tree being tested (2026-11-01, PR #85 verification).
-    # HEAD must describe the tree under test (CI checks out the real commit; HEAD-anchored inputs such as
-    # configs/approvals.yaml are read with expected_bytes from HEAD). The copied .git is discarded and a fresh repository is
-    # built from the tree alone: the copy's metadata could be a symlink or linked-worktree file pointing at an external
-    # repository, carry repository-local filters or hooks, or inherit GIT_INDEX_FILE and other GIT_* variables, any of
-    # which could alter the files or an external repository. A fresh init with system and global configuration disabled
-    # has no filters, hooks, signing or foreign ownership, so blobs are the working files byte for byte and nothing outside
-    # the disposable copy is touched. Commit author and subject are synthetic; tests must not read commit metadata.
-    'unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_PREFIX GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_ATTR_SOURCE; '
+    # The staged root's CONTENTS are copied (a symlinked root is never followed into); then HEAD is made to describe the
+    # tree under test, as CI's checkout does (HEAD-anchored inputs such as configs/approvals.yaml are read with
+    # expected_bytes from HEAD). The candidate's tracked-file list is read from the copied metadata first, every GIT_*
+    # variable is unset, the copied .git is made writable and discarded, and a fresh repository is built with an empty
+    # template and system/global configuration disabled, so no inherited or candidate-controlled template, filter, hook,
+    # signing or ownership setting can alter the files or reach an external repository. Exactly the candidate's tracked
+    # files are added (forced, so ignore rules cannot drop a tracked file); blobs equal the working files byte for byte.
+    # Commit author, subject and history are synthetic; tests must not read commit metadata or history.
+    'mkdir -p "$d/tree" && cp -a "$OXYFORMER_VERIFY_STAGED/." "$d/tree/" && cd "$d/tree" || exit 97; '
+    'for v in $(compgen -e); do case "$v" in GIT_*) unset "$v";; esac; done; '
     'g="env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 git -c user.name=merge-verifier -c user.email=merge-verifier@localhost -c core.hooksPath=/dev/null -c commit.gpgsign=false -c core.autocrlf=false -c core.safecrlf=false"; '
-    'rm -rf .git && $g init -q && $g add -A >/dev/null 2>&1 && $g commit -q --allow-empty --no-verify -m "candidate merge under verification" >/dev/null 2>&1 || exit 96; '
+    '$g ls-files -z > "$d/tracked.z" || exit 94; '
+    'chmod -R u+w .git 2>/dev/null; rm -rf .git && $g init -q --template= && xargs -0 -r $g add -f -- < "$d/tracked.z" && $g commit -q --allow-empty --no-verify -m "candidate merge under verification" >/dev/null 2>&1 || exit 96; '
     'py=$OXYFORMER_VERIFY_PYTHON; out=$OXYFORMER_VERIFY_RESULT; '
     'if [ -n "${OXYFORMER_VERIFY_BASH_ENV+x}" ]; then export BASH_ENV=$OXYFORMER_VERIFY_BASH_ENV; fi; '
     'unset OXYFORMER_VERIFY_PYTHON OXYFORMER_VERIFY_RESULT OXYFORMER_VERIFY_STAGED OXYFORMER_VERIFY_BASH_ENV; '
