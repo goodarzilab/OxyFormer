@@ -2143,7 +2143,7 @@ def test_diagnostic_lock_twenty_chains_seeds_admission_and_flags(diagnostic_requ
 
 
 @pytest.mark.parametrize('fault,match', [('missing', 'draws_continue_from'), ('duplicate', 'draws_continue_from'),
-    ('namespace', 'namespace already used'), ('estimate', 'estimate changed')])
+    ('namespace', 'namespace already used'), ('factor', '3.0 must equal decision factor 1.25')])
 @pytest.mark.parametrize('screening_rates', [(100.,) * 4], indirect=True)
 def test_diagnostic_lock_refusals(diagnostic_request, tmp_path, fault, match):
     req = diagnostic_lock_request(diagnostic_request, tmp_path)
