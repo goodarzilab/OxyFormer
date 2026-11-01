@@ -34,7 +34,11 @@ measured duration, divided by seconds per hour. Inner outcome and origin fits
 have separate terms, as do their outer refits. Scoring contributes once per
 repetition. The representative SSL term is the outer SSL fit, and the first
 inner partition represents other inner partitions. These are projection
-assumptions, not measurements of a complete repetition.
+assumptions, not measurements of a complete repetition. Each timed fit uses
+registered seed 1103; the projection multiplies by the cell's seed count.
+
+Peak GPU memory uses PyTorch's maximum allocated tensor memory. CUDA context
+memory and allocations outside PyTorch are excluded.
 
 Calibration compares the screening anchor with the single complete-repetition
 compute duration in the sealed profile. Frame, cell and operation identity must
