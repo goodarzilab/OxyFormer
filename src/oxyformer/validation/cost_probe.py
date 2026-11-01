@@ -487,6 +487,13 @@ def calibration_receipt(path, frame_path):
     path = Path(path)
     record = read_leaf_measurements(path)
     profile = record['profile']
+    import subprocess
+    tree = record['binding']['code_identity']
+    study = record['binding']['study']
+    receipt_work = source_work(
+        subprocess.check_output(['git', 'show', tree + ':src/oxyformer/training/nested_cv.py']).decode(),
+        subprocess.check_output(['git', 'show', tree + ':src/oxyformer/validation/coverage.py']).decode(),
+        seed_count=study['seed_count'], grid_points=study['grid_points'])
     seconds = profile['complete_repetition_seconds']
     if len(seconds) != 1:
         raise ValueError('calibration requires one complete repetition')
@@ -500,7 +507,7 @@ def calibration_receipt(path, frame_path):
     return {'compute_hours': Quantity(seconds[0] / 3600, frozenset({'measured'})),
             'study': record['binding']['study'], 'tree': record['binding']['code_identity'], 'frame_hash': expected,
             'frame_matches': expected == file_hash(frame_path),
-            'path': str(path), 'sha256': file_hash(path)}
+            'path': str(path), 'sha256': file_hash(path), 'work': receipt_work}
 
 
 def leaf_overhead(paths):
@@ -697,13 +704,15 @@ def measurement_report(root, overhead):
                                       for k, v in terms.items()}}
         measurements[cell] = records
     anchor = projections['e']
-    receipt = inputs['receipt']
+    loaded_receipt = calibration_receipt(inputs['profile_path'], inputs['frame_path'])
+    receipt = {**loaded_receipt, 'compute_hours': loaded_receipt['compute_hours'].to_dict()}
+    receipt['frame_matches'] = receipt['frame_hash'] == inputs['frame_sha256']
     check = calibration(anchor, Quantity(**{**receipt['compute_hours'],
         'basis': frozenset(receipt['compute_hours']['basis'])}),
         measured_anchor=anchor is not None and anchor.basis == {'measured'},
         frame_matches=receipt['frame_matches'],
         cell_matches=receipt['study'] == study_cells()['e'].to_dict(),
-        operations_match=inputs['work']['e']['counts'] == operation_counts(seed_count=1, grid_points=2))
+        operations_match=inputs['work']['e']['counts'] == receipt['work']['counts'])
     cells = {}
     for name, q in projections.items():
         if q is not None and not check['passed']:
@@ -716,7 +725,8 @@ def measurement_report(root, overhead):
     return {'schema_version': numbered(1), 'tree': BASE_TREE, 'cells': cells,
             'measurements': measurements, 'formula': formulas,
             'calibration': {**check, 'receipt': numbered(receipt),
-                            'operations': numbered(inputs['work']['e'])},
+                            'operations': {'projection': numbered(inputs['work']['e']),
+                                           'receipt': numbered(receipt['work'])}},
             'overhead': overhead, 'feasibility': {
                 cell: [] if q is None else numbered(feasibility(q, overhead_q), q.basis | overhead_q.basis)
                 for cell, q in projections.items()},
