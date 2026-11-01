@@ -26,7 +26,10 @@ The driver never fabricates selection results or checkpoints to skip tuning.
 Epoch slices use existing budget phase checks. Nuisance timings are differences
 of the controller's cumulative compute.wall_seconds. SSL uses the existing
 whole-call phase bracket. Slice checkpoints and their durable descriptors permit
-a second attempt after interruption. Construction work inside the controller
+a second attempt after interruption. The frozen plan specifies a maximum of
+thirty SSL epochs with patience five. Native patience completion is measured
+at its actual epoch count; this plan rule takes precedence over wording that
+would require every SSL fit to execute thirty epochs. Construction work inside the controller
 is included; repeated reconstruction can therefore affect calibration.
 
 For each cell the projection is the sum of each counted operation times its
@@ -45,10 +48,13 @@ compute duration in the sealed profile. Frame, cell and operation identity must
 match. The inclusive ratio window is 0.80 to 1.25. A failed calibration propagates
 the uncalibrated basis to projections and feasibility numbers.
 
-Campaign overhead uses each of the 140 campaign-D leaves once, taking its own
-last entry rather than summing cumulative predecessor histories. The budget
-record's measured runner wall interval excludes reserved final publication;
-it is not a replacement for scheduler accounting of failed attempts.
+Campaign overhead uses each of the 140 campaign-D leaves once. Its numerator
+is the reserved GPU allocation derived from the sealed stage budget through
+coverage.leaf_allocation: stage time plus setup, rounded to whole minutes. Its
+denominator sums each leaf's own compute entry, without double-counting cumulative
+predecessor histories. Measured runner wall time is retained separately; it
+excludes reserved final publication and is not the allocation numerator. Failed
+scheduler attempts are outside this ratio over the sealed campaign leaves.
 
 The feasibility arithmetic spans 39, 100, 300 and 1,000 repetitions, with one and
 four scenarios. Total allocated GPU-hours divided by sixteen is an idealised
