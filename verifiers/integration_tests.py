@@ -5,6 +5,7 @@ hanig-orchestrate's merge_unit.py runs this pinned file inside a disposable cand
 into the exact dev commit, and treats exit status 0 as a pass. It runs the whole pytest suite with the run's
 environment, CPU only, the same way .github/workflows/ci.yml does, so a merge is refused when the merged tree's
 tests fail even if each branch passed on its own. Exit status 5 (no tests collected) counts as a pass, as in CI.
+The staged candidate is committed inside the disposable copy before pytest so HEAD matches the tree, as in CI.
 """
 import os
 import shutil
@@ -38,6 +39,12 @@ HOST = socket.gethostname()
 JOB = (
     'set -u; d=$(mktemp -d /tmp/v-XXXXXX); trap \'chmod -R u+w "$d" 2>/dev/null; rm -rf "$d"\' EXIT HUP INT QUIT TERM USR1 USR2 ALRM XCPU XFSZ VTALRM PROF; '
     'cp -a "$OXYFORMER_VERIFY_STAGED" "$d/tree" && cd "$d/tree" || exit 97; '
+    # The candidate checkout starts at the exact target commit with the merged tree as uncommitted changes. CI runs on a
+    # commit whose HEAD matches its tree, and HEAD-anchored inputs (configs/approvals.yaml is read with expected_bytes
+    # from HEAD) would otherwise refuse any candidate that changes them. Committing the staged tree inside the disposable
+    # copy reproduces CI's condition without changing a byte of the tree being tested (2026-11-01, PR #85 verification).
+    'git -c user.name=merge-verifier -c user.email=merge-verifier@localhost -c core.hooksPath=/dev/null add -A >/dev/null 2>&1 && '
+    'git -c user.name=merge-verifier -c user.email=merge-verifier@localhost -c core.hooksPath=/dev/null commit -q --allow-empty --no-verify -m "candidate merge under verification" >/dev/null 2>&1 || exit 96; '
     'py=$OXYFORMER_VERIFY_PYTHON; out=$OXYFORMER_VERIFY_RESULT; '
     'if [ -n "${OXYFORMER_VERIFY_BASH_ENV+x}" ]; then export BASH_ENV=$OXYFORMER_VERIFY_BASH_ENV; fi; '
     'unset OXYFORMER_VERIFY_PYTHON OXYFORMER_VERIFY_RESULT OXYFORMER_VERIFY_STAGED OXYFORMER_VERIFY_BASH_ENV; '
