@@ -531,7 +531,7 @@ def study_cells():
     from oxyformer.training.fit import RecipeStudy
     return {'a': RecipeStudy(), 'b': RecipeStudy(reference_cap=32),
             **{cell: RecipeStudy(reference_cap=32, frozen_epochs=epochs, grid_points=2, seed_count=1)
-               for cell, epochs in (('c', 150), ('d', 60), ('e', 30))}
+               for cell, epochs in (('c', 150), ('d', 60), ('e', 30))}}
 
 
 def prepare_inputs(profile_root, destination):
