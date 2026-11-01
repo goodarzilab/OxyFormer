@@ -409,3 +409,104 @@ def test_allocated_overhead_uses_reserved_allocation_not_elapsed_wall(monkeypatc
     assert result['compute_hours']['value'] == 35.
     assert result['ratio']['value'] == 4.
     assert result['runner_wall_hours']['value'] == pytest.approx(140 * 1000 / 3600)
+
+
+def test_no_returned_slice_does_not_claim_zero_gpu_memory_or_partial_batches():
+    from oxyformer.validation.cost_probe import fit_statistics
+    stats = fit_statistics({'attempts': ['first', 'second'], 'slices': []})
+    assert stats['epochs_completed'] == 0
+    assert stats['peak_gpu_memory_bytes'] is None
+    assert stats['minibatches_partial_epoch'] is None
+
+
+def test_driver_records_intent_before_a_submission_reply_can_be_lost(tmp_path, monkeypatch):
+    import json
+    import subprocess
+    import pytest
+    from oxyformer.validation import cost_probe as cp
+    cp.atomic_record(tmp_path / 'inputs.json', {'work': {}})
+    monkeypatch.setattr(cp, 'require_compute_node', lambda: None)
+    monkeypatch.setattr(cp, 'clean_identity', lambda: 'clean-head')
+
+    def lost_reply(command, **kwargs):
+        assert command[0] == 'sbatch'
+        # The scheduler accepted this request, but the client died before
+        # receiving or durably recording the returned job identifier.
+        raise RuntimeError('submission reply lost')
+
+    monkeypatch.setattr(subprocess, 'check_output', lost_reply)
+    with pytest.raises(RuntimeError, match='reply lost'):
+        cp.drive_measurements(tmp_path)
+    ledger = json.loads((tmp_path / 'driver-jobs.json').read_text())
+    assert len(ledger) == 1
+    assert ledger[0]['state'] == 'SUBMITTING'
+    assert ledger[0]['job_id'] is None
+    assert ledger[0]['submission_name']
+
+
+def test_lost_submission_reply_is_recovered_from_the_scheduler(monkeypatch):
+    import subprocess
+    from oxyformer.validation.cost_probe import recover_submission
+    item = {'job_id': None, 'state': 'SUBMITTING', 'submission_name': 'unique-intent',
+            'submission_day': '2026-11-01'}
+
+    def query(command, **kwargs):
+        assert command[0] in ('sacct', 'squeue')
+        return '123|unique-intent\n' if command[0] == 'squeue' else ''
+
+    monkeypatch.setattr(subprocess, 'check_output', query)
+    recover_submission(item)
+    assert item['job_id'] == '123'
+    assert item['state'] == 'PENDING'
+
+
+def test_unresolved_submission_refuses_instead_of_resubmitting(monkeypatch):
+    import subprocess
+    import pytest
+    from oxyformer.validation.cost_probe import recover_submission
+    item = {'job_id': None, 'state': 'SUBMITTING', 'submission_name': 'unknown-intent',
+            'submission_day': '2026-11-01'}
+
+    def query(command, **kwargs):
+        assert command[0] in ('sacct', 'squeue')
+        return ''
+
+    monkeypatch.setattr(subprocess, 'check_output', query)
+    with pytest.raises(ValueError, match='submission outcome unresolved'):
+        recover_submission(item)
+    assert item['job_id'] is None
+
+
+def test_driver_recovers_two_live_jobs_without_another_submission(tmp_path, monkeypatch):
+    import json
+    import subprocess
+    import time
+    import pytest
+    from oxyformer.validation import cost_probe as cp
+    cp.atomic_record(tmp_path / 'inputs.json', {'work': {}})
+    cp.atomic_record(tmp_path / 'driver-jobs.json', [
+        {'job_id': None, 'cell': 'e', 'operation': 'score', 'state': 'SUBMITTING',
+         'submission_name': 'lost-intent', 'submission_day': '2026-11-01'},
+        {'job_id': '222', 'cell': 'a', 'operation': 'score', 'state': 'RUNNING'}])
+    monkeypatch.setattr(cp, 'require_compute_node', lambda: None)
+    monkeypatch.setattr(cp, 'clean_identity', lambda: 'clean-head')
+
+    def query(command, **kwargs):
+        if command[0] == 'squeue':
+            return '111|lost-intent\n'
+        assert command[0] == 'sacct', 'recovery must not submit a third job'
+        if '--name' in command:
+            return ''
+        job = command[command.index('-j') + 1]
+        return job + '|standard|node|00:01:00|RUNNING|0:0\n'
+
+    def stop_at_poll(seconds):
+        raise RuntimeError('poll boundary')
+
+    monkeypatch.setattr(subprocess, 'check_output', query)
+    monkeypatch.setattr(time, 'sleep', stop_at_poll)
+    with pytest.raises(RuntimeError, match='poll boundary'):
+        cp.drive_measurements(tmp_path)
+    ledger = json.loads((tmp_path / 'driver-jobs.json').read_text())
+    assert {job['job_id'] for job in ledger} == {'111', '222'}
+    assert len(ledger) == 2
