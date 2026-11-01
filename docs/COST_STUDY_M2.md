@@ -127,3 +127,10 @@ counters but their numeric summaries carry `failed_measurement` labels.
 Clean alternate Git histories are accepted; the protected-source byte checks
 remain required. CPU lifecycle tests exercise the actual fitting and scoring
 calls with synthetic inputs; they do not establish real GPU timings or placement.
+
+This successor counts work at launch base `57d0a04e419b0bc2c8bffb3adb46b586297746f4`.
+Attempt 4 used `f25e8853ba691883b447e0f89e9ce334f84f56ac`; coverage source changed
+between those trees. Its measurements therefore fail this successor's tree
+binding and cannot be combined with new measurements. Their root remains
+read-only. Fresh measurement collection requires its own root and available
+capacity under the two-GPU bound.

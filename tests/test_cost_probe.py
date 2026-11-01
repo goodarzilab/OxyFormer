@@ -442,6 +442,7 @@ def test_driver_records_intent_before_a_submission_reply_can_be_lost(tmp_path, m
     import subprocess
     import pytest
     from oxyformer.validation import cost_probe as cp
+    monkeypatch.setattr(cp, 'lifecycle_identity', lambda root: ({'work': {}}, 'fixture'))
     cp.atomic_record(tmp_path / 'inputs.json', {'work': {}})
     monkeypatch.setattr(cp, 'require_compute_node', lambda: None)
     monkeypatch.setattr(cp, 'clean_identity', lambda: 'clean-head')
@@ -1026,7 +1027,7 @@ def lifecycle_root(synthetic_profile, tmp_path, monkeypatch, counted_fixture):
     configure = PreparedEndpoint.configuration
     monkeypatch.setattr(PreparedEndpoint, 'configuration',
         lambda self, *args, **kwargs: configure(self, *args, **{**kwargs, 'device': 'cpu'}))
-    study = RecipeStudy(reference_cap=32, frozen_epochs=1, grid_points=2, seed_count=1)
+    study = RecipeStudy(reference_cap=32, grid_points=2, seed_count=1)
     monkeypatch.setattr(cp, 'study_cells', lambda: {'e': study})
     work = cp.pinned_work(seed_count=1, grid_points=2)
     monkeypatch.setattr(cp, 'calibration_receipt', lambda *args: {
@@ -1134,7 +1135,7 @@ def test_failed_term_summary_basis_and_null_projection(lifecycle_root):
             assert value['basis'] == ['failed_measurement']
 
 
-def test_source_identical_alternate_history_is_accepted(tmp_path):
+def test_source_identical_alternate_history_is_accepted(tmp_path, monkeypatch):
     import os
     import shutil
     import subprocess
@@ -1142,6 +1143,9 @@ def test_source_identical_alternate_history_is_accepted(tmp_path):
     from pathlib import Path
     from oxyformer.validation import cost_probe as cp
     REPO = Path.cwd()
+    # HEAD is available even in CI's shallow clone; protected bytes are the fixture.
+    baseline = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+    monkeypatch.setattr(cp, 'BASE_TREE', baseline)
     alternate = tmp_path / 'alternate'
     alternate.mkdir()
     subprocess.run(['git', 'init', str(alternate)], check=True, capture_output=True)
@@ -1195,4 +1199,3 @@ def test_separate_harness_imports_the_fitting_checkout(tmp_path):
     assert str(expected_runtime) in result.stderr
     assert str(shadow) not in result.stderr
     assert 'HARNESS_FIT_IMPORTED' not in result.stderr
-
