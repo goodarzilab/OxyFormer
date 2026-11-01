@@ -2421,3 +2421,12 @@ def test_diagnostic_estimate_factor_provenance_and_default(diagnostic_request):
 def test_diagnostic_offline_sizing_refuses_non_owner_factor(factor):
     with pytest.raises(ContractError, match=f'{factor!r}.*1.25'):
         campaign.diagnostic_sizing({}, campaign.month2_decision(), 14100, factor=factor)
+
+
+def test_screening_bytes_match_launch_base_fixture():
+    baseline = coverage.read_json(ROOT / 'tests/fixtures/diagnostic_factor_screening_baseline.json')
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    endpoint, frame = smoke_inputs.build_inputs()
+    assert coverage.digest(real_frame.screening_profile_tasks(endpoint, frame, approvals)) == baseline['emitter']
+    assert coverage.digest(campaign.screening_decision(approvals)) == baseline['decision']
+    assert coverage.digest(campaign.screening_safety_factor(approvals)) == baseline['safety']
