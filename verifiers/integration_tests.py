@@ -5,8 +5,9 @@ hanig-orchestrate's merge_unit.py runs this pinned file inside a disposable cand
 into the exact dev commit, and treats exit status 0 as a pass. It runs the whole pytest suite with the run's
 environment, CPU only, the same way .github/workflows/ci.yml does, so a merge is refused when the merged tree's
 tests fail even if each branch passed on its own. Exit status 5 (no tests collected) counts as a pass, as in CI.
-The staged candidate is committed inside the disposable copy before pytest so HEAD matches the tree, as in CI; the
-commit's author and subject are synthetic, so tests must not depend on commit metadata (CI on the real commit covers that).
+Inside the disposable copy the candidate's .git is discarded and a fresh repository is built from the tree alone before
+pytest, so HEAD matches the tree as in CI; commit author, subject and history are synthetic, so tests must not depend on
+commit metadata or history (CI on the real commit covers that).
 """
 import os
 import shutil
@@ -44,18 +45,16 @@ JOB = (
     # commit whose HEAD matches its tree, and HEAD-anchored inputs (configs/approvals.yaml is read with expected_bytes
     # from HEAD) would otherwise refuse any candidate that changes them. Committing the staged tree inside the disposable
     # copy reproduces CI's condition without changing a byte of the tree being tested (2026-11-01, PR #85 verification).
-    # Only a self-contained repository is committed into: a linked worktree copied with cp -a still points at the original
-    # repository and a commit there would move the original branch (exit 95). Git runs with its configuration isolated
-    # (no system/global config, signing off, ownership check off) so an inherited commit.gpgsign or safe.directory setting
-    # cannot abort the run before pytest (exit 96 on a genuine git failure). The commit's author and subject are synthetic:
-    # tests that read commit metadata are outside this verifier's envelope and are covered by CI on the real commit.
-    '[ -d .git ] && [ "$(git rev-parse --git-common-dir 2>/dev/null)" = ".git" ] || exit 95; '
-    'GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 '
-    'git -c user.name=merge-verifier -c user.email=merge-verifier@localhost -c core.hooksPath=/dev/null -c commit.gpgsign=false '
-    '-c safe.directory="*" add -A >/dev/null 2>&1 && '
-    'GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 '
-    'git -c user.name=merge-verifier -c user.email=merge-verifier@localhost -c core.hooksPath=/dev/null -c commit.gpgsign=false '
-    '-c safe.directory="*" commit -q --allow-empty --no-verify -m "candidate merge under verification" >/dev/null 2>&1 || exit 96; '
+    # HEAD must describe the tree under test (CI checks out the real commit; HEAD-anchored inputs such as
+    # configs/approvals.yaml are read with expected_bytes from HEAD). The copied .git is discarded and a fresh repository is
+    # built from the tree alone: the copy's metadata could be a symlink or linked-worktree file pointing at an external
+    # repository, carry repository-local filters or hooks, or inherit GIT_INDEX_FILE and other GIT_* variables, any of
+    # which could alter the files or an external repository. A fresh init with system and global configuration disabled
+    # has no filters, hooks, signing or foreign ownership, so blobs are the working files byte for byte and nothing outside
+    # the disposable copy is touched. Commit author and subject are synthetic; tests must not read commit metadata.
+    'unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_NAMESPACE GIT_PREFIX GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT GIT_ATTR_SOURCE; '
+    'g="env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 git -c user.name=merge-verifier -c user.email=merge-verifier@localhost -c core.hooksPath=/dev/null -c commit.gpgsign=false -c core.autocrlf=false -c core.safecrlf=false"; '
+    'rm -rf .git && $g init -q && $g add -A >/dev/null 2>&1 && $g commit -q --allow-empty --no-verify -m "candidate merge under verification" >/dev/null 2>&1 || exit 96; '
     'py=$OXYFORMER_VERIFY_PYTHON; out=$OXYFORMER_VERIFY_RESULT; '
     'if [ -n "${OXYFORMER_VERIFY_BASH_ENV+x}" ]; then export BASH_ENV=$OXYFORMER_VERIFY_BASH_ENV; fi; '
     'unset OXYFORMER_VERIFY_PYTHON OXYFORMER_VERIFY_RESULT OXYFORMER_VERIFY_STAGED OXYFORMER_VERIFY_BASH_ENV; '
