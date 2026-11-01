@@ -294,3 +294,343 @@ def require_compute_node(*, gpu=False):
             raise ValueError('one H100 is required')
         if torch.cuda.device_count() != 1:
             raise ValueError('exactly one visible GPU required')
+
+
+def ssl_timing(deadline):
+    """Collect the existing whole-call SSL interval bracketed by the controller."""
+    from oxyformer.training.fit import DeadlineTiming
+
+    class SSLTiming(DeadlineTiming):
+        def __init__(self):
+            super().__init__(deadline)
+            self.scope_start = None
+            self.intervals = []
+
+        def boundary(self, phase, device='cpu'):
+            result = super().boundary(phase, device)
+            if self.scope_start is None:
+                self.scope_start = self.last
+            return result
+
+        def finish_unit(self, device='cpu'):
+            start = self.scope_start
+            super().finish_unit(device)
+            if start is not None:
+                self.intervals.append(self.clock() - start)
+            self.scope_start = None
+
+    return SSLTiming()
+
+
+def measure_fit_task(endpoint, recipe, study, directory, *, position, predecessor=None,
+                     deadline=None):
+    """Run a single controller task, checkpointing after each completed epoch.
+
+    Other tasks must be completed in their own jobs before this call. No model,
+    selection result or controller checkpoint is fabricated to skip tuning.
+    """
+    from dataclasses import replace
+    from pathlib import Path
+    import os
+    import time
+    import torch
+    from oxyformer.training import nested_cv
+    from oxyformer.training.checkpoint import load_checkpoint
+    from oxyformer.training.fit import FoldArtifacts
+    from oxyformer.provenance import file_hash
+
+    require_compute_node(gpu=True)
+    head = clean_identity()
+    work = pinned_work(seed_count=study.seed_count, grid_points=study.grid_points)
+    tasks = work['tasks_per_outer_seed']
+    kind, fold, grid = tasks[position]
+    if kind == 'select':
+        raise ValueError('selection is performed with the following outer SSL task')
+    root = Path(directory)
+    root.mkdir(parents=True, exist_ok=True)
+    binding = {'tree': BASE_TREE, 'head': head, 'endpoint': endpoint.content_hash,
+               'recipe': recipe, 'study': study.to_dict(), 'position': position,
+               'incoming': None if predecessor is None else predecessor.checkpoint.sha256}
+    journal = root / 'progress.json'
+    record = resume_record(journal, binding)
+    job = os.environ['SLURM_JOB_ID']
+    if job not in record['attempts']:
+        if len(record['attempts']) >= 2:
+            raise ValueError('two attempts already used')
+        record['attempts'].append(job)
+    atomic_record(journal, record)
+    previous = (FoldArtifacts.from_json(record['predecessor']) if record['predecessor']
+                else predecessor)
+    deadline = time.monotonic() + 8 * 3600 - 900 if deadline is None else deadline
+    options = nested_cv._settings(recipe, endpoint)
+    base_config = endpoint.configuration(0, root, **options, study=study, device='cuda:0')
+    groups = nested_cv._check_fitting_minima(base_config, endpoint.outer, endpoint.geography)
+    parent = base_config.inner.split if fold < 3 else endpoint.outer
+    local, fitting, held = nested_cv._partition(base_config, parent, fold if fold < 3 else 0)
+    if kind == 'ssl':
+        allowed = set(fitting)
+        grouped = [tuple(i for i in g if i in allowed) for g in groups if allowed.intersection(g)]
+        stopping = min(grouped, key=lambda g: nested_cv.digest([1103, g, 'ssl-stopping']))
+        batches = math.ceil((len(fitting) - len(stopping)) / 256) + math.ceil(len(stopping) / 256)
+    else:
+        model_ids = tuple(i for i in fitting if kind != 'origin' or i in endpoint.outer.target_ids)
+        batches = math.ceil(len(model_ids) / base_config.settings.batch_size)
+    torch.cuda.reset_peak_memory_stats()
+    while time.monotonic() < deadline - 900:
+        before = (load_checkpoint(previous.checkpoint, previous.checkpoint.identity)['controller']
+                  if previous else None)
+        active = None if before is None else before['active']
+        finalize = active is not None and active['progress']['epoch'] >= base_config.frozen_epochs
+        timing = ssl_timing(deadline) if kind == 'ssl' else epoch_timing(deadline, finalize=finalize)
+        slice_root = root / ('slice-' + str(len(record['slices'])) + '-job-' + job)
+        # A killed call can leave a private incomplete directory. Never reuse it.
+        suffix = 0
+        while slice_root.exists():
+            suffix += 1
+            slice_root = root / ('slice-' + str(len(record['slices'])) + '-job-' + job + '-' + str(suffix))
+        config = replace(base_config, output_dir=str(slice_root), predecessor=previous,
+                         max_batches=batches if kind == 'ssl' else None,
+                         deadline_timing=timing, slice_seconds=min(14400., deadline-time.monotonic()),
+                         checkpoint_margin_seconds=timing.margin_seconds)
+        started = time.monotonic()
+        artifact = nested_cv.run_fold(config, endpoint.outer, 1103, geography=endpoint.geography)
+        wall = time.monotonic() - started
+        after = load_checkpoint(artifact.checkpoint, artifact.checkpoint.identity)['controller']
+        completed_task = after['position'] > position
+        if after['position'] > position + 1:
+            raise ValueError('measurement crossed a task boundary')
+        compute = after['compute']['wall_seconds'] - (before['compute']['wall_seconds'] if before else 0.)
+        if kind == 'ssl':
+            descriptor = after['initializations'].get(fold) if completed_task else after['ssl_pending']
+            from oxyformer.training.checkpoint import CheckpointArtifact
+            ssl = CheckpointArtifact.from_json(descriptor)
+            progress = load_checkpoint(ssl, ssl.identity)['progress']
+            if len(timing.intervals) < 2:
+                raise ValueError('missing whole-call SSL timing')
+            compute = timing.intervals[1]
+            epochs = progress['epoch']
+            partial = progress['step'] % max(1, math.ceil((len(fitting)-len(stopping))/256))
+        else:
+            progress = after['active']['progress'] if after['active'] is not None else None
+            epochs = base_config.frozen_epochs if completed_task else progress['epoch']
+            partial = 0 if progress is None else progress['step'] % batches
+        record['slices'].append({'job': job, 'wall_seconds': wall, 'compute_seconds': compute,
+            'epochs_completed': epochs, 'minibatches_partial_epoch': partial,
+            'minibatches_per_epoch': batches, 'peak_gpu_memory_bytes': torch.cuda.max_memory_allocated(),
+            'complete': completed_task, 'checkpoint_sha256': file_hash(artifact.checkpoint.path)})
+        record['predecessor'] = artifact.to_json()
+        atomic_record(journal, record)
+        previous = artifact
+        if completed_task:
+            return record
+    return record
+
+
+def measure_scoring(endpoint, recipe, study, root):
+    """Time both estimators on synthetic, full target-by-seed predictions only."""
+    from dataclasses import replace
+    from pathlib import Path
+    import time
+    import torch
+    from oxyformer.contracts import OOFNuisances
+    from oxyformer.validation.coverage import estimate_repetition
+
+    require_compute_node(gpu=True)
+    head = clean_identity()
+    names = endpoint.data.manifest.original_ids
+    weights = dict(zip(names, (1.,) * len(names) if endpoint.data.manifest.weight_field is None
+                       else endpoint.data.column(endpoint.data.manifest.weight_field)))
+    parts = []
+    for fold in range(5):
+        ids = endpoint.outer.evaluation_ids(fold)
+        for seed in study.seeds:
+            lineage = replace(endpoint.data.manifest.lineage, unit_ids=ids,
+                              split_hash=endpoint.outer.content_hash,
+                              parent_hashes=(endpoint.data.manifest.content_hash,),
+                              model_hash=None, seed=seed, parameter_count=None)
+            part = OOFNuisances(spec=endpoint.data.manifest.spec, lineage=lineage,
+                original_ids=ids, fold_ids=(fold,) * len(ids), seed_ids=(seed,) * len(ids),
+                mu_a=(0.,) * len(ids), mu_d=(0.,) * len(ids),
+                r_a=(1.,) * len(ids), r_d=(1.,) * len(ids),
+                origin_weights=tuple(weights[i] for i in ids))
+            parts.append(part.to_json())
+    expected = {(i, s) for i in endpoint.outer.original_ids for s in study.seeds}
+    observed = [(i, s) for p in parts for i, s in zip(
+        OOFNuisances.from_json(p).original_ids, OOFNuisances.from_json(p).seed_ids)]
+    if len(observed) != len(expected) or set(observed) != expected:
+        raise ValueError('synthetic scoring shape mismatch')
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=False)
+    continuation = {'parts': parts}
+    torch.cuda.reset_peak_memory_stats()
+    started = time.monotonic()
+    result = estimate_repetition(endpoint, recipe, root, float('inf'),
+                                 study=study, continuation=continuation)
+    wall = time.monotonic() - started
+    if result is None:
+        raise ValueError('scoring did not finish')
+    # Intentionally discard all scientific values. Synthetic predictions have
+    # no inferential meaning; only the call's elapsed time is a measurement.
+    del result
+    return {'tree': BASE_TREE, 'head': head, 'study': study.to_dict(),
+            'inputs': 'synthetic inputs, timing only', 'basis': ['measured'],
+            'wall_seconds': wall, 'peak_gpu_memory_bytes': torch.cuda.max_memory_allocated(),
+            'prediction_rows': len(observed)}
+
+
+def calibration_receipt(path, frame_path):
+    """Load the sealed repetition compute target, retaining the exact file hash."""
+    from pathlib import Path
+    import json
+    from oxyformer.provenance import file_hash
+    from oxyformer.validation.coverage import read_leaf_measurements
+    path = Path(path)
+    record = read_leaf_measurements(path)
+    profile = record['profile']
+    seconds = profile['complete_repetition_seconds']
+    if len(seconds) != 1:
+        raise ValueError('calibration requires one complete repetition')
+    from oxyformer.contracts import StageRequest
+    producer = StageRequest.from_json((path.parent / '_execution/request.json').read_text())
+    declared = dict(zip(producer.dependency_paths, producer.dependency_hashes))
+    expected = declared.get(str(Path(frame_path)))
+    if expected is None:
+        raise ValueError('receipt does not declare the measurement frame artifact')
+    return {'compute_hours': Quantity(seconds[0] / 3600, frozenset({'measured'})),
+            'study': record['binding']['study'], 'frame_hash': expected,
+            'frame_matches': expected == file_hash(frame_path),
+            'path': str(path), 'sha256': file_hash(path)}
+
+
+def leaf_overhead(paths):
+    """Use each campaign leaf's own record once; never sum cumulative history."""
+    from pathlib import Path
+    from oxyformer.validation.coverage import read_leaf_measurements
+    from oxyformer.provenance import file_hash
+
+    paths = tuple(map(Path, paths))
+    if len(paths) != 140 or len(set(paths)) != 140:
+        raise ValueError('exactly 140 unique campaign-D leaf records required')
+    own, files = [], []
+    for path in paths:
+        record = read_leaf_measurements(path)
+        leaf = record['leaves'][-1]
+        own.append(leaf)
+        files.append({'path': str(path), 'sha256': file_hash(path)})
+    if len({leaf['task_id'] for leaf in own}) != 140:
+        raise ValueError('duplicate campaign leaf')
+    allocated = Quantity(math.fsum(leaf['wall_seconds'] for leaf in own) / 3600,
+                         frozenset({'measured'}))
+    compute = Quantity(math.fsum(leaf['compute_seconds'] for leaf in own) / 3600,
+                       frozenset({'measured'}))
+    return {'allocated_hours': allocated.to_dict(), 'compute_hours': compute.to_dict(),
+            'ratio': ratio(allocated, compute).to_dict(), 'files': files}
+
+
+def study_cells():
+    from oxyformer.training.fit import RecipeStudy
+    return {'a': RecipeStudy(), 'b': RecipeStudy(reference_cap=32),
+            **{cell: RecipeStudy(reference_cap=32, frozen_epochs=epochs, grid_points=2, seed_count=1)
+               for cell, epochs in (('c', 150), ('d', 60), ('e', 30))}
+
+
+def prepare_inputs(profile_root, destination):
+    """Bind a null-effect draw to the same real frame used by the sealed profile."""
+    import json
+    from pathlib import Path
+    from oxyformer.contracts import StageRequest
+    from oxyformer.provenance import file_hash
+    from oxyformer.training.nested_cv import PreparedEndpoint
+    from oxyformer.validation.coverage import bind_observations, fixed_exposures
+    from oxyformer.validation.generators import generate_suite_a
+    from oxyformer.validation.scm import CovariateFrame, SCMConfig
+
+    require_compute_node()
+    head = clean_identity()
+    profile_root, root = Path(profile_root), Path(destination)
+    request = StageRequest.from_json((profile_root / '_execution/request.json').read_text())
+    task = json.loads((profile_root / '_execution/task.json').read_text())
+    if file_hash(profile_root / '_execution/task.json') != request.task_hash:
+        raise ValueError('profile task hash mismatch')
+    hashes = dict(zip(request.dependency_paths, request.dependency_hashes))
+    paths = {}
+    for name in ('frame.json', 'endpoint.json'):
+        matches = [Path(p) for p in request.dependency_paths if Path(p).name == name]
+        if len(matches) != 1 or file_hash(matches[0]) != hashes[str(matches[0])]:
+            raise ValueError('missing or changed profile ' + name)
+        paths[name] = matches[0]
+    receipt = calibration_receipt(profile_root / 'budget_record.json', paths['frame.json'])
+    template = PreparedEndpoint.from_json(paths['endpoint.json'].read_text())
+    frame = CovariateFrame.from_json(paths['frame.json'].read_text())
+    params = task['parameters']
+    if params['scenario']['name'] != 'null_effect':
+        raise ValueError('null_effect profile required')
+    scenario = SCMConfig(**params['scenario'])
+    fixed = fixed_exposures(template, frame)
+    sample = generate_suite_a(frame, scenario, template.policy, seed=params['draws'][0]['seed'],
+                              **({'fixed_exposures': fixed} if fixed else {}))
+    endpoint = bind_observations(template, sample.observations)
+    if not sample.integration_uncertainty.converged:
+        raise ValueError('null-effect draw integration did not converge')
+    root.mkdir(parents=True, exist_ok=True)
+    endpoint_path = root / 'measurement-endpoint.json'
+    endpoint_path.write_text(endpoint.to_json())
+    metadata = {'tree': BASE_TREE, 'prepared_head': head, 'recipe': params['recipe'],
+                'endpoint_path': str(endpoint_path), 'endpoint_sha256': file_hash(endpoint_path),
+                'frame_path': str(paths['frame.json']), 'frame_sha256': file_hash(paths['frame.json']),
+                'profile_path': str(profile_root / 'budget_record.json'),
+                'receipt': {**receipt, 'compute_hours': receipt['compute_hours'].to_dict()},
+                'work': {c: pinned_work(seed_count=s.seed_count, grid_points=s.grid_points)
+                         for c, s in study_cells().items()}}
+    atomic_record(root / 'inputs.json', metadata)
+    return metadata
+
+
+def main():
+    import argparse
+    import json
+    from pathlib import Path
+    from oxyformer.provenance import file_hash
+    from oxyformer.training.nested_cv import PreparedEndpoint
+    from oxyformer.training.fit import FoldArtifacts
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('command', choices=('prepare', 'fit', 'score'))
+    parser.add_argument('--root', required=True, type=Path)
+    parser.add_argument('--profile', type=Path)
+    parser.add_argument('--cell', choices=tuple('abcde'))
+    parser.add_argument('--position', type=int)
+    parser.add_argument('--predecessor', type=Path)
+    args = parser.parse_args()
+    require_compute_node(gpu=args.command != 'prepare')
+    if args.command == 'prepare':
+        if args.profile is None:
+            parser.error('--profile is required for preparation')
+        prepare_inputs(args.profile, args.root)
+        return
+    if args.cell is None:
+        parser.error('--cell is required')
+    metadata = json.loads((args.root / 'inputs.json').read_text())
+    if metadata['tree'] != BASE_TREE:
+        raise ValueError('measurement tree mismatch')
+    path = Path(metadata['endpoint_path'])
+    if file_hash(path) != metadata['endpoint_sha256']:
+        raise ValueError('measurement endpoint changed')
+    endpoint = PreparedEndpoint.from_json(path.read_text())
+    study = study_cells()[args.cell]
+    destination = args.root / args.cell
+    destination.mkdir(exist_ok=True)
+    if args.command == 'score':
+        result = measure_scoring(endpoint, metadata['recipe'], study, destination / 'scoring-work')
+        atomic_record(destination / 'scoring.json', result)
+    else:
+        if args.position is None:
+            parser.error('--position is required for fitting')
+        previous = (None if args.predecessor is None else FoldArtifacts.from_json(
+            json.loads(args.predecessor.read_text())['predecessor']))
+        measure_fit_task(endpoint, metadata['recipe'], study, destination / str(args.position),
+                         position=args.position, predecessor=previous)
+
+
+if __name__ == '__main__':
+    main()
