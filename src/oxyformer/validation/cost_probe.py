@@ -595,14 +595,17 @@ def main():
     from oxyformer.training.fit import FoldArtifacts
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('prepare', 'fit', 'score'))
+    parser.add_argument('command', choices=('prepare', 'fit', 'score', 'drive'))
     parser.add_argument('--root', required=True, type=Path)
     parser.add_argument('--profile', type=Path)
     parser.add_argument('--cell', choices=tuple('abcde'))
     parser.add_argument('--position', type=int)
     parser.add_argument('--predecessor', type=Path)
     args = parser.parse_args()
-    require_compute_node(gpu=args.command != 'prepare')
+    require_compute_node(gpu=args.command in ('fit', 'score'))
+    if args.command == 'drive':
+        drive_measurements(args.root)
+        return
     if args.command == 'prepare':
         if args.profile is None:
             parser.error('--profile is required for preparation')
@@ -724,6 +727,96 @@ def measurement_report(root, overhead):
                 'Idealised wall time assumes perfect utilisation of sixteen H100 GPUs.',
                 'CPU tests do not validate GPU timing or Slurm placement.',
                 'No final recipe or repetition count is recommended.']}
+
+
+
+
+def drive_measurements(root):
+    """Serialise each cell's genuine controller prerequisites, with two GPUs.
+
+    The driver runs on a CPU compute allocation. All GPU operations are separate
+    held jobs; this process never releases a job or changes node exclusions.
+    """
+    import fcntl
+    import json
+    from pathlib import Path
+    import shlex
+    import subprocess
+    import sys
+    import time
+
+    require_compute_node()
+    clean_identity()
+    root = Path(root)
+    metadata = json.loads((root / 'inputs.json').read_text())
+    lock = (root / 'driver.lock').open('w')
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    ledger_path = root / 'driver-jobs.json'
+    ledger = json.loads(ledger_path.read_text()) if ledger_path.exists() else []
+    failures = {}
+    while True:
+        for item in ledger:
+            output = subprocess.check_output(['sacct', '-n', '-X', '-j', item['job_id'],
+                '--format=JobIDRaw,Partition,NodeList,Elapsed,State,ExitCode', '-P'], text=True)
+            rows = [line.split('|') for line in output.strip().splitlines() if line]
+            rows = [row for row in rows if row[0] == item['job_id']]
+            if len(rows) != 1:
+                raise ValueError('scheduler accounting missing for ' + item['job_id'])
+            _, partition, node, elapsed, state, code = rows[0][:6]
+            item.update(partition=partition, node=node, elapsed=elapsed, state=state, exit_code=code)
+        atomic_record(ledger_path, ledger)
+        live = [j for j in ledger if j['state'] in ('PENDING', 'RUNNING', 'CONFIGURING', 'COMPLETING', 'SUSPENDED')]
+        if len(live) > 2:
+            raise ValueError('measurement GPU concurrency exceeded')
+        pending = []
+        for cell in ('e', 'a', 'b', 'c', 'd'):
+            if cell in failures or any(j['cell'] == cell for j in live):
+                continue
+            jobs = [j for j in ledger if j['cell'] == cell]
+            if not (root / cell / 'scoring.json').exists():
+                operation, previous = 'score', None
+            else:
+                schedule = metadata['work'][cell]['tasks_per_outer_seed']
+                previous = None
+                operation = None
+                for position, (kind, fold, grid) in enumerate(schedule):
+                    if kind == 'select':
+                        continue
+                    progress = root / cell / str(position) / 'progress.json'
+                    record = json.loads(progress.read_text()) if progress.exists() else None
+                    if record and record['slices'] and record['slices'][-1]['complete']:
+                        previous = progress
+                        continue
+                    operation = str(position)
+                    break
+                if operation is None:
+                    continue
+            attempts = [j for j in jobs if j['operation'] == operation]
+            if len(attempts) >= 2:
+                failures[cell] = {'status': 'failed_measurement', 'operation': operation,
+                                  'reason': 'sub-measurement incomplete after two attempts'}
+                continue
+            pending.append((cell, operation, previous))
+        if not live and not pending:
+            atomic_record(root / 'driver-failures.json', failures)
+            return
+        for cell, operation, previous in pending[:2-len(live)]:
+            command = [sys.executable, '-B', '-m', 'oxyformer.validation.cost_probe',
+                       'score' if operation == 'score' else 'fit', '--root', str(root), '--cell', cell]
+            if operation != 'score':
+                command.extend(['--position', operation])
+                if previous is not None:
+                    command.extend(['--predecessor', str(previous)])
+            args = guarded_gpu_arguments(root / 'job-%j.log', 'cost-m2-' + cell + '-' + operation)
+            job_id = subprocess.check_output(['sbatch', *args,
+                '--wrap', shlex.join(command)], text=True).strip()
+            if not job_id.isdigit():
+                raise ValueError('invalid sbatch response')
+            ledger.append({'job_id': job_id, 'cell': cell, 'operation': operation,
+                           'state': 'PENDING', 'partition': 'standard', 'basis': ['measured']})
+            atomic_record(ledger_path, ledger)
+        print('measurement driver:', len(live), 'active jobs;', len(failures), 'failed cells', flush=True)
+        time.sleep(60)
 
 
 if __name__ == '__main__':
