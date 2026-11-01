@@ -326,7 +326,8 @@ def test_terminal_failed_cells_publish_reasons_without_projections(tmp_path, mon
 
 
 @pytest.mark.parametrize('frame_matches', [True, False])
-def test_report_preserves_measurements_and_calibration_labels(tmp_path, monkeypatch, counted_fixture, frame_matches):
+@pytest.mark.parametrize('partial_inner', [False, True])
+def test_report_preserves_measurements_and_calibration_labels(tmp_path, monkeypatch, counted_fixture, frame_matches, partial_inner):
     import json
     from oxyformer.validation import cost_probe as cp
     work = {c: cp.pinned_work(seed_count=s.seed_count, grid_points=s.grid_points)
@@ -342,6 +343,12 @@ def test_report_preserves_measurements_and_calibration_labels(tmp_path, monkeypa
                 cp.atomic_record(tmp_path / cell / str(position) / 'progress.json', fit_record())
         cp.atomic_record(tmp_path / cell / 'scoring.json',
                          {'tree': BASE_TREE, 'wall_seconds': 70., 'inputs': 'synthetic inputs, timing only'})
+    if partial_inner:
+        cp.atomic_record(tmp_path / 'a/1/progress.json', fit_record(epochs=2, complete=False))
+        cp.atomic_record(tmp_path / 'driver-jobs.json', [
+            {'job_id': str(i), 'cell': 'a', 'operation': '1', 'state': 'TIMEOUT'} for i in (1, 2)])
+        cp.atomic_record(tmp_path / 'driver-failures.json', {
+            'a': {'operation': '1', 'reason': 'inner fit incomplete after two attempts'}})
     receipt = {'compute_hours': measured(sum(work['e']['counts'].values()) * 70 / 3600),
                'study': cp.cell_values(cp.study_cells()['e']),
                'frame_hash': 'same', 'frame_matches': frame_matches, 'work': work['e']}
@@ -351,6 +358,7 @@ def test_report_preserves_measurements_and_calibration_labels(tmp_path, monkeypa
     assert 'opaque private' not in json.dumps(report)
     for cell in cp.study_cells():
         basis = set(report['cells'][cell]['compute_h100_hours_per_repetition']['basis'])
+        assert ('extrapolated' in basis) is (cell == 'a' and partial_inner)
         assert ('uncalibrated' in basis) is (not frame_matches)
         assert report['measurements'][cell]['ssl']['summary']['epochs_completed']['value'] == 7
         assert report['measurements'][cell]['ssl']['summary']['wall_seconds_at_last_completed_epoch']['value'] == 100
@@ -510,3 +518,126 @@ def test_driver_recovers_two_live_jobs_without_another_submission(tmp_path, monk
     ledger = json.loads((tmp_path / 'driver-jobs.json').read_text())
     assert {job['job_id'] for job in ledger} == {'111', '222'}
     assert len(ledger) == 2
+
+
+def test_measurement_schedule_does_not_run_the_tuning_grid(counted_fixture):
+    from oxyformer.validation import cost_probe as cp
+    work = cp.pinned_work(seed_count=3, grid_points=4)
+    schedule = cp.measurement_tasks(work)
+    tasks = work['tasks_per_outer_seed']
+    assert [tasks[position] for position, _, _ in schedule] == [
+        ('ssl', 0, None), ('outcome', 0, 0), ('origin', 0, 0),
+        ('ssl', 3, None), ('outcome', 3, None), ('origin', 3, None)]
+    assert len(schedule) == 6
+    # Measurement shortcuts must not shrink the repetition's counted workload.
+    assert work['counts']['inner_outcome'] == 180
+    assert work['counts']['inner_origin'] == 180
+    assert schedule[-1][1] == schedule[-2][1] == schedule[-3][0]
+
+
+def test_fixed_grid_refits_use_real_outer_ssl_without_inner_selection(tmp_path, monkeypatch, counted_fixture):
+    from pathlib import Path
+    import time
+    import torch
+    from test_nested_cv import endpoint, state
+    from oxyformer.training.fit import FoldArtifacts, RecipeStudy
+    from oxyformer.validation import cost_probe as cp
+
+    prepared = endpoint(tmp_path / 'data')
+    configure = type(prepared).configuration
+
+    def cpu_configuration(self, *args, **kwargs):
+        return configure(self, *args, **{**kwargs, 'device': 'cpu'})
+
+    monkeypatch.setattr(type(prepared), 'configuration', cpu_configuration)
+    monkeypatch.setattr(cp, 'require_compute_node', lambda **kwargs: None)
+    monkeypatch.setattr(cp, 'clean_identity', lambda **kwargs: 'clean-head')
+    monkeypatch.setattr(torch.cuda, 'reset_peak_memory_stats', lambda: None)
+    monkeypatch.setattr(torch.cuda, 'max_memory_allocated', lambda: 0)
+    monkeypatch.setenv('SLURM_JOB_ID', 'first-attempt')
+    recipe = {'nested_cv': {'ssl_epochs': 1, 'frozen_epochs': 2, 'synthetic': True}}
+    work = cp.pinned_work(seed_count=3, grid_points=4)
+    schedule = cp.measurement_tasks(work)
+    records = {}
+    # Inner SSL and origin exercise skipping the other inner grid points.
+    # Outer SSL starts independently of any inner selection artifacts.
+    for position, source, fixed in (schedule[0], schedule[2], schedule[3], schedule[4]):
+        predecessor = None if source is None else FoldArtifacts.from_json(records[source]['predecessor'])
+        record = cp.measure_fit_task(prepared, recipe, RecipeStudy(), tmp_path / str(position),
+            position=position, predecessor=predecessor, standalone=fixed)
+        assert record['slices'][-1]['complete']
+        records[position] = record
+        controller = state(FoldArtifacts.from_json(record['predecessor']))
+        if fixed:
+            assert not record['timing_setup']['selection_performed']
+            if position != schedule[3][0]:
+                assert record['timing_setup']['grid_index'] == 0
+            else:
+                assert 'learning_rate' not in record['timing_setup']
+            assert controller['selection']['outcome'] == {'grid': 0, 'epochs': 2}
+        if position == schedule[4][0]:
+            assert not controller['results']
+            assert controller['final']['outcome']['learning_rate'] == .0003
+            assert controller['final']['outcome']['dropout'] == 0.
+            assert controller['active'] is None
+    # Resume the last outer-origin task after one durable epoch. Its completion
+    # must stop before calibration-transfer code, which needs real tuning OOFs.
+    position, source, fixed = schedule[-1]
+    predecessor = FoldArtifacts.from_json(records[source]['predecessor'])
+    original_clock = time.monotonic
+    offset = [0.]
+    monkeypatch.setattr(time, 'monotonic', lambda: original_clock() + offset[0])
+    original_write = cp.atomic_record
+
+    def stop_after_epoch(path, record):
+        original_write(path, record)
+        if record['attempts'] == ['first-attempt'] and len(record['slices']) == 1:
+            offset[0] = 10000.
+
+    monkeypatch.setattr(cp, 'atomic_record', stop_after_epoch)
+    first = cp.measure_fit_task(prepared, recipe, RecipeStudy(), tmp_path / str(position),
+        position=position, predecessor=predecessor, standalone=True,
+        deadline=time.monotonic() + 10000.)
+    assert first['slices'][-1]['epochs_completed'] == 1
+    monkeypatch.setenv('SLURM_JOB_ID', 'second-attempt')
+    final = cp.measure_fit_task(prepared, recipe, RecipeStudy(), tmp_path / str(position),
+        position=position, predecessor=predecessor, standalone=True,
+        deadline=time.monotonic() + 10000.)
+    assert final['slices'][-1]['complete']
+    assert final['slices'][-1]['epochs_completed'] == 2
+    artifact = FoldArtifacts.from_json(final['predecessor'])
+    controller = state(artifact)
+    assert controller['position'] == len(work['tasks_per_outer_seed'])
+    assert not artifact.complete
+    assert not controller['results'] and controller['calibration'] is None
+    assert 'transfer_diagnostics' not in controller
+    assert set(controller['final']) == {'origin'}
+    assert controller['final']['origin']['learning_rate'] == .0003
+    assert controller['final']['origin']['dropout'] == 0.
+
+
+def test_exhausted_inner_fit_does_not_block_independent_refit_measurements(tmp_path, counted_fixture):
+    from oxyformer.validation import cost_probe as cp
+    work = cp.pinned_work(seed_count=1, grid_points=2)
+    plan = cp.measurement_tasks(work)
+    cp.atomic_record(tmp_path / 'scoring.json', {})
+    cp.atomic_record(tmp_path / str(plan[0][0]) / 'progress.json', fit_record())
+    cp.atomic_record(tmp_path / str(plan[1][0]) / 'progress.json', fit_record(epochs=2, complete=False))
+    jobs = [{'operation': str(plan[1][0])} for _ in range(2)]
+    next_job, issues = cp.next_measurement(tmp_path, work, jobs)
+    assert next_job == (str(plan[2][0]), tmp_path / str(plan[0][0]) / 'progress.json', True)
+    assert [item['operation'] for item in issues] == [str(plan[1][0])]
+    cp.atomic_record(tmp_path / str(plan[2][0]) / 'progress.json', fit_record())
+    next_job, issues = cp.next_measurement(tmp_path, work, jobs)
+    assert next_job == (str(plan[3][0]), None, True)
+
+
+def test_failed_inner_ssl_still_allows_independent_outer_ssl(tmp_path, counted_fixture):
+    from oxyformer.validation import cost_probe as cp
+    work = cp.pinned_work(seed_count=1, grid_points=2)
+    plan = cp.measurement_tasks(work)
+    cp.atomic_record(tmp_path / 'scoring.json', {})
+    jobs = [{'operation': str(plan[0][0])} for _ in range(2)]
+    next_job, issues = cp.next_measurement(tmp_path, work, jobs)
+    assert next_job == (str(plan[3][0]), None, True)
+    assert [item['operation'] for item in issues] == [str(plan[0][0])]

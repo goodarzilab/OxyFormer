@@ -252,7 +252,7 @@ def resume_record(path, binding):
     return record
 
 
-def epoch_timing(deadline, *, finalize=False):
+def epoch_timing(deadline, *, finalize=False, terminal=False):
     """Use the controller's existing cooperative phase checks to slice epochs.
 
     The check before evaluation is not an epoch boundary. Stop at the following
@@ -270,12 +270,69 @@ def epoch_timing(deadline, *, finalize=False):
 
         def boundary(self, phase, device='cpu'):
             expired = super().boundary(phase, device)
-            stop = self.evaluated and (phase != 'evaluation' if finalize else True)
+            stop = self.evaluated and (phase != 'evaluation' if finalize and not terminal else True)
             self.evaluated = self.evaluated or phase == 'evaluation'
             self.stopped = self.stopped or stop
             return expired or self.stopped
 
     return EpochTiming()
+
+
+def measurement_tasks(work):
+    """Measure representative tasks; count the full tuning grid only in R2."""
+    tasks = work['tasks_per_outer_seed']
+    lookup = {tuple(task): i for i, task in enumerate(tasks)}
+    inner_ssl = lookup['ssl', 0, None]
+    outer_ssl = lookup['ssl', 3, None]
+    return [
+        (inner_ssl, None, False),
+        (lookup['outcome', 0, 0], inner_ssl, False),
+        (lookup['origin', 0, 0], inner_ssl, True),
+        (outer_ssl, None, True),
+        (lookup['outcome', 3, None], outer_ssl, True),
+        (lookup['origin', 3, None], outer_ssl, True),
+    ]
+
+
+def timing_predecessor(config, endpoint, root, *, position, predecessor=None):
+    """Set up one timing-only task using a fixed first-grid selection.
+
+    This is not a completed tuning result. It carries no calibration or OOF
+    selection claims, and the measurement stops before inferential finalization.
+    Trained initialization tensors come only from the appropriate real SSL fit.
+    """
+    from copy import deepcopy
+    from dataclasses import replace
+    from pathlib import Path
+    from oxyformer.training import nested_cv
+    from oxyformer.training.checkpoint import (CheckpointRequest, load_checkpoint,
+        save_checkpoint, model_state_hash)
+
+    root = Path(root)
+    root.mkdir(parents=True, exist_ok=False)
+    if predecessor is None:
+        stop = CheckpointRequest()
+        stop.request()
+        predecessor = nested_cv.run_fold(replace(config, output_dir=str(root / 'blank'),
+            predecessor=None, stop_request=stop), endpoint.outer, 1103,
+            geography=endpoint.geography)
+    checkpoint = predecessor.checkpoint
+    controller = deepcopy(load_checkpoint(checkpoint, checkpoint.identity)['controller'])
+    if controller['active'] is not None or controller['ssl_pending'] is not None:
+        raise ValueError('timing setup requires a completed SSL task')
+    controller.update(position=position, results=[], final={}, calibration=None,
+        selection={kind: {'grid': 0, 'epochs': config.frozen_epochs}
+                   for kind in ('outcome', 'origin')},
+        timing_only='fixed first grid point; no inner selection performed')
+    tensors = nested_cv._tensor_state(controller)
+    lineage = replace(checkpoint.lineage, model_hash=model_state_hash(tensors),
+                      parent_hashes=(checkpoint.content_hash,),
+                      parameter_count=sum(t.numel() for t in tensors.values()))
+    artifact = save_checkpoint(root, identity=checkpoint.identity, lineage=lineage,
+        state={'model': tensors, 'controller': controller,
+               'progress': {'epoch': position, 'step': position}},
+        complete=False, reason='requested', predecessor=checkpoint)
+    return replace(predecessor, checkpoint=artifact)
 
 
 def guarded_gpu_arguments(output, name):
@@ -335,11 +392,11 @@ def partial_epoch_batches(progress, training_batches, *, validation_batch_size=N
 
 
 def measure_fit_task(endpoint, recipe, study, directory, *, position, predecessor=None,
-                     deadline=None):
+                     deadline=None, standalone=False):
     """Run a single controller task, checkpointing after each completed epoch.
 
-    Other tasks must be completed in their own jobs before this call. No model,
-    selection result or controller checkpoint is fabricated to skip tuning.
+    Standalone tasks use the explicitly declared first grid point, without
+    running a tuning grid. Their initialization still requires a real SSL fit.
     """
     from dataclasses import replace
     from pathlib import Path
@@ -363,6 +420,12 @@ def measure_fit_task(endpoint, recipe, study, directory, *, position, predecesso
     binding = {'tree': BASE_TREE, 'head': head, 'endpoint': endpoint.content_hash,
                'recipe': recipe, 'study': cell_values(study), 'position': position,
                'incoming': None if predecessor is None else predecessor.checkpoint.sha256}
+    if standalone:
+        allowed = {p for p, _, fixed in measurement_tasks(work) if fixed}
+        if position not in allowed:
+            raise ValueError('unsupported standalone timing position')
+        binding['harness_head'] = clean_identity(cwd=Path(__file__).resolve().parents[3])
+        binding['mode'] = 'fixed first grid point, timing only'
     journal = root / 'progress.json'
     record = resume_record(journal, binding)
     job = os.environ['SLURM_JOB_ID']
@@ -376,6 +439,29 @@ def measure_fit_task(endpoint, recipe, study, directory, *, position, predecesso
     deadline = time.monotonic() + 8 * 3600 - 900 if deadline is None else deadline
     options = nested_cv._settings(recipe, endpoint)
     base_config = endpoint.configuration(0, root, **options, study=study, device='cuda:0')
+    if standalone:
+        record['timing_setup'] = {'mode': binding['mode'],
+            'epochs': base_config.ssl_epochs if kind == 'ssl' else base_config.frozen_epochs,
+            'selection_performed': False}
+        if kind != 'ssl':
+            record['timing_setup'].update(grid_index=0,
+                learning_rate=base_config.grid[0][0], dropout=base_config.grid[0][1])
+        if record['predecessor'] is None:
+            if kind != 'ssl':
+                if predecessor is None:
+                    raise ValueError('real SSL predecessor required')
+                saved = load_checkpoint(predecessor.checkpoint, predecessor.checkpoint.identity)['controller']
+                if fold not in saved['initializations']:
+                    raise ValueError('SSL predecessor has the wrong fitting partition')
+            setup = root / ('timing-setup-job-' + job)
+            suffix = 0
+            while setup.exists():
+                suffix += 1
+                setup = root / ('timing-setup-job-' + job + '-' + str(suffix))
+            previous = timing_predecessor(base_config, endpoint, setup,
+                position=position, predecessor=predecessor)
+            record['predecessor'] = previous.to_json()
+            atomic_record(journal, record)
     groups = nested_cv._check_fitting_minima(base_config, endpoint.outer, endpoint.geography)
     parent = base_config.inner.split if fold < 3 else endpoint.outer
     local, fitting, held = nested_cv._partition(base_config, parent, fold if fold < 3 else 0)
@@ -393,7 +479,8 @@ def measure_fit_task(endpoint, recipe, study, directory, *, position, predecesso
                   if previous else None)
         active = None if before is None else before['active']
         finalize = active is not None and active['progress']['epoch'] >= base_config.frozen_epochs
-        timing = ssl_timing(deadline) if kind == 'ssl' else epoch_timing(deadline, finalize=finalize)
+        timing = ssl_timing(deadline) if kind == 'ssl' else epoch_timing(deadline,
+            finalize=finalize, terminal=standalone and position == len(tasks) - 1)
         slice_root = root / ('slice-' + str(len(record['slices'])) + '-job-' + job)
         # A killed call can leave a private incomplete directory. Never reuse it.
         suffix = 0
@@ -637,6 +724,8 @@ def main():
     parser.add_argument('--predecessor', type=Path)
     parser.add_argument('--overhead', type=Path)
     parser.add_argument('--fit-checkout', type=Path)
+    parser.add_argument('--harness-checkout', type=Path)
+    parser.add_argument('--standalone', action='store_true')
     args = parser.parse_args()
     require_compute_node(gpu=args.command in ('fit', 'score'))
     if args.command == 'report':
@@ -645,7 +734,8 @@ def main():
         publish_report(args.root, json.loads(args.overhead.read_text()))
         return
     if args.command == 'drive':
-        drive_measurements(args.root, fit_checkout=args.fit_checkout)
+        drive_measurements(args.root, fit_checkout=args.fit_checkout,
+                           harness_checkout=args.harness_checkout)
         return
     if args.command == 'prepare':
         if args.profile is None:
@@ -673,7 +763,7 @@ def main():
         previous = (None if args.predecessor is None else FoldArtifacts.from_json(
             json.loads(args.predecessor.read_text())['predecessor']))
         measure_fit_task(endpoint, metadata['recipe'], study, destination / str(args.position),
-                         position=args.position, predecessor=previous)
+                         position=args.position, predecessor=previous, standalone=args.standalone)
 
 
 
@@ -743,9 +833,10 @@ def measurement_report(root, overhead):
     if any(j['state'] in live_states for j in jobs):
         raise ValueError('measurements are still running')
     for cell, failure in failures.items():
-        attempts = [j for j in jobs if j['cell'] == cell and j['operation'] == failure['operation']]
-        if len(attempts) != 2:
-            raise ValueError('failed measurement requires two recorded attempts')
+        for item in failure.get('operations', [failure]):
+            attempts = [j for j in jobs if j['cell'] == cell and j['operation'] == item['operation']]
+            if len(attempts) != 2:
+                raise ValueError('failed measurement requires two recorded attempts')
     projections, measurements, formulas = {}, {}, {}
     for cell, study in study_cells().items():
         directory = root / cell
@@ -842,6 +933,7 @@ def measurement_report(root, overhead):
                 'First outer fold and first inner fold timings represent other folds.',
                 'Registered seed 1103 represents the other registered neural seeds.',
                 'The first hyperparameter grid point represents other grid points in each inner-fit timing term.',
+                'Outer refits use the recorded fixed first grid point at the cell epoch count, without running inner selection. Selection workload enters the projection through the counted inner fits.',
                 'Outer SSL timing represents the SSL terms in the projection.',
                 'The frozen plan specifies maximum thirty SSL epochs with patience five; native patience completion is measured, with its actual epoch count.',
                 'Epoch slicing adds controller reconstruction work to measured compute.',
@@ -898,8 +990,42 @@ def submit_measurement(ledger_path, ledger, *, root, cell, operation, command, c
     atomic_record(ledger_path, ledger)
 
 
-def drive_measurements(root, *, fit_checkout=None):
-    """Serialise each cell's genuine controller prerequisites, with two GPUs.
+def next_measurement(directory, work, jobs):
+    """Continue independent terms after an exhausted measurement attempt pair."""
+    import json
+    from pathlib import Path
+    directory = Path(directory)
+    failures = []
+
+    def exhausted(operation):
+        if sum(j['operation'] == operation for j in jobs) < 2:
+            return False
+        failures.append({'operation': operation,
+                         'reason': 'sub-measurement ' + operation + ' incomplete after two attempts'})
+        return True
+
+    def completed(position):
+        path = directory / str(position) / 'progress.json'
+        record = json.loads(path.read_text()) if path.exists() else None
+        return bool(record and record['slices'] and record['slices'][-1]['complete'])
+
+    if not (directory / 'scoring.json').exists() and not exhausted('score'):
+        return ('score', None, False), failures
+    for position, source, fixed in measurement_tasks(work):
+        operation = str(position)
+        if completed(position) or exhausted(operation):
+            continue
+        if source is not None and not completed(source):
+            # A real SSL initialization is required. Other independent terms
+            # still run, and missing dependent terms remain explicit failures.
+            continue
+        previous = None if source is None else directory / str(source) / 'progress.json'
+        return (operation, previous, fixed), failures
+    return None, failures
+
+
+def drive_measurements(root, *, fit_checkout=None, harness_checkout=None):
+    """Schedule representative fits and their SSL prerequisites, with two GPUs.
 
     The driver runs on a CPU compute allocation. All GPU operations are separate
     held jobs; this process never releases a job or changes node exclusions.
@@ -914,8 +1040,11 @@ def drive_measurements(root, *, fit_checkout=None):
     require_compute_node()
     clean_identity()
     fitting_checkout = Path.cwd() if fit_checkout is None else Path(fit_checkout).resolve()
+    harness_checkout = Path.cwd() if harness_checkout is None else Path(harness_checkout).resolve()
     if fit_checkout is not None:
         clean_identity(cwd=fitting_checkout)
+    if harness_checkout != Path.cwd():
+        clean_identity(cwd=harness_checkout)
     root = Path(root)
     metadata = json.loads((root / 'inputs.json').read_text())
     lock = (root / 'driver.lock').open('w')
@@ -942,43 +1071,32 @@ def drive_measurements(root, *, fit_checkout=None):
             raise ValueError('measurement GPU concurrency exceeded')
         pending = []
         for cell in ('e', 'a', 'b', 'c', 'd'):
-            if cell in failures or any(j['cell'] == cell for j in live):
+            if any(j['cell'] == cell for j in live):
                 continue
             jobs = [j for j in ledger if j['cell'] == cell]
-            if not (root / cell / 'scoring.json').exists():
-                operation, previous = 'score', None
+            next_job, issues = next_measurement(root / cell, metadata['work'].get(cell), jobs)
+            if issues:
+                failures[cell] = {'status': 'failed_measurement',
+                    'operation': issues[0]['operation'], 'operations': issues,
+                    'reason': '; '.join(item['reason'] for item in issues)}
             else:
-                schedule = metadata['work'][cell]['tasks_per_outer_seed']
-                previous = None
-                operation = None
-                for position, (kind, fold, grid) in enumerate(schedule):
-                    if kind == 'select':
-                        continue
-                    progress = root / cell / str(position) / 'progress.json'
-                    record = json.loads(progress.read_text()) if progress.exists() else None
-                    if record and record['slices'] and record['slices'][-1]['complete']:
-                        previous = progress
-                        continue
-                    operation = str(position)
-                    break
-                if operation is None:
-                    continue
-            attempts = [j for j in jobs if j['operation'] == operation]
-            if len(attempts) >= 2:
-                failures[cell] = {'status': 'failed_measurement', 'operation': operation,
-                                  'reason': 'sub-measurement incomplete after two attempts'}
-                continue
-            pending.append((cell, operation, previous))
+                failures.pop(cell, None)
+            if next_job is not None:
+                pending.append((cell, *next_job))
         if not live and not pending:
             atomic_record(root / 'driver-failures.json', failures)
             return
-        for cell, operation, previous in pending[:2-len(live)]:
-            command = [sys.executable, '-B', '-m', 'oxyformer.validation.cost_probe',
+        for cell, operation, previous, standalone in pending[:2-len(live)]:
+            entry = ([str(harness_checkout / 'src/oxyformer/validation/cost_probe.py')]
+                     if standalone else ['-m', 'oxyformer.validation.cost_probe'])
+            command = [sys.executable, '-B', *entry,
                        'score' if operation == 'score' else 'fit', '--root', str(root), '--cell', cell]
             if operation != 'score':
                 command.extend(['--position', operation])
                 if previous is not None:
                     command.extend(['--predecessor', str(previous)])
+                if standalone:
+                    command.append('--standalone')
             submit_measurement(ledger_path, ledger, root=root, cell=cell,
                 operation=operation, command=command,
                 checkout=Path.cwd() if operation == 'score' else fitting_checkout)
@@ -1027,6 +1145,17 @@ def publish_report(root, overhead):
         for term, count in formula['counts'].items():
             lines.append('| ' + cell + ' | ' + term + ' | ' + display(count) + ' | ' +
                          display(formula['seconds'][term]) + ' |')
+    lines.extend(['',
+        'Refit timing uses the fixed first grid point at the cell epoch count, as clarified by the orchestrator.',
+        'Inner selection is not run for this timing: its workload enters the projection through the counted inner fits.', '',
+        '| Cell | Refit | Grid index | Learning rate | Dropout | Epoch bound |',
+        '| --- | --- | --- | --- | --- | --- |'])
+    for cell, records in report['measurements'].items():
+        for term in ('refit_outcome', 'refit_origin'):
+            setup = records[term].get('timing_setup')
+            if setup is not None:
+                lines.append('| ' + cell + ' | ' + term + ' | ' + ' | '.join(
+                    display(setup[k]) for k in ('grid_index', 'learning_rate', 'dropout', 'epochs')) + ' |')
     lines.extend(['', 'Campaign allocated/compute ratio: ' + display(overhead['ratio']),
         'Reserved allocation GPU-hours: ' + display(overhead['allocated_hours']),
         'Measured compute GPU-hours: ' + display(overhead['compute_hours']), '',
