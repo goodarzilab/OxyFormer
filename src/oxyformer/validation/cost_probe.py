@@ -60,7 +60,8 @@ def epoch_projection(*, required, completed, wall_seconds, boundary_seconds, att
     return Quantity(boundary_seconds * required / completed, frozenset({'extrapolated'}))
 
 
-def calibration(anchor, receipt, *, measured_anchor, frame_matches, cell_matches, operations_match):
+def calibration(anchor, receipt, *, measured_anchor, frame_matches, cell_matches,
+                operations_match, sources_match=True):
     reasons = []
     if not measured_anchor:
         reasons.append('anchor extrapolated')
@@ -70,6 +71,8 @@ def calibration(anchor, receipt, *, measured_anchor, frame_matches, cell_matches
         reasons.append('cell mismatch')
     if not operations_match:
         reasons.append('operation mismatch')
+    if not sources_match:
+        reasons.append('protected source mismatch')
     result = None if anchor is None else ratio(anchor, receipt)
     if result is None:
         reasons.append('anchor failed_measurement')
@@ -91,6 +94,12 @@ def feasibility(compute_hours, overhead):
 
 
 BASE_TREE = 'f25e8853ba691883b447e0f89e9ce334f84f56ac'
+PROTECTED_SOURCES = (
+    ('nested', 'src/oxyformer/training/nested_cv.py'),
+    ('coverage', 'src/oxyformer/validation/coverage.py'),
+    ('fit', 'src/oxyformer/training/fit.py'),
+    ('pretrain', 'src/oxyformer/training/pretrain.py'),
+)
 
 
 def operation_counts(*, seed_count, grid_points):
@@ -201,10 +210,7 @@ def pinned_work(*, seed_count, grid_points, tree=BASE_TREE):
     if tree != BASE_TREE:
         raise ValueError('counted-work tree mismatch')
     sources, digests = {}, {}
-    for name, path in (
-        ('nested', 'src/oxyformer/training/nested_cv.py'),
-        ('coverage', 'src/oxyformer/validation/coverage.py'),
-    ):
+    for name, path in PROTECTED_SOURCES:
         raw = subprocess.check_output(['git', 'show', tree + ':' + path])
         if Path(path).read_bytes() != raw:
             raise ValueError('protected source differs from counted-work tree')
@@ -612,6 +618,7 @@ def measure_scoring(endpoint, recipe, study, root):
 
 def calibration_receipt(path, frame_path):
     """Load the sealed repetition compute target, retaining the exact file hash."""
+    from hashlib import sha256
     from pathlib import Path
     import json
     from oxyformer.provenance import file_hash
@@ -622,9 +629,12 @@ def calibration_receipt(path, frame_path):
     import subprocess
     tree = record['binding']['code_identity']
     study = record['binding']['study']
+    sources, baseline = {}, {}
+    for name, source_path in PROTECTED_SOURCES:
+        sources[name] = subprocess.check_output(['git', 'show', tree + ':' + source_path])
+        baseline[name] = subprocess.check_output(['git', 'show', BASE_TREE + ':' + source_path])
     receipt_work = source_work(
-        subprocess.check_output(['git', 'show', tree + ':src/oxyformer/training/nested_cv.py']).decode(),
-        subprocess.check_output(['git', 'show', tree + ':src/oxyformer/validation/coverage.py']).decode(),
+        sources['nested'].decode(), sources['coverage'].decode(),
         seed_count=study['seed_count'], grid_points=study['grid_points'])
     seconds = profile['complete_repetition_seconds']
     if len(seconds) != 1:
@@ -639,6 +649,9 @@ def calibration_receipt(path, frame_path):
     return {'compute_hours': Quantity(seconds[0] / 3600, frozenset({'measured'})),
             'study': record['binding']['study'], 'tree': record['binding']['code_identity'], 'frame_hash': expected,
             'frame_matches': expected == file_hash(frame_path),
+            'sources_match': sources == baseline,
+            'source_sha256': {source_path: sha256(sources[name]).hexdigest()
+                              for name, source_path in PROTECTED_SOURCES},
             'path': str(path), 'sha256': file_hash(path), 'work': receipt_work}
 
 
@@ -700,7 +713,7 @@ def prepare_inputs(profile_root, destination):
     require_compute_node()
     head = clean_identity()
     require_month2_decision()
-    profile_root, root = Path(profile_root), Path(destination)
+    profile_root, root = Path(profile_root).resolve(), Path(destination).resolve()
     request = StageRequest.from_json((profile_root / '_execution/request.json').read_text())
     task = json.loads((profile_root / '_execution/task.json').read_text())
     if file_hash(profile_root / '_execution/task.json') != request.task_hash:
@@ -967,7 +980,8 @@ def measurement_report(root, overhead):
         measured_anchor=anchor is not None and anchor.basis == {'measured'},
         frame_matches=receipt['frame_matches'],
         cell_matches=receipt['study'] == cell_values(study_cells()['e']),
-        operations_match=projection_counts(inputs['work']['e']) == projection_counts(receipt['work']))
+        operations_match=projection_counts(inputs['work']['e']) == projection_counts(receipt['work']),
+        sources_match=receipt['sources_match'])
     cells = {}
     for name, q in projections.items():
         if q is not None and not check['passed']:
@@ -1107,7 +1121,7 @@ def drive_measurements(root, *, fit_checkout=None, harness_checkout=None):
         clean_identity(cwd=fitting_checkout)
     if harness_checkout != Path.cwd():
         clean_identity(cwd=harness_checkout)
-    root = Path(root)
+    root = Path(root).resolve()
     metadata = json.loads((root / 'inputs.json').read_text())
     lock = (root / 'driver.lock').open('w')
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
