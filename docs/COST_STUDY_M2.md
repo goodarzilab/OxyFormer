@@ -9,7 +9,8 @@ sub-measurement on one H100 in a separate held job on standard/root, with an
 eight-hour allocation. Only the orchestrator's node guard releases jobs.
 The driver permits two GPU measurement jobs concurrently.
 
-The checkout must be clean. Measurements record their commit and the fixed
+The checkout must be clean, and preparation and submission require the recorded
+month-two owner decision. Measurements record their commit and the fixed
 launch tree. The count derivation reads the task-list expressions in that tree's
 nested controller and the fold/seed iteration and scoring calls in coverage.
 It checks that the runtime protected sources match those bytes.
@@ -36,7 +37,11 @@ calibration-transfer step, which requires actual tuning OOF predictions.
 Epoch slices use existing budget phase checks. Nuisance timings are differences
 of the controller's cumulative compute.wall_seconds. SSL uses the existing
 whole-call phase bracket. Slice checkpoints and their durable descriptors permit
-a second attempt after interruption. The frozen plan specifies a maximum of
+a second attempt after interruption. A resumed SSL slice runs only the remaining
+transactions of its partial epoch before saving a timed boundary. Actual epoch
+progress is retained separately from the last timed boundary; a legacy record
+without a boundary cannot supply an extrapolation rate. Full training epochs
+without the final fit evaluation are incomplete measurements. The frozen plan specifies a maximum of
 thirty SSL epochs with patience five. Native patience completion is measured
 at its actual epoch count; this plan rule takes precedence over wording that
 would require every SSL fit to execute thirty epochs. Construction work inside the controller
@@ -45,7 +50,7 @@ is included; repeated reconstruction can therefore affect calibration.
 For each cell the projection is the sum of each counted operation times its
 measured duration, divided by seconds per hour. Inner outcome and origin fits
 have separate terms, as do their outer refits. Scoring contributes once per
-repetition. The representative SSL term is the outer SSL fit, and the first
+repetition. Inner and outer SSL use separate measured terms and counts. The first
 inner partition represents other inner partitions. These are projection
 assumptions, not measurements of a complete repetition. Each timed fit uses
 registered seed 1103; the projection multiplies by the cell's seed count. The
@@ -86,13 +91,16 @@ The driver records a unique submission intent before invoking sbatch. After a
 lost reply it reconciles that job name against accounting and the live queue.
 An unresolved submission stops further submissions until it can be reconciled;
 it is never silently retried. The ledger and driver lock enforce the concurrency
-limit across driver restarts.
+limit across driver restarts. Requeued and other nonterminal scheduler states
+retain their concurrency slots. Publication writes slurm_jobs.json from the
+measurement ledger while retaining separately recorded CPU checks.
 
 When continuing existing fits, run the driver with --fit-checkout pointing to the
 original clean runtime checkout and --harness-checkout pointing to a clean frozen
-checkout containing the fixed-grid timing harness. Independent timing jobs execute
+checkout containing the fixed-grid timing harness. All fitting jobs execute
 that harness as a script while importing the original runtime package; their
-records bind both commits. This preserves the package identity of real SSL
+records bind both commits. Each new attempt records its execution harness commit.
+This preserves the package identity of real SSL
 checkpoints already measured before the scheduling clarification. Scoring jobs use
 the driver checkout. Child commands explicitly use PYTHONPATH=src. Never edit
 either frozen checkout while its checkpoint chain is live.
