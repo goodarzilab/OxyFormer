@@ -2149,7 +2149,7 @@ def test_diagnostic_lock_refusals(diagnostic_request, tmp_path, fault, match):
     elif fault == 'namespace':
         task['parameters']['evaluation_namespace'] = 'month1-evaluation'
     else:
-        task['parameters']['profile_safety_factor'] = 1.5
+        task['parameters']['profile_safety_factor'] = 3.
     write(Path(req.task_path), task)
     result = campaign.run_stage(replace(req, task_hash=file_hash(req.task_path)))
     assert result.status == 'blocked' and match in result.message
@@ -2328,3 +2328,39 @@ def test_diagnostic_estimate_cpu_refusal_precedes_publication(diagnostic_request
     result = campaign_estimate.run_stage(diagnostic_request)
     assert result.status == 'blocked' and 'diagnostic measurement requires CUDA' in result.message
     assert not (Path(diagnostic_request.output_dir) / 'budget_estimate.json').exists()
+
+
+@pytest.mark.parametrize('value', ['2025-08-12T00:00:00', '2025-08-12T23:59:59+05:30',
+    '2025-08-12T00:00:00Z', datetime(2025, 8, 12), datetime.fromisoformat('2025-08-12T00:00:00+00:00')])
+def test_month2_iso_timestamp_normalizes_to_decision_date(value):
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    approvals['owner_decisions']['month2_followon']['decided_on'] = value
+    assert campaign.month2_decision(approvals)['decided_on'] == '2025-08-12'
+
+
+def test_diagnostic_safety_factor_cannot_undercut_default_at_chain_bound():
+    profile = {'seconds_per_repetition': 300000., 'publication_verification_seconds': 400.,
+        'leaf_overheads': {'setup_seconds': 100., 'import_seconds': 2., 'export_seconds': 3., 'publication_seconds': 5.}}
+    decision = campaign.month2_decision()
+    assert campaign.slice_count(profile, 1, 14100, 1., enforce_limit=False) <= 40
+    assert campaign.slice_count(profile, 1, 14100, 2., enforce_limit=False) > 40
+    with pytest.raises(ContractError, match='profile_safety_factor'):
+        campaign.diagnostic_sizing({'sign_changing': profile}, decision, 14100, factor=1.)
+    with pytest.raises(ContractError, match='chain requires .* leaves > 40'):
+        campaign.diagnostic_sizing({'sign_changing': profile}, decision, 14100)
+
+
+@pytest.mark.parametrize('screening_rates', [(100.,) * 4], indirect=True)
+def test_diagnostic_estimate_refuses_reduced_safety_factor_before_publication(diagnostic_request):
+    req = update_task(diagnostic_request, lambda p: p.update(profile_safety_factor=1.))
+    result = campaign_estimate.run_stage(req)
+    assert result.status == 'blocked' and 'profile_safety_factor' in result.message
+    assert not (Path(req.output_dir) / 'budget_estimate.json').exists()
+
+
+def test_month2_mapping_only_counterexample_refuses_missing_screening_context():
+    from oxyformer.provenance import canonical_json
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    serialized = json.loads(canonical_json(approvals['owner_decisions']['month2_followon']))
+    with pytest.raises(ContractError, match='screening campaign approval'):
+        campaign.month2_decision({'owner_decisions': {'month2_followon': serialized}})

@@ -945,7 +945,8 @@ exactly one campaign matching `draws_continue_from`.
 Each approved repetition runs in its own sequential continuation chain. Sizing
 uses the same measured leaf costs and publication reserve as screening, with a
 default safety factor of 2.0, at most 40 leaves per chain and four GPU-hours per
-leaf. Counts are never reduced to fit a budget; infeasible chains are refused.
+leaf. Explicit factors below 2.0 are refused before an estimate is published.
+Counts are never reduced to fit a budget; infeasible chains are refused.
 The month-1 total-hour ceilings do not apply. GPU concurrency is campaign-wide,
 read from the decision (currently 16 on `preemptible`). Expanded leaves use
 `--no-requeue`, three attempts and restart in a fresh attempt root after

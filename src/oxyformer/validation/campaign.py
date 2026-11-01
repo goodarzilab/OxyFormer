@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime
 import json
 import math
 from pathlib import Path
@@ -162,8 +162,13 @@ def month2_decision(approvals=_REPOSITORY_APPROVALS):
     if type(value) is str:
         try:
             value = date.fromisoformat(value)
-        except ValueError as exc:
-            raise ContractError("invalid " + name + ".decided_on") from exc
+        except ValueError:
+            try:
+                value = datetime.fromisoformat(value).date()
+            except ValueError as exc:
+                raise ContractError("invalid " + name + ".decided_on") from exc
+    elif type(value) is datetime:
+        value = value.date()
     check(type(value) is date, "decided_on")
     d["decided_on"] = value.isoformat()
     return d
@@ -181,6 +186,8 @@ def validate_diagnostic(recipe, approvals):
 def diagnostic_sizing(profiles, decision, wall, factor=2.0):
     """Pure offline arithmetic; never grants admission or changes the count."""
     c = decision["diagnostic_campaign"]
+    factor = finite(factor, "diagnostic profile_safety_factor")
+    require(factor >= 2.0, "diagnostic profile_safety_factor must be >= 2.0")
     require(set(profiles) == set(c["scenarios"]), "diagnostic profiles drift")
     hours = leaf_allocation(wall)["allocation_seconds"] / 3600
     require(hours <= c["gpu_hours_per_leaf_max"],
@@ -215,7 +222,7 @@ def diagnostic_estimate(request, config, parameters):
     require(integer(parameters["cpus_per_task"], "CPUs", 1) == 8, "diagnostic requires eight CPUs")
     wall = integer(parameters["wall_seconds"], "leaf wall seconds", 1)
     factor = finite(parameters.get("profile_safety_factor", 2.0), "profile safety factor")
-    require(factor >= 1, "diagnostic profile_safety_factor")
+    require(factor >= 2.0, "diagnostic profile_safety_factor must be >= 2.0")
     records = []
     for key, cls, expected in (("endpoint_input", PreparedEndpoint, recipe["endpoint_hash"]),
                               ("frame_input", CovariateFrame, recipe["frame_hash"])):
