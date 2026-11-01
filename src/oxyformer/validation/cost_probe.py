@@ -215,13 +215,13 @@ def pinned_work(*, seed_count, grid_points, tree=BASE_TREE):
             'tree': tree, 'source_sha256': digests}
 
 
-def clean_identity():
+def clean_identity(*, cwd=None):
     """A measurement starts only from committed, clean, base-descended code."""
     import subprocess
-    if subprocess.check_output(['git', 'status', '--porcelain']).strip():
+    if subprocess.check_output(['git', 'status', '--porcelain'], cwd=cwd).strip():
         raise ValueError('dirty checkout refused')
-    subprocess.run(['git', 'merge-base', '--is-ancestor', BASE_TREE, 'HEAD'], check=True)
-    return subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip()
+    subprocess.run(['git', 'merge-base', '--is-ancestor', BASE_TREE, 'HEAD'], check=True, cwd=cwd)
+    return subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=cwd).decode().strip()
 
 
 def atomic_record(path, value):
@@ -636,6 +636,7 @@ def main():
     parser.add_argument('--position', type=int)
     parser.add_argument('--predecessor', type=Path)
     parser.add_argument('--overhead', type=Path)
+    parser.add_argument('--fit-checkout', type=Path)
     args = parser.parse_args()
     require_compute_node(gpu=args.command in ('fit', 'score'))
     if args.command == 'report':
@@ -644,7 +645,7 @@ def main():
         publish_report(args.root, json.loads(args.overhead.read_text()))
         return
     if args.command == 'drive':
-        drive_measurements(args.root)
+        drive_measurements(args.root, fit_checkout=args.fit_checkout)
         return
     if args.command == 'prepare':
         if args.profile is None:
@@ -693,9 +694,9 @@ def fit_statistics(record):
             'epochs_completed': completed,
             'compute_seconds_at_last_completed_epoch': boundary_compute,
             'wall_seconds_at_last_completed_epoch': boundary_wall,
-            'minibatches_partial_epoch': last.get('minibatches_partial_epoch', 0),
+            'minibatches_partial_epoch': last.get('minibatches_partial_epoch'),
             'minibatches_per_epoch': last.get('minibatches_per_epoch'),
-            'peak_gpu_memory_bytes': max((s['peak_gpu_memory_bytes'] for s in slices), default=0),
+            'peak_gpu_memory_bytes': max((s['peak_gpu_memory_bytes'] for s in slices), default=None),
             'native_complete': bool(last.get('complete', False))}
 
 
@@ -738,7 +739,7 @@ def measurement_report(root, overhead):
         raise ValueError('measurement driver has not finished')
     failures = json.loads(terminal_path.read_text())
     jobs = json.loads((root / 'driver-jobs.json').read_text())
-    live_states = {'PENDING', 'RUNNING', 'CONFIGURING', 'COMPLETING', 'SUSPENDED'}
+    live_states = {'SUBMITTING', 'PENDING', 'RUNNING', 'CONFIGURING', 'COMPLETING', 'SUSPENDED'}
     if any(j['state'] in live_states for j in jobs):
         raise ValueError('measurements are still running')
     for cell, failure in failures.items():
@@ -840,17 +841,64 @@ def measurement_report(root, overhead):
                 'Synthetic scoring inputs, timing only; no estimate is reported.',
                 'First outer fold and first inner fold timings represent other folds.',
                 'Registered seed 1103 represents the other registered neural seeds.',
+                'The first hyperparameter grid point represents other grid points in each inner-fit timing term.',
                 'Outer SSL timing represents the SSL terms in the projection.',
                 'The frozen plan specifies maximum thirty SSL epochs with patience five; native patience completion is measured, with its actual epoch count.',
                 'Epoch slicing adds controller reconstruction work to measured compute.',
-                'Peak GPU memory is PyTorch allocated tensor memory; CUDA context and non-PyTorch allocations are excluded.',
+                'Fit summaries sum returned durable slices; whole-job wall time, including unreturned interrupted calls, is recorded separately in slurm_jobs.json.',
+                'Peak GPU memory is the largest recorded PyTorch allocator peak; CUDA context, non-PyTorch allocations and any unreturned interrupted call are excluded. Missing observations are null.',
                 'The overhead numerator is reserved allocation from sealed stage budgets, not elapsed runner wall; failed scheduler attempts are outside the sealed-leaf ratio.',
                 'Idealised wall time assumes perfect utilisation of sixteen H100 GPUs.',
                 'CPU tests do not validate GPU timing or Slurm placement.',
                 'No final recipe or repetition count is recommended.']}
 
 
-def drive_measurements(root):
+def recover_submission(item):
+    """Resolve an accepted submission whose reply was lost; never guess/retry."""
+    import getpass
+    import subprocess
+    name = item['submission_name']
+    outputs = [
+        subprocess.check_output(['sacct', '-n', '-X', '--user', getpass.getuser(),
+            '--name', name, '--starttime', item['submission_day'],
+            '--format=JobIDRaw,JobName%100', '-P'], text=True),
+        subprocess.check_output(['squeue', '--me', '--noheader', '--format=%i|%j'], text=True),
+    ]
+    found = set()
+    for output in outputs:
+        for line in output.splitlines():
+            fields = line.strip().split('|')
+            if len(fields) >= 2 and fields[1].strip() == name and fields[0].strip().isdigit():
+                found.add(fields[0].strip())
+    if len(found) != 1:
+        raise ValueError('submission outcome unresolved; reconcile unique job name ' + name)
+    item['job_id'] = found.pop()
+    item['state'] = 'PENDING'
+
+
+def submit_measurement(ledger_path, ledger, *, root, cell, operation, command, checkout):
+    """Persist intent before sbatch, then bind its reply to that same intent."""
+    from datetime import datetime, timezone
+    import shlex
+    import subprocess
+    import uuid
+    name = 'cost-m2-' + cell + '-' + operation + '-' + uuid.uuid4().hex[:16]
+    item = {'job_id': None, 'cell': cell, 'operation': operation,
+            'state': 'SUBMITTING', 'partition': 'standard', 'basis': ['measured'],
+            'submission_name': name, 'submission_day': datetime.now(timezone.utc).strftime('%Y-%m-%d'),
+            'checkout': str(checkout)}
+    ledger.append(item)
+    atomic_record(ledger_path, ledger)
+    args = guarded_gpu_arguments(root / 'job-%j.log', name)
+    job_id = subprocess.check_output(['sbatch', *args, '--chdir', str(checkout),
+        '--wrap', shlex.join(['env', 'PYTHONPATH=src', *command])], text=True).strip()
+    if not job_id.isdigit():
+        raise ValueError('invalid sbatch response; submission intent retained')
+    item.update(job_id=job_id, state='PENDING')
+    atomic_record(ledger_path, ledger)
+
+
+def drive_measurements(root, *, fit_checkout=None):
     """Serialise each cell's genuine controller prerequisites, with two GPUs.
 
     The driver runs on a CPU compute allocation. All GPU operations are separate
@@ -859,13 +907,15 @@ def drive_measurements(root):
     import fcntl
     import json
     from pathlib import Path
-    import shlex
     import subprocess
     import sys
     import time
 
     require_compute_node()
     clean_identity()
+    fitting_checkout = Path.cwd() if fit_checkout is None else Path(fit_checkout).resolve()
+    if fit_checkout is not None:
+        clean_identity(cwd=fitting_checkout)
     root = Path(root)
     metadata = json.loads((root / 'inputs.json').read_text())
     lock = (root / 'driver.lock').open('w')
@@ -875,6 +925,9 @@ def drive_measurements(root):
     failures = {}
     while True:
         for item in ledger:
+            if item['job_id'] is None:
+                recover_submission(item)
+                atomic_record(ledger_path, ledger)
             output = subprocess.check_output(['sacct', '-n', '-X', '-j', item['job_id'],
                 '--format=JobIDRaw,Partition,NodeList,Elapsed,State,ExitCode', '-P'], text=True)
             rows = [line.split('|') for line in output.strip().splitlines() if line]
@@ -926,14 +979,9 @@ def drive_measurements(root):
                 command.extend(['--position', operation])
                 if previous is not None:
                     command.extend(['--predecessor', str(previous)])
-            args = guarded_gpu_arguments(root / 'job-%j.log', 'cost-m2-' + cell + '-' + operation)
-            job_id = subprocess.check_output(['sbatch', *args,
-                '--wrap', shlex.join(command)], text=True).strip()
-            if not job_id.isdigit():
-                raise ValueError('invalid sbatch response')
-            ledger.append({'job_id': job_id, 'cell': cell, 'operation': operation,
-                           'state': 'PENDING', 'partition': 'standard', 'basis': ['measured']})
-            atomic_record(ledger_path, ledger)
+            submit_measurement(ledger_path, ledger, root=root, cell=cell,
+                operation=operation, command=command,
+                checkout=Path.cwd() if operation == 'score' else fitting_checkout)
         print('measurement driver:', len(live), 'active jobs;', len(failures), 'failed cells', flush=True)
         time.sleep(60)
 
@@ -968,8 +1016,10 @@ def publish_report(root, overhead):
                   '| Cell | Compute H100-hours per repetition |', '| --- | --- |'])
     for cell, value in report['cells'].items():
         lines.append('| ' + cell + ' | ' + display(value['compute_h100_hours_per_repetition']) + ' |')
-        if value.get('reason'):
-            lines.append('Failure reason for cell ' + cell + ': ' + value['reason'])
+    failure_lines = ['Failure reason for cell ' + cell + ': ' + value['reason']
+                     for cell, value in report['cells'].items() if value.get('reason')]
+    if failure_lines:
+        lines.extend(['', *failure_lines])
     lines.extend(['', 'Formula: sum(count per repetition × seconds per fit or pass), converted to H100-hours.', '',
                   '| Cell | Term | Count per repetition | Seconds per fit or pass |',
                   '| --- | --- | --- | --- |'])

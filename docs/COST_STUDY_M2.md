@@ -38,10 +38,14 @@ have separate terms, as do their outer refits. Scoring contributes once per
 repetition. The representative SSL term is the outer SSL fit, and the first
 inner partition represents other inner partitions. These are projection
 assumptions, not measurements of a complete repetition. Each timed fit uses
-registered seed 1103; the projection multiplies by the cell's seed count.
+registered seed 1103; the projection multiplies by the cell's seed count. The
+first hyperparameter grid point represents the other grid points in each
+inner-fit timing term.
 
-Peak GPU memory uses PyTorch's maximum allocated tensor memory. CUDA context
-memory and allocations outside PyTorch are excluded.
+Peak GPU memory is the largest recorded PyTorch allocator peak. CUDA context,
+non-PyTorch allocations and unreturned interrupted calls are excluded. Missing
+observations are null. Fit summaries sum returned durable slices; whole-job wall
+time is retained separately in slurm_jobs.json.
 
 Calibration compares the screening anchor with the single complete-repetition
 compute duration in the sealed profile. Frame, cell and operation identity must
@@ -66,3 +70,15 @@ and actual controller epoch continuation. They do not validate GPU timings,
 Slurm placement or successful completion of the real-frame measurements.
 The unit's external output directory, not this documentation, contains the
 measurement evidence and any completed report.
+
+The driver records a unique submission intent before invoking sbatch. After a
+lost reply it reconciles that job name against accounting and the live queue.
+An unresolved submission stops further submissions until it can be reconciled;
+it is never silently retried. The ledger and driver lock enforce the concurrency
+limit across driver restarts.
+
+When continuing an existing fit after report or driver changes, run the driver
+from the current clean checkout with --fit-checkout pointing to the original
+clean measurement checkout. Fit jobs retain its immutable package identity;
+scoring jobs use the current checkout. Child commands explicitly use PYTHONPATH=src.
+Never edit the frozen fit checkout while its checkpoint chain is live.
