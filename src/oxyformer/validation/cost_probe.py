@@ -827,7 +827,7 @@ def prepare_inputs(profile_root, destination):
                 'work': {c: pinned_work(seed_count=s.seed_count, grid_points=s.grid_points)
                          for c, s in study_cells().items()}}
     atomic_record(root / 'inputs.json', metadata)
-    return metadata
+    return json.loads((root / 'inputs.json').read_text())
 
 
 def main():
