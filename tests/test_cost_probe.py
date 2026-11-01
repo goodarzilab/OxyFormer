@@ -15,7 +15,7 @@ def counted_fixture(monkeypatch):
     nested = Path('src/oxyformer/training/nested_cv.py').read_text()
     coverage = Path('src/oxyformer/validation/coverage.py').read_text()
 
-    def fixture_work(*, seed_count, grid_points, tree=BASE_TREE):
+    def fixture_work(*, seed_count, grid_points, tree=BASE_TREE, check_runtime=True):
         return {**cost_probe.source_work(nested, coverage, seed_count=seed_count,
                                         grid_points=grid_points), 'tree': tree}
 
@@ -1248,3 +1248,23 @@ def test_legacy_work_provenance_is_checked_without_invalidating_good_fits(lifecy
     cp.atomic_record(root / 'inputs.json', metadata)
     with pytest.raises(ValueError, match='source digest mismatch'):
         cp.lifecycle_identity(root)
+
+
+def test_readonly_consumers_count_frozen_sources_without_using_harness_runtime(monkeypatch):
+    from pathlib import Path
+    import subprocess
+    from oxyformer.validation import cost_probe as cp
+    sources = {path: Path(path).read_bytes() for _, path in cp.PROTECTED_SOURCES}
+    def pinned_source(command, **kwargs):
+        assert command[:2] == ['git', 'show']
+        tree, path = command[2].split(':', 1)
+        assert tree == cp.BASE_TREE
+        return sources[path]
+    monkeypatch.setattr(subprocess, 'check_output', pinned_source)
+    monkeypatch.setattr(Path, 'read_bytes', lambda path: b'new reporting harness checkout')
+    work = cp.pinned_work(seed_count=1, grid_points=2, check_runtime=False)
+    assert work['counts']['scoring'] == 1
+    assert set(work['source_sha256']) == set(sources)
+    # Timing producers retain the default strict check for all four sources.
+    with pytest.raises(ValueError, match='protected source differs'):
+        cp.pinned_work(seed_count=1, grid_points=2)

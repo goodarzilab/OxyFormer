@@ -202,8 +202,8 @@ def source_work(nested_source, coverage_source, *, seed_count, grid_points,
             'scoring_operations': dict(scoring_calls)}
 
 
-def pinned_work(*, seed_count, grid_points, tree=BASE_TREE):
-    """Read the actual base source, and reject drift in protected runtime code."""
+def pinned_work(*, seed_count, grid_points, tree=BASE_TREE, check_runtime=True):
+    """Count pinned source; fitting/scoring also require identical runtime bytes."""
     from hashlib import sha256
     from pathlib import Path
     import subprocess
@@ -213,7 +213,7 @@ def pinned_work(*, seed_count, grid_points, tree=BASE_TREE):
     sources, digests = {}, {}
     for name, path in PROTECTED_SOURCES:
         raw = subprocess.check_output(['git', 'show', tree + ':' + path])
-        if Path(path).read_bytes() != raw:
+        if check_runtime and Path(path).read_bytes() != raw:
             raise ValueError('protected source differs from counted-work tree')
         sources[name] = raw.decode()
         digests[path] = sha256(raw).hexdigest()
@@ -731,7 +731,8 @@ def lifecycle_identity(root):
         refuse('frame changed')
     for cell, study in study_cells().items():
         work = inputs['work'][cell]
-        expected_work = pinned_work(seed_count=study.seed_count, grid_points=study.grid_points)
+        expected_work = pinned_work(seed_count=study.seed_count, grid_points=study.grid_points,
+                                    check_runtime=False)
         # Earlier preparation recorded only nested/coverage source digests.
         # Verify every declared digest, and derive all work from the same tree;
         # a later harness adding provenance fields must not invalidate good fits.
@@ -832,7 +833,8 @@ def prepare_inputs(profile_root, destination):
                 'frame_path': str(paths['frame.json']), 'frame_sha256': file_hash(paths['frame.json']),
                 'profile_path': str(profile_root / 'budget_record.json'),
                 'receipt': {**receipt, 'compute_hours': receipt['compute_hours'].to_dict()},
-                'work': {c: pinned_work(seed_count=s.seed_count, grid_points=s.grid_points)
+                'work': {c: pinned_work(seed_count=s.seed_count, grid_points=s.grid_points,
+                                        check_runtime=False)
                          for c, s in study_cells().items()}}
     atomic_record(root / 'inputs.json', metadata)
     return json.loads((root / 'inputs.json').read_text())

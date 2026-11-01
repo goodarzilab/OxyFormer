@@ -132,9 +132,12 @@ The measurement tree remains the original study base
 `f25e8853ba691883b447e0f89e9ce334f84f56ac`, as required for the orchestrator's
 primary attempt-4 measurements. The successor launch base
 `57d0a04e419b0bc2c8bffb3adb46b586297746f4` defines the complete PR review range,
-not a relabelling of earlier timings. Run the harness script from the frozen
+not a relabelling of earlier timings. Fitting and scoring run the harness script from the frozen
 measurement runtime with `PYTHONPATH=src`; its protected files must still match
-the measurement tree. Verify prior artifacts against their stored bindings,
+the measurement tree. Preparation and read-only consumers derive counts directly
+from that Git tree, so a newer reporting checkout does not invalidate earlier
+measurements. Pass the frozen runtime as `--fit-checkout` when driving from the
+new harness checkout. Verify prior artifacts against their stored bindings,
 preserve and exclude unverifiable records, and measure only missing terms after
 the primary driver's ledger has no pending work. Across both roots the bound is
 two GPU jobs, with separate held eight-hour jobs and the existing node guard.
