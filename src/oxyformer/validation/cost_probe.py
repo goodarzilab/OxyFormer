@@ -92,21 +92,10 @@ BASE_TREE = 'f25e8853ba691883b447e0f89e9ce334f84f56ac'
 
 
 def operation_counts(*, seed_count, grid_points):
-    """Count the launch-base coverage loop and nested controller task list.
-
-    coverage.estimate_repetition: five outer folds, each selected seed, then
-    one scoring pass. nested_cv._advance: three inner partitions, each with
-    SSL followed by outcome/origin for each grid point, then outer SSL and
-    one selected refit for each nuisance kind.
-    """
+    """Derive counts from the protected source at the recorded launch base."""
     if seed_count not in (1, 3) or grid_points not in (2, 4):
         raise ValueError('unregistered study dimensions')
-    outer_seeds = 5 * seed_count
-    return {'ssl': outer_seeds * 4,
-            'inner_outcome': outer_seeds * 3 * grid_points,
-            'inner_origin': outer_seeds * 3 * grid_points,
-            'refit_outcome': outer_seeds, 'refit_origin': outer_seeds,
-            'scoring': 1}
+    return pinned_work(seed_count=seed_count, grid_points=grid_points)['counts']
 
 
 def project(measurements, counts, *, tree):
@@ -118,3 +107,190 @@ def project(measurements, counts, *, tree):
         return None
     return add(*(measurements[name]['seconds'].times(count)
                  for name, count in counts.items())).times(1 / 3600)
+
+
+def source_work(nested_source, coverage_source, *, seed_count, grid_points,
+                held_inner_folds=(0, 1, 2)):
+    """Walk the task-building statements and coverage iteration in pinned source.
+
+    Only the expressions that build the controller task list are evaluated.
+    No training, imports or controller functions are executed by this walk.
+    The caller supplies target-bearing inner folds from its prepared endpoint.
+    """
+    import ast
+    from collections import Counter
+    from types import SimpleNamespace
+
+    nested = ast.parse(nested_source)
+    coverage = ast.parse(coverage_source)
+    advance = next(n for n in nested.body if isinstance(n, ast.FunctionDef) and n.name == '_advance')
+    estimate = next(n for n in coverage.body if isinstance(n, ast.FunctionDef) and n.name == 'estimate_repetition')
+    env = {'config': SimpleNamespace(grid=tuple(range(grid_points))),
+           'range': range, 'len': len}
+    tasks = []
+
+    def expression(node, scope):
+        # Sources are trusted repository files at the recorded commit, never
+        # measurement inputs. Limit expression evaluation to this small scope.
+        return eval(compile(ast.Expression(node), '<counted-work>', 'eval'),
+                    {'__builtins__': {}, **scope}, {})
+
+    def mutations(nodes, scope):
+        for node in nodes:
+            if isinstance(node, ast.For):
+                touches = any(isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+                              and n.value.id == 'tasks' for n in ast.walk(node))
+                if touches:
+                    if not isinstance(node.target, ast.Name):
+                        raise ValueError('unsupported task iteration')
+                    for value in expression(node.iter, scope):
+                        # _advance omits inner partitions without target rows.
+                        if value in held_inner_folds:
+                            mutations(node.body, {**scope, node.target.id: value})
+            elif isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+                call = node.value
+                if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name) and call.func.value.id == 'tasks':
+                    values = expression(call.args[0], scope)
+                    if call.func.attr == 'append':
+                        tasks.append(values)
+                    elif call.func.attr == 'extend':
+                        tasks.extend(values)
+                    else:
+                        raise ValueError('unsupported task mutation')
+            elif isinstance(node, ast.While):
+                break  # Execution is counted from the constructed task list.
+    mutations(advance.body, env)
+    loops = [n for n in ast.walk(estimate) if isinstance(n, ast.For)
+             and any(isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+                     and c.func.attr == 'run_fold' for c in ast.walk(n))]
+    if len(loops) != 2:
+        raise ValueError('coverage fold/seed iteration changed')
+    outer = next(n for n in loops if isinstance(n.target, ast.Name) and n.target.id == 'fold')
+    seed_loop = next(n for n in loops if isinstance(n.target, ast.Name) and n.target.id == 'neural_seed')
+    if not isinstance(seed_loop.iter, ast.Name) or seed_loop.iter.id != 'seeds':
+        raise ValueError('coverage seed iteration changed')
+    outer_count = len(expression(outer.iter, env))
+    scoring_calls = Counter(c.func.id for c in ast.walk(estimate)
+                            if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                            and c.func.id in ('one_step', 'cv_tmle', 'spatial_sensitivities'))
+    if scoring_calls != Counter(one_step=1, cv_tmle=1, spatial_sensitivities=1):
+        raise ValueError('coverage scoring operations changed')
+    counts = Counter()
+    for kind, fold, grid in tasks:
+        if kind == 'ssl':
+            counts['ssl'] += 1
+        elif kind in ('outcome', 'origin'):
+            counts[('refit_' if grid is None else 'inner_') + kind] += 1
+        elif kind != 'select':
+            raise ValueError('unknown nested operation')
+    counts = {name: count * outer_count * seed_count for name, count in counts.items()}
+    counts['scoring'] = 1
+    return {'counts': counts, 'tasks_per_outer_seed': tasks,
+            'outer_folds': outer_count, 'seed_count': seed_count,
+            'scoring_operations': dict(scoring_calls)}
+
+
+def pinned_work(*, seed_count, grid_points, tree=BASE_TREE):
+    """Read the actual base source, and reject drift in protected runtime code."""
+    from hashlib import sha256
+    from pathlib import Path
+    import subprocess
+
+    if tree != BASE_TREE:
+        raise ValueError('counted-work tree mismatch')
+    sources, digests = {}, {}
+    for name, path in (
+        ('nested', 'src/oxyformer/training/nested_cv.py'),
+        ('coverage', 'src/oxyformer/validation/coverage.py'),
+    ):
+        raw = subprocess.check_output(['git', 'show', tree + ':' + path])
+        if Path(path).read_bytes() != raw:
+            raise ValueError('protected source differs from counted-work tree')
+        sources[name] = raw.decode()
+        digests[path] = sha256(raw).hexdigest()
+    return {**source_work(sources['nested'], sources['coverage'],
+                          seed_count=seed_count, grid_points=grid_points),
+            'tree': tree, 'source_sha256': digests}
+
+
+def clean_identity():
+    """A measurement starts only from committed, clean, base-descended code."""
+    import subprocess
+    if subprocess.check_output(['git', 'status', '--porcelain']).strip():
+        raise ValueError('dirty checkout refused')
+    subprocess.run(['git', 'merge-base', '--is-ancestor', BASE_TREE, 'HEAD'], check=True)
+    return subprocess.check_output(['git', 'rev-parse', 'HEAD']).decode().strip()
+
+
+def atomic_record(path, value):
+    import json
+    import os
+    from pathlib import Path
+    import tempfile
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as stream:
+        json.dump(value, stream, indent=2, allow_nan=False)
+        stream.flush()
+        os.fsync(stream.fileno())
+        temporary = stream.name
+    os.replace(temporary, path)
+
+
+def resume_record(path, binding):
+    """Resume only this exact measurement; keep the last durable slice pointer."""
+    import json
+    from pathlib import Path
+    path = Path(path)
+    if not path.exists():
+        return {'binding': binding, 'attempts': [], 'slices': [], 'predecessor': None}
+    record = json.loads(path.read_text())
+    if record['binding'] != binding:
+        raise ValueError('measurement continuation binding mismatch')
+    return record
+
+
+def epoch_timing(deadline, *, finalize=False):
+    """Use the controller's existing cooperative phase checks to slice epochs.
+
+    The check before evaluation is not an epoch boundary. Stop at the following
+    check, after evaluation has completed. A completed training transaction has
+    a second evaluation check before its held-out prediction pass; a finalizing
+    call lets that pass finish and stops before the next training task.
+    """
+    from oxyformer.training.fit import DeadlineTiming
+
+    class EpochTiming(DeadlineTiming):
+        def __init__(self):
+            super().__init__(deadline)
+            self.evaluated = False
+            self.stopped = False
+
+        def boundary(self, phase, device='cpu'):
+            expired = super().boundary(phase, device)
+            stop = self.evaluated and (phase != 'evaluation' if finalize else True)
+            self.evaluated = self.evaluated or phase == 'evaluation'
+            self.stopped = self.stopped or stop
+            return expired or self.stopped
+
+    return EpochTiming()
+
+
+def guarded_gpu_arguments(output, name):
+    """The orchestrator alone releases these held requests after node guarding."""
+    return ['--parsable', '--hold', '--partition=standard', '--account=root',
+            '--nodes=1', '--ntasks=1', '--cpus-per-task=8', '--mem=64G',
+            '--gres=gpu:1', '--time=08:00:00', '--job-name=' + name,
+            '--output=' + str(output)]
+
+
+def require_compute_node(*, gpu=False):
+    import os
+    if not os.environ.get('SLURM_JOB_ID') or not os.environ.get('SLURMD_NODENAME'):
+        raise ValueError('Slurm compute node required')
+    if gpu:
+        import torch
+        if not torch.cuda.is_available() or 'H100' not in torch.cuda.get_device_name(0):
+            raise ValueError('one H100 is required')
+        if torch.cuda.device_count() != 1:
+            raise ValueError('exactly one visible GPU required')

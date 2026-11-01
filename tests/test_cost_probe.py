@@ -89,3 +89,72 @@ def test_labels_propagate_into_ratios_projections_and_table():
         for key, item in row.items():
             if isinstance(item, dict):
                 assert set(item['basis']) == labels
+
+
+def test_count_walk_responds_to_actual_controller_source():
+    from pathlib import Path
+    from oxyformer.validation.cost_probe import source_work
+    nested = Path('src/oxyformer/training/nested_cv.py').read_text()
+    coverage = Path('src/oxyformer/validation/coverage.py').read_text()
+    ordinary = source_work(nested, coverage, seed_count=1, grid_points=2)
+    changed = source_work(nested.replace('for fold in range(3):', 'for fold in range(2):'),
+                          coverage, seed_count=1, grid_points=2)
+    assert ordinary['counts']['inner_outcome'] == 30
+    assert changed['counts']['inner_outcome'] == 20
+    assert changed['counts']['ssl'] == 15
+    assert changed['counts']['scoring'] == 1
+
+
+def test_source_walk_omits_inner_partitions_without_targets():
+    from pathlib import Path
+    from oxyformer.validation.cost_probe import source_work
+    walked = source_work(Path('src/oxyformer/training/nested_cv.py').read_text(),
+                         Path('src/oxyformer/validation/coverage.py').read_text(),
+                         seed_count=1, grid_points=2, held_inner_folds=(0, 2))
+    assert walked['counts']['inner_origin'] == 20
+    assert walked['counts']['ssl'] == 15
+
+
+def test_source_walk_refuses_changed_scoring_operations():
+    from pathlib import Path
+    from oxyformer.validation.cost_probe import source_work
+    with pytest.raises(ValueError, match='scoring operations'):
+        source_work(Path('src/oxyformer/training/nested_cv.py').read_text(),
+                    Path('src/oxyformer/validation/coverage.py').read_text().replace(
+                        'cv_tmle(nuisances', 'different_estimator(nuisances'),
+                    seed_count=1, grid_points=2)
+
+
+def test_harness_resume_binding_and_durable_slice(tmp_path):
+    from oxyformer.validation.cost_probe import atomic_record, resume_record
+    path = tmp_path / 'progress.json'
+    binding = {'tree': BASE_TREE, 'head': 'head', 'frame': 'frame', 'cell': 'e'}
+    first = resume_record(path, binding)
+    first['attempts'].append('first-job')
+    first['slices'].append({'completed': 1, 'seconds': 12})
+    first['predecessor'] = 'checkpoint-descriptor'
+    atomic_record(path, first)
+    second = resume_record(path, binding)
+    second['attempts'].append('second-job')
+    atomic_record(path, second)
+    assert resume_record(path, binding)['slices'] == first['slices']
+    assert resume_record(path, binding)['predecessor'] == 'checkpoint-descriptor'
+    with pytest.raises(ValueError, match='binding mismatch'):
+        resume_record(path, {**binding, 'frame': 'another-frame'})
+
+
+def test_epoch_slice_stops_after_evaluation():
+    from oxyformer.validation.cost_probe import epoch_timing
+    timing = epoch_timing(float('inf'))
+    assert not timing.boundary('nuisance')
+    assert not timing.boundary('evaluation')
+    assert timing.boundary('nuisance')
+
+
+def test_finalizing_slice_preserves_held_out_evaluation():
+    from oxyformer.validation.cost_probe import epoch_timing
+    timing = epoch_timing(float('inf'), finalize=True)
+    assert not timing.boundary('nuisance')
+    assert not timing.boundary('evaluation')
+    assert not timing.boundary('evaluation')
+    assert timing.boundary('nuisance')
