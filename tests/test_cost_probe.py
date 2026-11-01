@@ -194,3 +194,53 @@ def test_real_controller_epoch_slices_and_resume(tmp_path):
     assert state(final)['position'] == 2
     assert state(final)['active'] is None
     assert state(final)['results'][0]['kind'] == 'outcome'
+
+
+def test_measurement_harness_resumes_real_controller_across_attempts(tmp_path, monkeypatch):
+    from dataclasses import replace
+    import time
+    import torch
+    from test_nested_cv import endpoint, tiny_config
+    from oxyformer.training import nested_cv
+    from oxyformer.training.fit import RecipeStudy
+    from oxyformer.validation import cost_probe
+
+    prepared = endpoint(tmp_path / 'data')
+    initial = tiny_config(prepared, tmp_path / 'initial', max_batches=2)
+    initial = replace(initial, settings=replace(initial.settings, frozen_epochs=2))
+    predecessor = nested_cv.run_fold(initial, prepared.outer, 1103, geography=prepared.geography)
+    original_configuration = type(prepared).configuration
+
+    def cpu_configuration(self, *args, **kwargs):
+        kwargs['device'] = 'cpu'
+        return original_configuration(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(prepared), 'configuration', cpu_configuration)
+    monkeypatch.setattr(cost_probe, 'require_compute_node', lambda **kwargs: None)
+    monkeypatch.setattr(cost_probe, 'clean_identity', lambda: 'same-clean-head')
+    monkeypatch.setattr(torch.cuda, 'reset_peak_memory_stats', lambda: None)
+    monkeypatch.setattr(torch.cuda, 'max_memory_allocated', lambda: 0)
+    original_clock = time.monotonic
+    offset = [0.]
+    monkeypatch.setattr(time, 'monotonic', lambda: original_clock() + offset[0])
+    original_write = cost_probe.atomic_record
+
+    def stop_after_durable_epoch(path, record):
+        original_write(path, record)
+        if record['attempts'] == ['job-one'] and len(record['slices']) == 1:
+            offset[0] = 10000.
+
+    monkeypatch.setattr(cost_probe, 'atomic_record', stop_after_durable_epoch)
+    recipe = {'nested_cv': {'ssl_epochs': 1, 'frozen_epochs': 2, 'synthetic': True}}
+    monkeypatch.setenv('SLURM_JOB_ID', 'job-one')
+    first = cost_probe.measure_fit_task(prepared, recipe, RecipeStudy(), tmp_path / 'measurement',
+        position=1, predecessor=predecessor, deadline=time.monotonic() + 10000.)
+    assert first['slices'][-1]['epochs_completed'] == 1
+    assert not first['slices'][-1]['complete']
+    monkeypatch.setenv('SLURM_JOB_ID', 'job-two')
+    second = cost_probe.measure_fit_task(prepared, recipe, RecipeStudy(), tmp_path / 'measurement',
+        position=1, predecessor=predecessor, deadline=time.monotonic() + 10000.)
+    assert second['attempts'] == ['job-one', 'job-two']
+    assert second['slices'][-1]['epochs_completed'] == 2
+    assert second['slices'][-1]['complete']
+    assert cost_probe.fit_quantity(second, 2).basis == {'measured'}
