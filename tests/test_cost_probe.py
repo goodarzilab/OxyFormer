@@ -681,7 +681,7 @@ def test_scoring_checks_pinned_source_before_computation(tmp_path, monkeypatch, 
     from oxyformer.training.fit import RecipeStudy
     from oxyformer.validation import cost_probe as cp, coverage
     monkeypatch.setattr(cp, 'require_compute_node', lambda **kwargs: None)
-    monkeypatch.setattr(cp, 'clean_identity', lambda: 'clean-descendant')
+    monkeypatch.setattr(cp, 'clean_identity', lambda **kwargs: 'clean-descendant')
 
     def changed_source(**kwargs):
         raise ValueError('protected source differs from counted-work tree')
@@ -931,7 +931,7 @@ def test_scoring_uses_only_registered_targets_with_extra_frame_rows(tmp_path, mo
     assert set(endpoint.outer.target_ids) < set(endpoint.outer.frame_original_ids)
     assert endpoint.outer.target_ids == endpoint.outer.original_ids
     monkeypatch.setattr(cp, 'require_compute_node', lambda **kwargs: None)
-    monkeypatch.setattr(cp, 'clean_identity', lambda: 'clean-head')
+    monkeypatch.setattr(cp, 'clean_identity', lambda **kwargs: 'clean-head')
     monkeypatch.setattr(torch.cuda, 'reset_peak_memory_stats', lambda: None)
     monkeypatch.setattr(torch.cuda, 'max_memory_allocated', lambda: 0)
     observed = []
@@ -1051,7 +1051,11 @@ def lifecycle_root(synthetic_profile, tmp_path, monkeypatch, counted_fixture):
             root / 'e' / str(position), position=position, predecessor=previous, standalone=standalone)
         assert records[position]['slices'][-1]['complete']
         jobs.append({'job_id': job, 'cell': 'e', 'operation': str(position), 'state': 'COMPLETED'})
-    cp.atomic_record(root / 'e/scoring.json', cp.measure_scoring(endpoint, metadata['recipe'], study, root / 'score-work'))
+    monkeypatch.setenv('SLURM_JOB_ID', 'score-job')
+    scoring = cp.measure_scoring(endpoint, metadata['recipe'], study, root / 'score-work')
+    assert scoring['job_id'] == 'score-job' and scoring['harness_head'] == 'fixture-head'
+    cp.atomic_record(root / 'e/scoring.json', scoring)
+    jobs.append({'job_id': 'score-job', 'cell': 'e', 'operation': 'score', 'state': 'COMPLETED'})
     cp.atomic_record(root / 'driver-jobs.json', jobs)
     cp.atomic_record(root / 'driver-failures.json', {})
     return root, profile, metadata
@@ -1268,3 +1272,18 @@ def test_readonly_consumers_count_frozen_sources_without_using_harness_runtime(m
     # Timing producers retain the default strict check for all four sources.
     with pytest.raises(ValueError, match='protected source differs'):
         cp.pinned_work(seed_count=1, grid_points=2)
+
+
+def test_scoring_refuses_dirty_separate_harness_before_timing(tmp_path, monkeypatch, cpu_measurement):
+    from oxyformer.training.fit import RecipeStudy
+    from oxyformer.validation import cost_probe as cp, coverage
+    def identity(*, cwd=None):
+        if cwd is not None:
+            raise ValueError('dirty harness checkout refused')
+        return 'clean-frozen-runtime'
+    monkeypatch.setattr(cp, 'clean_identity', identity)
+    calls = []
+    monkeypatch.setattr(coverage, 'estimate_repetition', lambda *a, **k: calls.append('scoring') or {})
+    with pytest.raises(ValueError, match='dirty harness checkout refused'):
+        cp.measure_scoring(cpu_measurement, {}, RecipeStudy(), tmp_path / 'score')
+    assert calls == []

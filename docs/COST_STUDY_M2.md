@@ -141,3 +141,8 @@ new harness checkout. Verify prior artifacts against their stored bindings,
 preserve and exclude unverifiable records, and measure only missing terms after
 the primary driver's ledger has no pending work. Across both roots the bound is
 two GPU jobs, with separate held eight-hour jobs and the existing node guard.
+
+Scoring receipts record the scheduler job ID and both runtime and harness commits.
+The scoring producer checks both checkouts before timing; every CLI entry also
+checks the checkout containing the harness script, including when invoked by
+absolute path from the frozen runtime.

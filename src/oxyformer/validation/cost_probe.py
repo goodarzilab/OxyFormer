@@ -567,6 +567,7 @@ def measure_scoring(endpoint, recipe, study, root):
     """Time both estimators on synthetic, full target-by-seed predictions only."""
     from dataclasses import replace
     from pathlib import Path
+    import os
     import time
     import torch
     from oxyformer.contracts import OOFNuisances
@@ -574,6 +575,7 @@ def measure_scoring(endpoint, recipe, study, root):
 
     require_compute_node(gpu=True)
     head = clean_identity()
+    harness_head = clean_identity(cwd=Path(__file__).resolve().parents[3])
     pinned_work(seed_count=study.seed_count, grid_points=study.grid_points)
     names = endpoint.data.manifest.original_ids
     weights = dict(zip(names, (1.,) * len(names) if endpoint.data.manifest.weight_field is None
@@ -612,7 +614,8 @@ def measure_scoring(endpoint, recipe, study, root):
     del result
     return {'binding': {'endpoint': endpoint.content_hash, 'tree': BASE_TREE,
                         'recipe': recipe, 'study': cell_values(study)},
-            'tree': BASE_TREE, 'head': head, 'study': cell_values(study),
+            'tree': BASE_TREE, 'head': head, 'harness_head': harness_head,
+            'job_id': os.environ.get('SLURM_JOB_ID'), 'study': cell_values(study),
             'inputs': 'synthetic inputs, timing only', 'basis': ['measured'],
             'wall_seconds': wall, 'peak_gpu_memory_bytes': torch.cuda.max_memory_allocated(),
             'prediction_rows': len(observed)}
@@ -862,6 +865,7 @@ def main():
     parser.add_argument('--standalone', action='store_true')
     args = parser.parse_args()
     require_compute_node(gpu=args.command in ('fit', 'score'))
+    clean_identity(cwd=Path(__file__).resolve().parents[3])
     if args.command == 'report':
         if args.overhead is None:
             parser.error('--overhead is required')
