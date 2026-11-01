@@ -7,7 +7,9 @@ approval, or campaign. It does not choose final cells or repetition counts.
 Run preparation and tests on Slurm CPU nodes. Run each scoring or fitting
 sub-measurement on one H100 in a separate held job on standard/root, with an
 eight-hour allocation. Only the orchestrator's node guard releases jobs.
-The driver permits two GPU measurement jobs concurrently.
+The driver permits two GPU measurement jobs concurrently. GPU jobs disable
+automatic requeue; any retry is a separate driver-recorded attempt, bounded by
+the two-attempt limit.
 
 The checkout must be clean, and preparation and submission require the recorded
 month-two owner decision. Measurements record their commit and the fixed

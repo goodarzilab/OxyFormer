@@ -353,7 +353,7 @@ def timing_predecessor(config, endpoint, root, *, position, predecessor=None):
 
 def guarded_gpu_arguments(output, name):
     """The orchestrator alone releases these held requests after node guarding."""
-    return ['--parsable', '--hold', '--partition=standard', '--account=root',
+    return ['--parsable', '--hold', '--no-requeue', '--partition=standard', '--account=root',
             '--nodes=1', '--ntasks=1', '--cpus-per-task=8', '--mem=64G',
             '--gres=gpu:1', '--time=08:00:00', '--job-name=' + name,
             '--output=' + str(output)]
