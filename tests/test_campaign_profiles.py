@@ -2116,6 +2116,7 @@ def test_diagnostic_lock_twenty_chains_seeds_admission_and_flags(diagnostic_requ
     assert [d['index'] for d in draws] == list(range(20))
     assert lock['concurrency_limits'] == {'gpu': 16, 'cpu': 6}
     assert lock['budget']['run_gpu_hours_ceiling'] is None
+    assert len(expansion['plans'][0]['tasks'][-1]['expected_leaves']) == sum(len(p['expected_leaves']) for p in expansion['plans'])
     for name in ('recipe_lock.json', 'budget.json', 'task_manifest.json'):
         assert coverage.read_json(root / name)['certifies_release_criteria'] is False
     for plan in expansion['plans']:

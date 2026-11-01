@@ -698,6 +698,17 @@ def build_screening_lock(request, config, task):
             "admission_receipt": deepcopy(p["admission_receipt"]),
             "collector": {"stage": "campaign-collect", "outputs": COLLECT_OUTPUTS, "wall_seconds": 600, "gpus": 0}}
         plans.append(expand_campaign(spec, config["approvals"]))
+    if diagnostic:
+        # The first chain's collector for each scenario receives every chain's
+        # leaves. Other collectors retain their local completion receipts.
+        for scenario in estimate["scenario_family"]:
+            indices = [i for i, plan in enumerate(plans)
+                if plan["spec"]["work"][0]["parameters"]["scenario"] == scenario]
+            spec = deepcopy(plans[indices[0]]["spec"])
+            spec["collector_inputs"] = {leaf["id"]: ["_execution/task.json", "_execution/request.json",
+                "_execution/result.json", *leaf["outputs"]]
+                for i in indices[1:] for leaf in plans[i]["tasks"][:-1]}
+            plans[indices[0]] = expand_campaign(spec, config["approvals"])
     return lock, plans, {**budget, **metadata, "lock_hash": digest(lock), "estimate_hash": lock["estimate_hash"]}
 
 
@@ -974,9 +985,19 @@ def collect(request, config, task):
     lock = load_lock(request, config, task)
     plan = _plan_for_task(request, config, task, lock)
     require(task == plan["tasks"][-1], "collection requires the declared collector")
-    require(task["expected_leaves"] == plan["expected_leaves"], "partial collector fan-in")
+    collected_leaves = list(plan["tasks"][:-1])
+    if lock.get("campaign_mode") == "diagnostic" and "collector_inputs" in plan["spec"]:
+        expansion = read_json(dependency(request, config, {
+            "dependency": task["recipe_lock"]["dependency"], "path": "expanded_units.json"}))
+        scenario = plan["spec"]["work"][0]["parameters"]["scenario"]
+        others = [p for p in expansion["plans"] if p["spec"]["id"] != task["campaign"]
+                  and p["spec"]["work"][0]["parameters"]["scenario"] == scenario]
+        collected_leaves.extend(leaf for p in others for leaf in p["tasks"][:-1])
+    require(task["expected_leaves"] == [leaf["id"] for leaf in collected_leaves], "partial collector fan-in")
     instance = next(k for k, v in lock["instances"].items() if v == task["campaign"])
     declared_batches = instance_batches(lock, instance)
+    if "collector_inputs" in plan["spec"]:
+        declared_batches = [b for b in lock["batches"] if b["scenario"] == declared_batches[0]["scenario"]]
     mode = declared_batches[0]["mode"]
     if mode == "final":
         references = [{"dependency": dep, "path": "gate.json"} for dep, paths in plan["spec"]["inputs"].items()
@@ -986,7 +1007,7 @@ def collect(request, config, task):
         require(gate["pass"] is True and gate["mode"] == "screening" and gate["lock_hash"] == digest(lock),
                 "screening did not admit final collection")
     results, runtimes = [], []
-    for leaf in plan["tasks"][:-1]:
+    for leaf in collected_leaves:
         budget = load_budget(request, config, leaf["id"], expected_task=leaf)
         path = dependency(request, config, {"dependency": leaf["id"], "path": "result.json"})
         require(file_hash(path) == budget["payload_hash"], "leaf scientific payload hash mismatch")
@@ -1022,7 +1043,7 @@ def collect(request, config, task):
         passing = all(s["complete"] and s["counts"]["success"] == s["declared_repetitions"] for s in summaries.values())
     gate = {"pass": passing, "mode": mode, "lock_hash": digest(lock),
             "certifies_production_coverage": bool(passing and mode == "final"),
-            "expected_leaves": plan["expected_leaves"], "received_leaves": [t["id"] for t in plan["tasks"][:-1]],
+            "expected_leaves": task["expected_leaves"], "received_leaves": [t["id"] for t in collected_leaves],
             "scenario_summaries": summaries, "retry_rules": lock["retry_rules"],
             "incomplete_chains": [r["batch_id"] for r in results if not r.get("terminal", True)],
             "leaf_runtimes": runtimes, "budget_overruns": [r for r in runtimes if r["overrun_seconds"] > 0]}

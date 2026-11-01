@@ -103,6 +103,8 @@ def _spec_check(spec, approvals):
         concrete_id(ref['dependency'])
         require(ref['dependency'] not in external, 'admission receipt must be a separate dependency')
         external.add(ref['dependency'])
+    if spec.get('campaign_mode') == 'diagnostic':
+        external.update(spec.get('collector_inputs', {}))
     variables = [dependency_variable(x) for x in external]
     require(len(set(variables)) == len(variables), 'dependency normalization collision')
     lock = spec['recipe_lock']
@@ -175,6 +177,9 @@ def _spec_check(spec, approvals):
 
 
 def _id(spec, slot):
+    # Collector fan-in does not change the already declared execution chains.
+    if spec.get('campaign_mode') == 'diagnostic':
+        spec = {k: v for k, v in spec.items() if k != 'collector_inputs'}
     digest = sha256(canonical_json({'campaign': spec, 'slot': slot}).encode()).hexdigest()
     return spec['id'][:8] + '-' + digest[:22]
 
@@ -234,9 +239,15 @@ def _build(spec):
     for task in tasks:
         needs[task['id']] = ['_execution/task.json', '_execution/request.json',
             '_execution/result.json', *task['outputs']]
+    collected = list(leaves)
+    if spec.get('campaign_mode') == 'diagnostic':
+        extra = spec.get('collector_inputs', {})
+        require(not set(extra).intersection(needs), 'duplicate diagnostic collector dependency')
+        needs.update(deepcopy(extra))
+        collected.extend(extra)
     task = {'id': _id(spec, ['collector']), 'stage': spec['collector']['stage'],
         'campaign': spec['id'], 'needs': needs, 'outputs': spec['collector']['outputs'],
-        'recipe_lock': spec['recipe_lock'], 'expected_leaves': leaves}
+        'recipe_lock': spec['recipe_lock'], 'expected_leaves': collected}
     if spec.get('campaign_mode') == 'screening':
         task.update({k: spec[k] for k in ('campaign_mode', 'study', 'campaign_label', 'certifies_release_criteria', 'final_cells')})
     if spec.get('campaign_mode') == 'diagnostic':
