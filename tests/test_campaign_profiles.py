@@ -2269,3 +2269,15 @@ def test_screening_complete_emitter_matches_launch_base_bytes():
     approvals = read_mapping(ROOT / 'configs/approvals.yaml')
     assert coverage.digest(real_frame.screening_profile_tasks(*smoke_inputs.build_inputs(), approvals)) == \
         'a7ad5eadc9da850403c9881d1a01d25f6564033387868dd2024bda2d8e7fca1d'
+
+
+@pytest.mark.parametrize('nested', [False, True])
+def test_month2_mixed_missing_and_extra_keys_raise_named_contract_error(nested):
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    block = approvals['owner_decisions']['month2_followon']
+    if nested:
+        block = block['diagnostic_campaign']
+    block.pop('purpose' if nested else 'decided_on')
+    block[42] = 'unexpected'
+    with pytest.raises(ContractError, match='month2_followon.*42'):
+        campaign.month2_decision(approvals)

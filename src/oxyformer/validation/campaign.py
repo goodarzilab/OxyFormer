@@ -124,7 +124,7 @@ def month2_decision(approvals=_REPOSITORY_APPROVALS):
     keys = {"decided_on", "partitions", "gpu_concurrency_max", "gpu_hours_ceiling",
             "diagnostic_campaign", "recipe_cost_study", "final_cells"}
     require(type(d) is dict, "missing " + name)
-    require(set(d) == keys, name + " keys: " + str(sorted(set(d) ^ keys)))
+    require(set(d) == keys, name + " keys: " + str(sorted(set(d) ^ keys, key=str)))
     d = deepcopy(d)
     def check(ok, key):
         require(ok, "invalid " + name + "." + key)
@@ -139,7 +139,7 @@ def month2_decision(approvals=_REPOSITORY_APPROVALS):
     ckeys = {"scenarios", "repetitions", "recipe", "partition", "gpu_hours_per_leaf_max",
              "leaves_per_chain_max", "parallel_chains", "draws_continue_from", "certifies_release_criteria", "purpose"}
     check(type(c) is dict, "diagnostic_campaign")
-    check(set(c) == ckeys, "diagnostic_campaign keys: " + str(sorted(set(c) ^ ckeys)))
+    check(set(c) == ckeys, "diagnostic_campaign keys: " + str(sorted(set(c) ^ ckeys, key=str)))
     screening = screening_decision(approvals)
     names = c["scenarios"]
     check(type(names) is list and bool(names) and all(type(n) is str for n in names)
