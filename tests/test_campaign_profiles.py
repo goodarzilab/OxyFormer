@@ -2053,11 +2053,15 @@ def test_diagnostic_emitter_subset_dependencies_and_screening_unchanged(built):
 
 def test_diagnostic_summary_known_bias_is_not_release():
     draws, records = successful_records(20)
+    for record in records:
+        for estimate in record['estimates'].values():
+            estimate['value'] += 2.
     result = campaign.diagnostic_summary(records, draws, null_scenario=True)
     assert result['coverage_pass'] is False and result['coverage_pass_reason'] == 'diagnostic'
     assert result['production_equivalent'] is False
     for method, row in result['diagnostic_summary'].items():
         assert row['n'] == 20 and row['numerical_failures'] == 0
+        assert row['bias'] == pytest.approx(2.)
         assert row['bias'] == pytest.approx(row['mean_estimate'] - row['truth'])
         assert row['coverage_lower'] == coverage.binomial_bound(row['coverage_count'], 20, side='lower')
         assert row['rejection_upper'] == coverage.binomial_bound(row['rejections'], 20, side='upper')
@@ -2101,6 +2105,7 @@ def diagnostic_lock_request(req, tmp_path):
     return request(tmp_path / 'diagnostic-lock', task, deps, cfg['approvals'])
 
 
+@pytest.mark.parametrize('screening_rates', [(100.,) * 4], indirect=True)
 def test_diagnostic_lock_twenty_chains_seeds_admission_and_flags(diagnostic_request, tmp_path):
     req = diagnostic_lock_request(diagnostic_request, tmp_path)
     result = campaign.run_stage(req)
@@ -2130,6 +2135,7 @@ def test_diagnostic_lock_twenty_chains_seeds_admission_and_flags(diagnostic_requ
 
 @pytest.mark.parametrize('fault,match', [('missing', 'draws_continue_from'), ('duplicate', 'draws_continue_from'),
     ('namespace', 'namespace already used'), ('estimate', 'estimate changed')])
+@pytest.mark.parametrize('screening_rates', [(100.,) * 4], indirect=True)
 def test_diagnostic_lock_refusals(diagnostic_request, tmp_path, fault, match):
     req = diagnostic_lock_request(diagnostic_request, tmp_path)
     task = coverage.read_json(req.task_path)
@@ -2147,6 +2153,7 @@ def test_diagnostic_lock_refusals(diagnostic_request, tmp_path, fault, match):
 
 
 @pytest.mark.parametrize('interrupted_step', [0, 1])
+@pytest.mark.parametrize('screening_rates', [(100.,) * 4], indirect=True)
 def test_diagnostic_preempted_attempt_restarts_or_resumes_only_predecessor(diagnostic_request, tmp_path, monkeypatch, interrupted_step):
     from test_coverage import chain_request
     req = diagnostic_lock_request(diagnostic_request, tmp_path)
@@ -2203,3 +2210,13 @@ def test_diagnostic_preempted_attempt_restarts_or_resumes_only_predecessor(diagn
         assert value['campaign_mode'] == 'diagnostic'
         assert value['certifies_release_criteria'] is False
         assert value['production_equivalent'] is False
+
+
+@pytest.mark.parametrize('key,value', [('partitions', ['preemptible', 'standard']),
+    ('gpu_concurrency_max', {'preemptible': 16}), ('gpu_hours_ceiling', 3600),
+    ('decided_on', 'not-a-date'), ('decided_on', None), ('recipe_cost_study', ''), ('final_cells', 3)])
+def test_month2_refuses_malformed_top_level(key, value):
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    approvals['owner_decisions']['month2_followon'][key] = value
+    with pytest.raises(ContractError, match='month2_followon.*' + key):
+        campaign.month2_decision(approvals)

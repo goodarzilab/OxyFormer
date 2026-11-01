@@ -996,7 +996,7 @@ def collect(request, config, task):
     require(task["expected_leaves"] == [leaf["id"] for leaf in collected_leaves], "partial collector fan-in")
     instance = next(k for k, v in lock["instances"].items() if v == task["campaign"])
     declared_batches = instance_batches(lock, instance)
-    if "collector_inputs" in plan["spec"]:
+    if lock.get("campaign_mode") == "diagnostic" and "collector_inputs" in plan["spec"]:
         declared_batches = [b for b in lock["batches"] if b["scenario"] == declared_batches[0]["scenario"]]
     mode = declared_batches[0]["mode"]
     if mode == "final":

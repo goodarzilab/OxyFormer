@@ -957,3 +957,9 @@ scenario. Diagnostic collection reports bias, empirical SD, SE/SD and exact
 binomial bounds, with `production_equivalent: false` and
 `certifies_release_criteria: false`. Final release gates and their repetition
 minimum remain unchanged.
+
+The first chain's collector for each diagnostic scenario also depends on every
+other chain's leaves and reports the scenario-wide repetition summary. Each
+remaining collector reports its own chain. The scenario-wide collector refuses
+partial fan-in; missing or unsuccessful draws are never dropped from the
+registered denominator.
