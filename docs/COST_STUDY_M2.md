@@ -147,3 +147,13 @@ Scoring receipts record the scheduler job ID and both runtime and harness commit
 The scoring producer checks both checkouts before timing; every CLI entry also
 checks the checkout containing the harness script, including when invoked by
 absolute path from the frozen runtime.
+
+Artifact reuse also resolves each recorded runtime commit and compares its four
+protected source blobs with the counted tree. Missing commits or mismatched
+sources are refused before scheduling or projection, including for legacy fits.
+Runtime and harness commits are execution provenance rather than scientific
+continuation keys. A second attempt records its actual commits while preserving
+the original journal binding and attempt history. Documentation-only checkout
+changes therefore permit continuation. The existing checkpoint validator still
+checks the entire executed package source and scientific configuration; this
+does not make checkpoints from changed fitting code interchangeable.

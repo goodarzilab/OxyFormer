@@ -11,13 +11,17 @@ from oxyformer.validation.cost_probe import (
 def counted_fixture(monkeypatch):
     """Arithmetic tests use a source fixture, including in shallow CI clones."""
     from pathlib import Path
+    from hashlib import sha256
     from oxyformer.validation import cost_probe
     nested = Path('src/oxyformer/training/nested_cv.py').read_text()
     coverage = Path('src/oxyformer/validation/coverage.py').read_text()
+    sources = {path: sha256(Path(path).read_bytes()).hexdigest()
+               for _, path in cost_probe.PROTECTED_SOURCES}
 
     def fixture_work(*, seed_count, grid_points, tree=BASE_TREE, check_runtime=True):
         return {**cost_probe.source_work(nested, coverage, seed_count=seed_count,
-                                        grid_points=grid_points), 'tree': tree}
+                                        grid_points=grid_points), 'tree': tree,
+                'source_sha256': sources}
 
     monkeypatch.setattr(cost_probe, 'pinned_work', fixture_work)
 
@@ -1018,13 +1022,15 @@ def lifecycle_root(synthetic_profile, tmp_path, monkeypatch, counted_fixture):
     """Real preparation, fit controller and scoring; synthetic CPU boundaries."""
     import json
     import torch
+    import subprocess
     from pathlib import Path
     from oxyformer.training.fit import RecipeStudy, FoldArtifacts
     from oxyformer.training.nested_cv import PreparedEndpoint
     from oxyformer.validation import cost_probe as cp
     profile, _ = synthetic_profile
     monkeypatch.setattr(cp, 'require_compute_node', lambda **kwargs: None)
-    monkeypatch.setattr(cp, 'clean_identity', lambda **kwargs: 'fixture-head')
+    runtime_head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+    monkeypatch.setattr(cp, 'clean_identity', lambda **kwargs: runtime_head)
     monkeypatch.setattr(torch.cuda, 'reset_peak_memory_stats', lambda: None)
     monkeypatch.setattr(torch.cuda, 'max_memory_allocated', lambda: 0)
     configure = PreparedEndpoint.configuration
@@ -1053,7 +1059,7 @@ def lifecycle_root(synthetic_profile, tmp_path, monkeypatch, counted_fixture):
         jobs.append({'job_id': job, 'cell': 'e', 'operation': str(position), 'state': 'COMPLETED'})
     monkeypatch.setenv('SLURM_JOB_ID', 'score-job')
     scoring = cp.measure_scoring(endpoint, metadata['recipe'], study, root / 'score-work')
-    assert scoring['job_id'] == 'score-job' and scoring['harness_head'] == 'fixture-head'
+    assert scoring['job_id'] == 'score-job' and scoring['harness_head'] == runtime_head
     cp.atomic_record(root / 'e/scoring.json', scoring)
     jobs.append({'job_id': 'score-job', 'cell': 'e', 'operation': 'score', 'state': 'COMPLETED'})
     cp.atomic_record(root / 'driver-jobs.json', jobs)
@@ -1242,7 +1248,7 @@ def test_legacy_work_provenance_is_checked_without_invalidating_good_fits(lifecy
     root, _, metadata = lifecycle_root
     original = cp.pinned_work
     paths = [path for _, path in cp.PROTECTED_SOURCES]
-    declared = {path: 'fixture-' + str(i) for i, path in enumerate(paths)}
+    declared = original(seed_count=1, grid_points=2)['source_sha256']
     monkeypatch.setattr(cp, 'pinned_work', lambda **kwargs: {
         **original(**kwargs), 'source_sha256': declared})
     metadata['work']['e']['source_sha256'] = {path: declared[path] for path in paths[:2]}
@@ -1287,3 +1293,115 @@ def test_scoring_refuses_dirty_separate_harness_before_timing(tmp_path, monkeypa
     with pytest.raises(ValueError, match='dirty harness checkout refused'):
         cp.measure_scoring(cpu_measurement, {}, RecipeStudy(), tmp_path / 'score')
     assert calls == []
+
+
+def runtime_commit_fixture(root, path, replacement):
+    """Real Git objects with controlled source bytes; no scientific data copied."""
+    import os
+    import subprocess
+    from pathlib import Path
+    baseline = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+    objects = Path(subprocess.check_output(['git', 'rev-parse', '--git-path', 'objects'],
+                                         text=True).strip()).resolve()
+    subprocess.run(['git', 'init', str(root)], check=True, capture_output=True)
+    (root / '.git/objects/info/alternates').write_text(str(objects) + '\n')
+    subprocess.run(['git', 'read-tree', baseline], cwd=root, check=True)
+    blob = subprocess.check_output(['git', 'hash-object', '-w', '--stdin'],
+                                   cwd=root, input=replacement).decode().strip()
+    subprocess.run(['git', 'update-index', '--add', '--cacheinfo', '100644', blob, path],
+                   cwd=root, check=True)
+    tree = subprocess.check_output(['git', 'write-tree'], cwd=root, text=True).strip()
+    environment = {**os.environ, 'GIT_AUTHOR_NAME': 'Synthetic fixture',
+        'GIT_AUTHOR_EMAIL': 'fixture@example.invalid', 'GIT_COMMITTER_NAME': 'Synthetic fixture',
+        'GIT_COMMITTER_EMAIL': 'fixture@example.invalid'}
+    changed = subprocess.check_output(['git', 'commit-tree', tree, '-p', baseline], cwd=root,
+        env=environment, input='Synthetic runtime fixture\n', text=True).strip()
+    return baseline, changed
+
+
+@pytest.mark.parametrize('artifact', ['fit', 'score'])
+def test_report_rejects_changed_recorded_runtime(lifecycle_root, tmp_path, monkeypatch, artifact):
+    import json
+    from pathlib import Path
+    from oxyformer.validation import cost_probe as cp
+    root, _, _ = lifecycle_root
+    overhead = {'ratio': measured(1.).to_dict()}
+    baseline = cp.measurement_report(root, overhead)
+    receipt = cp.calibration_receipt(None, None)
+    receipt['compute_hours'] = measured(baseline['cells']['e']['compute_h100_hours_per_repetition']['value'] / 1.01)
+    monkeypatch.setattr(cp, 'calibration_receipt', lambda *args: receipt)
+    source = 'src/oxyformer/training/pretrain.py'
+    wrapper = b'''\n_original_pretrain = pretrain
+def pretrain(*args, **kwargs):
+    import time
+    started = time.monotonic()
+    result = _original_pretrain(*args, **kwargs)
+    time.sleep(.01 * (time.monotonic() - started))
+    return result
+'''
+    repository = tmp_path / 'changed-runtime'
+    _, changed = runtime_commit_fixture(repository, source, Path(source).read_bytes() + wrapper)
+    path = root / ('e/0/progress.json' if artifact == 'fit' else 'e/scoring.json')
+    record = json.loads(path.read_text())
+    (record['binding'] if artifact == 'fit' else record)['head'] = changed
+    cp.atomic_record(path, record)
+    monkeypatch.chdir(repository)
+    with pytest.raises(ValueError, match='runtime.*source'):
+        result = cp.measurement_report(root, overhead)
+        print('Unexpected calibrated projection:', result['calibration']['passed'],
+              result['calibration']['ratio'])
+
+
+@pytest.mark.parametrize('changed_checkout', ['harness', 'runtime'])
+def test_standalone_resume_accepts_documentation_only_commits(tmp_path, monkeypatch, counted_fixture,
+                                                             changed_checkout):
+    import time
+    import torch
+    from test_nested_cv import endpoint
+    from oxyformer.training.fit import FoldArtifacts, RecipeStudy
+    from oxyformer.validation import cost_probe as cp
+    original, documentation = runtime_commit_fixture(tmp_path / 'git-fixture',
+        'docs/synthetic-runtime-fixture.md', b'Documentation only.\n')
+    heads = {'harness': original, 'runtime': original}
+    prepared = endpoint(tmp_path / 'data')
+    configure = type(prepared).configuration
+    monkeypatch.setattr(type(prepared), 'configuration',
+        lambda self, *args, **kwargs: configure(self, *args, **{**kwargs, 'device': 'cpu'}))
+    monkeypatch.setattr(cp, 'require_compute_node', lambda **kwargs: None)
+    monkeypatch.setattr(cp, 'clean_identity',
+        lambda *, cwd=None: heads['runtime' if cwd is None else 'harness'])
+    monkeypatch.setattr(torch.cuda, 'reset_peak_memory_stats', lambda: None)
+    monkeypatch.setattr(torch.cuda, 'max_memory_allocated', lambda: 0)
+    study = RecipeStudy(reference_cap=32, grid_points=2, seed_count=1)
+    recipe = {'nested_cv': {'ssl_epochs': 1, 'frozen_epochs': 2, 'synthetic': True}}
+    schedule = cp.measurement_tasks(cp.pinned_work(seed_count=1, grid_points=2))
+    ssl_position = schedule[3][0]
+    position = schedule[4][0]
+    monkeypatch.setenv('SLURM_JOB_ID', 'ssl-job')
+    ssl = cp.measure_fit_task(prepared, recipe, study, tmp_path / 'ssl',
+                              position=ssl_position, standalone=True)
+    predecessor = FoldArtifacts.from_json(ssl['predecessor'])
+    clock, offset = time.monotonic, [0.]
+    monkeypatch.setattr(time, 'monotonic', lambda: clock() + offset[0])
+    write = cp.atomic_record
+    def stop_before_final_evaluation(path, record):
+        write(path, record)
+        if (record['attempts'] == ['first-attempt'] and record['slices'] and
+                record['slices'][-1]['epochs_completed'] == 2):
+            offset[0] = 10000.
+    monkeypatch.setattr(cp, 'atomic_record', stop_before_final_evaluation)
+    directory = tmp_path / 'refit'
+    monkeypatch.setenv('SLURM_JOB_ID', 'first-attempt')
+    first = cp.measure_fit_task(prepared, recipe, study, directory, position=position,
+        predecessor=predecessor, standalone=True, deadline=time.monotonic() + 10000.)
+    assert first['slices'][-1]['epochs_completed'] == 2
+    assert not first['slices'][-1]['complete']
+    heads[changed_checkout] = documentation
+    monkeypatch.setenv('SLURM_JOB_ID', 'second-attempt')
+    second = cp.measure_fit_task(prepared, recipe, study, directory, position=position,
+        predecessor=predecessor, standalone=True, deadline=time.monotonic() + 10000.)
+    assert second['attempts'] == ['first-attempt', 'second-attempt']
+    assert second['slices'][-1]['complete']
+    assert second['binding'] == first['binding']
+    key = 'execution_harness_heads' if changed_checkout == 'harness' else 'execution_runtime_heads'
+    assert second[key] == {'first-attempt': original, 'second-attempt': documentation}

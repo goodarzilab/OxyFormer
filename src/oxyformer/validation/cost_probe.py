@@ -230,6 +230,21 @@ def clean_identity(*, cwd=None):
     return subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=cwd).decode().strip()
 
 
+def runtime_source_hashes(head):
+    """Authenticate a recorded runtime using its committed protected bytes."""
+    from hashlib import sha256
+    import re
+    import subprocess
+    if not isinstance(head, str) or not re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', head):
+        raise ValueError('runtime source identity lacks a complete commit hash')
+    try:
+        return {path: sha256(subprocess.check_output(
+            ['git', 'show', head + ':' + path], stderr=subprocess.PIPE)).hexdigest()
+            for _, path in PROTECTED_SOURCES}
+    except subprocess.CalledProcessError as error:
+        raise ValueError('runtime source identity unavailable for ' + head) from error
+
+
 def require_month2_decision():
     from pathlib import Path
     import yaml
@@ -262,14 +277,15 @@ def atomic_record(path, value):
 
 
 def resume_record(path, binding):
-    """Resume only this exact measurement; keep the last durable slice pointer."""
+    """Keep scientific bindings and checkpoints; execution commits are provenance."""
     import json
     from pathlib import Path
     path = Path(path)
     if not path.exists():
         return {'binding': binding, 'attempts': [], 'slices': [], 'predecessor': None}
     record = json.loads(path.read_text())
-    if record['binding'] != binding:
+    immutable = lambda value: {k: v for k, v in value.items() if k not in ('head', 'harness_head')}
+    if immutable(record['binding']) != immutable(binding):
         raise ValueError('measurement continuation binding mismatch')
     return record
 
@@ -453,6 +469,7 @@ def measure_fit_task(endpoint, recipe, study, directory, *, position, predecesso
     job = os.environ['SLURM_JOB_ID']
     record.setdefault('execution_harness_heads', {})[job] = clean_identity(
         cwd=Path(__file__).resolve().parents[3])
+    record.setdefault('execution_runtime_heads', {})[job] = head
     if job not in record['attempts']:
         if len(record['attempts']) >= 2:
             raise ValueError('two attempts already used')
@@ -732,6 +749,15 @@ def lifecycle_identity(root):
         refuse('endpoint content changed')
     if file_hash(inputs['frame_path']) != inputs['frame_sha256']:
         refuse('frame changed')
+    runtimes = {}
+    def verify_runtime(head, expected_sources, artifact):
+        try:
+            if head not in runtimes:
+                runtimes[head] = runtime_source_hashes(head)
+        except (TypeError, ValueError) as error:
+            refuse('unverifiable runtime source: ' + str(artifact) + ': ' + str(error))
+        if runtimes[head] != expected_sources:
+            refuse('runtime protected source mismatch: ' + str(artifact))
     for cell, study in study_cells().items():
         work = inputs['work'][cell]
         expected_work = pinned_work(seed_count=study.seed_count, grid_points=study.grid_points,
@@ -761,6 +787,9 @@ def lifecycle_identity(root):
             for key, value in {**expected, 'position': position}.items():
                 if binding.get(key) != value:
                     refuse(key + ' mismatch: ' + str(artifact))
+            verify_runtime(binding.get('head'), sources, artifact)
+            for head in record.get('execution_runtime_heads', {}).values():
+                verify_runtime(head, sources, artifact)
         score = root / cell / 'scoring.json'
         if score.exists():
             record = json.loads(score.read_text())
@@ -772,6 +801,7 @@ def lifecycle_identity(root):
                     refuse(key + ' mismatch: ' + str(score))
             if record.get('tree') != inputs['tree'] or record.get('study') != cell_values(study):
                 refuse('scoring dimensions mismatch: ' + str(score))
+            verify_runtime(record.get('head'), sources, score)
     return inputs, endpoint_hash
 
 
