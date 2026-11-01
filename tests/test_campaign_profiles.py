@@ -2046,6 +2046,8 @@ def test_diagnostic_emitter_subset_dependencies_and_screening_unchanged(built):
     estimate, lock = manifest['tasks'][-2:]
     assert estimate['parameters']['profile_safety_factor'] == 2.0
     assert estimate['id'] in lock['needs'] and 'old-lock' in lock['needs']
+    for dep, names in read_mapping(ROOT / 'configs/execution/stages.yaml')['stages']['campaign-lock']['needs'].items():
+        assert set(names) <= set(lock['needs'][dep])
     assert set(estimate['parameters']['profiles']) == {'sign_changing'}
     assert all(t['campaign_mode'] == 'diagnostic' and not t['certifies_release_criteria'] for t in manifest['tasks'])
     assert json.dumps(real_frame.screening_profile_tasks(endpoint, frame, approvals), sort_keys=True) == before
@@ -2207,9 +2209,10 @@ def test_diagnostic_preempted_attempt_restarts_or_resumes_only_predecessor(diagn
     assert (seen[-1] >= 1000.) if interrupted_step else (seen[-1] == 0.)
     for name in ('result.json', 'runtime.json', coverage.BUDGET_RECORD):
         value = coverage.read_json(Path(retried.output_dir) / name)
-        assert value['campaign_mode'] == 'diagnostic'
-        assert value['certifies_release_criteria'] is False
-        assert value['production_equivalent'] is False
+        metadata = value['binding'] if name == coverage.BUDGET_RECORD else value
+        assert metadata['campaign_mode'] == 'diagnostic'
+        assert metadata['certifies_release_criteria'] is False
+        assert (value['profile'] if name == coverage.BUDGET_RECORD else value)['production_equivalent'] is False
 
 
 @pytest.mark.parametrize('key,value', [('partitions', ['preemptible', 'standard']),
@@ -2259,3 +2262,10 @@ def test_diagnostic_collector_aggregates_all_twenty_chain_records(diagnostic_req
     for summary in value['diagnostic_summary']['sign_changing'].values():
         assert summary['n'] == 20 and summary['empirical_sd'] > 0
     assert len(gate['received_leaves']) == sum(len(p['expected_leaves']) for p in plans)
+
+
+def test_screening_complete_emitter_matches_launch_base_bytes():
+    # Measured against the complete emitter at f25e8853, including estimate.
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    assert coverage.digest(real_frame.screening_profile_tasks(*smoke_inputs.build_inputs(), approvals)) == \
+        'a7ad5eadc9da850403c9881d1a01d25f6564033387868dd2024bda2d8e7fca1d'

@@ -378,6 +378,8 @@ def diagnostic_profile_tasks(endpoint, frame, approvals, *, campaign_id, evaluat
         retry_rules=deepcopy(campaign.RETRY_RULES),
         estimate_input={'dependency': estimate['id'], 'path': 'budget_estimate.json'},
         admission_receipt={'dependency': campaign_id + '-admit', 'path': 'admission.json'})
+    for unit, names in read_mapping(ROOT / 'configs/execution/stages.yaml')['stages']['campaign-lock'].get('needs', {}).items():
+        lock['needs'][unit] = list(dict.fromkeys([*lock['needs'].get(unit, []), *names]))
     lock['needs'][estimate['id']] = ['budget_estimate.json']
     for ref in prior_locks:
         lock['needs'].setdefault(ref['dependency'], []).append(ref['path'])
