@@ -1168,6 +1168,8 @@ def test_source_identical_alternate_history_is_accepted(tmp_path, monkeypatch):
         assert (alternate / path).read_bytes() == subprocess.check_output(
             ['git', 'show', cp.BASE_TREE + ':' + path], cwd=alternate)
     assert cp.clean_identity(cwd=alternate) == head
+    monkeypatch.chdir(alternate)
+    assert cp.pinned_work(seed_count=1, grid_points=2, tree=baseline)['tree'] == baseline
 
 
 def test_separate_harness_imports_the_fitting_checkout(tmp_path):
@@ -1199,3 +1201,30 @@ def test_separate_harness_imports_the_fitting_checkout(tmp_path):
     assert str(expected_runtime) in result.stderr
     assert str(shadow) not in result.stderr
     assert 'HARNESS_FIT_IMPORTED' not in result.stderr
+
+
+def test_previous_root_artifacts_refused_after_endpoint_replacement(lifecycle_root, monkeypatch):
+    import json
+    from dataclasses import replace
+    from pathlib import Path
+    from oxyformer.provenance import file_hash
+    from oxyformer.training.nested_cv import PreparedEndpoint
+    from oxyformer.validation import cost_probe as cp
+    root, _, metadata = lifecycle_root
+    path = Path(metadata['endpoint_path'])
+    endpoint = PreparedEndpoint.from_json(path.read_text())
+    # Reproduce the old preparer's overwrite while keeping the old artifacts.
+    field = endpoint.data.manifest.outcome_field
+    columns = [c.name for c in endpoint.data.manifest.schema]
+    rows = tuple(tuple(value + 1. if name == field else value
+                       for name, value in zip(columns, row)) for row in endpoint.data.rows)
+    changed = replace(endpoint, data=replace(endpoint.data, rows=rows))
+    assert changed.content_hash != endpoint.content_hash
+    path.write_text(changed.to_json())
+    metadata.update(endpoint_sha256=file_hash(path), endpoint_content_hash=changed.content_hash)
+    cp.atomic_record(root / 'inputs.json', metadata)
+    monkeypatch.setattr(cp, 'submit_measurement', lambda *a, **k: pytest.fail('stale submission'))
+    for consume in (lambda: cp.drive_measurements(root),
+                    lambda: cp.measurement_report(root, {'ratio': measured(1.).to_dict()})):
+        with pytest.raises(ValueError, match='lifecycle identity: endpoint mismatch'):
+            consume()
