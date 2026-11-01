@@ -20,9 +20,19 @@ through coverage's existing adapter. The scientific values from the scoring
 measurement are discarded. Scoring inputs are synthetic predictions on the full
 target-by-seed product; only timing is retained.
 
-Fitting proceeds through the genuine nested controller. Each task has its own
-job, including the prerequisite tuning tasks needed to reach an outer refit.
-The driver never fabricates selection results or checkpoints to skip tuning.
+Fitting uses the existing nested controller and its compute counters. Each cell
+measures inner SSL, first-grid inner outcome and origin, outer SSL, and first-grid
+outer outcome and origin in separate jobs. Outer refits use the first grid point
+at the cell's epoch count, as clarified by the orchestrator. The cost of inner
+selection enters the projection through counted inner fits; running the entire
+tuning grid is not a prerequisite for timing a representative outer refit.
+
+For an independent task, the harness creates an explicitly timing-only controller
+checkpoint at that task position, with fixed first-grid settings and genuine SSL
+initialization for the corresponding training partition. It contains no invented
+tuning scores or calibration results. These incomplete controller artifacts never
+claim a finished scientific procedure. The final origin refit stops before the
+calibration-transfer step, which requires actual tuning OOF predictions.
 Epoch slices use existing budget phase checks. Nuisance timings are differences
 of the controller's cumulative compute.wall_seconds. SSL uses the existing
 whole-call phase bracket. Slice checkpoints and their durable descriptors permit
@@ -40,7 +50,8 @@ inner partition represents other inner partitions. These are projection
 assumptions, not measurements of a complete repetition. Each timed fit uses
 registered seed 1103; the projection multiplies by the cell's seed count. The
 first hyperparameter grid point represents the other grid points in each
-inner-fit timing term.
+inner-fit timing term. Each refit record also gives its fixed grid index, learning
+rate, dropout and epoch count; no grid selection is performed for that timing.
 
 Peak GPU memory is the largest recorded PyTorch allocator peak. CUDA context,
 non-PyTorch allocations and unreturned interrupted calls are excluded. Missing
@@ -77,8 +88,11 @@ An unresolved submission stops further submissions until it can be reconciled;
 it is never silently retried. The ledger and driver lock enforce the concurrency
 limit across driver restarts.
 
-When continuing an existing fit after report or driver changes, run the driver
-from the current clean checkout with --fit-checkout pointing to the original
-clean measurement checkout. Fit jobs retain its immutable package identity;
-scoring jobs use the current checkout. Child commands explicitly use PYTHONPATH=src.
-Never edit the frozen fit checkout while its checkpoint chain is live.
+When continuing existing fits, run the driver with --fit-checkout pointing to the
+original clean runtime checkout and --harness-checkout pointing to a clean frozen
+checkout containing the fixed-grid timing harness. Independent timing jobs execute
+that harness as a script while importing the original runtime package; their
+records bind both commits. This preserves the package identity of real SSL
+checkpoints already measured before the scheduling clarification. Scoring jobs use
+the driver checkout. Child commands explicitly use PYTHONPATH=src. Never edit
+either frozen checkout while its checkpoint chain is live.
