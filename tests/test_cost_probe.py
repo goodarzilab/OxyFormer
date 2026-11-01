@@ -282,3 +282,130 @@ def test_pinned_work_checks_base_source_identity_without_git_history(monkeypatch
     monkeypatch.setattr(subprocess, 'check_output', lambda command: source(command) + b'\n# drift\n')
     with pytest.raises(ValueError, match='protected source differs'):
         pinned_work(seed_count=1, grid_points=2)
+
+
+def fit_record(*, epochs=7, complete=True):
+    return {'attempts': ['one'], 'binding': {'tree': BASE_TREE},
+            'predecessor': 'opaque private checkpoint descriptor',
+            'slices': [{'compute_seconds': 70., 'wall_seconds': 100.,
+                        'epochs_completed': epochs, 'minibatches_partial_epoch': 0,
+                        'minibatches_per_epoch': 5, 'peak_gpu_memory_bytes': 123,
+                        'complete': complete}]}
+
+
+def test_native_patience_completion_is_measured():
+    from oxyformer.validation.cost_probe import fit_quantity
+    assert fit_quantity(fit_record(), 30) == measured(70.)
+
+
+def test_terminal_failed_cells_publish_reasons_without_projections(tmp_path, monkeypatch, counted_fixture):
+    import json
+    from oxyformer.validation import cost_probe as cp
+    work = {c: cp.pinned_work(seed_count=s.seed_count, grid_points=s.grid_points)
+            for c, s in cp.study_cells().items()}
+    metadata = {'tree': BASE_TREE, 'work': work, 'profile_path': 'sealed-profile',
+                'frame_path': 'frame', 'frame_sha256': 'same'}
+    (tmp_path / 'inputs.json').write_text(json.dumps(metadata))
+    failures = {c: {'status': 'failed_measurement', 'operation': '0',
+                   'reason': 'sub-measurement incomplete after two attempts'}
+                for c in cp.study_cells()}
+    (tmp_path / 'driver-failures.json').write_text(json.dumps(failures))
+    jobs = [{'job_id': c + str(n), 'cell': c, 'operation': '0', 'state': 'FAILED'}
+            for c in failures for n in (1, 2)]
+    (tmp_path / 'driver-jobs.json').write_text(json.dumps(jobs))
+    receipt = {'compute_hours': measured(1.), 'study': cp.cell_values(cp.study_cells()['e']),
+               'frame_hash': 'same', 'frame_matches': True, 'work': work['e']}
+    monkeypatch.setattr(cp, 'calibration_receipt', lambda *args: receipt)
+    report = cp.measurement_report(tmp_path, {'ratio': measured(1.).to_dict()})
+    for cell in failures:
+        assert report['cells'][cell]['status'] == 'failed_measurement'
+        assert report['cells'][cell]['reason']
+        assert report['cells'][cell]['compute_h100_hours_per_repetition'] is None
+        assert report['feasibility'][cell] == []
+    assert not report['calibration']['passed']
+
+
+@pytest.mark.parametrize('frame_matches', [True, False])
+def test_report_preserves_measurements_and_calibration_labels(tmp_path, monkeypatch, counted_fixture, frame_matches):
+    import json
+    from oxyformer.validation import cost_probe as cp
+    work = {c: cp.pinned_work(seed_count=s.seed_count, grid_points=s.grid_points)
+            for c, s in cp.study_cells().items()}
+    metadata = {'tree': BASE_TREE, 'work': work, 'profile_path': 'sealed-profile',
+                'frame_path': 'frame', 'frame_sha256': 'same'}
+    cp.atomic_record(tmp_path / 'inputs.json', metadata)
+    cp.atomic_record(tmp_path / 'driver-failures.json', {})
+    cp.atomic_record(tmp_path / 'driver-jobs.json', [])
+    for cell in cp.study_cells():
+        for position, (kind, fold, grid) in enumerate(work[cell]['tasks_per_outer_seed']):
+            if kind != 'select':
+                cp.atomic_record(tmp_path / cell / str(position) / 'progress.json', fit_record())
+        cp.atomic_record(tmp_path / cell / 'scoring.json',
+                         {'tree': BASE_TREE, 'wall_seconds': 70., 'inputs': 'synthetic inputs, timing only'})
+    receipt = {'compute_hours': measured(sum(work['e']['counts'].values()) * 70 / 3600),
+               'study': cp.cell_values(cp.study_cells()['e']),
+               'frame_hash': 'same', 'frame_matches': frame_matches, 'work': work['e']}
+    monkeypatch.setattr(cp, 'calibration_receipt', lambda *args: receipt)
+    report = cp.measurement_report(tmp_path, {'ratio': measured(1.).to_dict()})
+    assert report['calibration']['passed'] is frame_matches
+    assert 'opaque private' not in json.dumps(report)
+    for cell in cp.study_cells():
+        basis = set(report['cells'][cell]['compute_h100_hours_per_repetition']['basis'])
+        assert ('uncalibrated' in basis) is (not frame_matches)
+        assert report['measurements'][cell]['ssl']['summary']['epochs_completed']['value'] == 7
+        assert report['measurements'][cell]['ssl']['summary']['wall_seconds_at_last_completed_epoch']['value'] == 100
+        for row in report['feasibility'][cell]:
+            assert all(set(quantity['basis']) == basis for quantity in row.values())
+    def labelled_numbers(value):
+        if isinstance(value, dict):
+            if set(value) == {'value', 'basis'}:
+                assert value['basis']
+            else:
+                for child in value.values():
+                    labelled_numbers(child)
+        elif isinstance(value, list):
+            for child in value:
+                labelled_numbers(child)
+        else:
+            assert type(value) not in (int, float)
+    labelled_numbers(report)
+
+
+def test_report_refuses_unfinished_driver(tmp_path, counted_fixture):
+    from oxyformer.validation import cost_probe as cp
+    cp.atomic_record(tmp_path / 'inputs.json', {})
+    with pytest.raises(ValueError, match='driver has not finished'):
+        cp.measurement_report(tmp_path, {})
+
+
+def test_partial_epoch_counts_include_final_training_and_validation_batches():
+    from oxyformer.validation.cost_probe import partial_epoch_batches
+    # Epoch two has trained all four batches, but has not yet been evaluated.
+    progress = {'epoch': 1, 'step': 8, 'phase': 'evaluate'}
+    assert partial_epoch_batches(progress, 4) == 4
+    # SSL also charges completed validation batches before its epoch closes.
+    progress.update(phase='validation', validation_cursor=257)
+    assert partial_epoch_batches(progress, 4, validation_batch_size=256) == 6
+    # A native completion retains the final validation cursor; it is no longer partial.
+    progress['epoch'] = 2
+    assert partial_epoch_batches(progress, 4, validation_batch_size=256) == 0
+
+
+def test_allocated_overhead_uses_reserved_allocation_not_elapsed_wall(monkeypatch):
+    from pathlib import Path
+    from oxyformer.validation.cost_probe import leaf_overhead
+    from oxyformer.validation import coverage
+    from oxyformer import provenance
+    paths = [Path('/synthetic') / (str(i) + '.json') for i in range(140)]
+
+    def record(path):
+        return {'binding': {'wall_seconds': 3300.},
+                'leaves': [{'task_id': path.stem, 'wall_seconds': 1000., 'compute_seconds': 900.}]}
+
+    monkeypatch.setattr(coverage, 'read_leaf_measurements', record)
+    monkeypatch.setattr(provenance, 'file_hash', lambda path: path.stem)
+    result = leaf_overhead(paths)
+    assert result['allocated_hours']['value'] == 140.
+    assert result['compute_hours']['value'] == 35.
+    assert result['ratio']['value'] == 4.
+    assert result['runner_wall_hours']['value'] == pytest.approx(140 * 1000 / 3600)

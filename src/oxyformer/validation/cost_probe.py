@@ -36,7 +36,7 @@ def ratio(numerator, denominator):
     return Quantity(numerator.value / denominator.value, numerator.basis | denominator.basis)
 
 
-def epoch_projection(*, required, completed, wall_seconds, boundary_seconds, attempts):
+def epoch_projection(*, required, completed, wall_seconds, boundary_seconds, attempts, native_complete=False):
     """Use completed epochs only; partial-epoch wall time is never a rate."""
     if type(required) is not int or required <= 0:
         raise ValueError('positive required epoch count')
@@ -47,7 +47,9 @@ def epoch_projection(*, required, completed, wall_seconds, boundary_seconds, att
     if not (math.isfinite(wall_seconds) and math.isfinite(boundary_seconds)
             and 0 <= boundary_seconds <= wall_seconds):
         raise ValueError('invalid boundary time')
-    if completed == required:
+    if type(native_complete) is not bool or (native_complete and completed == 0):
+        raise ValueError('native completion requires completed epochs')
+    if completed == required or native_complete:
         return Quantity(wall_seconds, frozenset({'measured'}))
     if attempts != 2:
         raise ValueError('unfinished measurement requires its second attempt')
@@ -322,6 +324,16 @@ def ssl_timing(deadline):
     return SSLTiming()
 
 
+def partial_epoch_batches(progress, training_batches, *, validation_batch_size=None):
+    """Count transactions since the last completed training/validation epoch."""
+    partial = progress['step'] - progress['epoch'] * training_batches
+    if partial > 0 and validation_batch_size is not None and progress['phase'] == 'validation':
+        partial += math.ceil(progress['validation_cursor'] / validation_batch_size)
+    if partial < 0:
+        raise ValueError('epoch and minibatch counters disagree')
+    return partial
+
+
 def measure_fit_task(endpoint, recipe, study, directory, *, position, predecessor=None,
                      deadline=None):
     """Run a single controller task, checkpointing after each completed epoch.
@@ -409,11 +421,12 @@ def measure_fit_task(endpoint, recipe, study, directory, *, position, predecesso
                 raise ValueError('missing whole-call SSL timing')
             compute = timing.intervals[1]
             epochs = progress['epoch']
-            partial = progress['step'] % max(1, math.ceil((len(fitting)-len(stopping))/256))
+            partial = partial_epoch_batches(progress,
+                max(1, math.ceil((len(fitting)-len(stopping))/256)), validation_batch_size=256)
         else:
             progress = after['active']['progress'] if after['active'] is not None else None
             epochs = base_config.frozen_epochs if completed_task else progress['epoch']
-            partial = 0 if progress is None else progress['step'] % batches
+            partial = 0 if progress is None else partial_epoch_batches(progress, batches)
         record['slices'].append({'job': job, 'wall_seconds': wall, 'compute_seconds': compute,
             'epochs_completed': epochs, 'minibatches_partial_epoch': partial,
             'minibatches_per_epoch': batches, 'peak_gpu_memory_bytes': torch.cuda.max_memory_allocated(),
@@ -511,27 +524,34 @@ def calibration_receipt(path, frame_path):
 
 
 def leaf_overhead(paths):
-    """Use each campaign leaf's own record once; never sum cumulative history."""
+    """Sum reserved allocations and each leaf's own compute exactly once."""
     from pathlib import Path
-    from oxyformer.validation.coverage import read_leaf_measurements
+    from oxyformer.validation.coverage import leaf_allocation, read_leaf_measurements
     from oxyformer.provenance import file_hash
 
     paths = tuple(map(Path, paths))
     if len(paths) != 140 or len(set(paths)) != 140:
         raise ValueError('exactly 140 unique campaign-D leaf records required')
-    own, files = [], []
+    own, allocations, files = [], [], []
     for path in paths:
         record = read_leaf_measurements(path)
         leaf = record['leaves'][-1]
         own.append(leaf)
-        files.append({'path': str(path), 'sha256': file_hash(path)})
+        allocation = leaf_allocation(record['binding']['wall_seconds'])['allocation_seconds']
+        allocations.append(allocation)
+        files.append({'path': str(path), 'sha256': file_hash(path),
+                      'allocation_seconds': numbered(allocation),
+                      'compute_seconds': numbered(leaf['compute_seconds'])})
     if len({leaf['task_id'] for leaf in own}) != 140:
         raise ValueError('duplicate campaign leaf')
-    allocated = Quantity(math.fsum(leaf['wall_seconds'] for leaf in own) / 3600,
-                         frozenset({'measured'}))
+    allocated = Quantity(math.fsum(allocations) / 3600, frozenset({'measured'}))
+    runner_wall = Quantity(math.fsum(leaf['wall_seconds'] for leaf in own) / 3600,
+                           frozenset({'measured'}))
     compute = Quantity(math.fsum(leaf['compute_seconds'] for leaf in own) / 3600,
                        frozenset({'measured'}))
     return {'allocated_hours': allocated.to_dict(), 'compute_hours': compute.to_dict(),
+            'runner_wall_hours': runner_wall.to_dict(),
+            'allocation_definition': 'coverage.leaf_allocation(binding.wall_seconds): stage plus setup, rounded to whole minutes',
             'ratio': ratio(allocated, compute).to_dict(), 'files': files}
 
 
@@ -601,6 +621,7 @@ def prepare_inputs(profile_root, destination):
 
 def main():
     import argparse
+    import os
     import json
     from pathlib import Path
     from oxyformer.provenance import file_hash
@@ -643,7 +664,7 @@ def main():
     destination = args.root / args.cell
     destination.mkdir(exist_ok=True)
     if args.command == 'score':
-        result = measure_scoring(endpoint, metadata['recipe'], study, destination / 'scoring-work')
+        result = measure_scoring(endpoint, metadata['recipe'], study, destination / ('scoring-work-' + os.environ['SLURM_JOB_ID']))
         atomic_record(destination / 'scoring.json', result)
     else:
         if args.position is None:
@@ -656,19 +677,34 @@ def main():
 
 
 
-def fit_quantity(record, required):
+def fit_statistics(record):
+    """Summarise durable slices without counting partial epochs as boundaries."""
     slices = record['slices']
-    total = math.fsum(s['compute_seconds'] for s in slices)
+    compute = wall = boundary_compute = boundary_wall = 0.
     completed = 0
-    boundary = 0.
-    accumulated = 0.
     for item in slices:
-        accumulated += item['compute_seconds']
+        compute += item['compute_seconds']
+        wall += item['wall_seconds']
         if item['epochs_completed'] > completed and item['minibatches_partial_epoch'] == 0:
             completed = item['epochs_completed']
-            boundary = accumulated
-    return epoch_projection(required=required, completed=completed,
-        wall_seconds=total, boundary_seconds=boundary, attempts=len(record['attempts']))
+            boundary_compute, boundary_wall = compute, wall
+    last = slices[-1] if slices else {}
+    return {'compute_seconds': compute, 'wall_seconds': wall,
+            'epochs_completed': completed,
+            'compute_seconds_at_last_completed_epoch': boundary_compute,
+            'wall_seconds_at_last_completed_epoch': boundary_wall,
+            'minibatches_partial_epoch': last.get('minibatches_partial_epoch', 0),
+            'minibatches_per_epoch': last.get('minibatches_per_epoch'),
+            'peak_gpu_memory_bytes': max((s['peak_gpu_memory_bytes'] for s in slices), default=0),
+            'native_complete': bool(last.get('complete', False))}
+
+
+def fit_quantity(record, required):
+    stats = fit_statistics(record)
+    return epoch_projection(required=required, completed=stats['epochs_completed'],
+        wall_seconds=stats['compute_seconds'],
+        boundary_seconds=stats['compute_seconds_at_last_completed_epoch'],
+        attempts=len(record['attempts']), native_complete=stats['native_complete'])
 
 
 def numbered(value, basis=('measured',)):
@@ -684,29 +720,86 @@ def numbered(value, basis=('measured',)):
     return value
 
 
+def public_fit_record(path, record):
+    """Link checkpoint journals without copying their opaque model descriptors."""
+    from oxyformer.provenance import file_hash
+    return numbered({**{k: v for k, v in record.items() if k != 'predecessor'},
+                     'summary': fit_statistics(record),
+                     'journal_path': str(path), 'journal_sha256': file_hash(path)})
+
+
 def measurement_report(root, overhead):
     import json
     from pathlib import Path
     root = Path(root)
     inputs = json.loads((root / 'inputs.json').read_text())
+    terminal_path = root / 'driver-failures.json'
+    if not terminal_path.exists():
+        raise ValueError('measurement driver has not finished')
+    failures = json.loads(terminal_path.read_text())
+    jobs = json.loads((root / 'driver-jobs.json').read_text())
+    live_states = {'PENDING', 'RUNNING', 'CONFIGURING', 'COMPLETING', 'SUSPENDED'}
+    if any(j['state'] in live_states for j in jobs):
+        raise ValueError('measurements are still running')
+    for cell, failure in failures.items():
+        attempts = [j for j in jobs if j['cell'] == cell and j['operation'] == failure['operation']]
+        if len(attempts) != 2:
+            raise ValueError('failed measurement requires two recorded attempts')
     projections, measurements, formulas = {}, {}, {}
     for cell, study in study_cells().items():
         directory = root / cell
-        grid = study.grid_points
-        outer = 3 * (1 + 2 * grid)
-        positions = {'ssl': outer + 1, 'inner_outcome': 1, 'inner_origin': 1 + grid,
-                     'refit_outcome': outer + 2, 'refit_origin': outer + 3}
+        schedule = inputs['work'][cell]['tasks_per_outer_seed']
+        positions = {}
+        for position, (kind, fold, grid) in enumerate(schedule):
+            if fold == 3 and kind in ('ssl', 'outcome', 'origin'):
+                positions['ssl' if kind == 'ssl' else 'refit_' + kind] = position
+            elif fold == 0 and grid == 0 and kind in ('outcome', 'origin'):
+                positions['inner_' + kind] = position
+        if set(positions) != {'ssl', 'inner_outcome', 'inner_origin', 'refit_outcome', 'refit_origin'}:
+            raise ValueError('representative operations missing from counted work')
         terms, records = {}, {}
         for term, position in positions.items():
-            record = json.loads((directory / str(position) / 'progress.json').read_text())
+            path = directory / str(position) / 'progress.json'
             required = 30 if term == 'ssl' else study.frozen_epochs or 150
-            terms[term] = {'tree': record['binding']['tree'],
-                           'seconds': fit_quantity(record, required)}
-            records[term] = numbered(record)
-        scoring = json.loads((directory / 'scoring.json').read_text())
-        terms['scoring'] = {'tree': scoring['tree'],
-                            'seconds': Quantity(scoring['wall_seconds'], frozenset({'measured'}))}
-        records['scoring'] = numbered(scoring)
+            if not path.exists():
+                if cell not in failures:
+                    raise ValueError('missing measurement: ' + cell + '/' + term)
+                terms[term] = {'tree': BASE_TREE, 'seconds': None}
+                records[term] = {'status': 'failed_measurement', 'basis': ['failed_measurement'],
+                    'reason': 'not performed after prerequisite failure: ' + failures[cell]['reason']}
+                continue
+            record = json.loads(path.read_text())
+            # A killed process may never have appended its job id to the journal.
+            # Scheduler attempts remain evidence even when no new slice survived.
+            attempts = [j['job_id'] for j in jobs if j['cell'] == cell and j['operation'] == str(position)]
+            if attempts:
+                record['attempts'] = attempts
+            seconds = fit_quantity(record, required)
+            terms[term] = {'tree': record['binding']['tree'], 'seconds': seconds}
+            records[term] = public_fit_record(path, record)
+            records[term]['requested_max_epochs'] = numbered(required)
+            records[term]['duration_seconds'] = None if seconds is None else seconds.to_dict()
+            if seconds is None:
+                records[term].update(status='failed_measurement', basis=['failed_measurement'],
+                                     reason='zero completed epochs after two attempts')
+        score_path = directory / 'scoring.json'
+        if score_path.exists():
+            scoring = json.loads(score_path.read_text())
+            terms['scoring'] = {'tree': scoring['tree'],
+                'seconds': Quantity(scoring['wall_seconds'], frozenset({'measured'}))}
+            records['scoring'] = numbered(scoring)
+        elif cell in failures:
+            terms['scoring'] = {'tree': BASE_TREE, 'seconds': None}
+            records['scoring'] = {'status': 'failed_measurement', 'basis': ['failed_measurement'],
+                                 'reason': failures[cell]['reason']}
+        else:
+            raise ValueError('missing scoring measurement: ' + cell)
+        auxiliary = {}
+        for position, (kind, fold, grid) in enumerate(schedule):
+            path = directory / str(position) / 'progress.json'
+            if position not in positions.values() and path.exists():
+                auxiliary[str(position)] = public_fit_record(path, json.loads(path.read_text()))
+        records['prerequisites'] = auxiliary
         counts = inputs['work'][cell]['counts']
         projections[cell] = project(terms, counts, tree=inputs['tree'])
         formulas[cell] = {'expression': 'sum(count[term] * seconds[term]) / 3600',
@@ -717,9 +810,9 @@ def measurement_report(root, overhead):
     anchor = projections['e']
     loaded_receipt = calibration_receipt(inputs['profile_path'], inputs['frame_path'])
     receipt = {**loaded_receipt, 'compute_hours': loaded_receipt['compute_hours'].to_dict()}
-    receipt['frame_matches'] = receipt['frame_hash'] == inputs['frame_sha256']
-    check = calibration(anchor, Quantity(**{**receipt['compute_hours'],
-        'basis': frozenset(receipt['compute_hours']['basis'])}),
+    receipt['frame_matches'] = (receipt['frame_matches'] and
+                               receipt['frame_hash'] == inputs['frame_sha256'])
+    check = calibration(anchor, loaded_receipt['compute_hours'],
         measured_anchor=anchor is not None and anchor.basis == {'measured'},
         frame_matches=receipt['frame_matches'],
         cell_matches=receipt['study'] == cell_values(study_cells()['e']),
@@ -731,6 +824,8 @@ def measurement_report(root, overhead):
         cells[name] = {'study': numbered(cell_values(study_cells()[name])),
                        'compute_h100_hours_per_repetition': None if q is None else q.to_dict(),
                        'status': 'failed_measurement' if q is None else 'projected'}
+        if q is None:
+            cells[name]['reason'] = failures.get(name, {}).get('reason', 'a required term failed measurement')
         projections[name] = q
     overhead_q = Quantity(overhead['ratio']['value'], frozenset(overhead['ratio']['basis']))
     return {'schema_version': numbered(1), 'tree': BASE_TREE, 'cells': cells,
@@ -744,13 +839,15 @@ def measurement_report(root, overhead):
             'limitations': [
                 'Synthetic scoring inputs, timing only; no estimate is reported.',
                 'First outer fold and first inner fold timings represent other folds.',
+                'Registered seed 1103 represents the other registered neural seeds.',
                 'Outer SSL timing represents the SSL terms in the projection.',
+                'The frozen plan specifies maximum thirty SSL epochs with patience five; native patience completion is measured, with its actual epoch count.',
                 'Epoch slicing adds controller reconstruction work to measured compute.',
+                'Peak GPU memory is PyTorch allocated tensor memory; CUDA context and non-PyTorch allocations are excluded.',
+                'The overhead numerator is reserved allocation from sealed stage budgets, not elapsed runner wall; failed scheduler attempts are outside the sealed-leaf ratio.',
                 'Idealised wall time assumes perfect utilisation of sixteen H100 GPUs.',
                 'CPU tests do not validate GPU timing or Slurm placement.',
                 'No final recipe or repetition count is recommended.']}
-
-
 
 
 def drive_measurements(root):
@@ -871,8 +968,17 @@ def publish_report(root, overhead):
                   '| Cell | Compute H100-hours per repetition |', '| --- | --- |'])
     for cell, value in report['cells'].items():
         lines.append('| ' + cell + ' | ' + display(value['compute_h100_hours_per_repetition']) + ' |')
-    lines.extend(['', 'Measured campaign overhead ratio: ' + display(overhead['ratio']),
-        'Measured runner-wall GPU-hours: ' + display(overhead['allocated_hours']),
+        if value.get('reason'):
+            lines.append('Failure reason for cell ' + cell + ': ' + value['reason'])
+    lines.extend(['', 'Formula: sum(count per repetition × seconds per fit or pass), converted to H100-hours.', '',
+                  '| Cell | Term | Count per repetition | Seconds per fit or pass |',
+                  '| --- | --- | --- | --- |'])
+    for cell, formula in report['formula'].items():
+        for term, count in formula['counts'].items():
+            lines.append('| ' + cell + ' | ' + term + ' | ' + display(count) + ' | ' +
+                         display(formula['seconds'][term]) + ' |')
+    lines.extend(['', 'Campaign allocated/compute ratio: ' + display(overhead['ratio']),
+        'Reserved allocation GPU-hours: ' + display(overhead['allocated_hours']),
         'Measured compute GPU-hours: ' + display(overhead['compute_hours']), '',
         '| Cell | Repetitions | Scenarios | Compute H100-hours | Allocated H100-hours | Idealised wall hours at sixteen GPUs |',
         '| --- | --- | --- | --- | --- | --- |'])
