@@ -86,3 +86,35 @@ def feasibility(compute_hours, overhead):
                  allocated_h100_hours=allocated.times(repetitions * scenarios).to_dict(),
                  idealised_lower_bound_wall_hours_at_16_gpus=allocated.times(repetitions * scenarios / 16).to_dict())
             for repetitions in (39, 100, 300, 1000) for scenarios in (1, 4)]
+
+
+BASE_TREE = 'f25e8853ba691883b447e0f89e9ce334f84f56ac'
+
+
+def operation_counts(*, seed_count, grid_points):
+    """Count the launch-base coverage loop and nested controller task list.
+
+    coverage.estimate_repetition: five outer folds, each selected seed, then
+    one scoring pass. nested_cv._advance: three inner partitions, each with
+    SSL followed by outcome/origin for each grid point, then outer SSL and
+    one selected refit for each nuisance kind.
+    """
+    if seed_count not in (1, 3) or grid_points not in (2, 4):
+        raise ValueError('unregistered study dimensions')
+    outer_seeds = 5 * seed_count
+    return {'ssl': outer_seeds * 4,
+            'inner_outcome': outer_seeds * 3 * grid_points,
+            'inner_origin': outer_seeds * 3 * grid_points,
+            'refit_outcome': outer_seeds, 'refit_origin': outer_seeds,
+            'scoring': 1}
+
+
+def project(measurements, counts, *, tree):
+    if tree != BASE_TREE or any(m['tree'] != tree for m in measurements.values()):
+        raise ValueError('measurement tree mismatch')
+    if set(measurements) != set(counts):
+        raise ValueError('missing or extra measurement terms')
+    if any(m['seconds'] is None for m in measurements.values()):
+        return None
+    return add(*(measurements[name]['seconds'].times(count)
+                 for name, count in counts.items())).times(1 / 3600)
