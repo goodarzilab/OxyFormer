@@ -111,8 +111,9 @@ checkout containing the fixed-grid timing harness. All fitting jobs execute
 that harness as a script while importing the original runtime package; their
 records bind both commits. Each new attempt records its execution harness commit.
 This preserves the package identity of real SSL
-checkpoints already measured before the scheduling clarification. Scoring jobs use
-the driver checkout. Child commands explicitly use PYTHONPATH=src. Never edit
+checkpoints already measured before the scheduling clarification. Scoring jobs also
+execute the harness script from the fitting checkout. Child commands explicitly
+use PYTHONPATH=src. Never edit
 either frozen checkout while its checkpoint chain is live.
 
 The lifecycle identity guard reads `inputs.json` before preparation, scheduling,
