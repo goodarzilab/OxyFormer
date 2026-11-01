@@ -937,6 +937,12 @@ this diagnostic's envelope and are refused before any scratch output is written.
 
 `campaign_mode: diagnostic` is bound to the read-only
 `owner_decisions.month2_followon` block. It certifies no release criterion.
+Decision mappings require exact key sets, independent of mapping-key order:
+canonical-equivalent YAML/JSON mappings are accepted even when their keys are
+reordered. Lists retain their meaningful order (`partitions`, `scenarios`, and
+`applies_to` where present); the first approved scenario is used for admission.
+Missing or extra keys, wrong types, out-of-range values, and list-order drift
+are refused. This is the orchestrator's engineering interpretation of D1.
 `real_frame.diagnostic_profile_tasks` emits profiles for the approved scenarios,
 then estimate and lock tasks. The caller supplies the campaign ID, fresh evaluation
 namespace, prior-lock references and CPU budget. The prior locks must include

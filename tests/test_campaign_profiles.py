@@ -2308,15 +2308,25 @@ def test_diagnostic_expansion_names_mismatched_metadata(diagnostic_request, tmp_
             expand_campaign(changed, approvals)
 
 
-def test_month2_decision_accepts_canonical_mapping_serialization():
+@pytest.mark.parametrize('ordering', ['canonical', 'reversed'])
+def test_month2_decision_accepts_canonical_mapping_serialization(ordering):
     from oxyformer.provenance import canonical_json
     approvals = read_mapping(ROOT / 'configs/approvals.yaml')
     # The runner and sealed fixture writer sort JSON mapping keys. List order
     # (partitions and scenarios) remains significant; mapping order does not.
     expected = campaign.month2_decision(approvals)
     approvals['owner_decisions']['month2_followon'] = expected
-    serialized = json.loads(canonical_json(approvals['owner_decisions']['month2_followon']))
+    def reverse_mappings(value):
+        if isinstance(value, dict):
+            return {k: reverse_mappings(v) for k, v in reversed(list(value.items()))}
+        if isinstance(value, list):
+            return [reverse_mappings(v) for v in value]
+        return value
+    serialized = (json.loads(canonical_json(expected)) if ordering == 'canonical'
+                  else reverse_mappings(expected))
     assert list(serialized) != list(expected)
+    assert serialized['partitions'] == expected['partitions']
+    assert serialized['diagnostic_campaign']['scenarios'] == expected['diagnostic_campaign']['scenarios']
     approvals['owner_decisions']['month2_followon'] = serialized
     assert campaign.month2_decision(approvals) == expected
 
