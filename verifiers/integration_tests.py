@@ -5,7 +5,8 @@ hanig-orchestrate's merge_unit.py runs this pinned file inside a disposable cand
 into the exact dev commit, and treats exit status 0 as a pass. It runs the whole pytest suite with the run's
 environment, CPU only, the same way .github/workflows/ci.yml does, so a merge is refused when the merged tree's
 tests fail even if each branch passed on its own. Exit status 5 (no tests collected) counts as a pass, as in CI.
-The staged candidate is committed inside the disposable copy before pytest so HEAD matches the tree, as in CI.
+The staged candidate is committed inside the disposable copy before pytest so HEAD matches the tree, as in CI; the
+commit's author and subject are synthetic, so tests must not depend on commit metadata (CI on the real commit covers that).
 """
 import os
 import shutil
@@ -43,8 +44,18 @@ JOB = (
     # commit whose HEAD matches its tree, and HEAD-anchored inputs (configs/approvals.yaml is read with expected_bytes
     # from HEAD) would otherwise refuse any candidate that changes them. Committing the staged tree inside the disposable
     # copy reproduces CI's condition without changing a byte of the tree being tested (2026-11-01, PR #85 verification).
-    'git -c user.name=merge-verifier -c user.email=merge-verifier@localhost -c core.hooksPath=/dev/null add -A >/dev/null 2>&1 && '
-    'git -c user.name=merge-verifier -c user.email=merge-verifier@localhost -c core.hooksPath=/dev/null commit -q --allow-empty --no-verify -m "candidate merge under verification" >/dev/null 2>&1 || exit 96; '
+    # Only a self-contained repository is committed into: a linked worktree copied with cp -a still points at the original
+    # repository and a commit there would move the original branch (exit 95). Git runs with its configuration isolated
+    # (no system/global config, signing off, ownership check off) so an inherited commit.gpgsign or safe.directory setting
+    # cannot abort the run before pytest (exit 96 on a genuine git failure). The commit's author and subject are synthetic:
+    # tests that read commit metadata are outside this verifier's envelope and are covered by CI on the real commit.
+    '[ -d .git ] && [ "$(git rev-parse --git-common-dir 2>/dev/null)" = ".git" ] || exit 95; '
+    'GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 '
+    'git -c user.name=merge-verifier -c user.email=merge-verifier@localhost -c core.hooksPath=/dev/null -c commit.gpgsign=false '
+    '-c safe.directory="*" add -A >/dev/null 2>&1 && '
+    'GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 '
+    'git -c user.name=merge-verifier -c user.email=merge-verifier@localhost -c core.hooksPath=/dev/null -c commit.gpgsign=false '
+    '-c safe.directory="*" commit -q --allow-empty --no-verify -m "candidate merge under verification" >/dev/null 2>&1 || exit 96; '
     'py=$OXYFORMER_VERIFY_PYTHON; out=$OXYFORMER_VERIFY_RESULT; '
     'if [ -n "${OXYFORMER_VERIFY_BASH_ENV+x}" ]; then export BASH_ENV=$OXYFORMER_VERIFY_BASH_ENV; fi; '
     'unset OXYFORMER_VERIFY_PYTHON OXYFORMER_VERIFY_RESULT OXYFORMER_VERIFY_STAGED OXYFORMER_VERIFY_BASH_ENV; '
