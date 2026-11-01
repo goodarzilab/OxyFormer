@@ -632,5 +632,99 @@ def main():
                          position=args.position, predecessor=previous)
 
 
+
+
+def fit_quantity(record, required):
+    slices = record['slices']
+    total = math.fsum(s['compute_seconds'] for s in slices)
+    completed = 0
+    boundary = 0.
+    accumulated = 0.
+    for item in slices:
+        accumulated += item['compute_seconds']
+        if item['epochs_completed'] > completed and item['minibatches_partial_epoch'] == 0:
+            completed = item['epochs_completed']
+            boundary = accumulated
+    return epoch_projection(required=required, completed=completed,
+        wall_seconds=total, boundary_seconds=boundary, attempts=len(record['attempts']))
+
+
+def numbered(value, basis=('measured',)):
+    """Give every numerical leaf a basis, including report dimensions."""
+    if type(value) in (int, float):
+        return {'value': value, 'basis': sorted(basis)}
+    if isinstance(value, dict):
+        if set(value) == {'value', 'basis'}:
+            return value
+        return {k: numbered(v, basis) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [numbered(v, basis) for v in value]
+    return value
+
+
+def measurement_report(root, overhead):
+    import json
+    from pathlib import Path
+    root = Path(root)
+    inputs = json.loads((root / 'inputs.json').read_text())
+    projections, measurements, formulas = {}, {}, {}
+    for cell, study in study_cells().items():
+        directory = root / cell
+        grid = study.grid_points
+        outer = 3 * (1 + 2 * grid)
+        positions = {'ssl': outer + 1, 'inner_outcome': 1, 'inner_origin': 1 + grid,
+                     'refit_outcome': outer + 2, 'refit_origin': outer + 3}
+        terms, records = {}, {}
+        for term, position in positions.items():
+            record = json.loads((directory / str(position) / 'progress.json').read_text())
+            required = 30 if term == 'ssl' else study.frozen_epochs or 150
+            terms[term] = {'tree': record['binding']['tree'],
+                           'seconds': fit_quantity(record, required)}
+            records[term] = numbered(record)
+        scoring = json.loads((directory / 'scoring.json').read_text())
+        terms['scoring'] = {'tree': scoring['tree'],
+                            'seconds': Quantity(scoring['wall_seconds'], frozenset({'measured'}))}
+        records['scoring'] = numbered(scoring)
+        counts = inputs['work'][cell]['counts']
+        projections[cell] = project(terms, counts, tree=inputs['tree'])
+        formulas[cell] = {'expression': 'sum(count[term] * seconds[term]) / 3600',
+                          'counts': numbered(counts),
+                          'seconds': {k: None if v['seconds'] is None else v['seconds'].to_dict()
+                                      for k, v in terms.items()}}
+        measurements[cell] = records
+    anchor = projections['e']
+    receipt = inputs['receipt']
+    check = calibration(anchor, Quantity(**{**receipt['compute_hours'],
+        'basis': frozenset(receipt['compute_hours']['basis'])}),
+        measured_anchor=anchor is not None and anchor.basis == {'measured'},
+        frame_matches=receipt['frame_matches'],
+        cell_matches=receipt['study'] == study_cells()['e'].to_dict(),
+        operations_match=inputs['work']['e']['counts'] == operation_counts(seed_count=1, grid_points=2))
+    cells = {}
+    for name, q in projections.items():
+        if q is not None and not check['passed']:
+            q = q.with_basis('uncalibrated')
+        cells[name] = {'study': numbered(study_cells()[name].to_dict()),
+                       'compute_h100_hours_per_repetition': None if q is None else q.to_dict(),
+                       'status': 'failed_measurement' if q is None else 'projected'}
+        projections[name] = q
+    overhead_q = Quantity(overhead['ratio']['value'], frozenset(overhead['ratio']['basis']))
+    return {'schema_version': numbered(1), 'tree': BASE_TREE, 'cells': cells,
+            'measurements': measurements, 'formula': formulas,
+            'calibration': {**check, 'receipt': numbered(receipt),
+                            'operations': numbered(inputs['work']['e'])},
+            'overhead': overhead, 'feasibility': {
+                cell: [] if q is None else numbered(feasibility(q, overhead_q), q.basis | overhead_q.basis)
+                for cell, q in projections.items()},
+            'limitations': [
+                'Synthetic scoring inputs, timing only; no estimate is reported.',
+                'First outer fold and first inner fold timings represent other folds.',
+                'Outer SSL timing represents the SSL terms in the projection.',
+                'Epoch slicing adds controller reconstruction work to measured compute.',
+                'Idealised wall time assumes perfect utilisation of sixteen H100 GPUs.',
+                'CPU tests do not validate GPU timing or Slurm placement.',
+                'No final recipe or repetition count is recommended.']}
+
+
 if __name__ == '__main__':
     main()
