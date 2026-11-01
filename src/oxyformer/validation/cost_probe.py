@@ -93,7 +93,8 @@ def feasibility(compute_hours, overhead):
             for repetitions in (39, 100, 300, 1000) for scenarios in (1, 4)]
 
 
-BASE_TREE = '57d0a04e419b0bc2c8bffb3adb46b586297746f4'
+# Frozen study measurement tree; the successor launch base is only the PR range.
+BASE_TREE = 'f25e8853ba691883b447e0f89e9ce334f84f56ac'
 PROTECTED_SOURCES = (
     ('nested', 'src/oxyformer/training/nested_cv.py'),
     ('coverage', 'src/oxyformer/validation/coverage.py'),
@@ -731,8 +732,15 @@ def lifecycle_identity(root):
     for cell, study in study_cells().items():
         work = inputs['work'][cell]
         expected_work = pinned_work(seed_count=study.seed_count, grid_points=study.grid_points)
+        # Earlier preparation recorded only nested/coverage source digests.
+        # Verify every declared digest, and derive all work from the same tree;
+        # a later harness adding provenance fields must not invalidate good fits.
+        sources = expected_work.get('source_sha256', {})
+        if any(sources.get(path) != digest for path, digest in work.get('source_sha256', {}).items()):
+            refuse('source digest mismatch for cell ' + cell)
+        structure = lambda value: {k: v for k, v in value.items() if k != 'source_sha256'}
         # JSON normalisation accounts for task tuples stored as arrays.
-        if json.dumps(work, sort_keys=True) != json.dumps(expected_work, sort_keys=True):
+        if json.dumps(structure(work), sort_keys=True) != json.dumps(structure(expected_work), sort_keys=True):
             refuse('work mismatch for cell ' + cell)
         expected = {'tree': inputs['tree'], 'endpoint': endpoint_hash,
                     'recipe': inputs['recipe'], 'study': cell_values(study)}
@@ -1243,8 +1251,7 @@ def drive_measurements(root, *, fit_checkout=None, harness_checkout=None):
             atomic_record(root / 'driver-failures.json', failures)
             return
         for cell, operation, previous, standalone in pending[:2-len(live)]:
-            entry = ([str(harness_checkout / 'src/oxyformer/validation/cost_probe.py')]
-                     if operation != 'score' else ['-m', 'oxyformer.validation.cost_probe'])
+            entry = [str(harness_checkout / 'src/oxyformer/validation/cost_probe.py')]
             command = [sys.executable, '-B', *entry,
                        'score' if operation == 'score' else 'fit', '--root', str(root), '--cell', cell]
             if operation != 'score':
@@ -1255,7 +1262,7 @@ def drive_measurements(root, *, fit_checkout=None, harness_checkout=None):
                     command.append('--standalone')
             submit_measurement(ledger_path, ledger, root=root, cell=cell,
                 operation=operation, command=command,
-                checkout=Path.cwd() if operation == 'score' else fitting_checkout)
+                checkout=fitting_checkout)
         print('measurement driver:', len(live), 'active jobs;', len(failures), 'failed cells', flush=True)
         time.sleep(60)
 

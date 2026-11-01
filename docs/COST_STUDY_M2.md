@@ -13,10 +13,10 @@ the two-attempt limit.
 
 The checkout must be clean, and preparation and submission require the recorded
 month-two owner decision. Measurements record their commit and the fixed
-launch tree. The count derivation reads the task-list expressions in that tree's
+measurement tree. The count derivation reads the task-list expressions in that tree's
 nested controller and the fold/seed iteration and scoring calls in coverage.
 It checks that the runtime nested controller, coverage, fit and pretraining
-sources match the launch tree's bytes. Calibration also compares these four
+sources match the measurement tree's bytes. Calibration also compares these four
 sources at the sealed receipt's commit; differing protected sources make the
 result uncalibrated even when their operation counts match.
 
@@ -128,9 +128,13 @@ Clean alternate Git histories are accepted; the protected-source byte checks
 remain required. CPU lifecycle tests exercise the actual fitting and scoring
 calls with synthetic inputs; they do not establish real GPU timings or placement.
 
-This successor counts work at launch base `57d0a04e419b0bc2c8bffb3adb46b586297746f4`.
-Attempt 4 used `f25e8853ba691883b447e0f89e9ce334f84f56ac`; coverage source changed
-between those trees. Its measurements therefore fail this successor's tree
-binding and cannot be combined with new measurements. Their root remains
-read-only. Fresh measurement collection requires its own root and available
-capacity under the two-GPU bound.
+The measurement tree remains the original study base
+`f25e8853ba691883b447e0f89e9ce334f84f56ac`, as required for the orchestrator's
+primary attempt-4 measurements. The successor launch base
+`57d0a04e419b0bc2c8bffb3adb46b586297746f4` defines the complete PR review range,
+not a relabelling of earlier timings. Run the harness script from the frozen
+measurement runtime with `PYTHONPATH=src`; its protected files must still match
+the measurement tree. Verify prior artifacts against their stored bindings,
+preserve and exclude unverifiable records, and measure only missing terms after
+the primary driver's ledger has no pending work. Across both roots the bound is
+two GPU jobs, with separate held eight-hour jobs and the existing node guard.

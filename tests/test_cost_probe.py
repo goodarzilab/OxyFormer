@@ -1003,6 +1003,9 @@ def test_driver_makes_relative_measurement_root_absolute(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     def submit(ledger_path, ledger, **kwargs):
         assert kwargs['root'].is_absolute()
+        assert kwargs['checkout'] == tmp_path / 'frozen'
+        assert kwargs['command'][2].endswith('src/oxyformer/validation/cost_probe.py')
+        assert '-m' not in kwargs['command']
         assert Path(kwargs['command'][kwargs['command'].index('--root') + 1]) == root
         raise RuntimeError('submission inspected')
     monkeypatch.setattr(cp, 'submit_measurement', submit)
@@ -1228,3 +1231,20 @@ def test_previous_root_artifacts_refused_after_endpoint_replacement(lifecycle_ro
                     lambda: cp.measurement_report(root, {'ratio': measured(1.).to_dict()})):
         with pytest.raises(ValueError, match='lifecycle identity: endpoint mismatch'):
             consume()
+
+
+def test_legacy_work_provenance_is_checked_without_invalidating_good_fits(lifecycle_root, monkeypatch):
+    from oxyformer.validation import cost_probe as cp
+    root, _, metadata = lifecycle_root
+    original = cp.pinned_work
+    paths = [path for _, path in cp.PROTECTED_SOURCES]
+    declared = {path: 'fixture-' + str(i) for i, path in enumerate(paths)}
+    monkeypatch.setattr(cp, 'pinned_work', lambda **kwargs: {
+        **original(**kwargs), 'source_sha256': declared})
+    metadata['work']['e']['source_sha256'] = {path: declared[path] for path in paths[:2]}
+    cp.atomic_record(root / 'inputs.json', metadata)
+    assert cp.lifecycle_identity(root)[0] == metadata
+    metadata['work']['e']['source_sha256'][paths[0]] = 'changed-source'
+    cp.atomic_record(root / 'inputs.json', metadata)
+    with pytest.raises(ValueError, match='source digest mismatch'):
+        cp.lifecycle_identity(root)
