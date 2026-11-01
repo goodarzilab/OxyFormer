@@ -202,7 +202,8 @@ def source_work(nested_source, coverage_source, *, seed_count, grid_points,
             'scoring_operations': dict(scoring_calls)}
 
 
-def pinned_work(*, seed_count, grid_points, tree=BASE_TREE, check_runtime=True):
+def pinned_work(*, seed_count, grid_points, tree=BASE_TREE, check_runtime=True,
+                held_inner_folds=(0, 1, 2)):
     """Count pinned source; fitting/scoring also require identical runtime bytes."""
     from hashlib import sha256
     from pathlib import Path
@@ -218,8 +219,30 @@ def pinned_work(*, seed_count, grid_points, tree=BASE_TREE, check_runtime=True):
         sources[name] = raw.decode()
         digests[path] = sha256(raw).hexdigest()
     return {**source_work(sources['nested'], sources['coverage'],
-                          seed_count=seed_count, grid_points=grid_points),
+                          seed_count=seed_count, grid_points=grid_points,
+                          held_inner_folds=held_inner_folds),
             'tree': tree, 'source_sha256': digests}
+
+
+def endpoint_work(endpoint, walk):
+    """Count each outer partition's target-bearing inner folds from its split."""
+    work = walk((0, 1, 2))
+    outer_count = work['outer_folds']
+    splits = {inner.outer_fold: inner.split for inner in endpoint.inner}
+    if len(splits) != len(endpoint.inner) or set(splits) != set(range(outer_count)):
+        raise ValueError('counted work requires every outer partition exactly once')
+    held = {outer: tuple(fold for fold in range(3) if split.evaluation_ids(fold))
+            for outer, split in splits.items()}
+    if all(folds == (0, 1, 2) for folds in held.values()):
+        return work  # Preserve the existing all-fold binding, including legacy roots.
+    partitions = {outer: walk(folds) for outer, folds in held.items()}
+    names = set().union(*(part['counts'] for part in partitions.values())) - {'scoring'}
+    counts = {name: sum(part['counts'].get(name, 0) // outer_count
+                       for part in partitions.values()) for name in names}
+    counts['scoring'] = 1
+    return {**partitions[0], 'counts': counts,
+            'tasks_by_outer': {str(outer): part['tasks_per_outer_seed']
+                               for outer, part in partitions.items()}}
 
 
 def clean_identity(*, cwd=None):
@@ -230,18 +253,22 @@ def clean_identity(*, cwd=None):
     return subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=cwd).decode().strip()
 
 
-def runtime_source_hashes(head):
+def runtime_source_hashes(head, *, checkout=None):
     """Authenticate a recorded runtime using its committed protected bytes."""
     from hashlib import sha256
+    from pathlib import Path
     import re
     import subprocess
     if not isinstance(head, str) or not re.fullmatch(r'(?:[0-9a-f]{40}|[0-9a-f]{64})', head):
         raise ValueError('runtime source identity lacks a complete commit hash')
+    if checkout is not None and not Path(checkout).is_absolute():
+        raise ValueError('runtime checkout path must be absolute')
     try:
         return {path: sha256(subprocess.check_output(
-            ['git', 'show', head + ':' + path], stderr=subprocess.PIPE)).hexdigest()
+            ['git', 'show', head + ':' + path], cwd=checkout,
+            stderr=subprocess.PIPE)).hexdigest()
             for _, path in PROTECTED_SOURCES}
-    except subprocess.CalledProcessError as error:
+    except (OSError, subprocess.CalledProcessError) as error:
         raise ValueError('runtime source identity unavailable for ' + head) from error
 
 
@@ -320,12 +347,13 @@ def measurement_tasks(work):
     """Measure representative tasks; count the full tuning grid only in R2."""
     tasks = work['tasks_per_outer_seed']
     lookup = {tuple(task): i for i, task in enumerate(tasks)}
-    inner_ssl = lookup['ssl', 0, None]
+    inner = next(fold for kind, fold, grid in tasks if kind == 'ssl' and fold != 3)
+    inner_ssl = lookup['ssl', inner, None]
     outer_ssl = lookup['ssl', 3, None]
     return [
         (inner_ssl, None, False),
-        (lookup['outcome', 0, 0], inner_ssl, False),
-        (lookup['origin', 0, 0], inner_ssl, True),
+        (lookup['outcome', inner, 0], inner_ssl, False),
+        (lookup['origin', inner, 0], inner_ssl, True),
         (outer_ssl, None, True),
         (lookup['outcome', 3, None], outer_ssl, True),
         (lookup['origin', 3, None], outer_ssl, True),
@@ -448,7 +476,9 @@ def measure_fit_task(endpoint, recipe, study, directory, *, position, predecesso
 
     require_compute_node(gpu=True)
     head = clean_identity()
-    work = pinned_work(seed_count=study.seed_count, grid_points=study.grid_points)
+    inner = endpoint.validate(0).split
+    work = pinned_work(seed_count=study.seed_count, grid_points=study.grid_points,
+        held_inner_folds=tuple(fold for fold in range(3) if inner.evaluation_ids(fold)))
     tasks = work['tasks_per_outer_seed']
     kind, fold, grid = tasks[position]
     if kind == 'select':
@@ -470,6 +500,7 @@ def measure_fit_task(endpoint, recipe, study, directory, *, position, predecesso
     record.setdefault('execution_harness_heads', {})[job] = clean_identity(
         cwd=Path(__file__).resolve().parents[3])
     record.setdefault('execution_runtime_heads', {})[job] = head
+    record.setdefault('runtime_checkouts', {})[head] = str(Path.cwd().resolve())
     if job not in record['attempts']:
         if len(record['attempts']) >= 2:
             raise ValueError('two attempts already used')
@@ -632,6 +663,7 @@ def measure_scoring(endpoint, recipe, study, root):
     return {'binding': {'endpoint': endpoint.content_hash, 'tree': BASE_TREE,
                         'recipe': recipe, 'study': cell_values(study)},
             'tree': BASE_TREE, 'head': head, 'harness_head': harness_head,
+            'runtime_checkout': str(Path.cwd().resolve()),
             'job_id': os.environ.get('SLURM_JOB_ID'), 'study': cell_values(study),
             'inputs': 'synthetic inputs, timing only', 'basis': ['measured'],
             'wall_seconds': wall, 'peak_gpu_memory_bytes': torch.cuda.max_memory_allocated(),
@@ -655,15 +687,21 @@ def calibration_receipt(path, frame_path):
     for name, source_path in PROTECTED_SOURCES:
         sources[name] = subprocess.check_output(['git', 'show', tree + ':' + source_path])
         baseline[name] = subprocess.check_output(['git', 'show', BASE_TREE + ':' + source_path])
-    receipt_work = source_work(
-        sources['nested'].decode(), sources['coverage'].decode(),
-        seed_count=study['seed_count'], grid_points=study['grid_points'])
     seconds = profile['complete_repetition_seconds']
     if len(seconds) != 1:
         raise ValueError('calibration requires one complete repetition')
     from oxyformer.contracts import StageRequest
     producer = StageRequest.from_json((path.parent / '_execution/request.json').read_text())
     declared = dict(zip(producer.dependency_paths, producer.dependency_hashes))
+    endpoints = [name for name in declared if Path(name).name == 'endpoint.json']
+    if len(endpoints) != 1 or file_hash(endpoints[0]) != declared[endpoints[0]]:
+        raise ValueError('receipt endpoint dependency missing or changed')
+    from oxyformer.training.nested_cv import PreparedEndpoint
+    endpoint = PreparedEndpoint.from_json(Path(endpoints[0]).read_text())
+    receipt_work = endpoint_work(endpoint, lambda held: source_work(
+        sources['nested'].decode(), sources['coverage'].decode(),
+        seed_count=study['seed_count'], grid_points=study['grid_points'],
+        held_inner_folds=held))
     frames = [digest for name, digest in declared.items() if Path(name).name == 'frame.json']
     expected = frames[0] if len(frames) == 1 else None
     if expected is None:
@@ -721,7 +759,7 @@ def study_cells():
                for cell, epochs in (('c', 150), ('d', 60), ('e', 30))}}
 
 
-def lifecycle_identity(root):
+def lifecycle_identity(root, *, runtime_checkout=None):
     """Read-only validation of root inputs and every reusable artifact.
 
     File SHA256 authenticates stored bytes; PreparedEndpoint.content_hash binds
@@ -744,24 +782,39 @@ def lifecycle_identity(root):
         refuse('endpoint path must be absolute')
     if file_hash(path) != inputs['endpoint_sha256']:
         refuse('endpoint file changed')
-    endpoint_hash = PreparedEndpoint.from_json(path.read_text()).content_hash
+    endpoint = PreparedEndpoint.from_json(path.read_text())
+    endpoint_hash = endpoint.content_hash
     if inputs.get('endpoint_content_hash', endpoint_hash) != endpoint_hash:
         refuse('endpoint content changed')
     if file_hash(inputs['frame_path']) != inputs['frame_sha256']:
         refuse('frame changed')
+    profile_hash = inputs.get('profile_sha256', inputs.get('receipt', {}).get('sha256'))
+    if profile_hash is None or file_hash(inputs['profile_path']) != profile_hash:
+        refuse('calibration profile changed or lacks a stored content hash')
     runtimes = {}
-    def verify_runtime(head, expected_sources, artifact):
+    def verify_runtime(head, expected_sources, artifact, recorded_checkout=None):
         try:
             if head not in runtimes:
-                runtimes[head] = runtime_source_hashes(head)
+                errors = []
+                for checkout in (None, recorded_checkout, runtime_checkout):
+                    if checkout is None and errors:
+                        continue
+                    try:
+                        runtimes[head] = runtime_source_hashes(head, checkout=checkout)
+                        break
+                    except (TypeError, ValueError) as error:
+                        errors.append(str(error))
+                else:
+                    raise ValueError('; '.join(errors))
         except (TypeError, ValueError) as error:
             refuse('unverifiable runtime source: ' + str(artifact) + ': ' + str(error))
         if runtimes[head] != expected_sources:
             refuse('runtime protected source mismatch: ' + str(artifact))
     for cell, study in study_cells().items():
         work = inputs['work'][cell]
-        expected_work = pinned_work(seed_count=study.seed_count, grid_points=study.grid_points,
-                                    check_runtime=False)
+        expected_work = endpoint_work(endpoint, lambda held: pinned_work(
+            seed_count=study.seed_count, grid_points=study.grid_points,
+            check_runtime=False, held_inner_folds=held))
         # Earlier preparation recorded only nested/coverage source digests.
         # Verify every declared digest, and derive all work from the same tree;
         # a later harness adding provenance fields must not invalidate good fits.
@@ -787,9 +840,10 @@ def lifecycle_identity(root):
             for key, value in {**expected, 'position': position}.items():
                 if binding.get(key) != value:
                     refuse(key + ' mismatch: ' + str(artifact))
-            verify_runtime(binding.get('head'), sources, artifact)
+            checkouts = record.get('runtime_checkouts', {})
+            verify_runtime(binding.get('head'), sources, artifact, checkouts.get(binding.get('head')))
             for head in record.get('execution_runtime_heads', {}).values():
-                verify_runtime(head, sources, artifact)
+                verify_runtime(head, sources, artifact, checkouts.get(head))
         score = root / cell / 'scoring.json'
         if score.exists():
             record = json.loads(score.read_text())
@@ -801,7 +855,7 @@ def lifecycle_identity(root):
                     refuse(key + ' mismatch: ' + str(score))
             if record.get('tree') != inputs['tree'] or record.get('study') != cell_values(study):
                 refuse('scoring dimensions mismatch: ' + str(score))
-            verify_runtime(record.get('head'), sources, score)
+            verify_runtime(record.get('head'), sources, score, record.get('runtime_checkout'))
     return inputs, endpoint_hash
 
 
@@ -849,10 +903,12 @@ def prepare_inputs(profile_root, destination):
         raise ValueError('null-effect draw integration did not converge')
     candidate = {'tree': BASE_TREE, 'recipe': params['recipe'],
                  'frame_sha256': file_hash(paths['frame.json']),
-                 'endpoint_content_hash': endpoint.content_hash}
+                 'endpoint_content_hash': endpoint.content_hash,
+                 'profile_sha256': file_hash(profile_root / 'budget_record.json')}
     if existing is not None:
         stored, stored_endpoint = existing
-        previous = {**stored, 'endpoint_content_hash': stored_endpoint}
+        previous = {**stored, 'endpoint_content_hash': stored_endpoint,
+                    'profile_sha256': stored.get('profile_sha256', stored.get('receipt', {}).get('sha256'))}
         changed = [key for key, value in candidate.items() if previous.get(key) != value]
         if changed:
             raise ValueError('measurement lifecycle identity: preparation changed ' + ', '.join(changed))
@@ -865,9 +921,11 @@ def prepare_inputs(profile_root, destination):
                 'endpoint_content_hash': endpoint.content_hash,
                 'frame_path': str(paths['frame.json']), 'frame_sha256': file_hash(paths['frame.json']),
                 'profile_path': str(profile_root / 'budget_record.json'),
+                'profile_sha256': candidate['profile_sha256'],
                 'receipt': {**receipt, 'compute_hours': receipt['compute_hours'].to_dict()},
-                'work': {c: pinned_work(seed_count=s.seed_count, grid_points=s.grid_points,
-                                        check_runtime=False)
+                'work': {c: endpoint_work(endpoint, lambda held: pinned_work(
+                            seed_count=s.seed_count, grid_points=s.grid_points,
+                            check_runtime=False, held_inner_folds=held))
                          for c, s in study_cells().items()}}
     atomic_record(root / 'inputs.json', metadata)
     return json.loads((root / 'inputs.json').read_text())
@@ -899,7 +957,8 @@ def main():
     if args.command == 'report':
         if args.overhead is None:
             parser.error('--overhead is required')
-        publish_report(args.root, json.loads(args.overhead.read_text()))
+        publish_report(args.root, json.loads(args.overhead.read_text()),
+                       runtime_checkout=args.fit_checkout)
         return
     if args.command == 'drive':
         drive_measurements(args.root, fit_checkout=args.fit_checkout,
@@ -997,21 +1056,26 @@ def public_fit_record(path, record):
 
 def projection_counts(work):
     """Partition the walked SSL tasks by their actual fitting partition."""
-    tasks = work['tasks_per_outer_seed']
+    partitions = work.get('tasks_by_outer')
+    tasks = ([task for partition in partitions.values() for task in partition]
+             if partitions is not None else work['tasks_per_outer_seed'])
     inner = sum(kind == 'ssl' and fold != 3 for kind, fold, grid in tasks)
     outer = sum(kind == 'ssl' and fold == 3 for kind, fold, grid in tasks)
-    multiplier = work['outer_folds'] * work['seed_count']
+    multiplier = work['seed_count'] * (1 if partitions is not None else work['outer_folds'])
     counts = dict(work['counts'])
     if counts.pop('ssl') != (inner + outer) * multiplier:
         raise ValueError('SSL source counts disagree')
     return {**counts, 'inner_ssl': inner * multiplier, 'refit_ssl': outer * multiplier}
 
 
-def measurement_report(root, overhead):
+def measurement_report(root, overhead, *, runtime_checkout=None):
     import json
     from pathlib import Path
     root = Path(root)
-    inputs, _ = lifecycle_identity(root)
+    if runtime_checkout is None:
+        inputs, _ = lifecycle_identity(root)
+    else:
+        inputs, _ = lifecycle_identity(root, runtime_checkout=runtime_checkout)
     terminal_path = root / 'driver-failures.json'
     if not terminal_path.exists():
         raise ValueError('measurement driver has not finished')
@@ -1028,13 +1092,14 @@ def measurement_report(root, overhead):
     for cell, study in study_cells().items():
         directory = root / cell
         schedule = inputs['work'][cell]['tasks_per_outer_seed']
+        inner = next(fold for kind, fold, grid in schedule if kind == 'ssl' and fold != 3)
         positions = {}
         for position, (kind, fold, grid) in enumerate(schedule):
             if fold == 3 and kind in ('ssl', 'outcome', 'origin'):
                 positions['refit_' + kind] = position
-            elif fold == 0 and kind == 'ssl':
+            elif fold == inner and kind == 'ssl':
                 positions['inner_ssl'] = position
-            elif fold == 0 and grid == 0 and kind in ('outcome', 'origin'):
+            elif fold == inner and grid == 0 and kind in ('outcome', 'origin'):
                 positions['inner_' + kind] = position
         if set(positions) != {'inner_ssl', 'refit_ssl', 'inner_outcome', 'inner_origin', 'refit_outcome', 'refit_origin'}:
             raise ValueError('representative operations missing from counted work')
@@ -1246,7 +1311,10 @@ def drive_measurements(root, *, fit_checkout=None, harness_checkout=None):
     if harness_checkout != Path.cwd():
         clean_identity(cwd=harness_checkout)
     root = Path(root).resolve()
-    metadata, _ = lifecycle_identity(root)
+    if fit_checkout is None:
+        metadata, _ = lifecycle_identity(root)
+    else:
+        metadata, _ = lifecycle_identity(root, runtime_checkout=fitting_checkout)
     lock = (root / 'driver.lock').open('w')
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     ledger_path = root / 'driver-jobs.json'
@@ -1305,13 +1373,14 @@ def drive_measurements(root, *, fit_checkout=None, harness_checkout=None):
 
 
 
-def publish_report(root, overhead):
+def publish_report(root, overhead, *, runtime_checkout=None):
     """Publish only after every required measurement has a terminal record."""
     from pathlib import Path
     require_compute_node()
     clean_identity()
     root = Path(root)
-    report = measurement_report(root, overhead)
+    report = (measurement_report(root, overhead) if runtime_checkout is None else
+              measurement_report(root, overhead, runtime_checkout=runtime_checkout))
     destination = root.parent
     import json
     jobs_path = destination / 'slurm_jobs.json'

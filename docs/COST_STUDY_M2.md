@@ -157,3 +157,23 @@ the original journal binding and attempt history. Documentation-only checkout
 changes therefore permit continuation. The existing checkpoint validator still
 checks the entire executed package source and scientific configuration; this
 does not make checkpoints from changed fitting code interchangeable.
+
+New fit journals retain the absolute runtime checkout for each executed commit;
+scoring receipts retain their runtime checkout too. Consumers verify the actual
+protected Git blobs there when the commit is absent from their own repository.
+For legacy artifacts, `--fit-checkout` also supplies this verification location to
+the driver or report command. Stored paths and digest declarations alone are not
+accepted as source verification.
+
+Work counts inspect the target-bearing inner folds in every outer partition of
+the prepared endpoint. Targetless inner folds contribute no SSL or nuisance task;
+their labelled training rows remain available to the controller. The receipt's
+operation walk uses its authenticated endpoint dependency as well. Measurements
+use the first target-bearing inner partition of outer fold zero; this is inner
+fold zero on the registered real frame. The usual all-fold binding stays unchanged
+so verified legacy measurements retain their task positions and attempt history.
+
+The root also binds the calibration receipt's file hash. Re-preparation refuses
+a changed receipt before reusing the existing root, and consumers refuse an
+in-place receipt change. A copied profile with identical receipt content remains
+an idempotent input. Legacy roots use the receipt hash already stored in inputs.
