@@ -92,9 +92,11 @@ def _git(repo, home, *args, stdin=None):
            "GIT_AUTHOR_EMAIL": "merge-verifier@localhost", "GIT_COMMITTER_NAME": "merge-verifier",
            "GIT_COMMITTER_EMAIL": "merge-verifier@localhost", "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z",
            "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z", "LC_ALL": "C"}
-    cmd = ["git", "-c", "core.hooksPath=" + os.devnull, "-c", "commit.gpgsign=false", "-c", "gpg.format=openpgp",
-           "-c", "core.autocrlf=false", "-c", "core.safecrlf=false", "-c", "core.fsmonitor=false",
-           "-c", "protocol.allow=never", "--literal-pathspecs", *args]
+    # No content-conversion override here: status must judge the copied checkout under its own settings (for example
+    # core.autocrlf=true legitimately checks out LF blobs as CRLF); blobs are hashed with --no-filters regardless.
+    cmd = ["git", "--no-optional-locks", "-c", "core.hooksPath=" + os.devnull, "-c", "commit.gpgsign=false",
+           "-c", "gpg.format=openpgp", "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
+           "--literal-pathspecs", *args]
     proc = subprocess.run(cmd, cwd=repo, env=env, input=stdin, capture_output=True, check=False)
     if proc.returncode != 0:
         raise SystemExit(f"reconstruct: git {args[0]} failed: {proc.stderr.decode(errors='replace')[:300]}")
@@ -121,9 +123,23 @@ def reconstruct(tree):
     try:
         # Content-based (git status refreshes stat information in memory, so a copied tree with fresh inodes compares
         # by content): any modified, deleted or untracked non-ignored path means the index is not the tree under test.
-        status = _git(tree, home, "status", "--porcelain", "--untracked-files=all", "-z")
-        # porcelain v1 "XY path": X is index vs HEAD (the staged candidate merge, expected), Y is worktree vs index.
-        drift = [x[3:] for x in status.split(b"\0") if len(x) > 3 and (x[1:2] != b" " or x[:2] == b"??")]
+        # --no-optional-locks: status refreshes stat information in memory only and never writes an index (relevant when
+        # the copied metadata is a pointer file naming an external gitdir). porcelain v1 -z records are "XY path", with
+        # renames and copies ("R"/"C" in X) followed by a second NUL-terminated source path that is not a record.
+        status = _git(tree, home, "status", "--porcelain=v1", "--untracked-files=all", "--no-renames", "-z")
+        drift = []
+        fields = status.split(b"\0")
+        i = 0
+        while i < len(fields):
+            rec = fields[i]
+            i += 1
+            if not rec:
+                continue
+            if rec[:1] in (b"R", b"C"):
+                i += 1   # skip the source path field of a rename/copy record
+            # X is index vs HEAD (the staged candidate merge, expected); Y is worktree vs index.
+            if rec[1:2] != b" " or rec[:2] == b"??":
+                drift.append(rec[3:])
         if drift:
             raise SystemExit("reconstruct: the index does not describe the working tree (the merge operator stages the "
                              "candidate); differing paths: " + ", ".join(x.decode(errors="replace") for x in drift[:10]))
