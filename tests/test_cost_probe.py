@@ -232,7 +232,7 @@ def test_measurement_harness_resumes_real_controller_across_attempts(tmp_path, m
 
     monkeypatch.setattr(type(prepared), 'configuration', cpu_configuration)
     monkeypatch.setattr(cost_probe, 'require_compute_node', lambda **kwargs: None)
-    monkeypatch.setattr(cost_probe, 'clean_identity', lambda: 'same-clean-head')
+    monkeypatch.setattr(cost_probe, 'clean_identity', lambda **kwargs: 'same-clean-head')
     monkeypatch.setattr(torch.cuda, 'reset_peak_memory_stats', lambda: None)
     monkeypatch.setattr(torch.cuda, 'max_memory_allocated', lambda: 0)
     original_clock = time.monotonic
@@ -360,8 +360,8 @@ def test_report_preserves_measurements_and_calibration_labels(tmp_path, monkeypa
         basis = set(report['cells'][cell]['compute_h100_hours_per_repetition']['basis'])
         assert ('extrapolated' in basis) is (cell == 'a' and partial_inner)
         assert ('uncalibrated' in basis) is (not frame_matches)
-        assert report['measurements'][cell]['ssl']['summary']['epochs_completed']['value'] == 7
-        assert report['measurements'][cell]['ssl']['summary']['wall_seconds_at_last_completed_epoch']['value'] == 100
+        assert report['measurements'][cell]['refit_ssl']['summary']['epochs_completed']['value'] == 7
+        assert report['measurements'][cell]['refit_ssl']['summary']['wall_seconds_at_last_completed_epoch']['value'] == 100
         for row in report['feasibility'][cell]:
             assert all(set(quantity['basis']) == basis for quantity in row.values())
     def labelled_numbers(value):
@@ -485,7 +485,8 @@ def test_unresolved_submission_refuses_instead_of_resubmitting(monkeypatch):
     assert item['job_id'] is None
 
 
-def test_driver_recovers_two_live_jobs_without_another_submission(tmp_path, monkeypatch):
+@pytest.mark.parametrize('active_state', ['RUNNING', 'REQUEUED', 'REQUEUE_HOLD', 'RESIZING'])
+def test_driver_recovers_two_live_jobs_without_another_submission(tmp_path, monkeypatch, active_state):
     import json
     import subprocess
     import time
@@ -506,7 +507,7 @@ def test_driver_recovers_two_live_jobs_without_another_submission(tmp_path, monk
         if '--name' in command:
             return ''
         job = command[command.index('-j') + 1]
-        return job + '|standard|node|00:01:00|RUNNING|0:0\n'
+        return job + '|standard|node|00:01:00|' + active_state + '|0:0\n'
 
     def stop_at_poll(seconds):
         raise RuntimeError('poll boundary')
@@ -641,3 +642,192 @@ def test_failed_inner_ssl_still_allows_independent_outer_ssl(tmp_path, counted_f
     next_job, issues = cp.next_measurement(tmp_path, work, jobs)
     assert next_job == (str(plan[3][0]), None, True)
     assert [item['operation'] for item in issues] == [str(plan[0][0])]
+
+
+def test_full_epoch_count_still_requires_completed_fit_evaluation():
+    from oxyformer.validation.cost_probe import fit_quantity
+    record = fit_record(epochs=150, complete=False)
+    record['attempts'] = ['first', 'second']
+    assert fit_quantity(record, 150) is None
+
+
+def test_partial_ssl_history_reports_observed_epochs_without_invented_boundaries():
+    from oxyformer.validation.cost_probe import fit_quantity, fit_statistics
+    record = fit_record(epochs=0, complete=False)
+    record['attempts'] = ['first', 'second']
+    original = record['slices'][0]
+    record['slices'] = [{**original, 'epochs_completed': epoch,
+                         'minibatches_partial_epoch': 1} for epoch in (0, 1, 2)]
+    assert fit_statistics(record)['epochs_completed'] == 2
+    assert fit_statistics(record)['epochs_at_last_completed_boundary'] == 0
+    assert fit_quantity(record, 30) is None
+
+
+def test_scoring_checks_pinned_source_before_computation(tmp_path, monkeypatch, cpu_measurement):
+    from oxyformer.training.fit import RecipeStudy
+    from oxyformer.validation import cost_probe as cp, coverage
+    monkeypatch.setattr(cp, 'require_compute_node', lambda **kwargs: None)
+    monkeypatch.setattr(cp, 'clean_identity', lambda: 'clean-descendant')
+
+    def changed_source(**kwargs):
+        raise ValueError('protected source differs from counted-work tree')
+
+    monkeypatch.setattr(cp, 'pinned_work', changed_source)
+    monkeypatch.setattr(coverage, 'estimate_repetition', lambda *args, **kwargs: {})
+    with pytest.raises(ValueError, match='protected source differs'):
+        cp.measure_scoring(cpu_measurement, {}, RecipeStudy(), tmp_path / 'score')
+
+
+def test_driver_refuses_missing_owner_decision_before_submission(tmp_path, monkeypatch):
+    import subprocess
+    import yaml
+    from oxyformer.validation import cost_probe as cp
+    cp.atomic_record(tmp_path / 'inputs.json', {'work': {}})
+    monkeypatch.setattr(cp, 'require_compute_node', lambda: None)
+    monkeypatch.setattr(cp, 'clean_identity', lambda: 'clean-descendant')
+    monkeypatch.setattr(yaml, 'safe_load', lambda text: {'owner_decisions': {}})
+    def submission(command, **kwargs):
+        pytest.fail('submitted without owner_decisions.month2_followon')
+    monkeypatch.setattr(subprocess, 'check_output', submission)
+    with pytest.raises(ValueError, match='month2_followon'):
+        cp.drive_measurements(tmp_path)
+
+
+def test_report_uses_distinct_inner_and_outer_ssl_durations(tmp_path, monkeypatch, counted_fixture):
+    from oxyformer.validation import cost_probe as cp
+    work = {c: cp.pinned_work(seed_count=s.seed_count, grid_points=s.grid_points)
+            for c, s in cp.study_cells().items()}
+    cp.atomic_record(tmp_path / 'inputs.json', {'tree': BASE_TREE, 'work': work,
+        'profile_path': 'sealed', 'frame_path': 'frame', 'frame_sha256': 'same'})
+    cp.atomic_record(tmp_path / 'driver-failures.json', {})
+    cp.atomic_record(tmp_path / 'driver-jobs.json', [])
+    for cell in cp.study_cells():
+        for position, (kind, fold, grid) in enumerate(work[cell]['tasks_per_outer_seed']):
+            if kind == 'select':
+                continue
+            record = fit_record()
+            seconds = (1200. if fold == 3 else 600.) if kind == 'ssl' else 0.
+            record['slices'][0].update(compute_seconds=seconds, wall_seconds=seconds)
+            cp.atomic_record(tmp_path / cell / str(position) / 'progress.json', record)
+        cp.atomic_record(tmp_path / cell / 'scoring.json', {'tree': BASE_TREE, 'wall_seconds': 0.})
+    monkeypatch.setattr(cp, 'calibration_receipt', lambda *args: {
+        'compute_hours': measured(15000. / 3600), 'study': cp.cell_values(cp.study_cells()['e']),
+        'frame_hash': 'same', 'frame_matches': True, 'work': work['e']})
+    report = cp.measurement_report(tmp_path, {'ratio': measured(1.).to_dict()})
+    assert report['cells']['e']['compute_h100_hours_per_repetition']['value'] == pytest.approx(15000. / 3600)
+    assert report['formula']['e']['counts']['inner_ssl']['value'] == 15
+    assert report['formula']['e']['counts']['refit_ssl']['value'] == 5
+
+
+def test_publish_report_creates_scheduler_evidence_and_preserves_cpu_jobs(tmp_path, monkeypatch):
+    import json
+    from oxyformer.validation import cost_probe as cp
+    root = tmp_path / 'measurements'
+    cp.atomic_record(root / 'driver-jobs.json', [{'job_id': '123', 'cell': 'e',
+        'operation': '16', 'partition': 'standard', 'node': 'compute',
+        'elapsed': '01:02:03', 'state': 'COMPLETED', 'exit_code': '0:0'}])
+    cp.atomic_record(tmp_path / 'slurm_jobs.json', [
+        {'job_id': '100', 'sub_measurement': 'CPU tests'},
+        {'job_id': '123', 'wall_seconds': measured(1.).to_dict()}])
+    report = {'calibration': {'passed': True, 'ratio': measured(1.).to_dict(), 'reasons': []},
+        'tree': BASE_TREE, 'cells': {}, 'formula': {}, 'measurements': {},
+        'feasibility': {}, 'limitations': []}
+    monkeypatch.setattr(cp, 'measurement_report', lambda *args: report)
+    monkeypatch.setattr(cp, 'require_compute_node', lambda: None)
+    monkeypatch.setattr(cp, 'clean_identity', lambda: 'clean')
+    cp.publish_report(root, {k: measured(1.).to_dict() for k in ('ratio', 'allocated_hours', 'compute_hours')})
+    jobs = json.loads((tmp_path / 'slurm_jobs.json').read_text())
+    assert {j['job_id'] for j in jobs} == {'100', '123'}
+    gpu = next(j for j in jobs if j['job_id'] == '123')
+    assert gpu['node'] == 'compute' and gpu['elapsed'] == '01:02:03'
+    assert gpu['wall_seconds'] == measured(3723.).to_dict()
+    assert gpu['sub_measurement'] == 'cell e, controller operation 16'
+    assert gpu['basis'] == ['measured']
+
+
+@pytest.fixture
+def cpu_measurement(tmp_path, monkeypatch, counted_fixture):
+    import torch
+    from test_nested_cv import endpoint
+    from oxyformer.validation import cost_probe as cp
+    prepared = endpoint(tmp_path / 'data')
+    configure = type(prepared).configuration
+    monkeypatch.setattr(type(prepared), 'configuration',
+        lambda self, *args, **kwargs: configure(self, *args, **{**kwargs, 'device': 'cpu'}))
+    monkeypatch.setattr(cp, 'require_compute_node', lambda **kwargs: None)
+    monkeypatch.setattr(cp, 'clean_identity', lambda **kwargs: 'same-clean-head')
+    monkeypatch.setattr(torch.cuda, 'reset_peak_memory_stats', lambda: None)
+    monkeypatch.setattr(torch.cuda, 'max_memory_allocated', lambda: 0)
+    monkeypatch.setenv('SLURM_JOB_ID', 'first')
+    return prepared
+
+
+def test_ssl_resume_finishes_the_partial_epoch_before_another(tmp_path, monkeypatch, cpu_measurement):
+    from dataclasses import replace
+    import time
+    from oxyformer.training import nested_cv
+    from oxyformer.training.fit import RecipeStudy
+    from oxyformer.validation import cost_probe as cp
+    real_run = nested_cv.run_fold
+    calls = []
+
+    def interrupted(config, *args, **kwargs):
+        calls.append(config.max_batches)
+        if len(calls) == 1:
+            config = replace(config, max_batches=1)
+        return real_run(config, *args, **kwargs)
+
+    monkeypatch.setattr(nested_cv, 'run_fold', interrupted)
+    clock = time.monotonic
+    offset = [0.]
+    monkeypatch.setattr(time, 'monotonic', lambda: clock() + offset[0])
+    write = cp.atomic_record
+
+    def end_attempt(path, record):
+        write(path, record)
+        if len(record['slices']) in (1, 3):
+            offset[0] += 10000.
+
+    monkeypatch.setattr(cp, 'atomic_record', end_attempt)
+    recipe = {'nested_cv': {'ssl_epochs': 5, 'frozen_epochs': 2, 'synthetic': True}}
+    root = tmp_path / 'ssl-measurement'
+    first = cp.measure_fit_task(cpu_measurement, recipe, RecipeStudy(), root,
+        position=0, deadline=time.monotonic() + 10000.)
+    assert first['slices'][-1]['minibatches_partial_epoch'] == 1
+    monkeypatch.setenv('SLURM_JOB_ID', 'second')
+    # The attempt-registration write also sees one prior slice; stop only when
+    # a new checkpoint is written during this second attempt.
+    def end_second(path, record):
+        write(path, record)
+        if len(record['slices']) == 3:
+            offset[0] += 10000.
+    monkeypatch.setattr(cp, 'atomic_record', end_second)
+    second = cp.measure_fit_task(cpu_measurement, recipe, RecipeStudy(), root,
+        position=0, deadline=time.monotonic() + 10000.)
+    assert second['slices'][-1]['epochs_completed'] == 2
+    assert second['slices'][-1]['minibatches_partial_epoch'] == 0
+    assert cp.fit_statistics(second)['epochs_completed'] == 2
+    assert cp.fit_quantity(second, 5).basis == {'extrapolated'}
+
+
+def test_native_nuisance_completion_records_observed_epochs(tmp_path, monkeypatch, cpu_measurement):
+    from oxyformer.training import nested_cv
+    from oxyformer.training.fit import FoldArtifacts, RecipeStudy
+    from oxyformer.validation import cost_probe as cp
+    recipe = {'nested_cv': {'ssl_epochs': 1, 'frozen_epochs': 3, 'synthetic': True}}
+    ssl = cp.measure_fit_task(cpu_measurement, recipe, RecipeStudy(), tmp_path / 'ssl', position=0)
+    transaction = nested_cv._train_transaction
+
+    def native_finish(*args, **kwargs):
+        # Exercise the native completion interface with a real one-epoch fit.
+        # The registered study has no nuisance stopping partition; this fixture
+        # checks the returned progress instead of inventing an epoch count.
+        args = list(args)
+        args[5] = 1
+        return transaction(*args, **kwargs)
+
+    monkeypatch.setattr(nested_cv, '_train_transaction', native_finish)
+    result = cp.measure_fit_task(cpu_measurement, recipe, RecipeStudy(), tmp_path / 'inner',
+        position=1, predecessor=FoldArtifacts.from_json(ssl['predecessor']))
+    assert result['slices'][-1]['complete']
+    assert result['slices'][-1]['epochs_completed'] == 1
