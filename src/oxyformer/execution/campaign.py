@@ -244,7 +244,7 @@ def _build(spec):
         extra = spec.get('collector_inputs', {})
         require(not set(extra).intersection(needs), 'duplicate diagnostic collector dependency')
         needs.update(deepcopy(extra))
-        collected.extend(extra)
+        collected.extend(sorted(extra))
     task = {'id': _id(spec, ['collector']), 'stage': spec['collector']['stage'],
         'campaign': spec['id'], 'needs': needs, 'outputs': spec['collector']['outputs'],
         'recipe_lock': spec['recipe_lock'], 'expected_leaves': collected}

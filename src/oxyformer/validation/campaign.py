@@ -992,7 +992,8 @@ def collect(request, config, task):
         scenario = plan["spec"]["work"][0]["parameters"]["scenario"]
         others = [p for p in expansion["plans"] if p["spec"]["id"] != task["campaign"]
                   and p["spec"]["work"][0]["parameters"]["scenario"] == scenario]
-        collected_leaves.extend(leaf for p in others for leaf in p["tasks"][:-1])
+        other_leaves = {leaf["id"]: leaf for p in others for leaf in p["tasks"][:-1]}
+        collected_leaves.extend(other_leaves[key] for key in sorted(other_leaves))
     require(task["expected_leaves"] == [leaf["id"] for leaf in collected_leaves], "partial collector fan-in")
     instance = next(k for k, v in lock["instances"].items() if v == task["campaign"])
     declared_batches = instance_batches(lock, instance)

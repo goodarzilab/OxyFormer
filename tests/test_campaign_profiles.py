@@ -2220,3 +2220,42 @@ def test_month2_refuses_malformed_top_level(key, value):
     approvals['owner_decisions']['month2_followon'][key] = value
     with pytest.raises(ContractError, match='month2_followon.*' + key):
         campaign.month2_decision(approvals)
+
+
+@pytest.mark.parametrize('screening_rates', [(100.,) * 4], indirect=True)
+def test_diagnostic_collector_aggregates_all_twenty_chain_records(diagnostic_request, tmp_path, monkeypatch):
+    req = diagnostic_lock_request(diagnostic_request, tmp_path)
+    outcome = campaign.run_stage(req)
+    assert outcome.status == 'pass', outcome.message
+    root = Path(req.output_dir)
+    lock = coverage.read_json(root / 'recipe_lock.json')
+    plans = coverage.read_json(root / 'expanded_units.json')['plans']
+    cfg = coverage.read_json(req.config_path)
+    deps = {k: Path(v) for k, v in cfg['dependencies'].items()}
+    deps['campaign-lock'] = root
+    budgets = {}
+    _, records = successful_records(20, 'sign_changing')
+    for plan, batch, record in zip(plans, lock['batches'], records):
+        record['draw'] = batch['draws'][0]
+        for leaf in plan['tasks'][:-1]:
+            path = tmp_path / 'collected-leaves' / leaf['id']
+            payload = {'lock_hash': coverage.digest(lock), 'batch_id': batch['batch_id'], 'mode': 'diagnostic',
+                'scenario': batch['scenario'], 'draws': batch['draws'], 'records': [record]}
+            result_path = write(path / 'result.json', payload)
+            deps[leaf['id']] = path
+            budgets[leaf['id']] = {'payload_hash': file_hash(result_path),
+                'binding': {'recipe_hash': coverage.digest(lock['recipe'])},
+                'leaves': [{'wall_seconds': 100.}], 'complete': True}
+    monkeypatch.setattr(campaign, 'load_lock', lambda *args: lock)
+    monkeypatch.setattr(campaign, 'load_budget', lambda req, config, unit, **kw: budgets[unit])
+    collector = request(tmp_path / 'diagnostic-collector', plans[0]['tasks'][-1], deps, cfg['approvals'])
+    result = campaign.run_stage(collector)
+    assert result.status == 'pass', result.message
+    value = coverage.read_json(Path(collector.output_dir) / 'result.json')
+    assert len(value['records']) == 20
+    assert value['production_equivalent'] is False and value['certifies_release_criteria'] is False
+    gate = coverage.read_json(Path(collector.output_dir) / 'gate.json')
+    assert gate['coverage_pass'] is False and gate['coverage_pass_reason'] == 'diagnostic'
+    for summary in value['diagnostic_summary']['sign_changing'].values():
+        assert summary['n'] == 20 and summary['empirical_sd'] > 0
+    assert len(gate['received_leaves']) == sum(len(p['expected_leaves']) for p in plans)
