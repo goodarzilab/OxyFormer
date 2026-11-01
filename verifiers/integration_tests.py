@@ -5,10 +5,10 @@ hanig-orchestrate's merge_unit.py runs this pinned file inside a disposable cand
 into the exact dev commit, and treats exit status 0 as a pass. It runs the whole pytest suite with the run's
 environment, CPU only, the same way .github/workflows/ci.yml does, so a merge is refused when the merged tree's
 tests fail even if each branch passed on its own. Exit status 5 (no tests collected) counts as a pass, as in CI.
-Inside the disposable copy the candidate's tracked-file list is taken from its metadata, the metadata is discarded, and a
-fresh repository (empty template, no inherited configuration) is built holding exactly those files before pytest, so HEAD
-matches the tree as in CI; commit author, subject and history are synthetic, so tests must not depend on commit metadata
-or history (CI on the real commit covers that).
+Inside the disposable copy the candidate's index entries are read from its metadata, the metadata is discarded, and a
+fresh repository is built entry by entry from the working files (--no-filters, literal paths, empty template, empty HOME)
+before pytest, so HEAD matches the tree byte for byte as in CI; commit author, subject and history are synthetic, so tests
+must not depend on commit metadata or history (CI on the real commit covers that).
 """
 import os
 import shutil
@@ -41,22 +41,19 @@ UNOWNED_GRACE_SECONDS = 24 * 3600
 HOST = socket.gethostname()
 JOB = (
     'set -u; d=$(mktemp -d /tmp/v-XXXXXX); trap \'chmod -R u+w "$d" 2>/dev/null; rm -rf "$d"\' EXIT HUP INT QUIT TERM USR1 USR2 ALRM XCPU XFSZ VTALRM PROF; '
-    # The staged root's CONTENTS are copied (a symlinked root is never followed into); then HEAD is made to describe the
-    # tree under test, as CI's checkout does (HEAD-anchored inputs such as configs/approvals.yaml are read with
-    # expected_bytes from HEAD). The candidate's tracked-file list is read from the copied metadata first, every GIT_*
-    # variable is unset, the copied .git is made writable and discarded, and a fresh repository is built with an empty
-    # template and system/global configuration disabled, so no inherited or candidate-controlled template, filter, hook,
-    # signing or ownership setting can alter the files or reach an external repository. Exactly the candidate's tracked
-    # files are added (forced, so ignore rules cannot drop a tracked file); blobs equal the working files byte for byte.
-    # Commit author, subject and history are synthetic; tests must not read commit metadata or history.
+    # The staged root's CONTENTS are copied (a symlinked root is never followed into). HEAD must then describe the tree
+    # under test, as CI's checkout does (HEAD-anchored inputs such as configs/approvals.yaml are read with expected_bytes
+    # from HEAD): reconstruct() below, run from this same pinned file, reads the candidate's tracked entries from the copied
+    # metadata, discards that metadata, and builds a fresh repository whose index is written entry by entry from the
+    # working files with --no-filters and literal paths, so no attribute, filter, template, hook, signing, encoding or
+    # pathspec rule can alter a byte or reach outside the copy. Commit author, subject and history are synthetic; tests
+    # must not read commit metadata or history (CI on the real commit covers that).
     'mkdir -p "$d/tree" && cp -a "$OXYFORMER_VERIFY_STAGED/." "$d/tree/" && cd "$d/tree" || exit 97; '
     'for v in $(compgen -e); do case "$v" in GIT_*) unset "$v";; esac; done; '
-    'g="env GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 git -c user.name=merge-verifier -c user.email=merge-verifier@localhost -c core.hooksPath=/dev/null -c commit.gpgsign=false -c core.autocrlf=false -c core.safecrlf=false"; '
-    '$g ls-files -z > "$d/tracked.z" || exit 94; '
-    'chmod -R u+w .git 2>/dev/null; rm -rf .git && $g init -q --template= && xargs -0 -r $g add -f -- < "$d/tracked.z" && $g commit -q --allow-empty --no-verify -m "candidate merge under verification" >/dev/null 2>&1 || exit 96; '
+    '"$OXYFORMER_VERIFY_PYTHON" "$OXYFORMER_VERIFY_RECONSTRUCT" "$d/tree" || exit 96; '
     'py=$OXYFORMER_VERIFY_PYTHON; out=$OXYFORMER_VERIFY_RESULT; '
     'if [ -n "${OXYFORMER_VERIFY_BASH_ENV+x}" ]; then export BASH_ENV=$OXYFORMER_VERIFY_BASH_ENV; fi; '
-    'unset OXYFORMER_VERIFY_PYTHON OXYFORMER_VERIFY_RESULT OXYFORMER_VERIFY_STAGED OXYFORMER_VERIFY_BASH_ENV; '
+    'unset OXYFORMER_VERIFY_PYTHON OXYFORMER_VERIFY_RESULT OXYFORMER_VERIFY_STAGED OXYFORMER_VERIFY_BASH_ENV OXYFORMER_VERIFY_RECONSTRUCT; '
     'for v in $(compgen -e); do case "$v" in SLURM_*|SRUN_*) unset "$v";; esac; done; '
     '"$py" -m pytest -q; rc=$?; echo "$rc" > "$out"; exit $rc'
 )
@@ -89,6 +86,81 @@ def _sweep_stale():
             shutil.rmtree(path, ignore_errors=True)
 
 
+def _git(repo, home, *args, stdin=None):
+    env = {"PATH": os.defpath, "HOME": home, "XDG_CONFIG_HOME": os.path.join(home, ".config"),
+           "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+           "GIT_ATTR_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0", "GIT_AUTHOR_NAME": "merge-verifier",
+           "GIT_AUTHOR_EMAIL": "merge-verifier@localhost", "GIT_COMMITTER_NAME": "merge-verifier",
+           "GIT_COMMITTER_EMAIL": "merge-verifier@localhost", "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z",
+           "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z", "LC_ALL": "C"}
+    cmd = ["git", "-c", "core.hooksPath=" + os.devnull, "-c", "commit.gpgsign=false", "-c", "gpg.format=openpgp",
+           "-c", "core.autocrlf=false", "-c", "core.safecrlf=false", "-c", "core.fsmonitor=false",
+           "-c", "protocol.allow=never", "--literal-pathspecs", *args]
+    proc = subprocess.run(cmd, cwd=repo, env=env, input=stdin, capture_output=True, check=False)
+    if proc.returncode != 0:
+        raise SystemExit(f"reconstruct: git {args[0]} failed: {proc.stderr.decode(errors='replace')[:300]}")
+    return proc.stdout
+
+
+def reconstruct(tree):
+    """Make HEAD describe the working tree byte for byte, without git's content-conversion layer.
+
+    Reads the candidate's stage-0 index entries from the copied metadata, discards that metadata, and builds a fresh
+    repository (empty template, no inherited configuration, an empty HOME so no per-user attributes apply) whose index
+    is written from the working files: regular files and symlinks are hashed with --no-filters, gitlinks keep their
+    recorded commit, paths are literal. Then write-tree, commit-tree and update-ref; no hook, filter, attribute,
+    template, signing, encoding or pathspec rule can run, and nothing outside ``tree`` is read or written.
+    """
+    tree = os.path.realpath(tree)
+    if os.path.islink(os.path.join(tree, ".git")) or not os.path.isdir(os.path.join(tree, ".git")):
+        raise SystemExit("reconstruct: the copied metadata is not a self-contained directory")
+    home = tempfile.mkdtemp(prefix="verify-home-")
+    try:
+        raw = _git(tree, home, "ls-files", "-s", "-z", "--full-name")
+        entries = []
+        for record in raw.split(b"\0"):
+            if not record:
+                continue
+            meta, path = record.split(b"\t", 1)
+            mode, sha, stage = meta.split(b" ")
+            if stage != b"0":
+                raise SystemExit("reconstruct: unmerged index entry " + path.decode(errors="replace"))
+            entries.append((mode, sha, path))
+        for root, dirs, files in os.walk(os.path.join(tree, ".git")):
+            for name in dirs + files:
+                try:
+                    os.chmod(os.path.join(root, name), 0o700)
+                except OSError:
+                    pass
+        shutil.rmtree(os.path.join(tree, ".git"))
+        _git(tree, home, "init", "-q", "--template=")
+        index = bytearray()
+        for mode, sha, path in entries:
+            full = os.path.join(tree, path.decode("utf-8", "surrogateescape"))
+            if mode == b"160000":
+                blob = sha                      # gitlink: the recorded submodule commit, no object needed
+            elif mode == b"120000":
+                target = os.readlink(full).encode("utf-8", "surrogateescape")
+                blob = _git(tree, home, "hash-object", "-w", "-t", "blob", "--no-filters", "--stdin", stdin=target).strip()
+            elif mode in (b"100644", b"100755"):
+                with open(full, "rb") as fh:
+                    blob = _git(tree, home, "hash-object", "-w", "-t", "blob", "--no-filters", "--stdin", stdin=fh.read()).strip()
+            else:
+                raise SystemExit("reconstruct: unsupported index mode " + mode.decode())
+            index += mode + b" " + blob + b"\t" + path + b"\0"
+        _git(tree, home, "update-index", "-z", "--index-info", stdin=bytes(index))
+        tree_id = _git(tree, home, "write-tree").strip()
+        commit = _git(tree, home, "commit-tree", tree_id, "-m", "candidate merge under verification").strip()
+        _git(tree, home, "update-ref", "HEAD", commit.decode())
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+if len(sys.argv) == 2 and os.path.isdir(sys.argv[1]):
+    reconstruct(sys.argv[1])
+    sys.exit(0)
+
+
 work = child = None
 
 
@@ -110,12 +182,15 @@ try:
     Path(work, "owner").write_text(f"{HOST} {os.getpid()}\n")
     staged = os.path.join(work, "tree")
     result = os.path.join(work, "pytest-exit-status")
+    reconstruct_script = os.path.join(work, "reconstruct.py")
+    shutil.copyfile(os.path.abspath(__file__), reconstruct_script)   # the same pinned bytes run the reconstruction
     shutil.copytree(os.getcwd(), staged, symlinks=True)
     srun = ["srun", "--partition=standard", "--account=root", "--nodes=1", "--ntasks=1", "--cpus-per-task=8",
             "--mem=32G", "--time=12:00:00", "--export=ALL", "--chdir=/tmp", "--job-name=oxyformer-merge-verify"]
     # Job parameters use a private prefix and are removed before pytest, so the suite sees the original environment.
     env = dict(os.environ, PYTHONPATH="src", CUDA_VISIBLE_DEVICES="", OXYFORMER_VERIFY_STAGED=staged,
-               OXYFORMER_VERIFY_PYTHON=PYTHON, OXYFORMER_VERIFY_RESULT=result)
+               OXYFORMER_VERIFY_PYTHON=PYTHON, OXYFORMER_VERIFY_RESULT=result,
+               OXYFORMER_VERIFY_RECONSTRUCT=reconstruct_script)
     env.pop("SLURM_EXIT_ERROR", None)
     job_env = {k: v for k, v in env.items() if k != "BASH_ENV"}  # the wrapper shell must not source startup files
     if "BASH_ENV" in env:
