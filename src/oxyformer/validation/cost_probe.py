@@ -608,14 +608,20 @@ def main():
     from oxyformer.training.fit import FoldArtifacts
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('prepare', 'fit', 'score', 'drive'))
+    parser.add_argument('command', choices=('prepare', 'fit', 'score', 'drive', 'report'))
     parser.add_argument('--root', required=True, type=Path)
     parser.add_argument('--profile', type=Path)
     parser.add_argument('--cell', choices=tuple('abcde'))
     parser.add_argument('--position', type=int)
     parser.add_argument('--predecessor', type=Path)
+    parser.add_argument('--overhead', type=Path)
     args = parser.parse_args()
     require_compute_node(gpu=args.command in ('fit', 'score'))
+    if args.command == 'report':
+        if args.overhead is None:
+            parser.error('--overhead is required')
+        publish_report(args.root, json.loads(args.overhead.read_text()))
+        return
     if args.command == 'drive':
         drive_measurements(args.root)
         return
@@ -833,6 +839,52 @@ def drive_measurements(root):
             atomic_record(ledger_path, ledger)
         print('measurement driver:', len(live), 'active jobs;', len(failures), 'failed cells', flush=True)
         time.sleep(60)
+
+
+
+
+def publish_report(root, overhead):
+    """Publish only after every required measurement has a terminal record."""
+    from pathlib import Path
+    require_compute_node()
+    clean_identity()
+    root = Path(root)
+    report = measurement_report(root, overhead)
+    destination = root.parent
+    atomic_record(destination / 'recipe_cost_m2.json', report)
+
+    def display(quantity):
+        if quantity is None:
+            return 'failed_measurement; no projection'
+        return f"{quantity['value']:.6g} [" + ', '.join(quantity['basis']) + ']'
+
+    check = report['calibration']
+    lines = ['# Recipe cost study', '',
+             'Calibration: ' + ('passed' if check['passed'] else '**UNCALIBRATED**'),
+             'Calibration ratio: ' + display(check['ratio']), '']
+    if check['reasons']:
+        lines.extend(['Reasons: ' + '; '.join(check['reasons']) + '.',
+            'Potential contributors include representative-fold differences, reconstruction work',
+            'from epoch slicing, and the receipt identity differences named above.', ''])
+    lines.extend(['Counted-work tree: ' + report['tree'], '',
+                  'Every displayed numeric value has its propagated basis in brackets.', '',
+                  '| Cell | Compute H100-hours per repetition |', '| --- | --- |'])
+    for cell, value in report['cells'].items():
+        lines.append('| ' + cell + ' | ' + display(value['compute_h100_hours_per_repetition']) + ' |')
+    lines.extend(['', 'Measured campaign overhead ratio: ' + display(overhead['ratio']),
+        'Measured runner-wall GPU-hours: ' + display(overhead['allocated_hours']),
+        'Measured compute GPU-hours: ' + display(overhead['compute_hours']), '',
+        '| Cell | Repetitions | Scenarios | Compute H100-hours | Allocated H100-hours | Idealised wall hours at sixteen GPUs |',
+        '| --- | --- | --- | --- | --- | --- |'])
+    for cell, rows in report['feasibility'].items():
+        for row in rows:
+            lines.append('| ' + cell + ' | ' + ' | '.join(display(row[k]) for k in
+                ('repetitions', 'scenarios', 'compute_h100_hours', 'allocated_h100_hours',
+                 'idealised_lower_bound_wall_hours_at_16_gpus')) + ' |')
+    lines.extend(['', *report['limitations'], '',
+                  'Full validation, mutation and review evidence are recorded separately.',
+                  'This measurement report alone is not a completion or merge authorization.'])
+    (destination / 'SUMMARY.md').write_text('\n'.join(lines) + '\n')
 
 
 if __name__ == '__main__':
