@@ -7,6 +7,21 @@ from oxyformer.validation.cost_probe import (
 )
 
 
+@pytest.fixture
+def counted_fixture(monkeypatch):
+    """Arithmetic tests use a source fixture, including in shallow CI clones."""
+    from pathlib import Path
+    from oxyformer.validation import cost_probe
+    nested = Path('src/oxyformer/training/nested_cv.py').read_text()
+    coverage = Path('src/oxyformer/validation/coverage.py').read_text()
+
+    def fixture_work(*, seed_count, grid_points, tree=BASE_TREE):
+        return {**cost_probe.source_work(nested, coverage, seed_count=seed_count,
+                                        grid_points=grid_points), 'tree': tree}
+
+    monkeypatch.setattr(cost_probe, 'pinned_work', fixture_work)
+
+
 def measured(x):
     return Quantity(x, frozenset({'measured'}))
 
@@ -29,7 +44,7 @@ def test_finished_fit_is_measured():
 
 @pytest.mark.parametrize('seeds', [1, 3])
 @pytest.mark.parametrize('grid', [2, 4])
-def test_counted_controller_work(seeds, grid):
+def test_counted_controller_work(seeds, grid, counted_fixture):
     # Fixture traversal of the nested task ordering, including both refits.
     from collections import Counter
     tasks = []
@@ -45,7 +60,7 @@ def test_counted_controller_work(seeds, grid):
     assert operation_counts(seed_count=seeds, grid_points=grid) == dict(Counter(tasks))
 
 
-def test_projection_includes_scoring_and_refit_work():
+def test_projection_includes_scoring_and_refit_work(counted_fixture):
     counts = operation_counts(seed_count=1, grid_points=2)
     measurements = {name: {'tree': BASE_TREE, 'seconds': measured(i * 3600)}
                     for i, name in enumerate(counts, 1)}
@@ -76,7 +91,7 @@ def test_calibration_identity_and_anchor_rules(field, reason):
     assert 'uncalibrated' in result['ratio']['basis']
 
 
-def test_labels_propagate_into_ratios_projections_and_table():
+def test_labels_propagate_into_ratios_projections_and_table(counted_fixture):
     q = Quantity(1, frozenset({'extrapolated', 'uncalibrated'}))
     counts = operation_counts(seed_count=1, grid_points=2)
     measurements = {name: {'tree': BASE_TREE, 'seconds': measured(1)} for name in counts}
@@ -196,7 +211,7 @@ def test_real_controller_epoch_slices_and_resume(tmp_path):
     assert state(final)['results'][0]['kind'] == 'outcome'
 
 
-def test_measurement_harness_resumes_real_controller_across_attempts(tmp_path, monkeypatch):
+def test_measurement_harness_resumes_real_controller_across_attempts(tmp_path, monkeypatch, counted_fixture):
     from dataclasses import replace
     import time
     import torch
@@ -244,3 +259,26 @@ def test_measurement_harness_resumes_real_controller_across_attempts(tmp_path, m
     assert second['slices'][-1]['epochs_completed'] == 2
     assert second['slices'][-1]['complete']
     assert cost_probe.fit_quantity(second, 2).basis == {'measured'}
+
+
+def test_pinned_work_checks_base_source_identity_without_git_history(monkeypatch):
+    from pathlib import Path
+    import subprocess
+    from oxyformer.validation.cost_probe import pinned_work
+    calls = []
+
+    def source(command):
+        assert command[:2] == ['git', 'show']
+        tree, path = command[2].split(':', 1)
+        assert tree == BASE_TREE
+        calls.append(path)
+        return Path(path).read_bytes()
+
+    monkeypatch.setattr(subprocess, 'check_output', source)
+    counted = pinned_work(seed_count=1, grid_points=2)
+    assert counted['counts']['inner_outcome'] == 30
+    assert set(calls) == {'src/oxyformer/training/nested_cv.py',
+                          'src/oxyformer/validation/coverage.py'}
+    monkeypatch.setattr(subprocess, 'check_output', lambda command: source(command) + b'\n# drift\n')
+    with pytest.raises(ValueError, match='protected source differs'):
+        pinned_work(seed_count=1, grid_points=2)
