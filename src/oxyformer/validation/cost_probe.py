@@ -349,7 +349,7 @@ def measure_fit_task(endpoint, recipe, study, directory, *, position, predecesso
     root = Path(directory)
     root.mkdir(parents=True, exist_ok=True)
     binding = {'tree': BASE_TREE, 'head': head, 'endpoint': endpoint.content_hash,
-               'recipe': recipe, 'study': study.to_dict(), 'position': position,
+               'recipe': recipe, 'study': cell_values(study), 'position': position,
                'incoming': None if predecessor is None else predecessor.checkpoint.sha256}
     journal = root / 'progress.json'
     record = resume_record(journal, binding)
@@ -472,7 +472,7 @@ def measure_scoring(endpoint, recipe, study, root):
     # Intentionally discard all scientific values. Synthetic predictions have
     # no inferential meaning; only the call's elapsed time is a measurement.
     del result
-    return {'tree': BASE_TREE, 'head': head, 'study': study.to_dict(),
+    return {'tree': BASE_TREE, 'head': head, 'study': cell_values(study),
             'inputs': 'synthetic inputs, timing only', 'basis': ['measured'],
             'wall_seconds': wall, 'peak_gpu_memory_bytes': torch.cuda.max_memory_allocated(),
             'prediction_rows': len(observed)}
@@ -533,6 +533,11 @@ def leaf_overhead(paths):
                        frozenset({'measured'}))
     return {'allocated_hours': allocated.to_dict(), 'compute_hours': compute.to_dict(),
             'ratio': ratio(allocated, compute).to_dict(), 'files': files}
+
+
+def cell_values(study):
+    return {name: getattr(study, name) for name in
+            ('reference_cap', 'frozen_epochs', 'grid_points', 'seed_count')}
 
 
 def study_cells():
@@ -711,13 +716,13 @@ def measurement_report(root, overhead):
         'basis': frozenset(receipt['compute_hours']['basis'])}),
         measured_anchor=anchor is not None and anchor.basis == {'measured'},
         frame_matches=receipt['frame_matches'],
-        cell_matches=receipt['study'] == study_cells()['e'].to_dict(),
+        cell_matches=receipt['study'] == cell_values(study_cells()['e']),
         operations_match=inputs['work']['e']['counts'] == receipt['work']['counts'])
     cells = {}
     for name, q in projections.items():
         if q is not None and not check['passed']:
             q = q.with_basis('uncalibrated')
-        cells[name] = {'study': numbered(study_cells()[name].to_dict()),
+        cells[name] = {'study': numbered(cell_values(study_cells()[name])),
                        'compute_h100_hours_per_repetition': None if q is None else q.to_dict(),
                        'status': 'failed_measurement' if q is None else 'projected'}
         projections[name] = q
