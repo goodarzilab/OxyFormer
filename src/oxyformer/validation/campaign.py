@@ -150,7 +150,7 @@ def month2_decision(approvals=_REPOSITORY_APPROVALS):
     check(c["partition"] in d["partitions"], "diagnostic_campaign.partition")
     check(concurrency[c["partition"]] <= 16, "gpu_concurrency_max." + c["partition"])
     for key, ceiling in (("gpu_hours_per_leaf_max", 4), ("leaves_per_chain_max", 40)):
-        check(type(c[key]) in (int, float) and math.isfinite(c[key]) and 0 < c[key] <= ceiling,
+        check(type(c[key]) in (int, float) and 0 < c[key] <= ceiling and math.isfinite(c[key]),
               "diagnostic_campaign." + key)
     check(c["parallel_chains"] is True, "diagnostic_campaign.parallel_chains")
     check(c["certifies_release_criteria"] is False, "diagnostic_campaign.certifies_release_criteria")

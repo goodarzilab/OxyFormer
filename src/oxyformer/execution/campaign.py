@@ -134,7 +134,8 @@ def _spec_check(spec, approvals):
         require(d == month2_decision(), 'month2_followon drift')
         c = d['diagnostic_campaign']
         metadata = screening_metadata({'campaign_mode': 'diagnostic'})
-        require(all(spec.get(k) == v for k, v in metadata.items()), 'diagnostic specification drift')
+        for key, value in metadata.items():
+            require(spec.get(key) == value, 'diagnostic specification drift: ' + key)
         require(spec['kind'] == 'diagnostic', 'diagnostic kind drift')
         require(spec.get('partition') == c['partition'], 'diagnostic partition drift')
         require(spec.get('gpu_concurrency_max') == d['gpu_concurrency_max'][c['partition']],

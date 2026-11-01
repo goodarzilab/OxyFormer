@@ -2122,6 +2122,7 @@ def test_diagnostic_lock_twenty_chains_seeds_admission_and_flags(diagnostic_requ
     assert not {d['seed'] for d in draws}.intersection(d['seed'] for d in coverage.repetition_plan('month1:screening', 'sign_changing', 2))
     assert [d['index'] for d in draws] == list(range(20))
     assert lock['concurrency_limits'] == {'gpu': 16, 'cpu': 6}
+    assert lock['owner_decision_hash'] == lock['budget']['owner_decision_hash'] == coverage.digest(campaign.month2_decision())
     assert lock['budget']['run_gpu_hours_ceiling'] is None
     assert len(expansion['plans'][0]['tasks'][-1]['expected_leaves']) == sum(len(p['expected_leaves']) for p in expansion['plans'])
     for name in ('recipe_lock.json', 'budget.json', 'task_manifest.json'):
@@ -2281,3 +2282,49 @@ def test_month2_mixed_missing_and_extra_keys_raise_named_contract_error(nested):
     block[42] = 'unexpected'
     with pytest.raises(ContractError, match='month2_followon.*42'):
         campaign.month2_decision(approvals)
+
+
+@pytest.mark.parametrize('key', ['gpu_hours_per_leaf_max', 'leaves_per_chain_max'])
+def test_month2_oversized_integer_bound_is_named_contract_error(key):
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    approvals['owner_decisions']['month2_followon']['diagnostic_campaign'][key] = 10 ** 400
+    with pytest.raises(ContractError, match='month2_followon.*' + key):
+        campaign.month2_decision(approvals)
+
+
+@pytest.mark.parametrize('screening_rates', [(100.,) * 4], indirect=True)
+def test_diagnostic_expansion_names_mismatched_metadata(diagnostic_request, tmp_path):
+    from oxyformer.execution.campaign import expand_campaign
+    req = diagnostic_lock_request(diagnostic_request, tmp_path)
+    result = campaign.run_stage(req)
+    assert result.status == 'pass', result.message
+    spec = coverage.read_json(Path(req.output_dir) / 'expanded_units.json')['plans'][0]['spec']
+    approvals = coverage.read_json(req.config_path)['approvals']
+    for key, value in [('certifies_release_criteria', True), ('study', {}),
+                       ('production_equivalent', True), ('campaign_label', 'unlabelled')]:
+        changed = deepcopy(spec)
+        changed[key] = value
+        with pytest.raises(ContractError, match=key):
+            expand_campaign(changed, approvals)
+
+
+def test_month2_decision_accepts_canonical_mapping_serialization():
+    from oxyformer.provenance import canonical_json
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    # The runner and sealed fixture writer sort JSON mapping keys. List order
+    # (partitions and scenarios) remains significant; mapping order does not.
+    expected = campaign.month2_decision(approvals)
+    approvals['owner_decisions']['month2_followon'] = expected
+    serialized = json.loads(canonical_json(approvals['owner_decisions']['month2_followon']))
+    assert list(serialized) != list(expected)
+    approvals['owner_decisions']['month2_followon'] = serialized
+    assert campaign.month2_decision(approvals) == expected
+
+
+@pytest.mark.parametrize('screening_rates', [(100.,) * 4], indirect=True)
+def test_diagnostic_estimate_cpu_refusal_precedes_publication(diagnostic_request, monkeypatch):
+    import torch
+    monkeypatch.setattr(campaign, 'resolve_device', lambda: torch.device('cpu'))
+    result = campaign_estimate.run_stage(diagnostic_request)
+    assert result.status == 'blocked' and 'diagnostic measurement requires CUDA' in result.message
+    assert not (Path(diagnostic_request.output_dir) / 'budget_estimate.json').exists()
