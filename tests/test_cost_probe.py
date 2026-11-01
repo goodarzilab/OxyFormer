@@ -438,6 +438,7 @@ def test_driver_records_intent_before_a_submission_reply_can_be_lost(tmp_path, m
 
     def lost_reply(command, **kwargs):
         assert command[0] == 'sbatch'
+        assert '--no-requeue' in command
         # The scheduler accepted this request, but the client died before
         # receiving or durably recording the returned job identifier.
         raise RuntimeError('submission reply lost')
