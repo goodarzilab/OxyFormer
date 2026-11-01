@@ -158,3 +158,39 @@ def test_finalizing_slice_preserves_held_out_evaluation():
     assert not timing.boundary('evaluation')
     assert not timing.boundary('evaluation')
     assert timing.boundary('nuisance')
+
+
+def test_real_controller_epoch_slices_and_resume(tmp_path):
+    """Exercise the existing controller, not a mirror of its progress state."""
+    from dataclasses import replace
+    from test_nested_cv import endpoint, tiny_config, state
+    from oxyformer.training import nested_cv
+    from oxyformer.validation.cost_probe import epoch_timing
+
+    prepared = endpoint(tmp_path / 'data')
+    initial = tiny_config(prepared, tmp_path / 'ssl', max_batches=2)
+    # The synthetic SSL fixture has one fitting and one validation batch.
+    ssl = nested_cv.run_fold(initial, prepared.outer, 1103, geography=prepared.geography)
+    assert state(ssl)['position'] == 1
+    assert state(ssl)['active'] is None
+    config = replace(initial, max_batches=None,
+                     settings=replace(initial.settings, frozen_epochs=2))
+    # Runtime budgets may change across continuations, scientific settings may
+    # not: build the initial checkpoint under the same two-epoch configuration.
+    initial = replace(config, output_dir=str(tmp_path / 'ssl-two'), max_batches=2)
+    ssl = nested_cv.run_fold(initial, prepared.outer, 1103, geography=prepared.geography)
+    first = nested_cv.run_fold(replace(config, output_dir=str(tmp_path / 'epoch-one'),
+        predecessor=ssl, deadline_timing=epoch_timing(float('inf'))),
+        prepared.outer, 1103, geography=prepared.geography)
+    assert state(first)['position'] == 1
+    assert state(first)['active']['progress']['epoch'] == 1
+    second = nested_cv.run_fold(replace(config, output_dir=str(tmp_path / 'epoch-two'),
+        predecessor=first, deadline_timing=epoch_timing(float('inf'))),
+        prepared.outer, 1103, geography=prepared.geography)
+    assert state(second)['active']['progress']['epoch'] == 2
+    final = nested_cv.run_fold(replace(config, output_dir=str(tmp_path / 'finalize'),
+        predecessor=second, deadline_timing=epoch_timing(float('inf'), finalize=True)),
+        prepared.outer, 1103, geography=prepared.geography)
+    assert state(final)['position'] == 2
+    assert state(final)['active'] is None
+    assert state(final)['results'][0]['kind'] == 'outcome'
