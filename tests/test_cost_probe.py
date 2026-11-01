@@ -82,6 +82,7 @@ def test_calibration_window(value, passed):
 @pytest.mark.parametrize('field,reason', [
     ('measured_anchor', 'anchor extrapolated'), ('frame_matches', 'frame mismatch'),
     ('cell_matches', 'cell mismatch'), ('operations_match', 'operation mismatch'),
+    ('sources_match', 'protected source mismatch'),
 ])
 def test_calibration_identity_and_anchor_rules(field, reason):
     args = dict(measured_anchor=True, frame_matches=True, cell_matches=True, operations_match=True)
@@ -278,7 +279,9 @@ def test_pinned_work_checks_base_source_identity_without_git_history(monkeypatch
     counted = pinned_work(seed_count=1, grid_points=2)
     assert counted['counts']['inner_outcome'] == 30
     assert set(calls) == {'src/oxyformer/training/nested_cv.py',
-                          'src/oxyformer/validation/coverage.py'}
+                          'src/oxyformer/validation/coverage.py',
+                          'src/oxyformer/training/fit.py',
+                          'src/oxyformer/training/pretrain.py'}
     monkeypatch.setattr(subprocess, 'check_output', lambda command: source(command) + b'\n# drift\n')
     with pytest.raises(ValueError, match='protected source differs'):
         pinned_work(seed_count=1, grid_points=2)
@@ -314,7 +317,7 @@ def test_terminal_failed_cells_publish_reasons_without_projections(tmp_path, mon
             for c in failures for n in (1, 2)]
     (tmp_path / 'driver-jobs.json').write_text(json.dumps(jobs))
     receipt = {'compute_hours': measured(1.), 'study': cp.cell_values(cp.study_cells()['e']),
-               'frame_hash': 'same', 'frame_matches': True, 'work': work['e']}
+               'frame_hash': 'same', 'frame_matches': True, 'sources_match': True, 'work': work['e']}
     monkeypatch.setattr(cp, 'calibration_receipt', lambda *args: receipt)
     report = cp.measurement_report(tmp_path, {'ratio': measured(1.).to_dict()})
     for cell in failures:
@@ -325,9 +328,10 @@ def test_terminal_failed_cells_publish_reasons_without_projections(tmp_path, mon
     assert not report['calibration']['passed']
 
 
+@pytest.mark.parametrize('sources_match', [True, False])
 @pytest.mark.parametrize('frame_matches', [True, False])
 @pytest.mark.parametrize('partial_inner', [False, True])
-def test_report_preserves_measurements_and_calibration_labels(tmp_path, monkeypatch, counted_fixture, frame_matches, partial_inner):
+def test_report_preserves_measurements_and_calibration_labels(tmp_path, monkeypatch, counted_fixture, frame_matches, partial_inner, sources_match):
     import json
     from oxyformer.validation import cost_probe as cp
     work = {c: cp.pinned_work(seed_count=s.seed_count, grid_points=s.grid_points)
@@ -351,15 +355,16 @@ def test_report_preserves_measurements_and_calibration_labels(tmp_path, monkeypa
             'a': {'operation': '1', 'reason': 'inner fit incomplete after two attempts'}})
     receipt = {'compute_hours': measured(sum(work['e']['counts'].values()) * 70 / 3600),
                'study': cp.cell_values(cp.study_cells()['e']),
-               'frame_hash': 'same', 'frame_matches': frame_matches, 'work': work['e']}
+               'frame_hash': 'same', 'frame_matches': frame_matches,
+               'sources_match': sources_match, 'work': work['e']}
     monkeypatch.setattr(cp, 'calibration_receipt', lambda *args: receipt)
     report = cp.measurement_report(tmp_path, {'ratio': measured(1.).to_dict()})
-    assert report['calibration']['passed'] is frame_matches
+    assert report['calibration']['passed'] is (frame_matches and sources_match)
     assert 'opaque private' not in json.dumps(report)
     for cell in cp.study_cells():
         basis = set(report['cells'][cell]['compute_h100_hours_per_repetition']['basis'])
         assert ('extrapolated' in basis) is (cell == 'a' and partial_inner)
-        assert ('uncalibrated' in basis) is (not frame_matches)
+        assert ('uncalibrated' in basis) is (not (frame_matches and sources_match))
         assert report['measurements'][cell]['refit_ssl']['summary']['epochs_completed']['value'] == 7
         assert report['measurements'][cell]['refit_ssl']['summary']['wall_seconds_at_last_completed_epoch']['value'] == 100
         for row in report['feasibility'][cell]:
@@ -713,7 +718,7 @@ def test_report_uses_distinct_inner_and_outer_ssl_durations(tmp_path, monkeypatc
         cp.atomic_record(tmp_path / cell / 'scoring.json', {'tree': BASE_TREE, 'wall_seconds': 0.})
     monkeypatch.setattr(cp, 'calibration_receipt', lambda *args: {
         'compute_hours': measured(15000. / 3600), 'study': cp.cell_values(cp.study_cells()['e']),
-        'frame_hash': 'same', 'frame_matches': True, 'work': work['e']})
+        'frame_hash': 'same', 'frame_matches': True, 'sources_match': True, 'work': work['e']})
     report = cp.measurement_report(tmp_path, {'ratio': measured(1.).to_dict()})
     assert report['cells']['e']['compute_h100_hours_per_repetition']['value'] == pytest.approx(15000. / 3600)
     assert report['formula']['e']['counts']['inner_ssl']['value'] == 15
@@ -832,3 +837,162 @@ def test_native_nuisance_completion_records_observed_epochs(tmp_path, monkeypatc
         position=1, predecessor=FoldArtifacts.from_json(ssl['predecessor']))
     assert result['slices'][-1]['complete']
     assert result['slices'][-1]['epochs_completed'] == 1
+
+
+@pytest.mark.parametrize('changed', ['training/fit.py', 'training/pretrain.py'])
+def test_pinned_work_rejects_fit_and_ssl_source_drift(monkeypatch, changed):
+    from pathlib import Path
+    import subprocess
+    from oxyformer.validation import cost_probe as cp
+    paths = ['src/oxyformer/' + path for path in (
+        'training/nested_cv.py', 'validation/coverage.py',
+        'training/fit.py', 'training/pretrain.py')]
+    sources = {path: Path(path).read_bytes() for path in paths}
+    monkeypatch.setattr(subprocess, 'check_output', lambda command: sources[command[-1].split(':', 1)[1]])
+    read_bytes = Path.read_bytes
+    def runtime(path):
+        raw = read_bytes(path)
+        return raw + b'\n# different fitting implementation\n' if str(path) == 'src/oxyformer/' + changed else raw
+    monkeypatch.setattr(Path, 'read_bytes', runtime)
+    with pytest.raises(ValueError, match='protected source differs'):
+        cp.pinned_work(seed_count=1, grid_points=2)
+
+
+@pytest.fixture
+def synthetic_profile(tmp_path):
+    import json
+    from oxyformer.contracts import StageRequest
+    from oxyformer.provenance import file_hash
+    from test_coverage import synthetic_endpoint, smoke_recipe
+    prepared, frame = synthetic_endpoint(tmp_path / 'data')
+    profile = tmp_path / 'profile'
+    execution = profile / '_execution'
+    execution.mkdir(parents=True)
+    inputs = tmp_path / 'inputs'
+    inputs.mkdir()
+    frame_path, endpoint_path = inputs / 'frame.json', inputs / 'endpoint.json'
+    frame_path.write_text(frame.to_json())
+    endpoint_path.write_text(prepared.to_json())
+    config, task_path = execution / 'config.json', execution / 'task.json'
+    config.write_text('{}')
+    task_path.write_text(json.dumps({'parameters': {
+        'scenario': {'name': 'null_effect', 'active_mechanisms': ['null'], 'effect': 'null'},
+        'draws': [{'seed': 1103}], 'recipe': smoke_recipe(prepared, frame)}}))
+    request = StageRequest(stage='synthetic-profile', config_path=str(config), config_hash=file_hash(config),
+        task_path=str(task_path), task_hash=file_hash(task_path),
+        dependency_paths=(str(frame_path), str(endpoint_path)),
+        dependency_hashes=(file_hash(frame_path), file_hash(endpoint_path)),
+        output_dir=str(profile), code_identity=BASE_TREE)
+    (execution / 'request.json').write_text(request.to_json())
+    (profile / 'budget_record.json').write_text('{}')
+    return profile, request
+
+
+@pytest.mark.parametrize('changed', ['training/fit.py', 'training/pretrain.py'])
+def test_calibration_receipt_detects_changed_fitting_source(synthetic_profile, monkeypatch, changed):
+    from pathlib import Path
+    import subprocess
+    from oxyformer.validation import cost_probe as cp, coverage
+    profile, request = synthetic_profile
+    receipt_tree = 'b' * 40
+    record = {'binding': {'code_identity': receipt_tree, 'study': cp.cell_values(cp.study_cells()['e'])},
+              'profile': {'complete_repetition_seconds': [3600.]}}
+    monkeypatch.setattr(coverage, 'read_leaf_measurements', lambda path: record)
+    paths = ['src/oxyformer/' + path for path in (
+        'training/nested_cv.py', 'validation/coverage.py',
+        'training/fit.py', 'training/pretrain.py')]
+    sources = {path: Path(path).read_bytes() for path in paths}
+    def tree_source(command):
+        tree, path = command[-1].split(':', 1)
+        raw = sources[path]
+        return raw + b'\n# different fitting implementation\n' if tree == receipt_tree and path == 'src/oxyformer/' + changed else raw
+    monkeypatch.setattr(subprocess, 'check_output', tree_source)
+    receipt = cp.calibration_receipt(profile / 'budget_record.json', request.dependency_paths[0])
+    assert receipt.get('sources_match', True) is False
+
+
+def test_scoring_uses_only_registered_targets_with_extra_frame_rows(tmp_path, monkeypatch, counted_fixture):
+    import torch
+    from oxyformer.contracts import OOFNuisances
+    from oxyformer.training.fit import RecipeStudy
+    from oxyformer.validation import cost_probe as cp, coverage
+    from test_coverage import role_endpoint
+    endpoint, _ = role_endpoint(tmp_path / 'data')
+    assert set(endpoint.outer.target_ids) < set(endpoint.outer.frame_original_ids)
+    assert endpoint.outer.target_ids == endpoint.outer.original_ids
+    monkeypatch.setattr(cp, 'require_compute_node', lambda **kwargs: None)
+    monkeypatch.setattr(cp, 'clean_identity', lambda: 'clean-head')
+    monkeypatch.setattr(torch.cuda, 'reset_peak_memory_stats', lambda: None)
+    monkeypatch.setattr(torch.cuda, 'max_memory_allocated', lambda: 0)
+    observed = []
+    def score(*args, continuation, **kwargs):
+        for value in continuation['parts']:
+            part = OOFNuisances.from_json(value)
+            observed.extend(zip(part.original_ids, part.seed_ids))
+        return {}
+    monkeypatch.setattr(coverage, 'estimate_repetition', score)
+    study = RecipeStudy()
+    result = cp.measure_scoring(endpoint, {}, study, tmp_path / 'score')
+    expected = {(i, seed) for i in endpoint.outer.target_ids for seed in study.seeds}
+    assert len(observed) == len(expected) == result['prediction_rows']
+    assert set(observed) == expected
+
+
+def test_relative_sealed_dependencies_are_refused_before_preparation(synthetic_profile, monkeypatch, tmp_path):
+    import json
+    from oxyformer.provenance import ContractError
+    from oxyformer.validation import cost_probe as cp
+    profile, request = synthetic_profile
+    payload = json.loads(request.to_json())
+    payload['payload']['dependency_paths'] = ['frame.json', 'endpoint.json']
+    (profile / '_execution/request.json').write_text(json.dumps(payload))
+    monkeypatch.setattr(cp, 'require_compute_node', lambda: None)
+    monkeypatch.setattr(cp, 'clean_identity', lambda: 'clean-head')
+    def receipt(*args):
+        pytest.fail('read receipt after an invalid request')
+    monkeypatch.setattr(cp, 'calibration_receipt', receipt)
+    destination = tmp_path / 'measurement'
+    with pytest.raises(ContractError, match='request paths must be absolute'):
+        cp.prepare_inputs(profile, destination)
+    assert not destination.exists()
+
+
+def test_prepared_paths_survive_a_different_runtime_checkout(synthetic_profile, tmp_path, monkeypatch, counted_fixture):
+    from pathlib import Path
+    from oxyformer.provenance import file_hash
+    from oxyformer.training.nested_cv import PreparedEndpoint
+    from oxyformer.validation import cost_probe as cp
+    profile, request = synthetic_profile
+    monkeypatch.setattr(cp, 'require_compute_node', lambda: None)
+    monkeypatch.setattr(cp, 'clean_identity', lambda: 'clean-head')
+    monkeypatch.setattr(cp, 'calibration_receipt', lambda *args: {'compute_hours': measured(1.)})
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cp, 'require_month2_decision', lambda: None)
+    metadata = cp.prepare_inputs(Path('profile'), Path('measurements'))
+    runtime = tmp_path / 'frozen' / 'runtime'
+    runtime.mkdir(parents=True)
+    monkeypatch.chdir(runtime)
+    for name in ('endpoint_path', 'frame_path', 'profile_path'):
+        assert Path(metadata[name]).is_absolute(), name
+        assert Path(metadata[name]).exists(), name
+    endpoint_path = Path(metadata['endpoint_path'])
+    assert file_hash(endpoint_path) == metadata['endpoint_sha256']
+    assert PreparedEndpoint.from_json(endpoint_path.read_text()).outer.target_ids
+
+
+def test_driver_makes_relative_measurement_root_absolute(tmp_path, monkeypatch):
+    from pathlib import Path
+    from oxyformer.validation import cost_probe as cp
+    monkeypatch.setattr(cp, 'require_compute_node', lambda: None)
+    monkeypatch.setattr(cp, 'clean_identity', lambda **kwargs: 'clean-head')
+    monkeypatch.setattr(cp, 'require_month2_decision', lambda: None)
+    root = tmp_path / 'measurements'
+    cp.atomic_record(root / 'inputs.json', {'work': {}})
+    monkeypatch.chdir(tmp_path)
+    def submit(ledger_path, ledger, **kwargs):
+        assert kwargs['root'].is_absolute()
+        assert Path(kwargs['command'][kwargs['command'].index('--root') + 1]) == root
+        raise RuntimeError('submission inspected')
+    monkeypatch.setattr(cp, 'submit_measurement', submit)
+    with pytest.raises(RuntimeError, match='submission inspected'):
+        cp.drive_measurements(Path('measurements'), fit_checkout=tmp_path / 'frozen')

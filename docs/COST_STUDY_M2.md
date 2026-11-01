@@ -15,13 +15,21 @@ The checkout must be clean, and preparation and submission require the recorded
 month-two owner decision. Measurements record their commit and the fixed
 launch tree. The count derivation reads the task-list expressions in that tree's
 nested controller and the fold/seed iteration and scoring calls in coverage.
-It checks that the runtime protected sources match those bytes.
+It checks that the runtime nested controller, coverage, fit and pretraining
+sources match the launch tree's bytes. Calibration also compares these four
+sources at the sealed receipt's commit; differing protected sources make the
+result uncalibrated even when their operation counts match.
 
 Preparation authenticates the sealed null-effect profile and its real-frame
 dependencies, generates the profile's null-effect draw, and binds the observations
 through coverage's existing adapter. The scientific values from the scoring
 measurement are discarded. Scoring inputs are synthetic predictions on the full
-target-by-seed product; only timing is retained.
+target-by-seed product; only timing is retained. The merged split contract defines
+original_ids as target_ids; extra training and inert rows live in frame_original_ids
+and do not contribute scoring predictions. Sealed StageRequest dependency paths
+must be absolute. Preparation resolves its own profile and output roots, and the
+driver resolves its measurement root, so metadata and child commands remain valid
+when fitting jobs run in a separate runtime checkout.
 
 Fitting uses the existing nested controller and its compute counters. Each cell
 measures inner SSL, first-grid inner outcome and origin, outer SSL, and first-grid
