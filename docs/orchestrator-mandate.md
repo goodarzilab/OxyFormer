@@ -92,6 +92,9 @@ production recipe, (3) final cells sized from those measurements. The decision i
 - **Stop-and-ask item 4.** Unchanged except as relaxed above: a leaf above 4 GPU-hours, any other partition or account, and
   the final-coverage, anchor or refit-audit campaigns still need their own approval.
 - Repetition increases beyond the approved 20, and any change to the recipe or scenarios, are separate owner decisions.
+- **Sizing factor (2026-11-01 03:42 UTC).** Asked to choose between reusing the month-1 profile safety factor 1.25 for the
+  diagnostic campaign or raising the per-chain leaf bound, the owner answered verbatim "just don't be worried... go with
+  what you need"; the orchestrator took the first, recorded as `diagnostic_campaign.profile_safety_factor: 1.25`. Bounds unchanged.
 - Everything else in this mandate is unchanged.
 
 ## Concurrence party

@@ -284,6 +284,8 @@ owner_decisions:
       leaves_per_chain_max: 40                     # the month-1 per-instance leaf bound applies to each sequential continuation chain
       parallel_chains: true                        # repetitions are split over independent sequential chains so the campaign can use the 16-GPU allowance
       draws_continue_from: m1-screening-D          # the month-1 lock is listed in prior_locks and the new lock draws under a new seed namespace; no month-1 repetition is reused
+      profile_safety_factor: 1.25                  # owner decision 2026-11-01 03:42 UTC ("just don't be worried... go with what you need" to recommendation A): the month-1 factor, reused for this diagnostic only
+      profile_safety_factor_basis: "offline sizing on 2026-11-01 from the sealed sign_changing -p6 receipt and the authenticated campaign-D leaf records needed 44 leaves per repetition at the default 2.0, above leaves_per_chain_max 40; at 1.25 about 28; month 1 ran 140 leaves at 1.25 with zero budget overruns and zero leaf failures"
       certifies_release_criteria: false
       purpose: "estimate bias and SE/SD of one-step and CV-TMLE on sign_changing with enough repetitions to tell attenuation from noise; coverage and null-rejection bounds need at least 39 repetitions and are not certified here"
     recipe_cost_study: "bounded-slice measurement of the registered production recipe and intermediate cells at the current tree, reported to the owner before any final-cell sizing"
