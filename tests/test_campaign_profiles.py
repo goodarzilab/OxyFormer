@@ -2062,3 +2062,143 @@ def test_diagnostic_summary_known_bias_is_not_release():
         assert row['coverage_lower'] == coverage.binomial_bound(row['coverage_count'], 20, side='lower')
         assert row['rejection_upper'] == coverage.binomial_bound(row['rejections'], 20, side='upper')
         assert row['certifies_release_criteria'] is False
+
+
+@pytest.fixture
+def diagnostic_request(screening_request, tmp_path, monkeypatch):
+    source = coverage.read_json(screening_request.task_path)
+    config = coverage.read_json(screening_request.config_path)
+    task = deepcopy(source)
+    p = task['parameters']
+    old_recipe = deepcopy(p['recipe'])
+    p['recipe']['campaign_mode'] = 'diagnostic'
+    p.update(campaign.screening_metadata(p['recipe']), partition='preemptible', profile_safety_factor=2.)
+    task.update(campaign.screening_metadata(p['recipe']))
+    p['profiles'] = {'sign_changing': p['profiles']['sign_changing']}
+    p['probe_profiles'] = {'sign_changing': p['probe_profiles']['sign_changing']}
+    p['setup_calibration'] = [r for r in p['setup_calibration'] if r['dependency'] == p['profiles']['sign_changing']['dependency']]
+    # Reuse sealed synthetic profiling measurements; production profile binding
+    # itself is exercised by the existing _profile drift regressions.
+    original = campaign._profile
+    def measured(req, cfg, reference, scenario, recipe, stamps):
+        return original(req, cfg, reference, scenario, old_recipe, stamps)
+    monkeypatch.setattr(campaign, '_profile', measured)
+    deps = {k: Path(v) for k, v in config['dependencies'].items()}
+    return request(tmp_path / 'diagnostic-estimate', task, deps, config['approvals'])
+
+
+def diagnostic_lock_request(req, tmp_path):
+    lock_request = screening_lock_request(req, tmp_path)
+    task = coverage.read_json(lock_request.task_path)
+    cfg = coverage.read_json(lock_request.config_path)
+    deps = {k: Path(v) for k, v in cfg['dependencies'].items()}
+    prior = {'campaign_id': 'm1-screening-D', 'evaluation_namespace': 'month1-evaluation',
+             'batches': [{'draws': coverage.repetition_plan('month1:screening', 'sign_changing', 2)}]}
+    deps['prior-lock'] = tmp_path / 'prior'
+    write(deps['prior-lock'] / 'recipe_lock.json', prior)
+    task['parameters'].update(campaign_id='m2-diagnostic', evaluation_namespace='month2-evaluation',
+        prior_locks=[{'dependency': 'prior-lock', 'path': 'recipe_lock.json'}], cpu_wall_hours_budget=10000.)
+    return request(tmp_path / 'diagnostic-lock', task, deps, cfg['approvals'])
+
+
+def test_diagnostic_lock_twenty_chains_seeds_admission_and_flags(diagnostic_request, tmp_path):
+    req = diagnostic_lock_request(diagnostic_request, tmp_path)
+    result = campaign.run_stage(req)
+    assert result.status == 'pass', result.message
+    root = Path(req.output_dir)
+    lock = coverage.read_json(root / 'recipe_lock.json')
+    expansion = coverage.read_json(root / 'expanded_units.json')
+    assert len(lock['instances']) == len(lock['batches']) == len(expansion['plans']) == 20
+    assert set(lock['instances'].values()) == {f'm2-diagnostic-s0-c{j}' for j in range(20)}
+    draws = [b['draws'][0] for b in lock['batches']]
+    assert len({d['seed'] for d in draws}) == 20
+    assert not {d['seed'] for d in draws}.intersection(d['seed'] for d in coverage.repetition_plan('month1:screening', 'sign_changing', 2))
+    assert [d['index'] for d in draws] == list(range(20))
+    assert lock['concurrency_limits'] == {'gpu': 16, 'cpu': 6}
+    assert lock['budget']['run_gpu_hours_ceiling'] is None
+    for name in ('recipe_lock.json', 'budget.json', 'task_manifest.json'):
+        assert coverage.read_json(root / name)['certifies_release_criteria'] is False
+    for plan in expansion['plans']:
+        for unit in plan['units'][:-1]:
+            assert {'--partition=preemptible', '--account=root', '--qos=normal', '--gres=gpu:1', '--time=04:00:00', '--no-requeue'} <= set(unit['sbatch'])
+            assert unit['max_attempts'] == 3 and unit['retry']['mode'] == 'restart'
+            assert unit['concurrency_limits']['gpu'] == 16
+    assert all(t['parameters'].get('scenario', 'sign_changing') == 'sign_changing' for t in expansion['admission']['tasks'])
+    assert all(t['production_equivalent'] is False for t in expansion['admission']['tasks'])
+
+
+@pytest.mark.parametrize('fault,match', [('missing', 'draws_continue_from'), ('duplicate', 'draws_continue_from'),
+    ('namespace', 'namespace already used'), ('estimate', 'estimate changed')])
+def test_diagnostic_lock_refusals(diagnostic_request, tmp_path, fault, match):
+    req = diagnostic_lock_request(diagnostic_request, tmp_path)
+    task = coverage.read_json(req.task_path)
+    if fault == 'missing':
+        task['parameters']['prior_locks'] = []
+    elif fault == 'duplicate':
+        task['parameters']['prior_locks'] *= 2
+    elif fault == 'namespace':
+        task['parameters']['evaluation_namespace'] = 'month1-evaluation'
+    else:
+        task['parameters']['profile_safety_factor'] = 1.5
+    write(Path(req.task_path), task)
+    result = campaign.run_stage(replace(req, task_hash=file_hash(req.task_path)))
+    assert result.status == 'blocked' and match in result.message
+
+
+@pytest.mark.parametrize('interrupted_step', [0, 1])
+def test_diagnostic_preempted_attempt_restarts_or_resumes_only_predecessor(diagnostic_request, tmp_path, monkeypatch, interrupted_step):
+    from test_coverage import chain_request
+    req = diagnostic_lock_request(diagnostic_request, tmp_path)
+    result = campaign.run_stage(req)
+    assert result.status == 'pass', result.message
+    root = Path(req.output_dir)
+    lock = coverage.read_json(root / 'recipe_lock.json')
+    plan = coverage.read_json(root / 'expanded_units.json')['plans'][0]
+    config = coverage.read_json(req.config_path)
+    deps = {k: Path(v) for k, v in config['dependencies'].items()}
+    deps['campaign-lock'] = root
+    deps['campaign-admit'] = sealed_json_fixture(tmp_path / 'admitted', 'campaign-admit', 'campaign-admit',
+        {'admission.json': {'admitted': True, 'lock_hash': coverage.digest(lock),
+        'estimate_hash': lock['estimate_hash'], 'setup_policy': 'three-receipt-minima-v1',
+        'admission_measurements': {'setup_minima': {'fresh': 0., 'resumed_1': 0., 'resumed_2': 0.},
+                                   'allowance_seconds': 60.}}})
+    monkeypatch.setattr(campaign_probe, 'declared_publication_shape',
+        lambda *a, **kw: lock['budget']['expected_predecessor_shapes']['sign_changing'])
+    seen = []
+    interrupt = [False]
+    def execute(draw, frame, scenario, template, recipe, destination, deadline, *, continuation, study):
+        seen.append(continuation['compute_seconds'])
+        if interrupt[0]:
+            continuation['parts'].append('dead-attempt-marker')
+            raise OSError('simulated preemption before publication')
+        continuation['compute_seconds'] = 1000.
+        return {'draw': draw, 'status': 'incomplete', 'reason': 'budget exhausted'}
+    monkeypatch.setattr(coverage, 'execute_draw', execute)
+    def attempt(leaf, label):
+        r = chain_request(tmp_path / label, leaf, deps)
+        cfg = coverage.read_json(r.config_path)
+        cfg['approvals'] = config['approvals']
+        write(Path(r.config_path), cfg)
+        return replace(r, config_hash=file_hash(r.config_path))
+    if interrupted_step:
+        first = plan['tasks'][0]
+        initial = attempt(first, 'initial')
+        passed = run_coverage(initial)
+        assert passed.status == 'pass', passed.message
+        deps[first['id']] = Path(initial.output_dir)
+    leaf = plan['tasks'][interrupted_step]
+    interrupt[0] = True
+    dead = attempt(leaf, 'preempted')
+    failed = coverage.run_stage(dead)
+    assert failed.status == 'blocked' and 'simulated preemption' in failed.message
+    assert not (Path(dead.output_dir) / 'continuation.tar').exists()
+    interrupt[0] = False
+    retried = attempt(leaf, 'fresh-retry')
+    passed = run_coverage(retried)
+    assert passed.status == 'pass', passed.message
+    assert (seen[-1] >= 1000.) if interrupted_step else (seen[-1] == 0.)
+    for name in ('result.json', 'runtime.json', coverage.BUDGET_RECORD):
+        value = coverage.read_json(Path(retried.output_dir) / name)
+        assert value['campaign_mode'] == 'diagnostic'
+        assert value['certifies_release_criteria'] is False
+        assert value['production_equivalent'] is False

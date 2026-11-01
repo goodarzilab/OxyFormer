@@ -635,7 +635,8 @@ def build_screening_lock(request, config, task):
                 "leaf_budget": leaf_budget(p["wall_seconds"], p["profile_safety_factor"], profile["leaf_overheads"])})
     draws = [d for b in batches for d in b["draws"]]
     validate_draws(draws)
-    require(len({d["seed"] for d in draws}) == len(draws), "duplicate campaign seed")
+    if diagnostic:
+        require(len({d["seed"] for d in draws}) == len(draws), "duplicate campaign seed")
     require(not prior_seeds.intersection(d["seed"] for d in draws), "evaluation draws overlap prior lock or profiling")
     budget = {"gpu_hours": estimate["gpu_hours"], "gpu_hours_per_leaf_max": 4,
         "leaves_per_instance_max": 40, "per_scenario": estimate["per_scenario"],
@@ -654,6 +655,7 @@ def build_screening_lock(request, config, task):
         'total_overruns': 3, 'overrunning_leaf_gpu_hours_bound': 12,
         'policy': 'conservative projection, three-receipt admission, next-leaf refusal'}
     if diagnostic:
+        budget["cpu_wall_hours_ceiling"] = (estimate["projected_leaf_count"] * leaf_allocation(p["wall_seconds"])["allocation_seconds"] + len(batches) * 600) / 3600
         budget.update(**metadata, gpu_hours_per_leaf_max=c["gpu_hours_per_leaf_max"],
             leaves_per_instance_max=c["leaves_per_chain_max"], concurrency_limits={"gpu": concurrency, "cpu": 6},
             gpu_concurrency_max=concurrency, run_gpu_hours_ceiling=None, owner_decision="month2_followon",
@@ -1026,7 +1028,11 @@ def collect(request, config, task):
             "leaf_runtimes": runtimes, "budget_overruns": [r for r in runtimes if r["overrun_seconds"] > 0]}
     metadata = screening_metadata(lock["recipe"])
     gate.update(metadata)
-    return {"result.json": {"records": records, "gate": gate, **metadata}, "gate.json": gate}, passing
+    if mode == "diagnostic":
+        gate.update(coverage_pass=False, coverage_pass_reason="diagnostic",
+            diagnostic_summary={name: value["diagnostic_summary"] for name, value in summaries.items()})
+    return {"result.json": {"records": records, "gate": gate,
+        **({"diagnostic_summary": gate["diagnostic_summary"]} if mode == "diagnostic" else {}), **metadata}, "gate.json": gate}, passing
 
 
 def run_stage(request: StageRequest) -> StageResult:

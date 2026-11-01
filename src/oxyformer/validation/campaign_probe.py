@@ -149,6 +149,10 @@ def locked_probe_inputs(request, config, task):
     lock_path = dependency(request, config, p['lock_input'])
     lock_hash = file_hash(lock_path)
     lock = read_json(lock_path)
+    if lock.get('campaign_mode') == 'diagnostic':
+        from oxyformer.validation.campaign import validate_diagnostic
+        decision = validate_diagnostic(lock['recipe'], config.get('approvals'))
+        require(lock['owner_decision_hash'] == digest(decision), 'month2_followon decision hash drift')
     expansion = read_json(dependency(request, config, {
         'dependency': p['lock_input']['dependency'], 'path': 'expanded_units.json'}))
     require(expansion['lock_hash'] == lock_hash, 'probe expansion lock mismatch')
@@ -541,6 +545,11 @@ def setup_admission_plan(lock, plans, lock_unit, approvals):
     """Two independent jobs per logical probe; three final receipts feed admit."""
     from oxyformer.execution.campaign import _unit
     lock_hash = digest(lock)
+    if lock.get('campaign_mode') == 'diagnostic':
+        from oxyformer.validation.campaign import validate_diagnostic
+        decision = validate_diagnostic(lock['recipe'], approvals)
+        require(plans[0]['tasks'][0]['parameters']['scenario']['name'] == decision['diagnostic_campaign']['scenarios'][0],
+                'diagnostic admission scenario drift')
     first, base = first_leaf_inputs({'plans': plans})
     scenario = first['parameters']['scenario']['name']
     profile = lock['budget']['profiles'][scenario]
