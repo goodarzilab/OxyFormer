@@ -355,7 +355,9 @@ def diagnostic_profile_tasks(endpoint, frame, approvals, *, campaign_id, evaluat
     campaign.concrete_id(estimate['id'])
     estimate.update(metadata)
     p = estimate['parameters']
-    p.update(metadata, recipe=recipe, partition=c['partition'], profile_safety_factor=2.0)
+    p.update(metadata, recipe=recipe, partition=c['partition'],
+             profile_safety_factor=c['profile_safety_factor'],
+             owner_safety_factor_decision='month2_followon.diagnostic_campaign')
     p['profiles'] = {n: p['profiles'][n] for n in c['scenarios']}
     p['probe_profiles'] = {n: p['probe_profiles'][n] for n in c['scenarios']}
     estimate['resources']['partition'] = c['partition']
@@ -385,6 +387,8 @@ def diagnostic_profile_tasks(endpoint, frame, approvals, *, campaign_id, evaluat
         lock['needs'].setdefault(ref['dependency'], []).append(ref['path'])
     tasks.extend([estimate, lock])
     return {'schema_version': 1, **metadata,
+            'profile_safety_factor': c['profile_safety_factor'],
+            'owner_safety_factor_decision': 'month2_followon.diagnostic_campaign',
             'gpu_concurrency_max': d['gpu_concurrency_max'][c['partition']], 'tasks': tasks}
 
 

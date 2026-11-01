@@ -2018,7 +2018,7 @@ def test_month2_concurrency_ceiling(value):
 
 
 def test_diagnostic_arithmetic_keeps_twenty_independent_chains_and_no_total_cap():
-    profile = {'seconds_per_repetition': 100000., 'publication_verification_seconds': 400.,
+    profile = {'seconds_per_repetition': 150000., 'publication_verification_seconds': 400.,
         'leaf_overheads': {'setup_seconds': 100., 'import_seconds': 2., 'export_seconds': 3., 'publication_seconds': 5.}}
     decision = campaign.month2_decision()
     row = campaign.diagnostic_sizing({'sign_changing': profile}, decision, 14100)['sign_changing']
@@ -2044,7 +2044,8 @@ def test_diagnostic_emitter_subset_dependencies_and_screening_unchanged(built):
     assert len(profiles) == 40
     assert {t['parameters']['scenario']['name'] for t in profiles} == {'sign_changing'}
     estimate, lock = manifest['tasks'][-2:]
-    assert estimate['parameters']['profile_safety_factor'] == 2.0
+    assert estimate['parameters']['profile_safety_factor'] == campaign.month2_decision()['diagnostic_campaign']['profile_safety_factor']
+    assert manifest['owner_safety_factor_decision'] == 'month2_followon.diagnostic_campaign'
     assert estimate['id'] in lock['needs'] and 'old-lock' in lock['needs']
     for dep, names in read_mapping(ROOT / 'configs/execution/stages.yaml')['stages']['campaign-lock']['needs'].items():
         assert set(names) <= set(lock['needs'][dep])
@@ -2078,7 +2079,8 @@ def diagnostic_request(screening_request, tmp_path, monkeypatch):
     p = task['parameters']
     old_recipe = deepcopy(p['recipe'])
     p['recipe']['campaign_mode'] = 'diagnostic'
-    p.update(campaign.screening_metadata(p['recipe']), partition='preemptible', profile_safety_factor=2.)
+    p.update(campaign.screening_metadata(p['recipe']), partition='preemptible',
+             profile_safety_factor=campaign.month2_decision()['diagnostic_campaign']['profile_safety_factor'])
     task.update(campaign.screening_metadata(p['recipe']))
     p['profiles'] = {'sign_changing': p['profiles']['sign_changing']}
     p['probe_profiles'] = {'sign_changing': p['probe_profiles']['sign_changing']}
@@ -2124,6 +2126,10 @@ def test_diagnostic_lock_twenty_chains_seeds_admission_and_flags(diagnostic_requ
     assert lock['concurrency_limits'] == {'gpu': 16, 'cpu': 6}
     assert lock['owner_decision_hash'] == lock['budget']['owner_decision_hash'] == coverage.digest(campaign.month2_decision())
     assert lock['budget']['run_gpu_hours_ceiling'] is None
+    for name in ('budget.json', 'task_manifest.json'):
+        artifact = coverage.read_json(root / name)
+        assert artifact['profile_safety_factor'] == campaign.month2_decision()['diagnostic_campaign']['profile_safety_factor']
+        assert artifact['owner_safety_factor_decision'] == 'month2_followon.diagnostic_campaign'
     assert len(expansion['plans'][0]['tasks'][-1]['expected_leaves']) == sum(len(p['expected_leaves']) for p in expansion['plans'])
     for name in ('recipe_lock.json', 'budget.json', 'task_manifest.json'):
         assert coverage.read_json(root / name)['certifies_release_criteria'] is False
@@ -2137,7 +2143,7 @@ def test_diagnostic_lock_twenty_chains_seeds_admission_and_flags(diagnostic_requ
 
 
 @pytest.mark.parametrize('fault,match', [('missing', 'draws_continue_from'), ('duplicate', 'draws_continue_from'),
-    ('namespace', 'namespace already used'), ('estimate', 'estimate changed')])
+    ('namespace', 'namespace already used'), ('factor', '3.0 must equal decision factor 1.25')])
 @pytest.mark.parametrize('screening_rates', [(100.,) * 4], indirect=True)
 def test_diagnostic_lock_refusals(diagnostic_request, tmp_path, fault, match):
     req = diagnostic_lock_request(diagnostic_request, tmp_path)
@@ -2348,7 +2354,7 @@ def test_month2_iso_timestamp_normalizes_to_decision_date(value):
     assert campaign.month2_decision(approvals)['decided_on'] == '2025-08-12'
 
 
-def test_diagnostic_safety_factor_cannot_undercut_default_at_chain_bound():
+def test_diagnostic_safety_factor_uses_owner_decision_at_chain_bound():
     profile = {'seconds_per_repetition': 300000., 'publication_verification_seconds': 400.,
         'leaf_overheads': {'setup_seconds': 100., 'import_seconds': 2., 'export_seconds': 3., 'publication_seconds': 5.}}
     decision = campaign.month2_decision()
@@ -2356,13 +2362,16 @@ def test_diagnostic_safety_factor_cannot_undercut_default_at_chain_bound():
     assert campaign.slice_count(profile, 1, 14100, 2., enforce_limit=False) > 40
     with pytest.raises(ContractError, match='profile_safety_factor'):
         campaign.diagnostic_sizing({'sign_changing': profile}, decision, 14100, factor=1.)
-    with pytest.raises(ContractError, match='chain requires .* leaves > 40'):
-        campaign.diagnostic_sizing({'sign_changing': profile}, decision, 14100)
+    row = campaign.diagnostic_sizing({'sign_changing': profile}, decision, 14100)['sign_changing']
+    assert row['per_chain']['leaves'] == campaign.slice_count(
+        profile, 1, 14100, decision['diagnostic_campaign']['profile_safety_factor'])
+    assert row['per_chain']['leaves'] <= 40
 
 
 @pytest.mark.parametrize('screening_rates', [(100.,) * 4], indirect=True)
-def test_diagnostic_estimate_refuses_reduced_safety_factor_before_publication(diagnostic_request):
-    req = update_task(diagnostic_request, lambda p: p.update(profile_safety_factor=1.))
+@pytest.mark.parametrize('factor', [1., 2., 3., True, None])
+def test_diagnostic_estimate_refuses_reduced_safety_factor_before_publication(diagnostic_request, factor):
+    req = update_task(diagnostic_request, lambda p: p.update(profile_safety_factor=factor))
     result = campaign_estimate.run_stage(req)
     assert result.status == 'blocked' and 'profile_safety_factor' in result.message
     assert not (Path(req.output_dir) / 'budget_estimate.json').exists()
@@ -2374,3 +2383,50 @@ def test_month2_mapping_only_counterexample_refuses_missing_screening_context():
     serialized = json.loads(canonical_json(approvals['owner_decisions']['month2_followon']))
     with pytest.raises(ContractError, match='screening campaign approval'):
         campaign.month2_decision({'owner_decisions': {'month2_followon': serialized}})
+
+
+@pytest.mark.parametrize('factor', [1, 1.25, 1.75, 2])
+def test_month2_factor_normalized(factor):
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    approvals['owner_decisions']['month2_followon']['diagnostic_campaign']['profile_safety_factor'] = factor
+    value = campaign.month2_decision(approvals)['diagnostic_campaign']
+    assert type(value['profile_safety_factor']) is float
+    assert value['profile_safety_factor'] == factor
+
+
+@pytest.mark.parametrize('key,value', [
+    *[('profile_safety_factor', x) for x in (True, False, None, '1.25', [], {},
+        .99, 2.01, float('nan'), float('inf'), -float('inf'), 10 ** 400)],
+    *[('profile_safety_factor_basis', x) for x in ('', '  ', None, True, 123, [], {})]])
+def test_month2_factor_invalid(key, value):
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    approvals['owner_decisions']['month2_followon']['diagnostic_campaign'][key] = value
+    with pytest.raises(ContractError, match=key):
+        campaign.month2_decision(approvals)
+
+
+@pytest.mark.parametrize('screening_rates', [(100.,) * 4], indirect=True)
+def test_diagnostic_estimate_factor_provenance_and_default(diagnostic_request):
+    req = update_task(diagnostic_request, lambda p: p.pop('profile_safety_factor'))
+    estimate = campaign_estimate.estimate_budget(req)
+    factor = campaign.month2_decision()['diagnostic_campaign']['profile_safety_factor']
+    assert estimate['profile_safety_factor'] == factor
+    assert estimate['owner_safety_factor_decision'] == 'month2_followon.diagnostic_campaign'
+    profile = estimate['profiles']['sign_changing']
+    assert estimate['per_scenario']['sign_changing']['per_chain']['leaves'] == campaign.slice_count(
+        profile, 1, estimate['wall_seconds'], factor)
+
+
+@pytest.mark.parametrize('factor', [1., 1.5, 2., True, None])
+def test_diagnostic_offline_sizing_refuses_non_owner_factor(factor):
+    with pytest.raises(ContractError, match=f'{factor!r}.*1.25'):
+        campaign.diagnostic_sizing({}, campaign.month2_decision(), 14100, factor=factor)
+
+
+def test_screening_bytes_match_launch_base_fixture():
+    baseline = coverage.read_json(ROOT / 'tests/fixtures/diagnostic_factor_screening_baseline.json')
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    endpoint, frame = smoke_inputs.build_inputs()
+    assert coverage.digest(real_frame.screening_profile_tasks(endpoint, frame, approvals)) == baseline['emitter']
+    assert coverage.digest(campaign.screening_decision(approvals)) == baseline['decision']
+    assert coverage.digest(campaign.screening_safety_factor(approvals)) == baseline['safety']

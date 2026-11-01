@@ -950,8 +950,13 @@ exactly one campaign matching `draws_continue_from`.
 
 Each approved repetition runs in its own sequential continuation chain. Sizing
 uses the same measured leaf costs and publication reserve as screening, with a
-default safety factor of 2.0, at most 40 leaves per chain and four GPU-hours per
-leaf. Explicit factors below 2.0 are refused before an estimate is published.
+factor read from `month2_followon.diagnostic_campaign.profile_safety_factor`
+(currently 1.25), at most 40 leaves per chain and four GPU-hours per leaf.
+The owner chose the month-1 factor for this diagnostic on 2026-11-01; the
+`profile_safety_factor_basis` records that choice. Any explicit factor differing
+from the decision is refused, with both values named. Estimates, lock budgets
+and task manifests record the factor and `owner_safety_factor_decision:
+month2_followon.diagnostic_campaign`; the screening decision remains separate.
 Counts are never reduced to fit a budget; infeasible chains are refused.
 The month-1 total-hour ceilings do not apply. GPU concurrency is campaign-wide,
 read from the decision (currently 16 on `preemptible`). Expanded leaves use

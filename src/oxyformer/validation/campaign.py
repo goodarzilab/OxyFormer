@@ -137,9 +137,16 @@ def month2_decision(approvals=_REPOSITORY_APPROVALS):
     d["gpu_hours_ceiling"] = None
     c = d["diagnostic_campaign"]
     ckeys = {"scenarios", "repetitions", "recipe", "partition", "gpu_hours_per_leaf_max",
-             "leaves_per_chain_max", "parallel_chains", "draws_continue_from", "certifies_release_criteria", "purpose"}
+             "leaves_per_chain_max", "parallel_chains", "draws_continue_from", "certifies_release_criteria", "purpose",
+             "profile_safety_factor", "profile_safety_factor_basis"}
     check(type(c) is dict, "diagnostic_campaign")
     check(set(c) == ckeys, "diagnostic_campaign keys: " + str(sorted(set(c) ^ ckeys, key=str)))
+    factor = c["profile_safety_factor"]
+    check(type(factor) in (int, float) and 1. <= factor <= 2. and math.isfinite(factor),
+          "diagnostic_campaign.profile_safety_factor")
+    c["profile_safety_factor"] = float(factor)
+    check(type(c["profile_safety_factor_basis"]) is str and bool(c["profile_safety_factor_basis"].strip()),
+          "diagnostic_campaign.profile_safety_factor_basis")
     screening = screening_decision(approvals)
     names = c["scenarios"]
     check(type(names) is list and bool(names) and all(type(n) is str for n in names)
@@ -183,11 +190,20 @@ def validate_diagnostic(recipe, approvals):
     return decision
 
 
-def diagnostic_sizing(profiles, decision, wall, factor=2.0):
+def diagnostic_safety_factor(parameters, decision):
+    """Bind both omitted and explicit sizing factors to the owner decision."""
+    approved = decision["diagnostic_campaign"]["profile_safety_factor"]
+    factor = parameters.get("profile_safety_factor", approved)
+    require(type(factor) in (int, float) and factor == approved,
+            f"diagnostic profile_safety_factor {factor!r} must equal decision factor {approved!r}")
+    return float(approved)
+
+
+def diagnostic_sizing(profiles, decision, wall, factor=_REPOSITORY_APPROVALS):
     """Pure offline arithmetic; never grants admission or changes the count."""
     c = decision["diagnostic_campaign"]
-    factor = finite(factor, "diagnostic profile_safety_factor")
-    require(factor >= 2.0, "diagnostic profile_safety_factor must be >= 2.0")
+    factor = diagnostic_safety_factor(
+        {} if factor is _REPOSITORY_APPROVALS else {"profile_safety_factor": factor}, decision)
     require(set(profiles) == set(c["scenarios"]), "diagnostic profiles drift")
     hours = leaf_allocation(wall)["allocation_seconds"] / 3600
     require(hours <= c["gpu_hours_per_leaf_max"],
@@ -221,8 +237,7 @@ def diagnostic_estimate(request, config, parameters):
     require(resolve_device().type == "cuda", "diagnostic measurement requires CUDA")
     require(integer(parameters["cpus_per_task"], "CPUs", 1) == 8, "diagnostic requires eight CPUs")
     wall = integer(parameters["wall_seconds"], "leaf wall seconds", 1)
-    factor = finite(parameters.get("profile_safety_factor", 2.0), "profile safety factor")
-    require(factor >= 2.0, "diagnostic profile_safety_factor must be >= 2.0")
+    factor = diagnostic_safety_factor(parameters, decision)
     records = []
     for key, cls, expected in (("endpoint_input", PreparedEndpoint, recipe["endpoint_hash"]),
                               ("frame_input", CovariateFrame, recipe["frame_hash"])):
@@ -251,7 +266,7 @@ def diagnostic_estimate(request, config, parameters):
         "projected_leaf_count": sum(r["leaves"] for r in rows.values()),
         "gpu_hours": math.fsum(r["gpu_hours"] for r in rows.values()),
         "partition": c["partition"], "gpus": 1, "cpus_per_task": 8, "wall_seconds": wall,
-        "owner_safety_factor_decision": None, "profile_safety_factor": factor,
+        "owner_safety_factor_decision": "month2_followon.diagnostic_campaign", "profile_safety_factor": factor,
         "gpu_concurrency_max": decision["gpu_concurrency_max"][c["partition"]], "budget_h100_hours": None}
 
 
@@ -1085,6 +1100,9 @@ def run_stage(request: StageRequest) -> StageResult:
                     "lock_hash": digest(lock), "submission_performed": False, "screening_complete": False,
                     "certifies_production_coverage": False}}
             metadata = screening_metadata(lock["recipe"])
+            if lock["recipe"].get("campaign_mode") == "diagnostic":
+                values["task_manifest.json"].update({key: budget[key] for key in
+                    ("profile_safety_factor", "owner_safety_factor_decision")})
             values = {name: {**value, **metadata} for name, value in values.items()}
             return publish(request, values, status="pass", message="Recipe locked prospectively; no jobs submitted")
         require(request.stage == "campaign-collect", "unknown campaign stage")
