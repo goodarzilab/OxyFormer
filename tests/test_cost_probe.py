@@ -304,6 +304,8 @@ def test_native_patience_completion_is_measured():
 def test_terminal_failed_cells_publish_reasons_without_projections(tmp_path, monkeypatch, counted_fixture):
     import json
     from oxyformer.validation import cost_probe as cp
+    monkeypatch.setattr(cp, 'lifecycle_identity', lambda root: (__import__('json').loads(
+        (root / 'inputs.json').read_text()), 'synthetic-endpoint'))
     work = {c: cp.pinned_work(seed_count=s.seed_count, grid_points=s.grid_points)
             for c, s in cp.study_cells().items()}
     metadata = {'tree': BASE_TREE, 'work': work, 'profile_path': 'sealed-profile',
@@ -334,6 +336,8 @@ def test_terminal_failed_cells_publish_reasons_without_projections(tmp_path, mon
 def test_report_preserves_measurements_and_calibration_labels(tmp_path, monkeypatch, counted_fixture, frame_matches, partial_inner, sources_match):
     import json
     from oxyformer.validation import cost_probe as cp
+    monkeypatch.setattr(cp, 'lifecycle_identity', lambda root: (__import__('json').loads(
+        (root / 'inputs.json').read_text()), 'synthetic-endpoint'))
     work = {c: cp.pinned_work(seed_count=s.seed_count, grid_points=s.grid_points)
             for c, s in cp.study_cells().items()}
     metadata = {'tree': BASE_TREE, 'work': work, 'profile_path': 'sealed-profile',
@@ -384,8 +388,9 @@ def test_report_preserves_measurements_and_calibration_labels(tmp_path, monkeypa
     labelled_numbers(report)
 
 
-def test_report_refuses_unfinished_driver(tmp_path, counted_fixture):
+def test_report_refuses_unfinished_driver(tmp_path, counted_fixture, monkeypatch):
     from oxyformer.validation import cost_probe as cp
+    monkeypatch.setattr(cp, 'lifecycle_identity', lambda root: ({}, 'synthetic-endpoint'))
     cp.atomic_record(tmp_path / 'inputs.json', {})
     with pytest.raises(ValueError, match='driver has not finished'):
         cp.measurement_report(tmp_path, {})
@@ -498,6 +503,8 @@ def test_driver_recovers_two_live_jobs_without_another_submission(tmp_path, monk
     import time
     import pytest
     from oxyformer.validation import cost_probe as cp
+    monkeypatch.setattr(cp, 'lifecycle_identity', lambda root: (__import__('json').loads(
+        (root / 'inputs.json').read_text()), 'synthetic-endpoint'))
     cp.atomic_record(tmp_path / 'inputs.json', {'work': {}})
     cp.atomic_record(tmp_path / 'driver-jobs.json', [
         {'job_id': None, 'cell': 'e', 'operation': 'score', 'state': 'SUBMITTING',
@@ -701,6 +708,8 @@ def test_driver_refuses_missing_owner_decision_before_submission(tmp_path, monke
 
 def test_report_uses_distinct_inner_and_outer_ssl_durations(tmp_path, monkeypatch, counted_fixture):
     from oxyformer.validation import cost_probe as cp
+    monkeypatch.setattr(cp, 'lifecycle_identity', lambda root: (__import__('json').loads(
+        (root / 'inputs.json').read_text()), 'synthetic-endpoint'))
     work = {c: cp.pinned_work(seed_count=s.seed_count, grid_points=s.grid_points)
             for c, s in cp.study_cells().items()}
     cp.atomic_record(tmp_path / 'inputs.json', {'tree': BASE_TREE, 'work': work,
@@ -983,6 +992,8 @@ def test_prepared_paths_survive_a_different_runtime_checkout(synthetic_profile, 
 def test_driver_makes_relative_measurement_root_absolute(tmp_path, monkeypatch):
     from pathlib import Path
     from oxyformer.validation import cost_probe as cp
+    monkeypatch.setattr(cp, 'lifecycle_identity', lambda root: (__import__('json').loads(
+        (root / 'inputs.json').read_text()), 'synthetic-endpoint'))
     monkeypatch.setattr(cp, 'require_compute_node', lambda: None)
     monkeypatch.setattr(cp, 'clean_identity', lambda **kwargs: 'clean-head')
     monkeypatch.setattr(cp, 'require_month2_decision', lambda: None)
@@ -996,3 +1007,192 @@ def test_driver_makes_relative_measurement_root_absolute(tmp_path, monkeypatch):
     monkeypatch.setattr(cp, 'submit_measurement', submit)
     with pytest.raises(RuntimeError, match='submission inspected'):
         cp.drive_measurements(Path('measurements'), fit_checkout=tmp_path / 'frozen')
+
+
+@pytest.fixture
+def lifecycle_root(synthetic_profile, tmp_path, monkeypatch, counted_fixture):
+    """Real preparation, fit controller and scoring; synthetic CPU boundaries."""
+    import json
+    import torch
+    from pathlib import Path
+    from oxyformer.training.fit import RecipeStudy, FoldArtifacts
+    from oxyformer.training.nested_cv import PreparedEndpoint
+    from oxyformer.validation import cost_probe as cp
+    profile, _ = synthetic_profile
+    monkeypatch.setattr(cp, 'require_compute_node', lambda **kwargs: None)
+    monkeypatch.setattr(cp, 'clean_identity', lambda **kwargs: 'fixture-head')
+    monkeypatch.setattr(torch.cuda, 'reset_peak_memory_stats', lambda: None)
+    monkeypatch.setattr(torch.cuda, 'max_memory_allocated', lambda: 0)
+    configure = PreparedEndpoint.configuration
+    monkeypatch.setattr(PreparedEndpoint, 'configuration',
+        lambda self, *args, **kwargs: configure(self, *args, **{**kwargs, 'device': 'cpu'}))
+    study = RecipeStudy(reference_cap=32, frozen_epochs=1, grid_points=2, seed_count=1)
+    monkeypatch.setattr(cp, 'study_cells', lambda: {'e': study})
+    work = cp.pinned_work(seed_count=1, grid_points=2)
+    monkeypatch.setattr(cp, 'calibration_receipt', lambda *args: {
+        'compute_hours': measured(1.), 'study': cp.cell_values(study),
+        'frame_hash': cp_file_hash(), 'frame_matches': True, 'sources_match': True, 'work': work})
+    from oxyformer.provenance import file_hash
+    def cp_file_hash():
+        return file_hash(tmp_path / 'inputs/frame.json')
+    root = tmp_path / 'measurements'
+    metadata = cp.prepare_inputs(profile, root)
+    endpoint = PreparedEndpoint.from_json(Path(metadata['endpoint_path']).read_text())
+    records, jobs = {}, []
+    for position, source, standalone in cp.measurement_tasks(work):
+        job = 'fit-' + str(position)
+        monkeypatch.setenv('SLURM_JOB_ID', job)
+        previous = None if source is None else FoldArtifacts.from_json(records[source]['predecessor'])
+        records[position] = cp.measure_fit_task(endpoint, metadata['recipe'], study,
+            root / 'e' / str(position), position=position, predecessor=previous, standalone=standalone)
+        assert records[position]['slices'][-1]['complete']
+        jobs.append({'job_id': job, 'cell': 'e', 'operation': str(position), 'state': 'COMPLETED'})
+    cp.atomic_record(root / 'e/scoring.json', cp.measure_scoring(endpoint, metadata['recipe'], study, root / 'score-work'))
+    cp.atomic_record(root / 'driver-jobs.json', jobs)
+    cp.atomic_record(root / 'driver-failures.json', {})
+    return root, profile, metadata
+
+
+def test_produced_cell_lifecycle_and_idempotent_preparation(lifecycle_root, monkeypatch):
+    from oxyformer.validation import cost_probe as cp
+    root, profile, metadata = lifecycle_root
+    report = cp.measurement_report(root, {'ratio': measured(1.).to_dict()})
+    assert report['cells']['e']['compute_h100_hours_per_repetition'] is not None
+    snapshot = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in root.rglob('*') if p.is_file()}
+    monkeypatch.setattr(cp, 'clean_identity', lambda **kwargs: 'later-harness-head')
+    assert cp.prepare_inputs(profile, root) == metadata
+    assert snapshot == {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in snapshot}
+    # Change the draw seed through the ordinary sealed-request interface.
+    import json
+    from dataclasses import replace
+    from oxyformer.contracts import StageRequest
+    from oxyformer.provenance import file_hash
+    task_path = profile / '_execution/task.json'
+    task = json.loads(task_path.read_text())
+    task['parameters']['draws'][0]['seed'] += 1
+    task_path.write_text(json.dumps(task))
+    request_path = profile / '_execution/request.json'
+    request = StageRequest.from_json(request_path.read_text())
+    request_path.write_text(replace(request, task_hash=file_hash(task_path)).to_json())
+    with pytest.raises(ValueError, match='preparation changed endpoint_content_hash'):
+        cp.prepare_inputs(profile, root)
+    assert snapshot == {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in snapshot}
+
+
+@pytest.mark.parametrize('field', ['endpoint', 'tree', 'study', 'position', 'recipe'])
+def test_stale_artifacts_refused_before_driver_or_report(lifecycle_root, monkeypatch, field):
+    import json
+    from oxyformer.validation import cost_probe as cp
+    root, _, _ = lifecycle_root
+    path = root / 'e/0/progress.json'
+    record = json.loads(path.read_text())
+    record['binding'][field] = 'old-preparation'
+    cp.atomic_record(path, record)
+    monkeypatch.setattr(cp, 'submit_measurement', lambda *a, **k: pytest.fail('submitted stale root'))
+    snapshot = path.read_bytes()
+    for consume in (lambda: cp.drive_measurements(root),
+                    lambda: cp.measurement_report(root, {'ratio': measured(1.).to_dict()})):
+        with pytest.raises(ValueError, match='lifecycle identity: ' + field + ' mismatch'):
+            consume()
+    assert path.read_bytes() == snapshot
+
+
+def test_legacy_scoring_is_preserved_but_excluded(lifecycle_root):
+    import json
+    from oxyformer.validation import cost_probe as cp
+    root, _, _ = lifecycle_root
+    path = root / 'e/scoring.json'
+    record = json.loads(path.read_text())
+    del record['binding']
+    cp.atomic_record(path, record)
+    snapshot = path.read_bytes()
+    for consume in (lambda: cp.drive_measurements(root),
+                    lambda: cp.measurement_report(root, {'ratio': measured(1.).to_dict()})):
+        with pytest.raises(ValueError, match='legacy scoring excluded: endpoint identity unverifiable'):
+            consume()
+    assert path.read_bytes() == snapshot
+
+
+def test_failed_term_summary_basis_and_null_projection(lifecycle_root):
+    import json
+    from oxyformer.validation import cost_probe as cp
+    root, _, _ = lifecycle_root
+    path = root / 'e/0/progress.json'
+    record = json.loads(path.read_text())
+    record.update(slices=[], attempts=['first', 'second'])
+    cp.atomic_record(path, record)
+    cp.atomic_record(root / 'driver-jobs.json', [
+        {'job_id': job, 'cell': 'e', 'operation': '0', 'state': 'TIMEOUT'} for job in record['attempts']])
+    cp.atomic_record(root / 'driver-failures.json', {'e': {'operation': '0', 'reason': 'zero epochs'}})
+    report = cp.measurement_report(root, {'ratio': measured(1.).to_dict()})
+    term = report['measurements']['e']['inner_ssl']
+    assert term['status'] == 'failed_measurement'
+    assert term['duration_seconds'] is None
+    assert report['cells']['e']['compute_h100_hours_per_repetition'] is None
+    for value in term['summary'].values():
+        if isinstance(value, dict):
+            assert value['basis'] == ['failed_measurement']
+
+
+def test_source_identical_alternate_history_is_accepted(tmp_path):
+    import os
+    import shutil
+    import subprocess
+    import sys
+    from pathlib import Path
+    from oxyformer.validation import cost_probe as cp
+    REPO = Path.cwd()
+    alternate = tmp_path / 'alternate'
+    alternate.mkdir()
+    subprocess.run(['git', 'init', str(alternate)], check=True, capture_output=True)
+    objects = Path(subprocess.check_output(['git', 'rev-parse', '--git-path', 'objects'], text=True).strip()).resolve()
+    (alternate / '.git/objects/info/alternates').write_text(str(objects) + '\n')
+    for path in [p for _, p in cp.PROTECTED_SOURCES] + ['src/oxyformer/validation/cost_probe.py']:
+        destination = alternate / path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(REPO / path, destination)
+    subprocess.run(['git', 'add', 'src'], cwd=alternate, check=True)
+    tree = subprocess.check_output(['git', 'write-tree'], cwd=alternate, text=True).strip()
+    environment = {**os.environ, 'GIT_AUTHOR_NAME': 'Synthetic fixture',
+        'GIT_AUTHOR_EMAIL': 'fixture@example.invalid', 'GIT_COMMITTER_NAME': 'Synthetic fixture',
+        'GIT_COMMITTER_EMAIL': 'fixture@example.invalid'}
+    head = subprocess.check_output(['git', 'commit-tree', tree], cwd=alternate,
+        env=environment, input='Synthetic unrelated history\n', text=True).strip()
+    subprocess.run(['git', 'update-ref', '--no-deref', 'HEAD', head], cwd=alternate, check=True)
+    assert not subprocess.check_output(['git', 'status', '--porcelain'], cwd=alternate)
+    for _, path in cp.PROTECTED_SOURCES:
+        assert (alternate / path).read_bytes() == subprocess.check_output(
+            ['git', 'show', cp.BASE_TREE + ':' + path], cwd=alternate)
+    assert cp.clean_identity(cwd=alternate) == head
+
+
+def test_separate_harness_imports_the_fitting_checkout(tmp_path):
+    import os
+    import shutil
+    import subprocess
+    import sys
+    from pathlib import Path
+    from oxyformer.validation import cost_probe as cp
+    REPO = Path.cwd()
+    fit_root, harness_root = tmp_path / 'fit-tree', tmp_path / 'harness-tree'
+    for destination in (fit_root, harness_root):
+        shutil.copytree(REPO / 'src', destination / 'src', ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+    shadow = harness_root / 'src/oxyformer/training/fit.py'
+    with shadow.open('a') as stream:
+        stream.write("\nraise RuntimeError('HARNESS_FIT_IMPORTED')\n")
+    script = harness_root / 'src/oxyformer/validation/cost_probe.py'
+    text = script.read_text().replace('from __future__ import annotations',
+        "from __future__ import annotations\nimport sys\nprint('PROBE_SCRIPT_PATH0=' + sys.path[0])", 1)
+    script.write_text(text)
+    environment = {**os.environ, 'PYTHONPATH': 'src', 'CUDA_VISIBLE_DEVICES': ''}
+    result = subprocess.run([sys.executable, '-B', '-v', str(script), '--help'],
+        cwd=fit_root, env=environment, text=True, capture_output=True, timeout=120)
+    actual = next(line.split('=', 1)[1] for line in result.stdout.splitlines()
+                  if line.startswith('PROBE_SCRIPT_PATH0='))
+    expected_runtime = fit_root / 'src/oxyformer/training/fit.py'
+    assert result.returncode == 0, result.stderr[-4000:]
+    assert actual == str(script.parent)
+    assert str(expected_runtime) in result.stderr
+    assert str(shadow) not in result.stderr
+    assert 'HARNESS_FIT_IMPORTED' not in result.stderr
+

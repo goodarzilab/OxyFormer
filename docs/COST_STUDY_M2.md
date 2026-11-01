@@ -114,3 +114,16 @@ This preserves the package identity of real SSL
 checkpoints already measured before the scheduling clarification. Scoring jobs use
 the driver checkout. Child commands explicitly use PYTHONPATH=src. Never edit
 either frozen checkout while its checkpoint chain is live.
+
+The lifecycle identity guard reads `inputs.json` before preparation, scheduling,
+and reporting. It loads the endpoint from its absolute path, checks its stored
+file digest, and recomputes the endpoint content hash for comparison to journal
+bindings. It checks the counted work, recipe, study dimensions and fit position.
+Scoring now records an endpoint binding too. Legacy scores without that evidence
+are preserved but excluded with an error; matching measurements are required.
+Preparation with identical inputs is a no-op even after a harness commit changes;
+changed inputs are refused before any overwrite. Failed terms retain their raw
+counters but their numeric summaries carry `failed_measurement` labels.
+Clean alternate Git histories are accepted; the protected-source byte checks
+remain required. CPU lifecycle tests exercise the actual fitting and scoring
+calls with synthetic inputs; they do not establish real GPU timings or placement.

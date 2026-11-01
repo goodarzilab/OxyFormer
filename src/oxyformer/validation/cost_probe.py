@@ -93,7 +93,7 @@ def feasibility(compute_hours, overhead):
             for repetitions in (39, 100, 300, 1000) for scenarios in (1, 4)]
 
 
-BASE_TREE = 'f25e8853ba691883b447e0f89e9ce334f84f56ac'
+BASE_TREE = '57d0a04e419b0bc2c8bffb3adb46b586297746f4'
 PROTECTED_SOURCES = (
     ('nested', 'src/oxyformer/training/nested_cv.py'),
     ('coverage', 'src/oxyformer/validation/coverage.py'),
@@ -222,11 +222,10 @@ def pinned_work(*, seed_count, grid_points, tree=BASE_TREE):
 
 
 def clean_identity(*, cwd=None):
-    """A measurement starts only from committed, clean, base-descended code."""
+    """A measurement starts only from committed, clean code; protected bytes are checked separately."""
     import subprocess
     if subprocess.check_output(['git', 'status', '--porcelain'], cwd=cwd).strip():
         raise ValueError('dirty checkout refused')
-    subprocess.run(['git', 'merge-base', '--is-ancestor', BASE_TREE, 'HEAD'], check=True, cwd=cwd)
     return subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=cwd).decode().strip()
 
 
@@ -610,7 +609,9 @@ def measure_scoring(endpoint, recipe, study, root):
     # Intentionally discard all scientific values. Synthetic predictions have
     # no inferential meaning; only the call's elapsed time is a measurement.
     del result
-    return {'tree': BASE_TREE, 'head': head, 'study': cell_values(study),
+    return {'binding': {'endpoint': endpoint.content_hash, 'tree': BASE_TREE,
+                        'recipe': recipe, 'study': cell_values(study)},
+            'tree': BASE_TREE, 'head': head, 'study': cell_values(study),
             'inputs': 'synthetic inputs, timing only', 'basis': ['measured'],
             'wall_seconds': wall, 'peak_gpu_memory_bytes': torch.cuda.max_memory_allocated(),
             'prediction_rows': len(observed)}
@@ -699,6 +700,69 @@ def study_cells():
                for cell, epochs in (('c', 150), ('d', 60), ('e', 30))}}
 
 
+def lifecycle_identity(root):
+    """Read-only validation of root inputs and every reusable artifact.
+
+    File SHA256 authenticates stored bytes; PreparedEndpoint.content_hash binds
+    fitting inputs. Legacy scoring has no such evidence and is never inferred
+    from a filename or from a fitting journal. Preserve it and refuse reuse.
+    """
+    import json
+    from pathlib import Path
+    from oxyformer.provenance import file_hash
+    from oxyformer.training.nested_cv import PreparedEndpoint
+
+    root = Path(root)
+    inputs = json.loads((root / 'inputs.json').read_text())
+    def refuse(detail):
+        raise ValueError('measurement lifecycle identity: ' + detail)
+    if inputs.get('tree') != BASE_TREE:
+        refuse('tree mismatch')
+    path = Path(inputs['endpoint_path'])
+    if not path.is_absolute():
+        refuse('endpoint path must be absolute')
+    if file_hash(path) != inputs['endpoint_sha256']:
+        refuse('endpoint file changed')
+    endpoint_hash = PreparedEndpoint.from_json(path.read_text()).content_hash
+    if inputs.get('endpoint_content_hash', endpoint_hash) != endpoint_hash:
+        refuse('endpoint content changed')
+    if file_hash(inputs['frame_path']) != inputs['frame_sha256']:
+        refuse('frame changed')
+    for cell, study in study_cells().items():
+        work = inputs['work'][cell]
+        expected_work = pinned_work(seed_count=study.seed_count, grid_points=study.grid_points)
+        # JSON normalisation accounts for task tuples stored as arrays.
+        if json.dumps(work, sort_keys=True) != json.dumps(expected_work, sort_keys=True):
+            refuse('work mismatch for cell ' + cell)
+        expected = {'tree': inputs['tree'], 'endpoint': endpoint_hash,
+                    'recipe': inputs['recipe'], 'study': cell_values(study)}
+        for artifact in sorted((root / cell).glob('*/progress.json')):
+            record = json.loads(artifact.read_text())
+            binding = record.get('binding', {})
+            try:
+                position = int(artifact.parent.name)
+                task = work['tasks_per_outer_seed'][position]
+                if position < 0 or task[0] == 'select':
+                    raise ValueError()
+            except (ValueError, IndexError):
+                refuse('invalid fit position: ' + str(artifact))
+            for key, value in {**expected, 'position': position}.items():
+                if binding.get(key) != value:
+                    refuse(key + ' mismatch: ' + str(artifact))
+        score = root / cell / 'scoring.json'
+        if score.exists():
+            record = json.loads(score.read_text())
+            if 'binding' not in record:
+                refuse('legacy scoring excluded: endpoint identity unverifiable; '
+                       'matching measurement required: ' + str(score))
+            for key, value in expected.items():
+                if record['binding'].get(key) != value:
+                    refuse(key + ' mismatch: ' + str(score))
+            if record.get('tree') != inputs['tree'] or record.get('study') != cell_values(study):
+                refuse('scoring dimensions mismatch: ' + str(score))
+    return inputs, endpoint_hash
+
+
 def prepare_inputs(profile_root, destination):
     """Bind a null-effect draw to the same real frame used by the sealed profile."""
     import json
@@ -714,6 +778,9 @@ def prepare_inputs(profile_root, destination):
     head = clean_identity()
     require_month2_decision()
     profile_root, root = Path(profile_root).resolve(), Path(destination).resolve()
+    existing = lifecycle_identity(root) if (root / 'inputs.json').exists() else None
+    if existing is None and root.exists() and any(root.iterdir()):
+        raise ValueError('measurement lifecycle identity: nonempty root lacks inputs.json')
     request = StageRequest.from_json((profile_root / '_execution/request.json').read_text())
     task = json.loads((profile_root / '_execution/task.json').read_text())
     if file_hash(profile_root / '_execution/task.json') != request.task_hash:
@@ -738,11 +805,22 @@ def prepare_inputs(profile_root, destination):
     endpoint = bind_observations(template, sample.observations)
     if not sample.integration_uncertainty.converged:
         raise ValueError('null-effect draw integration did not converge')
+    candidate = {'tree': BASE_TREE, 'recipe': params['recipe'],
+                 'frame_sha256': file_hash(paths['frame.json']),
+                 'endpoint_content_hash': endpoint.content_hash}
+    if existing is not None:
+        stored, stored_endpoint = existing
+        previous = {**stored, 'endpoint_content_hash': stored_endpoint}
+        changed = [key for key, value in candidate.items() if previous.get(key) != value]
+        if changed:
+            raise ValueError('measurement lifecycle identity: preparation changed ' + ', '.join(changed))
+        return stored
     root.mkdir(parents=True, exist_ok=True)
     endpoint_path = root / 'measurement-endpoint.json'
     endpoint_path.write_text(endpoint.to_json())
     metadata = {'tree': BASE_TREE, 'prepared_head': head, 'recipe': params['recipe'],
                 'endpoint_path': str(endpoint_path), 'endpoint_sha256': file_hash(endpoint_path),
+                'endpoint_content_hash': endpoint.content_hash,
                 'frame_path': str(paths['frame.json']), 'frame_sha256': file_hash(paths['frame.json']),
                 'profile_path': str(profile_root / 'budget_record.json'),
                 'receipt': {**receipt, 'compute_hours': receipt['compute_hours'].to_dict()},
@@ -889,7 +967,7 @@ def measurement_report(root, overhead):
     import json
     from pathlib import Path
     root = Path(root)
-    inputs = json.loads((root / 'inputs.json').read_text())
+    inputs, _ = lifecycle_identity(root)
     terminal_path = root / 'driver-failures.json'
     if not terminal_path.exists():
         raise ValueError('measurement driver has not finished')
@@ -944,6 +1022,8 @@ def measurement_report(root, overhead):
                           if stats['epochs_completed'] >= required else
                           'no durable completed-epoch timing boundary after two attempts'
                           if stats['epochs_completed'] else 'zero completed epochs after two attempts')
+                records[term]['summary'] = numbered(stats, ('failed_measurement',))
+                records[term]['requested_max_epochs'] = numbered(required, ('failed_measurement',))
                 records[term].update(status='failed_measurement', basis=['failed_measurement'],
                                      reason=reason)
         score_path = directory / 'scoring.json'
@@ -1122,7 +1202,7 @@ def drive_measurements(root, *, fit_checkout=None, harness_checkout=None):
     if harness_checkout != Path.cwd():
         clean_identity(cwd=harness_checkout)
     root = Path(root).resolve()
-    metadata = json.loads((root / 'inputs.json').read_text())
+    metadata, _ = lifecycle_identity(root)
     lock = (root / 'driver.lock').open('w')
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     ledger_path = root / 'driver-jobs.json'
