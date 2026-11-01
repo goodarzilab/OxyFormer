@@ -493,11 +493,12 @@ def calibration_receipt(path, frame_path):
     from oxyformer.contracts import StageRequest
     producer = StageRequest.from_json((path.parent / '_execution/request.json').read_text())
     declared = dict(zip(producer.dependency_paths, producer.dependency_hashes))
-    expected = declared.get(str(Path(frame_path)))
+    frames = [digest for name, digest in declared.items() if Path(name).name == 'frame.json']
+    expected = frames[0] if len(frames) == 1 else None
     if expected is None:
         raise ValueError('receipt does not declare the measurement frame artifact')
     return {'compute_hours': Quantity(seconds[0] / 3600, frozenset({'measured'})),
-            'study': record['binding']['study'], 'frame_hash': expected,
+            'study': record['binding']['study'], 'tree': record['binding']['code_identity'], 'frame_hash': expected,
             'frame_matches': expected == file_hash(frame_path),
             'path': str(path), 'sha256': file_hash(path)}
 
