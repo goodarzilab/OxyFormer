@@ -1216,7 +1216,7 @@ def test_previous_root_artifacts_refused_after_endpoint_replacement(lifecycle_ro
     # Reproduce the old preparer's overwrite while keeping the old artifacts.
     field = endpoint.data.manifest.outcome_field
     columns = [c.name for c in endpoint.data.manifest.schema]
-    rows = tuple(tuple(value + 1. if name == field else value
+    rows = tuple(tuple(value + 1. if name == field and value is not None else value
                        for name, value in zip(columns, row)) for row in endpoint.data.rows)
     changed = replace(endpoint, data=replace(endpoint.data, rows=rows))
     assert changed.content_hash != endpoint.content_hash
