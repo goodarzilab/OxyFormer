@@ -49,7 +49,6 @@ JOB = (
     # pathspec rule can alter a byte or reach outside the copy. Commit author, subject and history are synthetic; tests
     # must not read commit metadata or history (CI on the real commit covers that).
     'mkdir -p "$d/tree" && cp -a "$OXYFORMER_VERIFY_STAGED/." "$d/tree/" && cd "$d/tree" || exit 97; '
-    'for v in $(compgen -e); do case "$v" in GIT_*) unset "$v";; esac; done; '
     '"$OXYFORMER_VERIFY_PYTHON" "$OXYFORMER_VERIFY_RECONSTRUCT" "$d/tree" || exit 96; '
     'py=$OXYFORMER_VERIFY_PYTHON; out=$OXYFORMER_VERIFY_RESULT; '
     'if [ -n "${OXYFORMER_VERIFY_BASH_ENV+x}" ]; then export BASH_ENV=$OXYFORMER_VERIFY_BASH_ENV; fi; '
@@ -105,42 +104,64 @@ def _git(repo, home, *args, stdin=None):
 def reconstruct(tree):
     """Make HEAD describe the working tree byte for byte, without git's content-conversion layer.
 
-    Reads the candidate's stage-0 index entries from the copied metadata, discards that metadata, and builds a fresh
-    repository (empty template, no inherited configuration, an empty HOME so no per-user attributes apply) whose index
-    is written from the working files: regular files and symlinks are hashed with --no-filters, gitlinks keep their
-    recorded commit, paths are literal. Then write-tree, commit-tree and update-ref; no hook, filter, attribute,
-    template, signing, encoding or pathspec rule can run, and nothing outside ``tree`` is read or written.
+    The candidate checkout is produced by the merge operator as ``git merge --no-commit`` into the exact target commit,
+    so its index IS the candidate tree and the working files equal the index; both are checked here. The stage-0 index
+    entries are read through the copied metadata (a self-contained ``.git`` directory or an ordinary linked-worktree
+    pointer file; a symlinked ``.git`` is refused), that local metadata is discarded (permissions repaired without
+    following symlinks; an external gitdir behind a pointer file is never touched), and a fresh repository (empty
+    template, no inherited configuration, an empty HOME so no per-user attributes apply) receives an index written from
+    the working files: regular files and symlinks hashed with --no-filters, literal paths. Then write-tree, commit-tree
+    and update-ref. Submodules are outside this verifier's envelope and are refused explicitly.
     """
     tree = os.path.realpath(tree)
-    if os.path.islink(os.path.join(tree, ".git")) or not os.path.isdir(os.path.join(tree, ".git")):
-        raise SystemExit("reconstruct: the copied metadata is not a self-contained directory")
+    meta = os.path.join(tree, ".git")
+    if os.path.islink(meta) or not (os.path.isdir(meta) or os.path.isfile(meta)):
+        raise SystemExit("reconstruct: the copied metadata must be a .git directory or an ordinary pointer file")
     home = tempfile.mkdtemp(prefix="verify-home-")
     try:
+        # Content-based (git status refreshes stat information in memory, so a copied tree with fresh inodes compares
+        # by content): any modified, deleted or untracked non-ignored path means the index is not the tree under test.
+        status = _git(tree, home, "status", "--porcelain", "--untracked-files=all", "-z")
+        # porcelain v1 "XY path": X is index vs HEAD (the staged candidate merge, expected), Y is worktree vs index.
+        drift = [x[3:] for x in status.split(b"\0") if len(x) > 3 and (x[1:2] != b" " or x[:2] == b"??")]
+        if drift:
+            raise SystemExit("reconstruct: the index does not describe the working tree (the merge operator stages the "
+                             "candidate); differing paths: " + ", ".join(x.decode(errors="replace") for x in drift[:10]))
         raw = _git(tree, home, "ls-files", "-s", "-z", "--full-name")
         entries = []
         for record in raw.split(b"\0"):
             if not record:
                 continue
-            meta, path = record.split(b"\t", 1)
-            mode, sha, stage = meta.split(b" ")
+            meta_fields, path = record.split(b"\t", 1)
+            mode, sha, stage = meta_fields.split(b" ")
             if stage != b"0":
                 raise SystemExit("reconstruct: unmerged index entry " + path.decode(errors="replace"))
+            if mode == b"160000":
+                raise SystemExit("reconstruct: submodules are outside this verifier's envelope: " + path.decode(errors="replace"))
             entries.append((mode, sha, path))
-        for root, dirs, files in os.walk(os.path.join(tree, ".git")):
-            for name in dirs + files:
-                try:
-                    os.chmod(os.path.join(root, name), 0o700)
-                except OSError:
-                    pass
-        shutil.rmtree(os.path.join(tree, ".git"))
+        if os.path.isdir(meta):
+            for root, dirs, files in os.walk(meta, topdown=True):
+                for name in dirs + files:
+                    full = os.path.join(root, name)
+                    if not os.path.islink(full):
+                        try:
+                            os.chmod(full, 0o700 if name in dirs else 0o600)
+                        except OSError:
+                            pass
+            os.chmod(meta, 0o700)
+            shutil.rmtree(meta)
+        else:
+            os.remove(meta)   # a linked-worktree pointer file: the external gitdir is left exactly as it was
         _git(tree, home, "init", "-q", "--template=")
         index = bytearray()
         for mode, sha, path in entries:
             full = os.path.join(tree, path.decode("utf-8", "surrogateescape"))
-            if mode == b"160000":
-                blob = sha                      # gitlink: the recorded submodule commit, no object needed
-            elif mode == b"120000":
-                target = os.readlink(full).encode("utf-8", "surrogateescape")
+            if mode == b"120000":
+                if os.path.islink(full):
+                    target = os.readlink(full).encode("utf-8", "surrogateescape")
+                else:   # core.symlinks=false checkout: the link target is the file's content
+                    with open(full, "rb") as fh:
+                        target = fh.read()
                 blob = _git(tree, home, "hash-object", "-w", "-t", "blob", "--no-filters", "--stdin", stdin=target).strip()
             elif mode in (b"100644", b"100755"):
                 with open(full, "rb") as fh:
