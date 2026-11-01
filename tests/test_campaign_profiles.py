@@ -1977,3 +1977,400 @@ def test_admit_side_synthetic_shape_matches_r5_lock(admission_shape_fixture, mon
     assert shape['relative_difference'] == {
         'archive_bytes': (tree['continuation.tar']['size'] - 66058240) / 66058240,
         'record_count': (observed_records - 18) / 18}
+
+
+def test_month2_decision_json_and_key_refusals():
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    value = campaign.month2_decision(approvals)
+    assert value['gpu_hours_ceiling'] is None
+    assert json.loads(json.dumps(value)) == value
+    assert value['diagnostic_campaign']['repetitions'] == 20
+    for key in value:
+        changed = deepcopy(approvals)
+        del changed['owner_decisions']['month2_followon'][key]
+        with pytest.raises(ContractError, match='month2_followon.*' + key):
+            campaign.month2_decision(changed)
+    for key in value['diagnostic_campaign']:
+        changed = deepcopy(approvals)
+        del changed['owner_decisions']['month2_followon']['diagnostic_campaign'][key]
+        with pytest.raises(ContractError, match='month2_followon.*' + key):
+            campaign.month2_decision(changed)
+
+
+@pytest.mark.parametrize('key,value', [('scenarios', []), ('scenarios', ['sign_changing'] * 2),
+    ('scenarios', ['unknown']), ('repetitions', True), ('repetitions', 0), ('recipe', {}),
+    ('partition', 'idle'), ('gpu_hours_per_leaf_max', 4.01), ('gpu_hours_per_leaf_max', float('nan')),
+    ('leaves_per_chain_max', 41), ('parallel_chains', False), ('certifies_release_criteria', True),
+    ('purpose', ''), ('draws_continue_from', '')])
+def test_month2_refuses_malformed_campaign(key, value):
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    approvals['owner_decisions']['month2_followon']['diagnostic_campaign'][key] = value
+    with pytest.raises(ContractError, match='month2_followon.*' + key):
+        campaign.month2_decision(approvals)
+
+
+@pytest.mark.parametrize('value', [0, True, 17, 1.5])
+def test_month2_concurrency_ceiling(value):
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    approvals['owner_decisions']['month2_followon']['gpu_concurrency_max']['preemptible'] = value
+    with pytest.raises(ContractError, match='gpu_concurrency_max'):
+        campaign.month2_decision(approvals)
+
+
+def test_diagnostic_arithmetic_keeps_twenty_independent_chains_and_no_total_cap():
+    profile = {'seconds_per_repetition': 100000., 'publication_verification_seconds': 400.,
+        'leaf_overheads': {'setup_seconds': 100., 'import_seconds': 2., 'export_seconds': 3., 'publication_seconds': 5.}}
+    decision = campaign.month2_decision()
+    row = campaign.diagnostic_sizing({'sign_changing': profile}, decision, 14100)['sign_changing']
+    assert row['repetitions'] == row['chains'] == 20
+    assert row['per_chain']['repetitions'] == 1
+    assert row['leaves'] == 20 * row['per_chain']['leaves']
+    assert row['gpu_hours'] > 640
+    assert row['gpu_hours'] == 20 * row['per_chain']['gpu_hours']
+    profile['seconds_per_repetition'] = 1e8
+    with pytest.raises(ContractError, match='chain requires .* leaves > 40'):
+        campaign.diagnostic_sizing({'sign_changing': profile}, decision, 14100)
+
+
+def test_diagnostic_emitter_subset_dependencies_and_screening_unchanged(built):
+    approvals, (endpoint, frame, _, _) = built
+    approvals = approvals['approvals']
+    before = json.dumps(real_frame.screening_profile_tasks(endpoint, frame, approvals), sort_keys=True)
+    manifest = real_frame.diagnostic_profile_tasks(endpoint, frame, approvals, campaign_id='m2-diagnostic',
+        evaluation_namespace='m2-diagnostic-new', prior_locks=[{'dependency': 'old-lock', 'path': 'recipe_lock.json'}],
+        cpu_wall_hours_budget=10000)
+    assert manifest['gpu_concurrency_max'] == 16
+    profiles = manifest['tasks'][:-2]
+    assert len(profiles) == 40
+    assert {t['parameters']['scenario']['name'] for t in profiles} == {'sign_changing'}
+    estimate, lock = manifest['tasks'][-2:]
+    assert estimate['parameters']['profile_safety_factor'] == 2.0
+    assert estimate['id'] in lock['needs'] and 'old-lock' in lock['needs']
+    for dep, names in read_mapping(ROOT / 'configs/execution/stages.yaml')['stages']['campaign-lock']['needs'].items():
+        assert set(names) <= set(lock['needs'][dep])
+    assert set(estimate['parameters']['profiles']) == {'sign_changing'}
+    assert all(t['campaign_mode'] == 'diagnostic' and not t['certifies_release_criteria'] for t in manifest['tasks'])
+    assert json.dumps(real_frame.screening_profile_tasks(endpoint, frame, approvals), sort_keys=True) == before
+
+
+def test_diagnostic_summary_known_bias_is_not_release():
+    draws, records = successful_records(20)
+    for record in records:
+        for estimate in record['estimates'].values():
+            estimate['value'] += 2.
+    result = campaign.diagnostic_summary(records, draws, null_scenario=True)
+    assert result['coverage_pass'] is False and result['coverage_pass_reason'] == 'diagnostic'
+    assert result['production_equivalent'] is False
+    for method, row in result['diagnostic_summary'].items():
+        assert row['n'] == 20 and row['numerical_failures'] == 0
+        assert row['bias'] == pytest.approx(2.)
+        assert row['bias'] == pytest.approx(row['mean_estimate'] - row['truth'])
+        assert row['coverage_lower'] == coverage.binomial_bound(row['coverage_count'], 20, side='lower')
+        assert row['rejection_upper'] == coverage.binomial_bound(row['rejections'], 20, side='upper')
+        assert row['certifies_release_criteria'] is False
+
+
+@pytest.fixture
+def diagnostic_request(screening_request, tmp_path, monkeypatch):
+    source = coverage.read_json(screening_request.task_path)
+    config = coverage.read_json(screening_request.config_path)
+    task = deepcopy(source)
+    p = task['parameters']
+    old_recipe = deepcopy(p['recipe'])
+    p['recipe']['campaign_mode'] = 'diagnostic'
+    p.update(campaign.screening_metadata(p['recipe']), partition='preemptible', profile_safety_factor=2.)
+    task.update(campaign.screening_metadata(p['recipe']))
+    p['profiles'] = {'sign_changing': p['profiles']['sign_changing']}
+    p['probe_profiles'] = {'sign_changing': p['probe_profiles']['sign_changing']}
+    p['setup_calibration'] = [r for r in p['setup_calibration'] if r['dependency'] == p['profiles']['sign_changing']['dependency']]
+    # Reuse sealed synthetic profiling measurements; production profile binding
+    # itself is exercised by the existing _profile drift regressions.
+    original = campaign._profile
+    def measured(req, cfg, reference, scenario, recipe, stamps):
+        return original(req, cfg, reference, scenario, old_recipe, stamps)
+    monkeypatch.setattr(campaign, '_profile', measured)
+    deps = {k: Path(v) for k, v in config['dependencies'].items()}
+    return request(tmp_path / 'diagnostic-estimate', task, deps, config['approvals'])
+
+
+def diagnostic_lock_request(req, tmp_path):
+    lock_request = screening_lock_request(req, tmp_path)
+    task = coverage.read_json(lock_request.task_path)
+    cfg = coverage.read_json(lock_request.config_path)
+    deps = {k: Path(v) for k, v in cfg['dependencies'].items()}
+    prior = {'campaign_id': 'm1-screening-D', 'evaluation_namespace': 'month1-evaluation',
+             'batches': [{'draws': coverage.repetition_plan('month1:screening', 'sign_changing', 2)}]}
+    deps['prior-lock'] = tmp_path / 'prior'
+    write(deps['prior-lock'] / 'recipe_lock.json', prior)
+    task['parameters'].update(campaign_id='m2-diagnostic', evaluation_namespace='month2-evaluation',
+        prior_locks=[{'dependency': 'prior-lock', 'path': 'recipe_lock.json'}], cpu_wall_hours_budget=10000.)
+    return request(tmp_path / 'diagnostic-lock', task, deps, cfg['approvals'])
+
+
+@pytest.mark.parametrize('screening_rates', [(100.,) * 4], indirect=True)
+def test_diagnostic_lock_twenty_chains_seeds_admission_and_flags(diagnostic_request, tmp_path):
+    req = diagnostic_lock_request(diagnostic_request, tmp_path)
+    result = campaign.run_stage(req)
+    assert result.status == 'pass', result.message
+    root = Path(req.output_dir)
+    lock = coverage.read_json(root / 'recipe_lock.json')
+    expansion = coverage.read_json(root / 'expanded_units.json')
+    assert len(lock['instances']) == len(lock['batches']) == len(expansion['plans']) == 20
+    assert set(lock['instances'].values()) == {f'm2-diagnostic-s0-c{j}' for j in range(20)}
+    draws = [b['draws'][0] for b in lock['batches']]
+    assert len({d['seed'] for d in draws}) == 20
+    assert not {d['seed'] for d in draws}.intersection(d['seed'] for d in coverage.repetition_plan('month1:screening', 'sign_changing', 2))
+    assert [d['index'] for d in draws] == list(range(20))
+    assert lock['concurrency_limits'] == {'gpu': 16, 'cpu': 6}
+    assert lock['owner_decision_hash'] == lock['budget']['owner_decision_hash'] == coverage.digest(campaign.month2_decision())
+    assert lock['budget']['run_gpu_hours_ceiling'] is None
+    assert len(expansion['plans'][0]['tasks'][-1]['expected_leaves']) == sum(len(p['expected_leaves']) for p in expansion['plans'])
+    for name in ('recipe_lock.json', 'budget.json', 'task_manifest.json'):
+        assert coverage.read_json(root / name)['certifies_release_criteria'] is False
+    for plan in expansion['plans']:
+        for unit in plan['units'][:-1]:
+            assert {'--partition=preemptible', '--account=root', '--qos=normal', '--gres=gpu:1', '--time=04:00:00', '--no-requeue'} <= set(unit['sbatch'])
+            assert unit['max_attempts'] == 3 and unit['retry']['mode'] == 'restart'
+            assert unit['concurrency_limits']['gpu'] == 16
+    assert all(t['parameters'].get('scenario', 'sign_changing') == 'sign_changing' for t in expansion['admission']['tasks'])
+    assert all(t['production_equivalent'] is False for t in expansion['admission']['tasks'])
+
+
+@pytest.mark.parametrize('fault,match', [('missing', 'draws_continue_from'), ('duplicate', 'draws_continue_from'),
+    ('namespace', 'namespace already used'), ('estimate', 'estimate changed')])
+@pytest.mark.parametrize('screening_rates', [(100.,) * 4], indirect=True)
+def test_diagnostic_lock_refusals(diagnostic_request, tmp_path, fault, match):
+    req = diagnostic_lock_request(diagnostic_request, tmp_path)
+    task = coverage.read_json(req.task_path)
+    if fault == 'missing':
+        task['parameters']['prior_locks'] = []
+    elif fault == 'duplicate':
+        task['parameters']['prior_locks'] *= 2
+    elif fault == 'namespace':
+        task['parameters']['evaluation_namespace'] = 'month1-evaluation'
+    else:
+        task['parameters']['profile_safety_factor'] = 3.
+    write(Path(req.task_path), task)
+    result = campaign.run_stage(replace(req, task_hash=file_hash(req.task_path)))
+    assert result.status == 'blocked' and match in result.message
+
+
+@pytest.mark.parametrize('interrupted_step', [0, 1])
+@pytest.mark.parametrize('screening_rates', [(100.,) * 4], indirect=True)
+def test_diagnostic_preempted_attempt_restarts_or_resumes_only_predecessor(diagnostic_request, tmp_path, monkeypatch, interrupted_step):
+    from test_coverage import chain_request
+    req = diagnostic_lock_request(diagnostic_request, tmp_path)
+    result = campaign.run_stage(req)
+    assert result.status == 'pass', result.message
+    root = Path(req.output_dir)
+    lock = coverage.read_json(root / 'recipe_lock.json')
+    plan = coverage.read_json(root / 'expanded_units.json')['plans'][0]
+    config = coverage.read_json(req.config_path)
+    deps = {k: Path(v) for k, v in config['dependencies'].items()}
+    deps['campaign-lock'] = root
+    deps['campaign-admit'] = sealed_json_fixture(tmp_path / 'admitted', 'campaign-admit', 'campaign-admit',
+        {'admission.json': {'admitted': True, 'lock_hash': coverage.digest(lock),
+        'estimate_hash': lock['estimate_hash'], 'setup_policy': 'three-receipt-minima-v1',
+        'admission_measurements': {'setup_minima': {'fresh': 0., 'resumed_1': 0., 'resumed_2': 0.},
+                                   'allowance_seconds': 60.}}})
+    monkeypatch.setattr(campaign_probe, 'declared_publication_shape',
+        lambda *a, **kw: lock['budget']['expected_predecessor_shapes']['sign_changing'])
+    seen = []
+    interrupt = [False]
+    def execute(draw, frame, scenario, template, recipe, destination, deadline, *, continuation, study):
+        seen.append(continuation['compute_seconds'])
+        if interrupt[0]:
+            continuation['parts'].append('dead-attempt-marker')
+            raise OSError('simulated preemption before publication')
+        continuation['compute_seconds'] = 1000.
+        return {'draw': draw, 'status': 'incomplete', 'reason': 'budget exhausted'}
+    monkeypatch.setattr(coverage, 'execute_draw', execute)
+    def attempt(leaf, label):
+        r = chain_request(tmp_path / label, leaf, deps)
+        cfg = coverage.read_json(r.config_path)
+        cfg['approvals'] = config['approvals']
+        write(Path(r.config_path), cfg)
+        return replace(r, config_hash=file_hash(r.config_path))
+    if interrupted_step:
+        first = plan['tasks'][0]
+        initial = attempt(first, 'initial')
+        passed = run_coverage(initial)
+        assert passed.status == 'pass', passed.message
+        deps[first['id']] = Path(initial.output_dir)
+    leaf = plan['tasks'][interrupted_step]
+    interrupt[0] = True
+    dead = attempt(leaf, 'preempted')
+    failed = coverage.run_stage(dead)
+    assert failed.status == 'blocked' and 'simulated preemption' in failed.message
+    assert not (Path(dead.output_dir) / 'continuation.tar').exists()
+    interrupt[0] = False
+    retried = attempt(leaf, 'fresh-retry')
+    passed = run_coverage(retried)
+    assert passed.status == 'pass', passed.message
+    assert (seen[-1] >= 1000.) if interrupted_step else (seen[-1] == 0.)
+    for name in ('result.json', 'runtime.json', coverage.BUDGET_RECORD):
+        value = coverage.read_json(Path(retried.output_dir) / name)
+        metadata = value['binding'] if name == coverage.BUDGET_RECORD else value
+        assert metadata['campaign_mode'] == 'diagnostic'
+        assert metadata['certifies_release_criteria'] is False
+        assert (value['profile'] if name == coverage.BUDGET_RECORD else value)['production_equivalent'] is False
+
+
+@pytest.mark.parametrize('key,value', [('partitions', ['preemptible', 'standard']),
+    ('gpu_concurrency_max', {'preemptible': 16}), ('gpu_hours_ceiling', 3600),
+    ('decided_on', 'not-a-date'), ('decided_on', None), ('recipe_cost_study', ''), ('final_cells', 3)])
+def test_month2_refuses_malformed_top_level(key, value):
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    approvals['owner_decisions']['month2_followon'][key] = value
+    with pytest.raises(ContractError, match='month2_followon.*' + key):
+        campaign.month2_decision(approvals)
+
+
+@pytest.mark.parametrize('screening_rates', [(100.,) * 4], indirect=True)
+def test_diagnostic_collector_aggregates_all_twenty_chain_records(diagnostic_request, tmp_path, monkeypatch):
+    req = diagnostic_lock_request(diagnostic_request, tmp_path)
+    outcome = campaign.run_stage(req)
+    assert outcome.status == 'pass', outcome.message
+    root = Path(req.output_dir)
+    lock = coverage.read_json(root / 'recipe_lock.json')
+    plans = coverage.read_json(root / 'expanded_units.json')['plans']
+    cfg = coverage.read_json(req.config_path)
+    deps = {k: Path(v) for k, v in cfg['dependencies'].items()}
+    deps['campaign-lock'] = root
+    budgets = {}
+    _, records = successful_records(20, 'sign_changing')
+    for plan, batch, record in zip(plans, lock['batches'], records):
+        record['draw'] = batch['draws'][0]
+        for leaf in plan['tasks'][:-1]:
+            path = tmp_path / 'collected-leaves' / leaf['id']
+            payload = {'lock_hash': coverage.digest(lock), 'batch_id': batch['batch_id'], 'mode': 'diagnostic',
+                'scenario': batch['scenario'], 'draws': batch['draws'], 'records': [record]}
+            result_path = write(path / 'result.json', payload)
+            deps[leaf['id']] = path
+            budgets[leaf['id']] = {'payload_hash': file_hash(result_path),
+                'binding': {'recipe_hash': coverage.digest(lock['recipe'])},
+                'leaves': [{'wall_seconds': 100.}], 'complete': True}
+    monkeypatch.setattr(campaign, 'load_lock', lambda *args: lock)
+    monkeypatch.setattr(campaign, 'load_budget', lambda req, config, unit, **kw: budgets[unit])
+    collector = request(tmp_path / 'diagnostic-collector', plans[0]['tasks'][-1], deps, cfg['approvals'])
+    result = campaign.run_stage(collector)
+    assert result.status == 'pass', result.message
+    value = coverage.read_json(Path(collector.output_dir) / 'result.json')
+    assert len(value['records']) == 20
+    assert value['production_equivalent'] is False and value['certifies_release_criteria'] is False
+    gate = coverage.read_json(Path(collector.output_dir) / 'gate.json')
+    assert gate['coverage_pass'] is False and gate['coverage_pass_reason'] == 'diagnostic'
+    for summary in value['diagnostic_summary']['sign_changing'].values():
+        assert summary['n'] == 20 and summary['empirical_sd'] > 0
+    assert len(gate['received_leaves']) == sum(len(p['expected_leaves']) for p in plans)
+
+
+def test_screening_complete_emitter_matches_launch_base_bytes():
+    # Measured against the complete emitter at f25e8853, including estimate.
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    assert coverage.digest(real_frame.screening_profile_tasks(*smoke_inputs.build_inputs(), approvals)) == \
+        'a7ad5eadc9da850403c9881d1a01d25f6564033387868dd2024bda2d8e7fca1d'
+
+
+@pytest.mark.parametrize('nested', [False, True])
+def test_month2_mixed_missing_and_extra_keys_raise_named_contract_error(nested):
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    block = approvals['owner_decisions']['month2_followon']
+    if nested:
+        block = block['diagnostic_campaign']
+    block.pop('purpose' if nested else 'decided_on')
+    block[42] = 'unexpected'
+    with pytest.raises(ContractError, match='month2_followon.*42'):
+        campaign.month2_decision(approvals)
+
+
+@pytest.mark.parametrize('key', ['gpu_hours_per_leaf_max', 'leaves_per_chain_max'])
+def test_month2_oversized_integer_bound_is_named_contract_error(key):
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    approvals['owner_decisions']['month2_followon']['diagnostic_campaign'][key] = 10 ** 400
+    with pytest.raises(ContractError, match='month2_followon.*' + key):
+        campaign.month2_decision(approvals)
+
+
+@pytest.mark.parametrize('screening_rates', [(100.,) * 4], indirect=True)
+def test_diagnostic_expansion_names_mismatched_metadata(diagnostic_request, tmp_path):
+    from oxyformer.execution.campaign import expand_campaign
+    req = diagnostic_lock_request(diagnostic_request, tmp_path)
+    result = campaign.run_stage(req)
+    assert result.status == 'pass', result.message
+    spec = coverage.read_json(Path(req.output_dir) / 'expanded_units.json')['plans'][0]['spec']
+    approvals = coverage.read_json(req.config_path)['approvals']
+    for key, value in [('certifies_release_criteria', True), ('study', {}),
+                       ('production_equivalent', True), ('campaign_label', 'unlabelled')]:
+        changed = deepcopy(spec)
+        changed[key] = value
+        with pytest.raises(ContractError, match=key):
+            expand_campaign(changed, approvals)
+
+
+@pytest.mark.parametrize('ordering', ['canonical', 'reversed'])
+def test_month2_decision_accepts_canonical_mapping_serialization(ordering):
+    from oxyformer.provenance import canonical_json
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    # The runner and sealed fixture writer sort JSON mapping keys. List order
+    # (partitions and scenarios) remains significant; mapping order does not.
+    expected = campaign.month2_decision(approvals)
+    approvals['owner_decisions']['month2_followon'] = expected
+    def reverse_mappings(value):
+        if isinstance(value, dict):
+            return {k: reverse_mappings(v) for k, v in reversed(list(value.items()))}
+        if isinstance(value, list):
+            return [reverse_mappings(v) for v in value]
+        return value
+    serialized = (json.loads(canonical_json(expected)) if ordering == 'canonical'
+                  else reverse_mappings(expected))
+    assert list(serialized) != list(expected)
+    assert serialized['partitions'] == expected['partitions']
+    assert serialized['diagnostic_campaign']['scenarios'] == expected['diagnostic_campaign']['scenarios']
+    approvals['owner_decisions']['month2_followon'] = serialized
+    assert campaign.month2_decision(approvals) == expected
+
+
+@pytest.mark.parametrize('screening_rates', [(100.,) * 4], indirect=True)
+def test_diagnostic_estimate_cpu_refusal_precedes_publication(diagnostic_request, monkeypatch):
+    import torch
+    monkeypatch.setattr(campaign, 'resolve_device', lambda: torch.device('cpu'))
+    result = campaign_estimate.run_stage(diagnostic_request)
+    assert result.status == 'blocked' and 'diagnostic measurement requires CUDA' in result.message
+    assert not (Path(diagnostic_request.output_dir) / 'budget_estimate.json').exists()
+
+
+@pytest.mark.parametrize('value', ['2025-08-12T00:00:00', '2025-08-12T23:59:59+05:30',
+    '2025-08-12T00:00:00Z', datetime(2025, 8, 12), datetime.fromisoformat('2025-08-12T00:00:00+00:00')])
+def test_month2_iso_timestamp_normalizes_to_decision_date(value):
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    approvals['owner_decisions']['month2_followon']['decided_on'] = value
+    assert campaign.month2_decision(approvals)['decided_on'] == '2025-08-12'
+
+
+def test_diagnostic_safety_factor_cannot_undercut_default_at_chain_bound():
+    profile = {'seconds_per_repetition': 300000., 'publication_verification_seconds': 400.,
+        'leaf_overheads': {'setup_seconds': 100., 'import_seconds': 2., 'export_seconds': 3., 'publication_seconds': 5.}}
+    decision = campaign.month2_decision()
+    assert campaign.slice_count(profile, 1, 14100, 1., enforce_limit=False) <= 40
+    assert campaign.slice_count(profile, 1, 14100, 2., enforce_limit=False) > 40
+    with pytest.raises(ContractError, match='profile_safety_factor'):
+        campaign.diagnostic_sizing({'sign_changing': profile}, decision, 14100, factor=1.)
+    with pytest.raises(ContractError, match='chain requires .* leaves > 40'):
+        campaign.diagnostic_sizing({'sign_changing': profile}, decision, 14100)
+
+
+@pytest.mark.parametrize('screening_rates', [(100.,) * 4], indirect=True)
+def test_diagnostic_estimate_refuses_reduced_safety_factor_before_publication(diagnostic_request):
+    req = update_task(diagnostic_request, lambda p: p.update(profile_safety_factor=1.))
+    result = campaign_estimate.run_stage(req)
+    assert result.status == 'blocked' and 'profile_safety_factor' in result.message
+    assert not (Path(req.output_dir) / 'budget_estimate.json').exists()
+
+
+def test_month2_mapping_only_counterexample_refuses_missing_screening_context():
+    from oxyformer.provenance import canonical_json
+    approvals = read_mapping(ROOT / 'configs/approvals.yaml')
+    serialized = json.loads(canonical_json(approvals['owner_decisions']['month2_followon']))
+    with pytest.raises(ContractError, match='screening campaign approval'):
+        campaign.month2_decision({'owner_decisions': {'month2_followon': serialized}})

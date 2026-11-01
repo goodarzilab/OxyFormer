@@ -323,6 +323,71 @@ def screening_profile_tasks(endpoint, frame, approvals, *, setup_calibration=Non
     return {'schema_version': 1, **metadata, 'gpu_concurrency_max': 4, 'tasks': tasks}
 
 
+def diagnostic_profile_tasks(endpoint, frame, approvals, *, campaign_id, evaluation_namespace,
+                             prior_locks, cpu_wall_hours_budget, setup_calibration=None,
+                             calibration_probes=None):
+    """Emit the approved profile subset and sizing/lock tasks, without submission."""
+    d = campaign.month2_decision(approvals)
+    require(d == campaign.month2_decision(), 'month2_followon drift')
+    c = d['diagnostic_campaign']
+    campaign.concrete_id(campaign_id)
+    require(len(campaign_id) <= 23, 'campaign ID must leave room for chain suffix')
+    original = screening_profile_tasks(endpoint, frame, approvals)
+    tasks = []
+    for source in original['tasks']:
+        if source['stage'] != 'simulation-smoke' or source['parameters']['scenario']['name'] not in c['scenarios']:
+            continue
+        task = deepcopy(source)
+        recipe = task['parameters']['recipe']
+        recipe['campaign_mode'] = 'diagnostic'
+        metadata = campaign.screening_metadata(recipe)
+        task.update(metadata)
+        task['parameters'].update(metadata, partition=c['partition'])
+        task['resources']['partition'] = c['partition']
+        task['parameters']['draws'] = repetition_plan(digest(['diagnostic-profile', recipe, campaign_id]),
+            task['parameters']['scenario']['name'], 1)
+        task['continuation']['owner'] = digest(['diagnostic-profile-chain', task['parameters']])
+        tasks.append(task)
+    recipe = deepcopy(tasks[0]['parameters']['recipe'])
+    metadata = campaign.screening_metadata(recipe)
+    estimate = deepcopy(original['tasks'][-1])
+    estimate['id'] = campaign_id + '-estimate'
+    campaign.concrete_id(estimate['id'])
+    estimate.update(metadata)
+    p = estimate['parameters']
+    p.update(metadata, recipe=recipe, partition=c['partition'], profile_safety_factor=2.0)
+    p['profiles'] = {n: p['profiles'][n] for n in c['scenarios']}
+    p['probe_profiles'] = {n: p['probe_profiles'][n] for n in c['scenarios']}
+    estimate['resources']['partition'] = c['partition']
+    # Rebuild dependency declarations from the artifacts each consumer reads.
+    estimate['needs'] = deepcopy(tasks[0]['needs'])
+    from oxyformer.validation.campaign_probe import PROFILE_SETUP_INPUTS
+    for ref in p['profiles'].values():
+        estimate['needs'][ref['dependency']] = list(PROFILE_SETUP_INPUTS)
+    for refs in p['probe_profiles'].values():
+        for ref in refs.values():
+            estimate['needs'][ref['dependency']] = list(PROFILE_SETUP_INPUTS)
+    estimate = sizing_task_inputs(estimate, setup_calibration=setup_calibration, calibration_probes=calibration_probes)
+    lock = deepcopy(estimate)
+    lock.update(id=campaign_id + '-lock', stage='campaign-lock')
+    campaign.concrete_id(lock['id'])
+    from oxyformer.validation.campaign_probe import LOCK_OUTPUTS
+    lock['outputs'] = list(LOCK_OUTPUTS)
+    lock['parameters'].update(campaign_id=campaign_id, evaluation_namespace=evaluation_namespace,
+        prior_locks=deepcopy(prior_locks), cpu_wall_hours_budget=cpu_wall_hours_budget,
+        retry_rules=deepcopy(campaign.RETRY_RULES),
+        estimate_input={'dependency': estimate['id'], 'path': 'budget_estimate.json'},
+        admission_receipt={'dependency': campaign_id + '-admit', 'path': 'admission.json'})
+    for unit, names in read_mapping(ROOT / 'configs/execution/stages.yaml')['stages']['campaign-lock'].get('needs', {}).items():
+        lock['needs'][unit] = list(dict.fromkeys([*lock['needs'].get(unit, []), *names]))
+    lock['needs'][estimate['id']] = ['budget_estimate.json']
+    for ref in prior_locks:
+        lock['needs'].setdefault(ref['dependency'], []).append(ref['path'])
+    tasks.extend([estimate, lock])
+    return {'schema_version': 1, **metadata,
+            'gpu_concurrency_max': d['gpu_concurrency_max'][c['partition']], 'tasks': tasks}
+
+
 def run_stage(request: StageRequest) -> StageResult:
     try:
         values, design = prepare_inputs(request)

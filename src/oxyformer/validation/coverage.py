@@ -523,7 +523,7 @@ def read_json(path):
 def output_metadata(task):
     from oxyformer.validation.campaign import screening_metadata
     recipe = task.get("parameters", {}).get("recipe", task.get("parameters", {}))
-    return screening_metadata(task if task.get("campaign_mode") == "screening" else recipe)
+    return screening_metadata(task if task.get("campaign_mode") in ("screening", "diagnostic") else recipe)
 
 
 def publish(request, values, *, status, message, extra_artifacts=()):
@@ -804,9 +804,9 @@ def prepare_batch(request: StageRequest):
         from oxyformer.training.fit import resolve_device
         require(resolve_device() == resolve_device(parameters["device"]),
                 "runtime differs from task required device")
-    require(mode in ("smoke", "profile", "screening", "final"), "unknown repetition mode")
+    require(mode in ("smoke", "profile", "screening", "diagnostic", "final"), "unknown repetition mode")
     require((request.stage == "simulation-smoke") == (mode in ("smoke", "profile")), "stage/mode mismatch")
-    if mode in ("screening", "final"):
+    if mode in ("screening", "diagnostic", "final"):
         lock = load_lock(request, config, task)
         validate_leaf_task(request, config, task, lock)
         recipe = lock["recipe"]
@@ -819,7 +819,15 @@ def prepare_batch(request: StageRequest):
         recipe = parameters["recipe"]
         lock = None
     from oxyformer.validation.campaign import screening_metadata, validate_screening
-    if screening_metadata(recipe):
+    if recipe.get("campaign_mode") == "diagnostic":
+        from oxyformer.validation.campaign import validate_diagnostic
+        decision = validate_diagnostic(recipe, config.get("approvals"))["diagnostic_campaign"]
+        require(mode in ("profile", "diagnostic"), "diagnostic cell cannot certify final coverage")
+        require(parameters.get("study") == decision["recipe"], "diagnostic study drift")
+        require(parameters.get("partition") == decision["partition"], "diagnostic partition drift")
+        require(parameters.get("certifies_release_criteria") is False, "diagnostic certifies_release_criteria drift")
+        require(uses_continuation(task), "diagnostic requires coverage continuation")
+    elif screening_metadata(recipe):
         decision = validate_screening(recipe, config.get("approvals"))
         require(mode in ("profile", "screening"), "screening cell cannot certify final coverage")
         require(parameters.get("study") == decision["recipe"], "screening task study drift")
