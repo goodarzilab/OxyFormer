@@ -300,7 +300,7 @@ owner_decisions:
   # mandate's Phase-3 amendment. Final-cell repetitions, recipe and scenarios remain a later owner decision.
   month2_phase3:
     decided_on: "2026-11-09"
-    purpose: "attribution before sizing: CPU-only oracle-nuisance replay on the saved m2-diag-A artifacts, a W&B logging hook, final-cell admission from an owner block, and one cost re-calibration replay; these decisions launch no campaign"
+    purpose: "attribution before sizing: CPU-only oracle-nuisance replay on the saved m2-diag-A artifacts, a W&B logging hook, final-cell admission from an owner block, and one cost re-calibration replay; campaigns remain separate owner decisions"
     engineering_units: [p3-oracle-path, p3-wandb-hook, p3-final-cell-mode, p3-attribution-run]
     code_author: "codex/gpt-6.1-sol"       # owner decision 2026-11-06, reconfirmed 2026-11-09; codex/gpt-6-astra reviews and tie-breaks, never authors
     run_logging:
@@ -317,7 +317,7 @@ owner_decisions:
       partition: standard
       gpu_hours_max: 34
       purpose: "time one complete screening-cell repetition end to end and reconcile it with the sealed receipt (30.46 H100-h) and the harness projection (73.9 H100-h, ratio 2.43); timing only, not a new scientific repetition"
-    final_cells: "unchanged: repetitions, recipe and scenarios for any final cell, and the SE variance target the committee routed to the owner, remain later owner decisions"
+    final_cells: "repetitions, recipe and scenarios for any final cell, and the SE variance target the committee routed to the owner, remain later owner decisions"
 
 # Not yet approved. A unit that needs one of these must stop and report; the orchestrator brings it to the owner.
 pending_owner_approval:

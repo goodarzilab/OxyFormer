@@ -39,12 +39,13 @@ Anything beyond that is a follow-up issue, never a blocker.
    `standard` with account `root` only.
 2. Writes only to `~/oxyformer-swarm`, the coordinator state directory, `~/envs/oxyformer`, and the repository through PRs
    into `dev`. `main`, the root data CSVs, `outputs/` and `report/` are read-only.
-3. Code agents are Codex gpt-6.1-sol (thinking high) in `auto-review` mode (owner decision 2026-11-06, reconfirmed 2026-11-09);
-   Codex gpt-6-astra holds the deep-review and tie-break seats and never authors (brood-lord PR 358). Attempt records of units
-   dispatched before this amendment merged keep gpt-6-astra as their recorded author and are never rewritten. Any attempt,
-   retry or continuation dispatched after the merge, including one of a pre-merge unit, uses gpt-6.1-sol and declares every
-   author of carried-forward work as a coauthor (`--author codex/gpt-6-astra --author codex/gpt-6.1-sol`), so neither reviews
-   or tie-breaks it. An audit of a pre-merge attempt reads the author from that attempt's record, not from this item.
+3. From the moment this amendment merges, the code agent for any new attempt is Codex gpt-6.1-sol (thinking high) in
+   `auto-review` mode (owner decisions of 2026-11-06 and 2026-11-09). Codex gpt-6-astra holds the deep-review and tie-break
+   seats for work it neither authored nor coauthored. Attempt records are never rewritten; each records the author or
+   authors of that attempt's work, and audits read the author from the record. An attempt that carries forward another
+   agent's work lists that agent as an author too. Authors, including coauthors, never review or tie-break their own work;
+   the review gate and committee tooling enforce this by excluding declared authors, forming the panel from the remaining
+   seats, and routing a tie-break whose seat is excluded to the owner.
 4. At most 3 substantive review rounds per change, then the step-back committee for an exit criterion. The committee's
    converged criterion, or its tie-break ruling, is binding.
 5. The scientific protocol in `docs/plan/OXYFORMER_V2_PLAN.md` and `configs/approvals.yaml` stays fixed: estimands, the
@@ -112,8 +113,8 @@ Wonder) converged on attribution before sizing and routed one science question t
 PLAN.md ledger and `final-cells/design-memo.md`. The owner then answered four questions, verbatim:
 
 - Tickets: "Approve all four (Recommended)": file and dispatch p3-oracle-path, p3-wandb-hook, p3-final-cell-mode and
-  p3-attribution-run. They change no science and launch no campaign. The logging-off numerics test is a CPU unit test on synthetic
-  data, not a training run.
+  p3-attribution-run, engineering units whose scope is analysis code, run logging, admission validation and a CPU audit. The
+  logging-off numerics test is a CPU unit test on synthetic data, not a training run.
 - Code author: "Sol 6.1 authors; amend the mandate (Recommended)": Bounded item 3 now names Codex gpt-6.1-sol; gpt-6-astra reviews and
   tie-breaks and never authors.
 - Cost replay: "Approve on the pinned tree with a W&B waiver (Recommended)": one exact replay of an existing screening-cell repetition
@@ -124,9 +125,10 @@ PLAN.md ledger and `final-cells/design-memo.md`. The owner then answered four qu
   rule of 2026-11-07, brood-lord PR 364).
 
 Effect on this mandate: Bounded item 3 as amended above; the four engineering units and the replay are granted work under items 2,
-5 and 9 and `owner_decisions.month2_phase3` in `configs/approvals.yaml`. Everything else is unchanged: final-cell repetitions, recipe
-and scenarios, any pilot or ladder beyond the approved 20 repetitions, the final-coverage, anchor and refit-audit allocations, and
-the choice of variance target for the SE/SD gate remain owner decisions under stop-and-ask items 1 and 4.
+5 and 9 and `owner_decisions.month2_phase3` in `configs/approvals.yaml`. Final-cell repetitions, recipe and scenarios, any pilot or
+ladder beyond the approved 20 repetitions, the final-coverage, anchor and refit-audit allocations, and the choice of variance target
+for the SE/SD gate remain owner decisions under stop-and-ask items 1 and 4. A tie-break on work gpt-6-astra coauthored routes to
+the owner by the tooling's existing rule.
 
 ## Concurrence party
 The step-back committee of hanig-review-gate: two members on contrasting providers, the author excluded. Hani Goodarzi
