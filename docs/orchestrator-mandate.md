@@ -41,7 +41,8 @@ Anything beyond that is a follow-up issue, never a blocker.
    into `dev`. `main`, the root data CSVs, `outputs/` and `report/` are read-only.
 3. Code agents are Codex gpt-6.1-sol (thinking high) in `auto-review` mode (owner decision 2026-11-06, reconfirmed 2026-11-09);
    Codex gpt-6-astra holds the deep-review and tie-break seats and never authors (brood-lord PR 358). Units dispatched before
-   2026-11-10 ran under gpt-6-astra and keep their records unchanged.
+   this amendment merged ran under gpt-6-astra and keep their records unchanged; the four phase-3 units and later units dispatch
+   under gpt-6.1-sol.
 4. At most 3 substantive review rounds per change, then the step-back committee for an exit criterion. The committee's
    converged criterion, or its tie-break ruling, is binding.
 5. The scientific protocol in `docs/plan/OXYFORMER_V2_PLAN.md` and `configs/approvals.yaml` stays fixed: estimands, the
