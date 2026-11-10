@@ -243,3 +243,23 @@ def test_input_output_collision(inputs, monkeypatch):
     with pytest.raises(ValueError, match='input'):
         cr.main()
     assert p.read_bytes() == original
+
+
+@pytest.mark.parametrize('mode', ['forward', 'reverse', 'hardlink'])
+def test_output_alias_refuses(inputs, monkeypatch, mode):
+    a, b = (inputs[0].parent / name for name in ('reconciliation.json', 'reconciliation.md'))
+    if mode == 'hardlink':
+        a.write_text('preserved')
+        b.hardlink_to(a)
+    elif mode == 'forward':
+        a.symlink_to(b)
+    else:
+        b.symlink_to(a)
+    monkeypatch.setattr('sys.argv', ['cost_reconcile', '--manifest', str(inputs[0]),
+                                    '--report', str(inputs[1]), '--out', str(a.parent)])
+    with pytest.raises(ValueError, match='alias'):
+        cr.main()
+    if mode == 'hardlink':
+        assert a.read_text() == b.read_text() == 'preserved'
+    else:
+        assert not (b if mode == 'forward' else a).exists()
