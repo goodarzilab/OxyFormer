@@ -38,6 +38,67 @@ OWNER_APPROVALS = REPOSITORY / "configs/approvals.yaml"
 _REPOSITORY_APPROVALS = object()
 
 
+
+def validate_campaign(campaign, approvals=_REPOSITORY_APPROVALS):
+    """Validate an owner-named allocation, returning a copy with bounded certification.
+
+    This is the declaration validator, not a campaign emitter or an admission
+    receipt. Screening and diagnostic keep their existing validation paths.
+    """
+    require(isinstance(campaign, dict), "malformed campaign declaration")
+    mode = campaign.get("campaign_mode")
+    require(isinstance(mode, str) and bool(mode.strip()) and mode not in ("screening", "diagnostic"),
+            "campaign_mode must name an owner block")
+    if approvals is _REPOSITORY_APPROVALS:
+        try:
+            approvals = yaml.safe_load(OWNER_APPROVALS.read_text())
+        except (OSError, yaml.YAMLError, ValueError) as exc:
+            raise ContractError("missing or malformed owner campaign approval: " + mode) from exc
+    require(isinstance(approvals, dict) and isinstance(approvals.get("owner_decisions"), dict),
+            "missing owner campaign approval: " + mode)
+    decision = approvals["owner_decisions"].get(mode)
+    fields = {"purpose", "cells", "partitions", "repetitions_per_scenario", "scenarios",
+              "certifies_release_criteria"}
+    require(isinstance(decision, dict) and set(decision) == fields,
+            "missing or malformed owner campaign approval: " + mode)
+    prefix = "owner_decisions." + mode + "."
+    require(isinstance(decision["purpose"], str) and decision["purpose"] in ("final_coverage", "anchor", "refit_audit", "diagnostic_pilot", "recipe_ladder"),
+            "invalid " + prefix + "purpose")
+    cells = decision["cells"]
+    require(isinstance(cells, dict) and len(cells) == 1, "invalid " + prefix + "cells: exactly one cell required")
+    for name, study in cells.items():
+        require(isinstance(name, str) and bool(name.strip()), "invalid " + prefix + "cell name")
+        require(isinstance(study, dict) and set(study) == set(SCREENING_CELL), "invalid " + prefix + "cells." + name)
+        for key, value in study.items():
+            require(type(value) is int and value > 0, "invalid " + prefix + "cells." + name + "." + key)
+    for key in ("partitions", "scenarios"):
+        values = decision[key]
+        require(isinstance(values, list) and bool(values)
+                and all(isinstance(v, str) and bool(v.strip()) for v in values)
+                and len(set(values)) == len(values), "invalid " + prefix + key)
+    count = decision["repetitions_per_scenario"]
+    require(type(count) is int and count > 0, "invalid " + prefix + "repetitions_per_scenario")
+    require(type(decision["certifies_release_criteria"]) is bool,
+            "invalid " + prefix + "certifies_release_criteria")
+    require(set(campaign) == {"campaign_mode", "cell", "study"} | fields - {"cells"},
+            "unknown or missing campaign declaration fields")
+    cell = campaign["cell"]
+    require(isinstance(cell, str) and cell in cells, "campaign cell not named by owner block: " + str(cell))
+    require(isinstance(campaign["study"], dict) and dict(campaign["study"]) == dict(cells[cell])
+            and all(type(v) is int for v in campaign["study"].values()), "campaign cell study mismatch")
+    for key in ("purpose", "partitions", "repetitions_per_scenario", "scenarios"):
+        expected_type = int if key == "repetitions_per_scenario" else str if key == "purpose" else list
+        valid_type = (type(campaign[key]) is int if expected_type is int
+                      else isinstance(campaign[key], expected_type))
+        require(valid_type and campaign[key] == decision[key],
+                "campaign " + key + " mismatch with " + prefix.rstrip("."))
+    require(type(campaign["certifies_release_criteria"]) is bool, "invalid campaign certifies_release_criteria")
+    validated = deepcopy(campaign)
+    validated["certifies_release_criteria"] = (campaign["certifies_release_criteria"]
+        and decision["certifies_release_criteria"] and count >= MIN_REPETITIONS)
+    return validated
+
+
 def screening_decision(approvals=_REPOSITORY_APPROVALS):
     """Read, never amend, the owner decision. Absence is not an opt-in."""
     if approvals is _REPOSITORY_APPROVALS:

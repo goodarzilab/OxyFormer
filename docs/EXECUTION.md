@@ -975,3 +975,50 @@ other chain's leaves and reports the scenario-wide repetition summary. Each
 remaining collector reports its own chain. The scenario-wide collector refuses
 partial fan-in; missing or unsuccessful draws are never dropped from the
 registered denominator.
+
+
+### Owner-named campaign declarations (validation only)
+
+`oxyformer.validation.campaign.validate_campaign(declaration)` reads an explicit
+`campaign_mode` as a block name under `owner_decisions` in `configs/approvals.yaml`.
+It returns a copy of the validated declaration. This interface validates an
+allocation; it emits no tasks, admits no leaves and runs no training. The existing
+screening and diagnostic emitters retain their screening cell and approvals.
+Emission for other blocks needs separate implementation; this validator alone
+cannot launch a final-cell campaign.
+
+The following is a schema example, **NOT an approval**. Only the owner can add
+such a block to `configs/approvals.yaml`:
+
+```yaml
+owner_decisions:
+  example_final:
+    purpose: final_coverage
+    cells:
+      example_cell:
+        reference_cap: 64
+        frozen_epochs: 150
+        grid_points: 4
+        seed_count: 3
+    partitions: [standard]
+    repetitions_per_scenario: 1000
+    scenarios: [null_effect, sign_changing]
+    certifies_release_criteria: true
+```
+
+Each block names exactly one cell. The allowed purposes are `final_coverage`,
+`anchor`, `refit_audit`, `diagnostic_pilot`, and `recipe_ladder`. A declaration
+contains `campaign_mode: example_final`, `cell: example_cell`, `study` equal to
+that cell's four integers, and all the block's fields except `cells`. Purpose,
+partitions, scenarios (including list order), and repetitions per scenario must
+match exactly. Integers must be positive Python/YAML integers, excluding booleans.
+The returned `certifies_release_criteria` is false unless both declaration and
+block request true and **every** selected scenario gets at least 1,000 repetitions.
+Two scenarios at 500 each (1,000 total) cannot certify release criteria. This flag
+is permission to evaluate existing release gates, never evidence they passed.
+
+Every new tree needs its own profile chain, estimate, lock and admission before
+leaves execute. The scientific fingerprint moves with every tracked non-`.md`
+change, including tests and configuration; old profile receipts and locks do not
+transfer to a changed tree. Validation grants no allocation beyond the named
+owner block, and does not replace the existing sizing or admission checks.
