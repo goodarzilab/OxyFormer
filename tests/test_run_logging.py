@@ -7,6 +7,7 @@ import random
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from types import SimpleNamespace
 
@@ -890,9 +891,20 @@ def test_spool_footer_redacts_numeric_credential(tmp_path, monkeypatch):
     key = '0' * 39 + '2'
     monkeypatch.setenv('WANDB_API_KEY', key)
     monkeypatch.setitem(sys.modules, 'wandb', FakeSDK())
-    hook = logging.WandbLogger(tmp_path, sync=False)
-    logging.emit(hook, dict(event='run_start'))
-    logging.emit(hook, dict(event='train_step'))
-    logging.finish(hook)
-    footer = json.loads(hook.spool.read_text().splitlines()[-1])
-    assert footer.get('count') != int(key)
+    # Keep this test on the footer path: pytest's numbered directory can itself
+    # contain the credential's decimal form and correctly refuse all delivery.
+    while True:
+        directory = Path(tempfile.mkdtemp(prefix='footer-', dir='/tmp'))
+        if logging.sanitize(str(directory)) == str(directory):
+            break
+        shutil.rmtree(directory)
+    try:
+        hook = logging.WandbLogger(directory, sync=False)
+        logging.emit(hook, dict(event='run_start'))
+        logging.emit(hook, dict(event='train_step'))
+        logging.finish(hook)
+        footer = json.loads(hook.spool.read_text().splitlines()[-1])
+        assert footer.get('count') != int(key)
+        assert not hook.logging_ok
+    finally:
+        shutil.rmtree(directory)
