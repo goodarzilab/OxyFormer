@@ -57,9 +57,10 @@ The five settled contract questions are:
 
 - Non-interference covers checkpoint bytes, per-step numerics and the returned
   training artifact. Finish runs after checkpoint persistence, with a 180-second
-  delivery deadline. On Linux this uses a temporary SIGALRM handler; a threaded
-  caller or an existing real-time timer refuses delivery rather than replacing
-  another component's timer. A delivery timeout marks logging incomplete;
+  delivery deadline. On Linux delivery runs in a disposable forked process,
+  whose process group is killed and reaped after completion or timeout. Native
+  SDK waits and RNG operations cannot block or mutate the training process.
+  A delivery timeout marks logging incomplete;
   a pending/null status also means incomplete. Scientific results stay usable.
 - Credential redaction includes exact runtime key text, its decimal integer,
   and digit strings differing only by leading zeros, in values and mapping keys.
@@ -73,3 +74,8 @@ The five settled contract questions are:
   The group is killed and its leader reaped after the lookup. Timeout/error
   records `git_revision = 'unavailable: <reason>'` (also in `git_sha`), marks
   logging incomplete and continues finish.
+
+Refusal state is sealed independently of captured events, so losing a flagged
+start event cannot bypass refusal during replay. Credential-bearing logging
+directories are refused before creation or SDK handoff. Spool metadata is also
+sanitized; if redaction prevents integrity validation, telemetry stays incomplete.

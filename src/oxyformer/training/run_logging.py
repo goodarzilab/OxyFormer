@@ -9,8 +9,7 @@ from pathlib import Path
 import re
 import socket
 import signal
-import threading
-from contextlib import contextmanager
+import multiprocessing
 import subprocess
 import sys
 import tempfile
@@ -61,12 +60,15 @@ def inspect_config(hook, config):
     unknown = set(vars(config)) - CONFIG_SCHEMA[type(config).__name__].keys()
     if unknown:
         hook.logging_ok = False
-        hook.refusal = 'refused: undeclared config key ' + sorted(unknown)[0]
+        hook.refusal = 'refused: undeclared config key ' + sorted(map(str, unknown))[0]
 
 
 def emit(hook, event, device='cpu'):
     validate_hook(hook)
     if hook is None or hook is noop:
+        return
+    if event.get('event') == 'run_finish':
+        hook._finish_bounded()
         return
     rng = None
     try:
@@ -159,28 +161,26 @@ GIT_TIMEOUT = 10
 FINISH_TIMEOUT = 180
 
 
-class _FinishTimeout(BaseException):
-    pass
-
-
-@contextmanager
-def _finish_deadline():
-    # Linux main-thread delivery only. Refuse telemetry in threaded callers or
-    # while another component owns SIGALRM, rather than replacing its timer.
-    if threading.current_thread() is not threading.main_thread():
-        raise _FinishTimeout()
-    previous = signal.getsignal(signal.SIGALRM)
-    if signal.getitimer(signal.ITIMER_REAL) != (0., 0.):
-        raise _FinishTimeout()
-    def expired(*args):
-        raise _FinishTimeout()
-    signal.signal(signal.SIGALRM, expired)
-    signal.setitimer(signal.ITIMER_REAL, FINISH_TIMEOUT)
+def _finish_worker(hook, connection):
+    # A disposable process isolates native SDK stalls and RNG use. Its process
+    # group also owns SDK subprocesses, so timeout cleanup is independent of
+    # Python signal dispatch inside the delivery operation.
+    os.setsid()
     try:
-        yield
+        hook._finish()
+    except BaseException:
+        hook.logging_ok = False
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous)
+        state = {name: getattr(hook, name) for name in
+                 ('logging_ok', 'sync_ok', 'init_attempted')}
+        for name in ('spool', 'attempt_dir', 'status_path'):
+            value = getattr(hook, name)
+            state[name] = str(value) if value is not None else None
+        try:
+            # Local control state, not an event or SDK payload.
+            connection.send(state)
+        finally:
+            connection.close()
 
 
 def git_revision():
@@ -266,17 +266,7 @@ class WandbLogger:
         if self.finished:
             return
         if event['event'] == 'run_finish':
-            rng = None
-            try:
-                rng = capture_rng('cpu')
-                with _finish_deadline():
-                    self._finish()
-            except _FinishTimeout:
-                self.logging_ok = False
-                self.finished = True
-            finally:
-                if rng is not None:
-                    restore_rng(rng, 'cpu')
+            self._finish_bounded()
             return
         # No filesystem, SDK or provenance subprocess can block a fitting slice.
         try:
@@ -285,7 +275,45 @@ class WandbLogger:
             self.logging_ok = False
             raise
 
+    def _finish_bounded(self):
+        if self.finished:
+            return
+        process = receiver = sender = None
+        try:
+            context = multiprocessing.get_context('fork')
+            receiver, sender = context.Pipe(duplex=False)
+            process = context.Process(target=_finish_worker, args=(self, sender))
+            process.start()
+            sender.close()
+            if not receiver.poll(FINISH_TIMEOUT):
+                raise TimeoutError('telemetry delivery timeout')
+            state = receiver.recv()
+            self.logging_ok = state['logging_ok'] is True
+            self.sync_ok = state['sync_ok'] if type(state['sync_ok']) is bool else None
+            self.init_attempted = state['init_attempted'] is True
+            for name in ('spool', 'attempt_dir', 'status_path'):
+                setattr(self, name, Path(state[name]) if state[name] is not None else None)
+        except Exception:
+            self.logging_ok = False
+        finally:
+            if process is not None and process.pid is not None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                if process.is_alive():
+                    process.kill()
+                process.join()
+                process.close()
+            if receiver is not None:
+                receiver.close()
+            if sender is not None:
+                sender.close()
+            self.finished = True
+
     def _prepare_directory(self):
+        if sanitize(str(self.directory)) != str(self.directory):
+            raise ValueError('credential in logging directory')
         if self.attempt_dir is None:
             self.directory.mkdir(parents=True, exist_ok=True)
             self.attempt_dir = Path(tempfile.mkdtemp(prefix='attempt-', dir=self.directory))
@@ -307,14 +335,15 @@ class WandbLogger:
             rows.append(json.dumps(sanitize(event)))
         if not rows:
             self.logging_ok = False
-        header = json.dumps(dict(schema='oxyformer-events-v1', capture_ok=self.logging_ok))
+        header = json.dumps(sanitize(dict(schema='oxyformer-events-v1', capture_ok=self.logging_ok,
+                                         refusal=self.refusal)))
         digest = sha256()
         pending = self.attempt_dir / 'events-pending.jsonl'
         with pending.open('w') as stream:
             for line in (header, *rows):
                 stream.write(line + '\n')
                 digest.update((line + '\n').encode())
-            stream.write(json.dumps(dict(sealed=True, count=len(rows), sha256=digest.hexdigest())) + '\n')
+            stream.write(json.dumps(sanitize(dict(sealed=True, count=len(rows), sha256=digest.hexdigest()))) + '\n')
         final = self.attempt_dir / 'events-complete.jsonl'
         os.replace(pending, final)
         self.spool = final
@@ -331,6 +360,8 @@ class WandbLogger:
                 type(footer.get('count')) is not int or footer['count'] != len(rows) or
                 footer.get('sha256') != digest):
             raise ValueError('incomplete event spool')
+        if header.get('refusal') is not None:
+            self.refusal = header['refusal']
         events = [sanitize(json.loads(row)) for row in rows]
         if not events or any(type(event) is not dict or not isinstance(event.get('event'), str)
                              for event in events):
@@ -343,9 +374,11 @@ class WandbLogger:
         self.init_attempted = True
         events, captured = self._read_spool()
         self.logging_ok = self.logging_ok and captured
-        if any(event.get('refused') is True for event in events):
+        if self.refusal or any(event.get('refused') is True for event in events):
             self.logging_ok = False
             return
+        if sanitize(str(self.attempt_dir)) != str(self.attempt_dir):
+            raise ValueError('credential in SDK directory')
         import wandb
         first = events[0]
         self.run = wandb.init(entity='goodarzilab', project='oxyformer-v2',

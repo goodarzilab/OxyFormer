@@ -1,5 +1,6 @@
 from dataclasses import replace
 import json
+import multiprocessing
 import shutil
 from pathlib import Path
 import random
@@ -16,14 +17,41 @@ from oxyformer.training import run_logging as logging
 from oxyformer.training.checkpoint import capture_rng
 
 
+_manager = None
+
+
+def shared_manager():
+    global _manager
+    if _manager is None:
+        _manager = multiprocessing.get_context('fork').Manager()
+    return _manager
+
+
+def shared_list(values=()):
+    return shared_manager().list(values)
+
+
 class FakeSDK:
     def __init__(self):
-        self.events = []
-        self.kwargs = None
-        self.closed = False
+        self.state = shared_manager().Namespace()
+        self.state.events = []
+        self.state.kwargs = None
+        self.state.closed = False
+
+    @property
+    def events(self):
+        return self.state.events
+
+    @property
+    def kwargs(self):
+        return self.state.kwargs
+
+    @property
+    def closed(self):
+        return self.state.closed
 
     def init(self, **kwargs):
-        self.kwargs = kwargs
+        self.state.kwargs = kwargs
         return self
 
     def Settings(self, **kwargs):
@@ -34,10 +62,10 @@ class FakeSDK:
         return str(Path(self.kwargs['dir']) / 'offline-run' / 'files')
 
     def log(self, event):
-        self.events.append(event)
+        self.state.events = self.events + [event]
 
     def finish(self):
-        self.closed = True
+        self.state.closed = True
 
 
 def test_default_offline_and_sync_is_separate_fact(tmp_path, monkeypatch):
@@ -45,7 +73,7 @@ def test_default_offline_and_sync_is_separate_fact(tmp_path, monkeypatch):
     monkeypatch.setenv('WANDB_API_KEY', '0123456789' * 4)
     monkeypatch.setitem(sys.modules, 'wandb', sdk)
     monkeypatch.delenv('WANDB_MODE', raising=False)
-    calls = []
+    calls = shared_list()
     def sync(command, **kwargs):
         assert sdk.closed
         calls.append((command, kwargs))
@@ -62,7 +90,7 @@ def test_default_offline_and_sync_is_separate_fact(tmp_path, monkeypatch):
     assert calls[0][0][1:4] == ['-m', 'wandb', 'sync']
     assert calls[0][1]['timeout'] == 120
     monkeypatch.delenv('WANDB_API_KEY')
-    calls.clear()
+    calls[:] = []
     hook = logging.WandbLogger(tmp_path)
     logging.emit(hook, dict(event='run_start'))
     logging.finish(hook)
@@ -259,7 +287,7 @@ def test_allocator_windows(tmp_path, monkeypatch):
 
 def test_online_environment_cannot_enable_network_or_retry(tmp_path, monkeypatch):
     sdk = FakeSDK()
-    attempts = []
+    attempts = shared_list()
     def unavailable(**kwargs):
         attempts.append(kwargs['mode'])
         raise RuntimeError('service unavailable')
@@ -270,7 +298,7 @@ def test_online_environment_cannot_enable_network_or_retry(tmp_path, monkeypatch
     for _ in range(3):
         logging.emit(hook, dict(event='run_start'))
     logging.finish(hook)
-    assert attempts == ['offline']
+    assert list(attempts) == ['offline']
     assert not hook.logging_ok and hook.finished
 
 
@@ -386,7 +414,7 @@ def test_slow_spool_failure_cannot_consume_ssl_slice(tmp_path, monkeypatch):
                         lambda *args: (2026, 1, 1, 0, 0, 0, 3, 1, 0))
     view, split, config = make_case(tmp_path / 'attempt')
     config = replace(config, slice_seconds=30., checkpoint_margin_seconds=1., max_batches=1)
-    clock, failed = [0.], [False]
+    clock, failed = [0.], shared_list([False])
     monkeypatch.setattr(logging.time, 'monotonic', lambda: clock[0])
     original = Path.open
     def slow_write(path, mode='r', *args, **kwargs):
@@ -488,7 +516,7 @@ def test_slow_git_provenance_failure_cannot_consume_ssl_slice(tmp_path, monkeypa
                         lambda *args: (2026, 1, 1, 0, 0, 0, 3, 1, 0))
     view, split, config = make_case(tmp_path / 'attempt')
     config = replace(config, slice_seconds=30., checkpoint_margin_seconds=1., max_batches=1)
-    clock, queried = [0.], [False]
+    clock, queried = [0.], shared_list([False])
     monkeypatch.setattr(logging.time, 'monotonic', lambda: clock[0])
     def slow_git():
         queried[0] = True
@@ -692,7 +720,7 @@ def test_finish_external_failures_preserve_checkpoint_and_result(tmp_path, monke
     off_json = off.to_dict()
     shutil.rmtree(config.output_dir)
     hook = logging.WandbLogger(tmp_path / 'logs', sync=False)
-    entered = []
+    entered = shared_list()
     def unavailable(*args, **kwargs):
         entered.append(time.monotonic())
         if failure == 'stall':
@@ -762,3 +790,105 @@ def test_sdk_stalls_are_bounded(tmp_path, monkeypatch, action):
     logging.finish(hook)
     assert time.monotonic() - started < 1
     assert hook.finished and not hook.logging_ok
+
+
+def test_refusal_survives_missing_flagged_start(tmp_path, monkeypatch):
+    from test_pretrain import make_case
+    from oxyformer.training.pretrain import pretrain
+    sdk = FakeSDK()
+    monkeypatch.setitem(sys.modules, 'wandb', sdk)
+    view, split, config = make_case(tmp_path / 'attempt')
+    hook = logging.WandbLogger(tmp_path / 'logs', sync=False)
+    config = replace(config, run_logger=hook)
+    config.__dict__['extra'] = 'not exported'
+    original = logging.WandbLogger.__call__
+    def dropping(self, event):
+        if event.get('event') == 'run_start' and event.get('refused'):
+            raise OSError('lost start')
+        return original(self, event)
+    monkeypatch.setattr(logging.WandbLogger, '__call__', dropping)
+    pretrain(view, split, config, 1103)
+    monkeypatch.setattr(logging.WandbLogger, '__call__', original)
+    replay = logging.WandbLogger.replay(hook.spool, sync=False)
+    assert not replay.logging_ok and sdk.kwargs is None
+
+
+@pytest.mark.parametrize('native', ['hash', 'wait'])
+def test_native_sdk_stall_is_bounded(tmp_path, monkeypatch, native):
+    import ctypes
+    import hashlib
+    import time
+    sdk = FakeSDK()
+    def stalled(**kwargs):
+        if native == 'hash':
+            hashlib.pbkdf2_hmac('sha256', b'fixture', b'fixture', 3000000)
+        else:
+            ctypes.CDLL(None).system(b'sleep 1')
+        raise RuntimeError('native stall')
+    monkeypatch.setattr(sdk, 'init', stalled)
+    monkeypatch.setitem(sys.modules, 'wandb', sdk)
+    monkeypatch.setattr(logging, 'FINISH_TIMEOUT', .05)
+    hook = logging.WandbLogger(tmp_path, sync=False)
+    logging.emit(hook, dict(event='run_start'))
+    started = time.monotonic()
+    logging.finish(hook)
+    assert time.monotonic() - started < .5
+    assert hook.finished and not hook.logging_ok
+
+
+def test_finish_does_not_access_parent_rng(tmp_path, monkeypatch):
+    import time
+    monkeypatch.setitem(sys.modules, 'wandb', FakeSDK())
+    hook = logging.WandbLogger(tmp_path, sync=False)
+    logging.emit(hook, dict(event='run_start'))
+    original = logging.capture_rng
+    def stalled(*args, **kwargs):
+        time.sleep(.4)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(logging, 'capture_rng', stalled)
+    monkeypatch.setattr(logging, 'FINISH_TIMEOUT', .05)
+    started = time.monotonic()
+    logging.finish(hook)
+    assert time.monotonic() - started < .5
+
+
+@pytest.mark.parametrize('form', ['exact', 'integer', 'zeros'])
+def test_credential_directory_refuses_delivery(tmp_path, monkeypatch, form):
+    key = '0' + '1234567890' * 3 + '123456789'
+    monkeypatch.setenv('WANDB_API_KEY', key)
+    value = {'exact': key, 'integer': str(int(key)), 'zeros': '000' + str(int(key))}[form]
+    sdk = FakeSDK()
+    monkeypatch.setitem(sys.modules, 'wandb', sdk)
+    directory = tmp_path / value
+    hook = logging.WandbLogger(directory, sync=False)
+    logging.emit(hook, dict(event='run_start'))
+    logging.finish(hook)
+    assert sdk.kwargs is None and not hook.logging_ok
+    assert not directory.exists()
+
+
+def test_non_string_extra_config_key_refuses_telemetry(tmp_path, monkeypatch):
+    from test_pretrain import make_case
+    from oxyformer.training.pretrain import pretrain
+    monkeypatch.setitem(sys.modules, 'wandb', FakeSDK())
+    view, split, config = make_case(tmp_path / 'attempt')
+    hook = logging.WandbLogger(tmp_path / 'logs', sync=False)
+    config = replace(config, run_logger=hook)
+    config.__dict__[1] = 'cache-only metadata'
+    config.__dict__['extra'] = 'another unknown key'
+    artifact = pretrain(view, split, config, 1103)
+    assert artifact.sha256 and not hook.logging_ok
+    assert 'refused: undeclared config key' in hook.spool.read_text()
+    assert 'cache-only metadata' not in hook.spool.read_text()
+
+
+def test_spool_footer_redacts_numeric_credential(tmp_path, monkeypatch):
+    key = '0' * 39 + '2'
+    monkeypatch.setenv('WANDB_API_KEY', key)
+    monkeypatch.setitem(sys.modules, 'wandb', FakeSDK())
+    hook = logging.WandbLogger(tmp_path, sync=False)
+    logging.emit(hook, dict(event='run_start'))
+    logging.emit(hook, dict(event='train_step'))
+    logging.finish(hook)
+    footer = json.loads(hook.spool.read_text().splitlines()[-1])
+    assert footer.get('count') != int(key)
