@@ -17,18 +17,22 @@ import torch
 
 from oxyformer.training.checkpoint import capture_rng, restore_rng
 
-_SECRET_FIELD = re.compile(r"(?:api[_-]?key|access[_-]?token|auth[_-]?token|^token$|^key$|password|secret|credential)", re.I)
+_SECRET_FIELD = re.compile(r"(?:api[_-]?key|(?:access|auth|refresh|bearer|session|client|identity|id)[_-]?token|authorization|^token$|^key$|password|secret|credential)", re.I)
 
 
 def sanitize(value):
     if isinstance(value, dict):
-        return {sanitize(str(k)): ('[redacted]' if _SECRET_FIELD.search(str(k)) else sanitize(v))
+        return {sanitize(str(sanitize(k))): ('[redacted]' if _SECRET_FIELD.search(str(k)) else sanitize(v))
                 for k, v in value.items()}
     if isinstance(value, (tuple, list)):
         return [sanitize(v) for v in value]
     if isinstance(value, str):
         key = os.environ.get('WANDB_API_KEY')
         return value.replace(key, '[redacted]') if key else value
+    if isinstance(value, (int, float)):
+        key = os.environ.get('WANDB_API_KEY')
+        if key and ((key.isdecimal() and value == int(key)) or key in str(value)):
+            return '[redacted]'
     return value
 
 
@@ -37,10 +41,12 @@ def noop(event):
 
 
 def emit(hook, event, device='cpu'):
-    if hook is None:
+    if hook is None or hook is noop:
         return
     rng = capture_rng(device)
     try:
+        if event.get('event') == 'run_finish' and not isinstance(hook, WandbLogger):
+            event = dict(event, git_sha=git_revision())
         hook(sanitize(event))
     except Exception:
         if isinstance(hook, WandbLogger):
@@ -50,7 +56,7 @@ def emit(hook, event, device='cpu'):
 
 
 def step_event(hook, *, model, loss, learning_rate, samples, started, device, **context):
-    if hook is None:
+    if hook is None or hook is noop:
         return
     try:
         gradients = [p.grad.detach().double().norm() for p in model.parameters()
@@ -112,7 +118,7 @@ def project_config(config):
 
 
 def window_start(hook, device):
-    if hook is not None and torch.device(device).type == 'cuda':
+    if hook is not None and hook is not noop and torch.device(device).type == 'cuda':
         try:
             torch.cuda.synchronize(device)
             torch.cuda.reset_peak_memory_stats(device)
@@ -122,17 +128,21 @@ def window_start(hook, device):
     return time.monotonic()
 
 
-def run_config(config, identity, *, data, split, seed):
+def git_revision():
+    try:
+        return subprocess.check_output(['git', 'rev-parse', 'HEAD'],
+            cwd=Path(__file__).resolve().parents[3], stderr=subprocess.DEVNULL, text=True).strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def run_config(config, identity, *, data, split, seed, defer_git=False):
     values = project_config(config)
     values['data'] = dict(pin=data.content_hash, lineage=data.lineage.to_dict())
     if hasattr(data, 'sources'):
         values['data']['manifest'] = data.to_dict()
     values['split'] = split.to_dict()
-    try:
-        git_sha = subprocess.check_output(['git', 'rev-parse', 'HEAD'],
-            cwd=Path(__file__).resolve().parents[3], stderr=subprocess.DEVNULL, text=True).strip()
-    except (OSError, subprocess.SubprocessError):
-        git_sha = None
+    git_sha = None if defer_git else git_revision()
     values = sanitize(values)
     serialized = json.dumps(values, sort_keys=True, separators=(',', ':'))
     return dict(config=values, config_snapshot_sha256=sha256(serialized.encode()).hexdigest(),
@@ -144,10 +154,10 @@ def run_config(config, identity, *, data, split, seed):
 
 
 def start(hook, config, identity, *, data, split, seed, phase):
-    if hook is None:
+    if hook is None or hook is noop:
         return
     try:
-        metadata = run_config(config, identity, data=data, split=split, seed=seed)
+        metadata = run_config(config, identity, data=data, split=split, seed=seed, defer_git=True)
         emit(hook, dict(event='run_start', phase=phase, **metadata), config.device)
     except Exception:
         if isinstance(hook, WandbLogger):
@@ -168,6 +178,9 @@ class WandbLogger:
         self.finished = False
         self.init_attempted = False
         self.spool = None
+        self.attempt_dir = None
+        self.status_path = None
+        self._events = []
 
     def __call__(self, event):
         if self.finished:
@@ -175,46 +188,99 @@ class WandbLogger:
         if event['event'] == 'run_finish':
             self._finish()
             return
-        self.directory.mkdir(parents=True, exist_ok=True)
-        if self.spool is None:
-            fd, name = tempfile.mkstemp(prefix='events-', suffix='.jsonl', dir=self.directory)
-            os.close(fd)
-            self.spool = Path(name)
-        with self.spool.open('a') as stream:
-            stream.write(json.dumps(sanitize(event)) + '\n')
+        # No filesystem, SDK or provenance subprocess can block a fitting slice.
+        try:
+            self._events.append(json.dumps(sanitize(event)))
+        except Exception:
+            self.logging_ok = False
+            raise
+
+    def _prepare_directory(self):
+        if self.attempt_dir is None:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            self.attempt_dir = Path(tempfile.mkdtemp(prefix='attempt-', dir=self.directory))
+            self.status_path = self.attempt_dir / 'logging-status.json'
+
+    def _seal(self):
+        rows = []
+        revision = None
+        queried = False
+        for text in self._events:
+            event = json.loads(text)
+            if event.get('event') == 'run_start' and 'git_sha' in event and event['git_sha'] is None:
+                if not queried:
+                    revision, queried = git_revision(), True
+                    if revision is None:
+                        self.logging_ok = False
+                event['git_sha'] = revision
+            rows.append(json.dumps(sanitize(event)))
+        if not rows:
+            self.logging_ok = False
+        header = json.dumps(dict(schema='oxyformer-events-v1', capture_ok=self.logging_ok))
+        digest = sha256()
+        pending = self.attempt_dir / 'events-pending.jsonl'
+        with pending.open('w') as stream:
+            for line in (header, *rows):
+                stream.write(line + '\n')
+                digest.update((line + '\n').encode())
+            stream.write(json.dumps(dict(sealed=True, count=len(rows), sha256=digest.hexdigest())) + '\n')
+        final = self.attempt_dir / 'events-complete.jsonl'
+        os.replace(pending, final)
+        self.spool = final
+
+    def _read_spool(self):
+        lines = self.spool.read_text().splitlines()
+        if len(lines) < 3:
+            raise ValueError('unsealed event spool')
+        header, footer = json.loads(lines[0]), json.loads(lines[-1])
+        rows = lines[1:-1]
+        digest = sha256(''.join(line + '\n' for line in lines[:-1]).encode()).hexdigest()
+        if (header.get('schema') != 'oxyformer-events-v1' or
+                type(header.get('capture_ok')) is not bool or footer.get('sealed') is not True or
+                type(footer.get('count')) is not int or footer['count'] != len(rows) or
+                footer.get('sha256') != digest):
+            raise ValueError('incomplete event spool')
+        events = [sanitize(json.loads(row)) for row in rows]
+        if not events or any(type(event) is not dict or not isinstance(event.get('event'), str)
+                             for event in events):
+            raise ValueError('invalid event spool')
+        return events, header['capture_ok']
 
     def _deliver(self):
         if self.init_attempted:
             return
         self.init_attempted = True
+        events, captured = self._read_spool()
+        self.logging_ok = self.logging_ok and captured
         import wandb
-        with self.spool.open() as stream:
-            first = json.loads(next(stream))
-            self.run = wandb.init(entity='goodarzilab', project='oxyformer-v2',
-                mode='offline', dir=str(self.directory),
-                config=first if first['event'] == 'run_start' else None,
-                settings=wandb.Settings(console='off', disable_git=True,
-                                        disable_code=True, disable_job_creation=True))
-            self.run.log(first)
-            for line in stream:
-                self.run.log(json.loads(line))
+        first = events[0]
+        self.run = wandb.init(entity='goodarzilab', project='oxyformer-v2',
+            mode='offline', dir=str(self.attempt_dir),
+            config=first if first['event'] == 'run_start' else None,
+            settings=wandb.Settings(console='off', disable_git=True,
+                                    disable_code=True, disable_job_creation=True))
+        for event in events:
+            self.run.log(event)
 
     def _status(self, *, pending=False):
+        if self.status_path is None:
+            return
         try:
-            self.directory.mkdir(parents=True, exist_ok=True)
-            (self.directory / 'logging-status.json').write_text(json.dumps(
-                dict(logging_ok=None if pending else self.logging_ok, sync_ok=self.sync_ok)))
+            temporary = self.status_path.with_suffix('.tmp')
+            temporary.write_text(json.dumps(dict(
+                logging_ok=None if pending else self.logging_ok, sync_ok=self.sync_ok)))
+            os.replace(temporary, self.status_path)
         except OSError:
             self.logging_ok = False
 
     def _finish(self):
-        # Both callers have persisted their checkpoint before reaching this path.
-        self._status(pending=True)
+        # The training callers have already persisted their scientific checkpoint.
         try:
+            self._prepare_directory()
+            self._status(pending=True)
             if self.spool is None:
-                self.logging_ok = False
-            else:
-                self._deliver()
+                self._seal()
+            self._deliver()
         except Exception:
             self.logging_ok = False
         closed = False
@@ -241,7 +307,7 @@ class WandbLogger:
 
     @classmethod
     def replay(cls, spool, *, sync=True):
-        """Recover a retained event spool without rerunning scientific work."""
+        """Recover a sealed spool; prior capture failures remain incomplete."""
         spool = Path(spool)
         hook = cls(spool.parent, sync=sync)
         hook.spool = spool

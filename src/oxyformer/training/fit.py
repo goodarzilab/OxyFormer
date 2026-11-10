@@ -1149,6 +1149,9 @@ def _fit_controller(config, outer, manifest, identity, controller, root, budget)
                                                     selection_inputs, config.policy)
                     result.update(selection_ids=selection_ids,
                         selection_metrics=pair_metrics(selection_logits, selection_inputs.origin_weights))
+                    run_logging.emit(config.run_logger, dict(event='evaluation', phase='selection',
+                        kind=kind, inner_fold=fold, grid=grid, metrics=list(result['selection_metrics']),
+                        original_ids=list(selection_ids)), config.device)
                 run_logging.emit(config.run_logger, dict(event='evaluation', phase='held_out',
                     kind=kind, inner_fold=fold, grid=grid, metrics=list(metrics)), config.device)
                 controller["results"].append(result)

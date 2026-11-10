@@ -58,7 +58,7 @@ def test_default_offline_and_sync_is_separate_fact(tmp_path, monkeypatch):
     assert sdk.kwargs['mode'] == 'offline'
     assert sdk.kwargs['entity'] == 'goodarzilab' and sdk.kwargs['project'] == 'oxyformer-v2'
     assert hook.logging_ok and hook.sync_ok is False
-    assert json.loads((tmp_path / 'logging-status.json').read_text()) == dict(logging_ok=True, sync_ok=False)
+    assert json.loads(hook.status_path.read_text()) == dict(logging_ok=True, sync_ok=False)
     assert calls[0][0][1:4] == ['-m', 'wandb', 'sync']
     assert calls[0][1]['timeout'] == 120
     monkeypatch.delenv('WANDB_API_KEY')
@@ -93,7 +93,7 @@ def test_failure_isolation_and_secret_free_diagnostics(tmp_path, monkeypatch, fa
         assert hook.logging_ok is False
     captured = capsys.readouterr()
     assert key not in captured.out + captured.err
-    assert key not in (tmp_path / 'logging-status.json').read_text()
+    assert key not in hook.status_path.read_text()
 
 
 def test_rng_identity_even_if_callback_draws_and_raises():
@@ -205,10 +205,11 @@ def check_invariance(monkeypatch, config, trace, run, tmp_path, phase, phases):
     assert logged == [float(loss) for loss in results[0][0]]
 
 
-def test_finish_reaches_callable_hook():
+def test_finish_reaches_callable_hook(monkeypatch):
+    monkeypatch.setattr(logging, 'git_revision', lambda: 'a' * 40)
     events = []
     logging.finish(events.append)
-    assert events == [dict(event='run_finish')]
+    assert events == [dict(event='run_finish', git_sha='a' * 40)]
 
 
 def test_closed_config_schema():
@@ -311,7 +312,7 @@ def test_sdk_import_failure_persists_status(tmp_path, monkeypatch):
     hook = logging.WandbLogger(directory, sync=False)
     logging.emit(hook, dict(event='run_start'))
     logging.finish(hook)
-    status = json.loads((directory / 'logging-status.json').read_text())
+    status = json.loads(hook.status_path.read_text())
     assert status['logging_ok'] is False and hook.finished
 
 
@@ -373,3 +374,182 @@ def test_retained_spool_can_be_replayed(tmp_path, monkeypatch):
     assert recovered.logging_ok and recovered.finished and sdk.closed
     assert sdk.events == [dict(event='run_start', api_key='[redacted]'),
                           dict(event='train_step', train_loss=1.)]
+
+
+def test_slow_spool_failure_cannot_consume_ssl_slice(tmp_path, monkeypatch):
+    from test_pretrain import make_case
+    from oxyformer.training.pretrain import pretrain
+    import oxyformer.training.checkpoint as checkpoint
+    monkeypatch.setattr(checkpoint.zipfile.time, 'localtime',
+                        lambda *args: (2026, 1, 1, 0, 0, 0, 3, 1, 0))
+    view, split, config = make_case(tmp_path / 'attempt')
+    config = replace(config, slice_seconds=30., checkpoint_margin_seconds=1., max_batches=1)
+    clock, failed = [0.], [False]
+    monkeypatch.setattr(logging.time, 'monotonic', lambda: clock[0])
+    original = Path.open
+    def slow_write(path, mode='r', *args, **kwargs):
+        if path.name.startswith('events-') and mode in ('a', 'w') and not failed[0]:
+            failed[0] = True
+            clock[0] += 35.
+            raise OSError('slow log filesystem')
+        return original(path, mode, *args, **kwargs)
+    monkeypatch.setattr(Path, 'open', slow_write)
+    monkeypatch.setitem(sys.modules, 'wandb', FakeSDK())
+    artifacts = []
+    for hook in (None, logging.WandbLogger(tmp_path / 'logs', sync=False)):
+        clock[0] = 0.
+        artifacts.append(pretrain(view, split, replace(config, run_logger=hook), 1103))
+        shutil.rmtree(config.output_dir)
+    assert failed[0]
+    assert [a.step for a in artifacts] == [1, 1]
+    assert artifacts[0].sha256 == artifacts[1].sha256
+
+
+def test_numeric_runtime_key_and_refresh_token_are_redacted(tmp_path, monkeypatch):
+    key, refresh = '1234567890' * 4, 'abcdef0123' * 4
+    monkeypatch.setenv('WANDB_API_KEY', key)
+    sdk = FakeSDK()
+    monkeypatch.setitem(sys.modules, 'wandb', sdk)
+    hook = logging.WandbLogger(tmp_path, sync=False)
+    logging.emit(hook, dict(event='run_start', identifier=int(key), refresh_token=refresh))
+    logging.finish(hook)
+    for path in tmp_path.rglob('*'):
+        if path.is_file():
+            assert key not in path.read_text(errors='replace')
+            assert refresh not in path.read_text(errors='replace')
+    assert sdk.kwargs['config']['identifier'] == '[redacted]'
+    assert sdk.kwargs['config']['refresh_token'] == '[redacted]'
+
+
+def test_replay_preserves_prior_capture_failure(tmp_path, monkeypatch):
+    class DroppingLogger(logging.WandbLogger):
+        def __call__(self, event):
+            if event.get('event') == 'train_step' and event.get('step') == 1:
+                raise OSError('one lost event')
+            return super().__call__(event)
+    hook = DroppingLogger(tmp_path, sync=False)
+    logging.emit(hook, dict(event='run_start'))
+    logging.emit(hook, dict(event='train_step', step=1))
+    logging.emit(hook, dict(event='train_step', step=2))
+    monkeypatch.setitem(sys.modules, 'wandb', None)
+    logging.finish(hook)
+    assert not hook.logging_ok
+    sdk = FakeSDK()
+    monkeypatch.setitem(sys.modules, 'wandb', sdk)
+    replay = logging.WandbLogger.replay(hook.spool, sync=False)
+    assert replay.finished and not replay.logging_ok
+    assert len(sdk.events) == 2
+
+
+def test_shared_logging_base_keeps_attempt_statuses(tmp_path, monkeypatch):
+    first = logging.WandbLogger(tmp_path, sync=False)
+    logging.emit(first, dict(event='run_start'))
+    monkeypatch.setitem(sys.modules, 'wandb', None)
+    logging.finish(first)
+    first_status = getattr(first, 'status_path', tmp_path / 'logging-status.json')
+    assert json.loads(first_status.read_text())['logging_ok'] is False
+    second = logging.WandbLogger(tmp_path, sync=False)
+    logging.emit(second, dict(event='run_start'))
+    monkeypatch.setitem(sys.modules, 'wandb', FakeSDK())
+    logging.finish(second)
+    second_status = getattr(second, 'status_path', tmp_path / 'logging-status.json')
+    assert first_status != second_status
+    assert json.loads(first_status.read_text())['logging_ok'] is False
+    assert json.loads(second_status.read_text())['logging_ok'] is True
+
+
+def test_selection_evaluations_match_checkpoint(tmp_path):
+    from test_fit import make_case
+    from oxyformer.training.fit import fit_fold
+    from oxyformer.training.checkpoint import load_checkpoint
+    spec, split, manifest, config = make_case(tmp_path / 'attempt')
+    events = []
+    artifact = fit_fold(spec, split, manifest, replace(config, run_logger=events.append), 1103).checkpoint
+    results = [r for r in load_checkpoint(artifact, artifact.identity)['controller']['results']
+               if r['kind'] == 'origin']
+    assert any(r['selection_metrics'] != r['metrics'] for r in results)
+    selected = [e for e in events if e['event'] == 'evaluation' and e['phase'] == 'selection']
+    assert len(selected) == len(results) > 0
+    for event in selected:
+        result = next(r for r in results if r['fold'] == event['inner_fold'] and r['grid'] == event['grid'])
+        assert event['metrics'] == list(result['selection_metrics'])
+        assert event['original_ids'] == list(result['selection_ids'])
+
+
+def test_slow_git_provenance_failure_cannot_consume_ssl_slice(tmp_path, monkeypatch):
+    from test_pretrain import make_case
+    from oxyformer.training.pretrain import pretrain
+    import oxyformer.training.checkpoint as checkpoint
+    monkeypatch.setattr(checkpoint.zipfile.time, 'localtime',
+                        lambda *args: (2026, 1, 1, 0, 0, 0, 3, 1, 0))
+    view, split, config = make_case(tmp_path / 'attempt')
+    config = replace(config, slice_seconds=30., checkpoint_margin_seconds=1., max_batches=1)
+    clock, queried = [0.], [False]
+    monkeypatch.setattr(logging.time, 'monotonic', lambda: clock[0])
+    original = subprocess.check_output
+    def slow_git(command, *args, **kwargs):
+        if command == ['git', 'rev-parse', 'HEAD'] and kwargs.get('text'):
+            queried[0] = True
+            clock[0] += 35.
+            raise OSError('slow provenance filesystem')
+        return original(command, *args, **kwargs)
+    monkeypatch.setattr(subprocess, 'check_output', slow_git)
+    monkeypatch.setitem(sys.modules, 'wandb', FakeSDK())
+    artifacts = []
+    for hook in (None, logging.noop, logging.WandbLogger(tmp_path / 'logs', sync=False)):
+        clock[0] = 0.
+        artifacts.append(pretrain(view, split, replace(config, run_logger=hook), 1103))
+        shutil.rmtree(config.output_dir)
+    assert queried[0]
+    assert [a.step for a in artifacts] == [1, 1, 1]
+    assert len({a.sha256 for a in artifacts}) == 1
+
+
+def test_capture_needs_no_filesystem_or_sdk_before_finish(tmp_path, monkeypatch):
+    hook = logging.WandbLogger(tmp_path, sync=False)
+    sdk = FakeSDK()
+    monkeypatch.setitem(sys.modules, 'wandb', sdk)
+    def unavailable(*args, **kwargs):
+        raise OSError('filesystem unavailable during training')
+    with monkeypatch.context() as context:
+        context.setattr(Path, 'open', unavailable)
+        logging.emit(hook, dict(event='run_start'))
+        logging.emit(hook, dict(event='train_step', step=1))
+        assert hook.logging_ok and not hook.init_attempted and hook.spool is None
+    logging.finish(hook)
+    assert hook.logging_ok and len(sdk.events) == 2
+
+
+@pytest.mark.parametrize('damage', ['truncate', 'drop_row', 'capture_flag'])
+def test_unsealed_or_modified_spool_cannot_publish_complete(tmp_path, monkeypatch, damage):
+    monkeypatch.setitem(sys.modules, 'wandb', None)
+    hook = logging.WandbLogger(tmp_path / 'logs', sync=False)
+    logging.emit(hook, dict(event='run_start'))
+    logging.emit(hook, dict(event='train_step', step=1))
+    logging.finish(hook)
+    lines = hook.spool.read_text().splitlines()
+    if damage == 'truncate':
+        lines.pop()
+    elif damage == 'drop_row':
+        lines.pop(1)
+    else:
+        header = json.loads(lines[0])
+        header['capture_ok'] = not header['capture_ok']
+        lines[0] = json.dumps(header)
+    damaged = tmp_path / 'damaged.jsonl'
+    damaged.write_text('\n'.join(lines) + '\n')
+    sdk = FakeSDK()
+    monkeypatch.setitem(sys.modules, 'wandb', sdk)
+    replay = logging.WandbLogger.replay(damaged, sync=False)
+    assert replay.finished and not replay.logging_ok and sdk.kwargs is None
+
+
+def test_leading_zero_numeric_key_is_redacted(tmp_path, monkeypatch):
+    key = '0' + '1234567890' * 3 + '123456789'
+    monkeypatch.setenv('WANDB_API_KEY', key)
+    sdk = FakeSDK()
+    monkeypatch.setitem(sys.modules, 'wandb', sdk)
+    hook = logging.WandbLogger(tmp_path, sync=False)
+    logging.emit(hook, dict(event='run_start', mapping={int(key): 'fixture'}))
+    logging.finish(hook)
+    assert sdk.kwargs['config']['mapping'] == {'[redacted]': 'fixture'}
