@@ -175,7 +175,13 @@ def check_invariance(monkeypatch, config, trace, run, tmp_path, phase, phases):
     deterministic = torch.are_deterministic_algorithms_enabled()
     torch.use_deterministic_algorithms(True)
     try:
-        for hook in (None, logging.noop, logging.WandbLogger(tmp_path / 'logs', sync=False)):
+        hooks = (None, logging.noop, logging.WandbLogger(tmp_path / 'logs', sync=False),
+                 logging.WandbLogger(tmp_path / 'outage', sync=False))
+        for index, hook in enumerate(hooks):
+            if index == 3:
+                def unavailable(**kwargs):
+                    raise RuntimeError('service unavailable')
+                monkeypatch.setattr(sdk, 'init', unavailable)
             trace.clear()
             artifact = run(replace(config, run_logger=hook))
             results.append((list(trace), artifact.sha256))
@@ -260,3 +266,28 @@ def test_online_environment_cannot_enable_network_or_retry(tmp_path, monkeypatch
     logging.finish(hook)
     assert attempts == ['offline']
     assert not hook.logging_ok and hook.finished
+
+
+@pytest.mark.parametrize('phase', ['fit', 'ssl'])
+def test_real_offline_training_payloads(tmp_path, monkeypatch, phase):
+    pytest.importorskip('wandb', reason='real SDK runs only in the separate clone')
+    monkeypatch.setenv('WANDB_MODE', 'online')
+    key = '0123456789' * 4
+    monkeypatch.setenv('WANDB_API_KEY', key)
+    hook = logging.WandbLogger(tmp_path / 'logs', sync=False)
+    if phase == 'fit':
+        from test_fit import make_case
+        from oxyformer.training.fit import fit_fold
+        spec, split, manifest, config = make_case(tmp_path / 'attempt')
+        artifact = fit_fold(spec, split, manifest, replace(config, run_logger=hook), 1103).checkpoint
+    else:
+        from test_pretrain import make_case
+        from oxyformer.training.pretrain import pretrain
+        view, split, config = make_case(tmp_path / 'attempt')
+        artifact = pretrain(view, split, replace(config, run_logger=hook), 1103)
+    assert artifact.sha256
+    assert hook.logging_ok and hook.finished and hook.sync_ok is None
+    assert list((tmp_path / 'logs').rglob('*.wandb'))
+    for path in tmp_path.rglob('*'):
+        if path.is_file():
+            assert key.encode() not in path.read_bytes(), path
