@@ -15,7 +15,9 @@ Outputs contain input hashes, every retained leaf's compute and overhead,
 repetition totals, the harness formula, receipt, overhead and candidate causes.
 Numeric quantities preserve all source bases, including projected and uncalibrated.
 Copied counts add `[derived]`; computed quantities use `[derived]` or `[extrapolated]`.
-Identifiers and hashes are strings, not numerical quantities.
+Identifiers and hashes are strings, not numerical quantities; this includes
+leaf sequence steps and numeric task schedule indices. Numerical work evidence
+is a formula count even under an unrecognized name; seconds retain timing bases.
 
 The supported terminal archives retain OOFNuisances blobs and coverage state.
 They discard controller task timing history. The module therefore uses the
@@ -47,6 +49,7 @@ limit. Larger enclosure violations still refuse. The repetition timer must
 match the independently rounded archive within relative tolerance 1e-6 or absolute
 tolerance 1e-3 seconds. The absolute discrepancy is reported as measured. Extra
 study metadata is listed; the four screening values remain mandatory.
+Equal-valued JSON floats are accepted; Boolean values are not numeric counts.
 
 Stored cell hours may be rounded: formula consistency uses relative tolerance
 1e-6. JSON preserves source calibration verbatim; Markdown summarizes it beside the

@@ -477,3 +477,44 @@ def test_output_write_failure_cleans_both_and_retry_succeeds(tmp_path, monkeypat
     assert hashlib.sha256(source.read_bytes()).hexdigest() == before
     cr.write_outputs(destinations, [source], ['json payload', 'markdown payload'])
     assert [p.read_text() for p in destinations] == ['json payload', 'markdown payload']
+
+
+@pytest.mark.parametrize('key', ['frozen_epochs', 'grid_points', 'reference_cap', 'seed_count'])
+def test_screening_numeric_values_accept_float_reject_bool(inputs, key):
+    path = inputs[0].parent / '0/budget_record.json'
+    budget = cr.load(path)
+    expected = budget['binding']['study'][key]
+    budget['binding']['study'][key] = float(expected)
+    write(path, budget)
+    assert cr.reconcile(*inputs)['summary']['chain_count']['value'] == 2
+    budget['binding']['study'][key] = True
+    write(path, budget)
+    with pytest.raises(ValueError, match='screening'):
+        cr.reconcile(*inputs)
+
+
+def test_leaf_float_steps_are_identifiers(inputs):
+    path = inputs[0].parent / '0/budget_record.json'
+    budget = cr.load(path)
+    for leaf in budget['leaves']:
+        leaf['step'] = float(leaf['step'])
+    write(path, budget)
+    result = cr.reconcile(*inputs)
+    assert [x['step'] for x in result['chains'][0]['leaves']] == ['0', '1']
+
+
+def test_receipt_work_count_context_and_schedule_identifiers(inputs):
+    source = cr.load(inputs[1])
+    work = {'inner_folds': {'value': 5, 'basis': ['measured']},
+            'representative_operations': {'value': 3, 'basis': ['projected']},
+            'tasks_per_outer_seed': [['ssl', {'value': 0, 'basis': ['measured']}, None]],
+            'tasks_by_outer': {'0': [['outcome', 1, 2]]}}
+    source['calibration']['receipt']['work'] = work
+    write(inputs[1], source)
+    result = cr.reconcile(*inputs)
+    copied = result['receipt']['work']
+    assert copied['inner_folds']['basis'] == '[derived, measured]'
+    assert copied['representative_operations']['basis'] == '[derived, projected]'
+    assert copied['tasks_per_outer_seed'] == [['ssl', '0', None]]
+    assert copied['tasks_by_outer'] == {'0': [['outcome', '1', '2']]}
+    assert result['calibration'] == source['calibration']
