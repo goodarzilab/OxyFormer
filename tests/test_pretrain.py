@@ -538,3 +538,45 @@ def test_checkpoint_load_across_same_model_cards(tmp_path, monkeypatch):
     assert restored["progress"]["step"] == artifact.step == 1
     with pytest.raises(ContractError, match="incompatible checkpoint identity"):
         load_checkpoint(artifact, replace(artifact.identity, environment=different))
+
+
+def test_logging_bitwise_invariance(tmp_path, monkeypatch):
+    import shutil
+    import sys
+    import oxyformer.training.pretrain as module
+    from oxyformer.training import run_logging
+    from test_run_logging import FakeSDK, assert_events
+    # ZIP member dates are wall-clock metadata, independent of numerics.
+    import oxyformer.training.checkpoint as checkpoint_module
+    monkeypatch.setattr(checkpoint_module.zipfile.time, 'localtime',
+                        lambda *args: (2026, 1, 1, 0, 0, 0, 3, 1, 0))
+    sdk = FakeSDK()
+    monkeypatch.setitem(sys.modules, 'wandb', sdk)
+    view, split, config = make_case(tmp_path)
+    original = torch.Tensor.backward
+    trace = []
+    def observe(loss, *args, **kwargs):
+        trace.append(loss.detach().clone())
+        return original(loss, *args, **kwargs)
+    monkeypatch.setattr(torch.Tensor, 'backward', observe)
+    results = []
+    deterministic = torch.are_deterministic_algorithms_enabled()
+    torch.use_deterministic_algorithms(True)
+    try:
+        for hook in (None, run_logging.noop, run_logging.WandbLogger(tmp_path / 'logs', sync=False)):
+            trace.clear()
+            artifact = pretrain(view, split, replace(config, run_logger=hook), 1103)
+            results.append((list(trace), artifact.sha256))
+            shutil.rmtree(config.output_dir)
+    finally:
+        torch.use_deterministic_algorithms(deterministic)
+    for trace, digest in results[1:]:
+        assert digest == results[0][1]
+        assert len(trace) == len(results[0][0])
+        assert all((x is y) if x is None or y is None else torch.equal(x, y)
+                   for x, y in zip(trace, results[0][0]))
+    assert config.run_logger is None
+    assert_events(sdk.events, ('ssl',))
+    logged = [e['train_loss'] for e in sdk.events
+              if e['event'] == 'train_step' and e['train_loss'] is not None]
+    assert logged == [None if loss is None else float(loss) for loss in results[0][0]]
