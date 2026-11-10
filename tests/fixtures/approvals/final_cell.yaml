@@ -1,0 +1,14 @@
+# Synthetic test fixture only; NOT an owner approval.
+owner_decisions:
+  example_final:
+    purpose: final_coverage
+    cells:
+      example_cell:
+        reference_cap: 64
+        frozen_epochs: 150
+        grid_points: 4
+        seed_count: 3
+    partitions: [standard]
+    repetitions_per_scenario: 1000
+    scenarios: [null_effect, sign_changing]
+    certifies_release_criteria: true

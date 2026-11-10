@@ -1428,3 +1428,106 @@ def test_calibration_records_copy_sealed_profile_provenance(tmp_path):
         'task_id': record['leaves'][-1]['task_id'], 'budget_generation': record['budget_generation'],
         'scientific_fingerprint': record['profile']['scientific_fingerprint'],
         'environment_hash': record['profile']['environment_hash']}]
+
+
+@pytest.fixture
+def owner_cell():
+    import yaml
+    approvals = yaml.safe_load((Path(__file__).parent / 'fixtures/approvals/final_cell.yaml').read_text())
+    block = approvals['owner_decisions']['example_final']
+    declaration = {k: deepcopy(v) for k, v in block.items() if k != 'cells'}
+    declaration.update(campaign_mode='example_final', cell='example_cell',
+        study=deepcopy(block['cells']['example_cell']))
+    return declaration, approvals
+
+
+def test_owner_cell_accepts_fixture_and_repository_read(owner_cell, tmp_path, monkeypatch):
+    import yaml
+    declaration, approvals = owner_cell
+    original = deepcopy((declaration, approvals))
+    assert campaign.validate_campaign(declaration, approvals) == declaration
+    path = tmp_path / 'approvals.yaml'
+    path.write_text(yaml.safe_dump(approvals))
+    monkeypatch.setattr(campaign, 'OWNER_APPROVALS', path)
+    assert campaign.validate_campaign(declaration) == declaration
+    assert (declaration, approvals) == original
+    path.write_text('owner_decisions: {}')
+    with pytest.raises(ContractError, match='approval'):
+        campaign.validate_campaign(declaration)
+
+
+@pytest.mark.parametrize('field,value,message', [
+    ('campaign_mode', 'unapproved', 'approval'), ('cell', 'unnamed', 'cell'),
+    ('purpose', 'anchor', 'purpose'), ('partitions', ['preemptible'], 'partitions'),
+    ('repetitions_per_scenario', 999, 'repetitions_per_scenario'),
+    ('repetitions_per_scenario', 1000., 'repetitions_per_scenario'),
+    ('scenarios', ['null_effect'], 'scenarios'),
+    ('scenarios', ['sign_changing', 'null_effect'], 'scenarios'),
+    ('study', campaign.SCREENING_CELL, 'study'),
+])
+def test_owner_campaign_binds_declaration(owner_cell, field, value, message):
+    declaration, approvals = owner_cell
+    declaration[field] = value
+    with pytest.raises(ContractError, match=message):
+        campaign.validate_campaign(declaration, approvals)
+
+
+@pytest.mark.parametrize('field', [*campaign.SCREENING_CELL, 'repetitions_per_scenario'])
+@pytest.mark.parametrize('value', [True, False, 0, -1, 1.0, 1.5, '1000', None])
+def test_owner_campaign_malformed_integers_fail_closed(owner_cell, field, value):
+    declaration, approvals = owner_cell
+    block = approvals['owner_decisions']['example_final']
+    target = block if field == 'repetitions_per_scenario' else block['cells']['example_cell']
+    target[field] = value
+    declared = declaration if field == 'repetitions_per_scenario' else declaration['study']
+    declared[field] = value
+    with pytest.raises(ContractError, match=field):
+        campaign.validate_campaign(declaration, approvals)
+
+
+@pytest.mark.parametrize('field,value', [
+    ('cells', {}), ('purpose', 'unregistered'), ('partitions', []),
+    ('scenarios', []), ('scenarios', ['null_effect', 'null_effect']),
+    ('certifies_release_criteria', 'true'),
+])
+def test_owner_campaign_malformed_block(owner_cell, field, value):
+    declaration, approvals = owner_cell
+    approvals['owner_decisions']['example_final'][field] = value
+    with pytest.raises(ContractError, match=field):
+        campaign.validate_campaign(declaration, approvals)
+
+
+@pytest.mark.parametrize('count,owner_certifies,requested,expected', [
+    (500, True, True, False),  # Two scenarios, 1,000 repetitions total.
+    (999, True, True, False), (1000, True, True, True),
+    (1001, True, True, True), (1000, False, True, False),
+    (1000, True, False, False),
+])
+def test_owner_campaign_certification_is_per_scenario(owner_cell, count, owner_certifies, requested, expected):
+    declaration, approvals = owner_cell
+    block = approvals['owner_decisions']['example_final']
+    declaration['repetitions_per_scenario'] = block['repetitions_per_scenario'] = count
+    block['certifies_release_criteria'] = owner_certifies
+    declaration['certifies_release_criteria'] = requested
+    result = campaign.validate_campaign(declaration, approvals)
+    assert result['certifies_release_criteria'] is expected
+    assert declaration['certifies_release_criteria'] is requested
+    result['study']['reference_cap'] = 1
+    assert declaration['study']['reference_cap'] == 64
+
+
+@pytest.mark.parametrize('mode', ['screening', 'diagnostic'])
+def test_owner_campaign_cannot_override_existing_modes(owner_cell, mode):
+    declaration, approvals = owner_cell
+    approvals['owner_decisions'][mode] = approvals['owner_decisions']['example_final']
+    declaration['campaign_mode'] = mode
+    with pytest.raises(ContractError, match='campaign_mode'):
+        campaign.validate_campaign(declaration, approvals)
+
+
+def test_owner_campaign_requires_one_cell(owner_cell):
+    declaration, approvals = owner_cell
+    cells = approvals['owner_decisions']['example_final']['cells']
+    cells['another'] = deepcopy(cells['example_cell'])
+    with pytest.raises(ContractError, match='exactly one cell'):
+        campaign.validate_campaign(declaration, approvals)
