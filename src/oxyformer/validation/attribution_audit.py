@@ -125,16 +125,22 @@ def load(path):
         states = [{**state, 'parts': [OOFNuisances.from_json(blob(k)) for k in state['parts']],
                    'sample': {k: blob(state['sample'][k]) for k in ('observations', 'structural_causal_truth')}} for state in header['states']]
     request = StageRequest.from_json((path/'_execution/request.json').read_text())
+    def resolve_dependency(name):
+        try:
+            return Path(name).resolve()
+        except RuntimeError as exc:
+            raise ContractError('unreadable dependency: '+str(name)+': '+str(exc)) from exc
+
     def dependency(expected, cls=None):
         for name, hashed in zip(request.dependency_paths, request.dependency_hashes):
             if hashed == expected:
                 source = Path(name)
                 # Only rebase paths explicitly anchored inside the saved attempt.
-                resolved = source.resolve()
-                anchor = Path(request.output_dir).resolve()
+                resolved = resolve_dependency(source)
+                anchor = resolve_dependency(request.output_dir)
                 if not source.exists() and resolved.is_relative_to(anchor):
-                    target = (path/resolved.relative_to(anchor)).resolve()
-                    require(target.is_relative_to(path.resolve()), 'external dependency: '+str(source))
+                    target = resolve_dependency(path/resolved.relative_to(anchor))
+                    require(target.is_relative_to(resolve_dependency(path)), 'external dependency: '+str(source))
                     source = target
                 raw = source.read_bytes()
                 require(sha256(raw).hexdigest() == expected, 'dependency digest mismatch')

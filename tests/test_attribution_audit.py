@@ -188,3 +188,38 @@ def test_empty_states_is_unreadable(tmp_path):
         assert audit.main([str(tmp_path/'saved'), '--output-dir', str(tmp_path/'out')]) == 1
     result = json.loads((tmp_path/'out/attribution_audit.json').read_text())
     assert 'empty states' in result['skipped'][0]['status']
+
+@pytest.mark.parametrize('site', ['source', 'anchor', 'target', 'attempt'])
+def test_dependency_resolution_loop_keeps_readable_sibling(tmp_path, site):
+    bad, good = tmp_path/'bad', tmp_path/'good'
+    saved_fixture(bad)
+    saved_fixture(good)
+    request_path = bad/'_execution/request.json'
+    request = StageRequest.from_json(request_path.read_text())
+    external = tmp_path/'external-endpoint.json'
+    external.symlink_to(external.name)
+    if site == 'source':
+        request = replace(request, dependency_paths=(str(external), request.dependency_paths[1]))
+    elif site == 'anchor':
+        (bad/'endpoint.json').unlink()
+        request = replace(request, output_dir=str(external))
+    else:
+        moved = tmp_path/'moved'
+        bad.rename(moved)
+        request_path = moved/'_execution/request.json'
+        if site == 'target':
+            (moved/'endpoint.json').unlink()
+            (moved/'endpoint.json').symlink_to('endpoint.json')
+        bad = moved
+    request_path.write_text(request.to_json())
+    original = Path.resolve
+    def resolve(path, *args, **kwargs):
+        if site == 'attempt' and path == bad:
+            raise RuntimeError('Symlink loop from attempt root')
+        return original(path, *args, **kwargs)
+    with patch.object(Path, 'resolve', resolve):
+        assert audit.main([str(bad), str(good), '--output-dir', str(tmp_path/'out')]) == 0
+    report = json.loads((tmp_path/'out/attribution_audit.json').read_text())
+    assert len(report['repetitions']) == len(report['skipped']) == 1
+    assert 'unreadable dependency' in report['skipped'][0]['status']
+    assert (tmp_path/'out/attribution_audit.md').exists()
