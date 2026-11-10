@@ -908,3 +908,35 @@ def test_spool_footer_redacts_numeric_credential(tmp_path, monkeypatch):
         assert not hook.logging_ok
     finally:
         shutil.rmtree(directory)
+
+
+def test_finish_timeout_cannot_orphan_git_group(tmp_path, monkeypatch):
+    import os
+    import signal
+    executable = tmp_path / 'git'
+    marker = tmp_path / 'git-pid'
+    executable.write_text('#!/usr/bin/env python3\nimport os,time\n'
+                          f'open({str(marker)!r}, "w").write(str(os.getpid()))\n'
+                          'time.sleep(100)\n')
+    executable.chmod(0o700)
+    monkeypatch.setenv('PATH', str(tmp_path) + ':' + os.environ['PATH'])
+    monkeypatch.setattr(logging, 'GIT_TIMEOUT', 1.)
+    monkeypatch.setattr(logging, 'FINISH_TIMEOUT', .2)
+    monkeypatch.setitem(sys.modules, 'wandb', None)
+    hook = logging.WandbLogger(tmp_path / 'logs', sync=False)
+    logging.emit(hook, dict(event='run_start', git_sha=None))
+    started = time.monotonic()
+    logging.finish(hook)
+    assert time.monotonic() - started < 2.5
+    assert marker.exists(), 'Git double must have entered'
+    pid = int(marker.read_text())
+    alive = False
+    try:
+        os.kill(pid, 0)
+        alive = True
+    except ProcessLookupError:
+        pass
+    finally:
+        if alive:
+            os.killpg(pid, signal.SIGKILL)
+    assert not alive, 'finish timeout left an owned Git process behind'

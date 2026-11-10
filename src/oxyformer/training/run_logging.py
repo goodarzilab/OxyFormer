@@ -163,8 +163,8 @@ FINISH_TIMEOUT = 180
 
 def _finish_worker(hook, connection):
     # A disposable process isolates native SDK stalls and RNG use. Its process
-    # group also owns SDK subprocesses, so timeout cleanup is independent of
-    # Python signal dispatch inside the delivery operation.
+    # group is terminated on completion or timeout, independently of Python
+    # signal dispatch inside the delivery operation. Git has a separate owner.
     os.setsid()
     try:
         hook._finish()
@@ -187,7 +187,7 @@ def git_revision():
     process = None
     try:
         process = subprocess.Popen(['git', 'rev-parse', 'HEAD'],
-            cwd=Path(__file__).resolve().parents[3], stderr=subprocess.DEVNULL,
+            cwd=Path(__file__).parents[3], stderr=subprocess.DEVNULL,
             stdout=subprocess.PIPE, text=True, start_new_session=True)
         output, _ = process.communicate(timeout=GIT_TIMEOUT)
         if process.returncode:
@@ -261,6 +261,8 @@ class WandbLogger:
         self.status_path = None
         self._events = []
         self.refusal = None
+        self._needs_git = False
+        self._git_revision = None
 
     def __call__(self, event):
         if self.finished:
@@ -270,6 +272,8 @@ class WandbLogger:
             return
         # No filesystem, SDK or provenance subprocess can block a fitting slice.
         try:
+            if event.get('event') == 'run_start' and 'git_sha' in event and event['git_sha'] is None:
+                self._needs_git = True
             self._events.append(json.dumps(sanitize(event)))
         except Exception:
             self.logging_ok = False
@@ -280,6 +284,8 @@ class WandbLogger:
             return
         process = receiver = sender = None
         try:
+            if self._needs_git and not self.refusal:
+                self._git_revision = git_revision()
             context = multiprocessing.get_context('fork')
             receiver, sender = context.Pipe(duplex=False)
             process = context.Process(target=_finish_worker, args=(self, sender))
@@ -327,7 +333,7 @@ class WandbLogger:
             event = json.loads(text)
             if event.get('event') == 'run_start' and 'git_sha' in event and event['git_sha'] is None:
                 if not queried:
-                    revision, queried = git_revision(), True
+                    revision, queried = self._git_revision, True
                     if revision.startswith('unavailable:'):
                         self.logging_ok = False
                 event['git_sha'] = revision

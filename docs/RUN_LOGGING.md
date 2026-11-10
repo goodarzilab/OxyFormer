@@ -57,8 +57,9 @@ The five settled contract questions are:
 
 - Non-interference covers checkpoint bytes, per-step numerics and the returned
   training artifact. Finish runs after checkpoint persistence, with a 180-second
-  delivery deadline. On Linux delivery runs in a disposable forked process,
-  whose process group is killed and reaped after completion or timeout. Native
+  delivery deadline, following the separate ten-second Git lookup. On Linux
+  SDK/spool delivery runs in a disposable forked process; its process group is
+  killed and its leader reaped after completion or timeout. Native
   SDK waits and RNG operations cannot block or mutate the training process.
   A delivery timeout marks logging incomplete;
   a pending/null status also means incomplete. Scientific results stay usable.
@@ -79,3 +80,6 @@ Refusal state is sealed independently of captured events, so losing a flagged
 start event cannot bypass refusal during replay. Credential-bearing logging
 directories are refused before creation or SDK handoff. Spool metadata is also
 sanitized; if redaction prevents integrity validation, telemetry stays incomplete.
+
+Git is looked up and reaped before the SDK worker starts. Killing a stalled
+SDK worker therefore cannot strand Git in its separate process group.
