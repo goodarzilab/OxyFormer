@@ -576,7 +576,7 @@ def test_generic_hook_rejected_before_training(tmp_path, phase):
 
 
 def test_decimal_string_credentials_redacted(tmp_path, monkeypatch):
-    key = '0' + '123456789' * 4 + '012'
+    key = '0' + '1234567890' * 3 + '123456789'
     monkeypatch.setenv('WANDB_API_KEY', key)
     forms = [key, str(int(key)), '000' + str(int(key))]
     sdk = FakeSDK()
@@ -745,3 +745,20 @@ def test_refused_snapshot_cannot_be_published_by_replay(tmp_path, monkeypatch):
     replay = logging.WandbLogger.replay(hook.spool, sync=False)
     assert replay.finished and not replay.logging_ok
     assert sdk.kwargs is None and not sdk.events
+
+
+@pytest.mark.parametrize('action', ['init', 'log', 'finish'])
+def test_sdk_stalls_are_bounded(tmp_path, monkeypatch, action):
+    import time
+    sdk = FakeSDK()
+    def stalled(*args, **kwargs):
+        time.sleep(30)
+    monkeypatch.setattr(sdk, action, stalled)
+    monkeypatch.setitem(sys.modules, 'wandb', sdk)
+    monkeypatch.setattr(logging, 'FINISH_TIMEOUT', .1)
+    hook = logging.WandbLogger(tmp_path, sync=False)
+    logging.emit(hook, dict(event='run_start'))
+    started = time.monotonic()
+    logging.finish(hook)
+    assert time.monotonic() - started < 1
+    assert hook.finished and not hook.logging_ok
