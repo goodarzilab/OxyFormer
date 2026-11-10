@@ -1,23 +1,15 @@
 # Run logging
 
-`FitConfig.run_logger` and `PretrainConfig.run_logger` default to `None`.
-Use a fresh `run_logging.WandbLogger(directory)` per attempt; nested SSL shares it.
+`FitConfig.run_logger`/`PretrainConfig.run_logger` default to `None` (no-op).
+Use fresh `run_logging.WandbLogger(directory)` per attempt; nested SSL shares it.
+`WANDB_MODE` defaults to `offline`. Finish/sync follow checkpoints (120-second
+sync timeout). `logging-status.json` records `logging_ok`/`sync_ok` facts;
+failures preserve results. Retry with `python -m wandb sync /path/to/offline-run`.
 
-W&B targets `goodarzilab/oxyformer-v2`; `WANDB_MODE` defaults to `offline`.
-After checkpoint publication, finish precedes sync (120-second timeout).
-`logging-status.json` and `logging_ok`/`sync_ok` report separate completeness
-facts; null sync means no attempt. Failures preserve training results. Retry:
-
-```sh
-python -m wandb sync --entity goodarzilab --project oxyformer-v2 /path/to/offline-run
-```
-
-Install optional W&B from **conda-forge only**. Only runtime `WANDB_API_KEY`
-supplies credentials for online/sync; never persist it or dump the environment.
-Events redact credentials; error output is suppressed. Tests grep repo/run files.
-Uploads are unverified: tests use offline SDK files and simulated sync.
+Install from **conda-forge only**. Credentials come only from runtime
+`WANDB_API_KEY`: never persist it or dump the environment. Events redact secrets;
+errors are suppressed and tests grep repo/run files. Upload is unverified.
 
 Both loops test off/no-op/on with deterministic CPU kernels, bitwise losses and
-checkpoint SHA-256. Tests fix paths/ZIP dates affecting archive bytes. Callbacks
-preserve Python/NumPy/Torch RNG state. GPU nondeterminism remains a limit;
-throughput/memory measurements apply only to that hardware.
+checkpoint SHA-256, fixed paths/ZIP dates, and unchanged Python/NumPy/Torch RNG.
+GPU nondeterminism remains; measurements apply only to that hardware.

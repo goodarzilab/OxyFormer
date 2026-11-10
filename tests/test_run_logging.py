@@ -167,7 +167,6 @@ def test_real_offline_sdk(tmp_path, monkeypatch):
 
 def check_invariance(monkeypatch, config, trace, run, tmp_path, phase, phases):
     import oxyformer.training.checkpoint as checkpoint
-    # Paths and ZIP dates affect archive bytes independently of numerics.
     monkeypatch.setattr(checkpoint.zipfile.time, 'localtime',
                         lambda *args: (2026, 1, 1, 0, 0, 0, 3, 1, 0))
     sdk = FakeSDK()
@@ -189,6 +188,14 @@ def check_invariance(monkeypatch, config, trace, run, tmp_path, phase, phases):
         assert all(torch.equal(x, y) for x, y in zip(losses, results[0][0]))
     assert config.run_logger is None
     assert_events(sdk.events, phases)
+    if phase == 'nuisance':
+        assert sdk.events[0]['config']['deadline_timing']['compute_deadline'] == config.deadline_timing.deadline
     logged = [e['train_loss'] for e in sdk.events if e['event'] == 'train_step'
               and e['phase'] == phase and e['train_loss'] is not None]
     assert logged == [float(loss) for loss in results[0][0]]
+
+
+def test_finish_reaches_callable_hook():
+    events = []
+    logging.finish(events.append)
+    assert events == [dict(event='run_finish')]
