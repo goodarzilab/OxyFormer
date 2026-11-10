@@ -20,11 +20,6 @@ _SECRET_FIELD = re.compile(r"(?:api[_-]?key|access[_-]?token|auth[_-]?token|^tok
 
 
 def sanitize(value):
-    """Redact credentials without mistaking SHA-256 provenance for credentials.
-
-    Environment values are never enumerated or dumped. The sole credential
-    source is WANDB_API_KEY, read by the SDK/CLI at runtime.
-    """
     if isinstance(value, dict):
         return {str(k): ('[redacted]' if _SECRET_FIELD.search(str(k)) else sanitize(v))
                 for k, v in value.items()}
@@ -37,22 +32,17 @@ def sanitize(value):
 
 
 def noop(event):
-    """Explicit no-op hook; None also disables logging."""
+    pass
 
 
 def emit(hook, event, device='cpu'):
-    """Pass detached JSON values only. Callback return values never reach fitting.
-
-    Restore global Python/NumPy/Torch RNGs even when a third-party SDK draws
-    randomness or raises. Diagnostics contain no exception text or credentials.
-    """
+    """Ignore callback returns/errors and preserve global RNG state."""
     if hook is None:
         return
     rng = capture_rng(device)
     try:
         hook(sanitize(event))
     except Exception:
-        # Do not print arbitrary exceptions: they may contain credentials.
         if isinstance(hook, WandbLogger):
             hook.logging_ok = False
     finally:
@@ -63,7 +53,6 @@ def step_event(hook, *, model, loss, learning_rate, samples, started, device, **
     if hook is None:
         return
     try:
-        # Norm of the gradients actually applied (after the existing clipping).
         gradients = [p.grad.detach().double().norm() for p in model.parameters()
                      if p.grad is not None]
         norm = torch.stack(gradients).norm().item() if gradients else 0.
@@ -83,7 +72,6 @@ def step_event(hook, *, model, loss, learning_rate, samples, started, device, **
 
 
 def run_config(config, identity, *, data, split, seed):
-    """Full declared configuration, without raw observations or live resources."""
     excluded = {'run_logger', 'data', 'deadline_timing', 'stop_request', 'predecessor'}
     values = {}
     for field in fields(config):
@@ -91,7 +79,6 @@ def run_config(config, identity, *, data, split, seed):
             continue
         value = getattr(config, field.name)
         values[field.name] = value.to_dict() if hasattr(value, 'to_dict') else value
-    # Runtime resources excluded above are represented by their lineage instead.
     predecessor = config.predecessor
     predecessor = getattr(predecessor, 'checkpoint', predecessor)
     values['resume'] = None if predecessor is None else predecessor.to_dict()
@@ -131,12 +118,7 @@ def finish(hook, device='cpu'):
 
 
 class WandbLogger:
-    """One offline run per invocation. Completeness is separate from fit success.
-
-    Pass this object as run_logger. Nested SSL shares the fold's run; standalone
-    SSL finishes its own run. Sync is attempted only after SDK finish, with a
-    bounded timeout, and never changes the returned scientific artifact.
-    """
+    """One optional offline run; logging/sync completeness is independent."""
     def __init__(self, directory, *, sync=True):
         self.directory = Path(directory)
         self.sync = sync
@@ -181,7 +163,6 @@ class WandbLogger:
             self.sync_ok = False
         finally:
             self.finished = True
-            # The caller can inspect these facts even if this optional file fails.
             try:
                 (self.directory / 'logging-status.json').write_text(json.dumps(
                     dict(logging_ok=self.logging_ok, sync_ok=self.sync_ok)))
