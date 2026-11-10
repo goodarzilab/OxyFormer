@@ -70,18 +70,59 @@ def step_event(hook, *, model, loss, learning_rate, samples, started, device, **
             hook.logging_ok = False
 
 
-def run_config(config, identity, *, data, split, seed):
-    excluded = {'run_logger', 'data', 'stop_request', 'predecessor'}
+# Every declared runtime key has an explicit projection policy. New fields fail closed.
+CONFIG_SCHEMA = {
+    'FitConfig': dict.fromkeys(('entity_graph inner fold policy policy_covariates treatment_design '
+        'feature_kinds families county_field exposure_assignment_level output_dir family '
+        'population_field settings study stopping_ids ssl_epochs predecessor stop_request '
+        'max_batches slice_seconds checkpoint_margin_seconds device deadline_timing').split(), 'included'),
+    'PretrainConfig': dict.fromkeys(('settings output_dir predecessor slice_seconds '
+        'checkpoint_margin_seconds max_batches stop_request controller_state device finish_logging').split(), 'included')}
+CONFIG_SCHEMA['FitConfig']['data'] = 'hashed'
+for _schema in CONFIG_SCHEMA.values():
+    _schema['run_logger'] = 'excluded'
+
+
+def stop_state(request, *, reason=None):
+    if reason == 'requested':
+        return 'honoured'
+    # Never invoke a requested property: deadline proxies can mutate accounting.
+    return 'requested' if request is not None and vars(request).get('requested') is True else 'none'
+
+
+def project_config(config):
+    schema = CONFIG_SCHEMA[type(config).__name__]
+    names = {f.name for f in fields(config)}
+    if names != schema.keys():
+        raise ValueError('unclassified configuration keys: ' + str(names ^ schema.keys()))
     values = {}
-    for field in fields(config):
-        if field.name in excluded:
+    for name, policy in schema.items():
+        if policy in ('excluded', 'hashed'):
             continue
-        value = getattr(config, field.name)
-        value = value.report() if field.name == 'deadline_timing' and value is not None else value
-        values[field.name] = value.to_dict() if hasattr(value, 'to_dict') else value
-    predecessor = config.predecessor
-    predecessor = getattr(predecessor, 'checkpoint', predecessor)
-    values['resume'] = None if predecessor is None else predecessor.to_dict()
+        value = getattr(config, name)
+        if name == 'stop_request':
+            value = stop_state(value)
+        elif name == 'predecessor':
+            value = getattr(value, 'checkpoint', value)
+        elif name == 'deadline_timing' and value is not None:
+            value = value.report()
+        values[name] = value.to_dict() if hasattr(value, 'to_dict') else value
+    return values
+
+
+def window_start(hook, device):
+    if hook is not None and torch.device(device).type == 'cuda':
+        try:
+            torch.cuda.synchronize(device)
+            torch.cuda.reset_peak_memory_stats(device)
+        except Exception:
+            if isinstance(hook, WandbLogger):
+                hook.logging_ok = False
+    return time.monotonic()
+
+
+def run_config(config, identity, *, data, split, seed):
+    values = project_config(config)
     values['data'] = dict(pin=data.content_hash, lineage=data.lineage.to_dict())
     if hasattr(data, 'sources'):
         values['data']['manifest'] = data.to_dict()
@@ -124,6 +165,7 @@ class WandbLogger:
         self.logging_ok = True
         self.sync_ok = None
         self.finished = False
+        self.init_attempted = False
 
     def __call__(self, event):
         if self.finished:
@@ -132,13 +174,13 @@ class WandbLogger:
             self._finish()
             return
         if self.run is None:
-            mode = os.environ.get('WANDB_MODE', 'offline')
-            if mode not in ('offline', 'dryrun', 'disabled') and not os.environ.get('WANDB_API_KEY'):
-                raise RuntimeError('Environment credential required')
+            if self.init_attempted:
+                return
+            self.init_attempted = True
             import wandb
             self.directory.mkdir(parents=True, exist_ok=True)
             self.run = wandb.init(entity='goodarzilab', project='oxyformer-v2',
-                mode=mode, dir=str(self.directory),
+                mode='offline', dir=str(self.directory),
                 config=event if event['event'] == 'run_start' else None,
                 settings=wandb.Settings(console='off', disable_git=True,
                                         disable_code=True, disable_job_creation=True))
