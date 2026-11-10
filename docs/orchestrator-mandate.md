@@ -39,7 +39,13 @@ Anything beyond that is a follow-up issue, never a blocker.
    `standard` with account `root` only.
 2. Writes only to `~/oxyformer-swarm`, the coordinator state directory, `~/envs/oxyformer`, and the repository through PRs
    into `dev`. `main`, the root data CSVs, `outputs/` and `report/` are read-only.
-3. Code agents are Codex gpt-6-astra (thinking high) in `auto-review` mode.
+3. From the moment this amendment merges, the code agent for any new attempt is Codex gpt-6.1-sol (thinking high) in
+   `auto-review` mode (owner decisions of 2026-11-06 and 2026-11-09). Codex gpt-6-astra holds the deep-review and tie-break
+   seats for work it neither authored nor coauthored. Attempt records are never rewritten; each records the author or
+   authors of that attempt's work, and audits read the author from the record. An attempt that carries forward another
+   agent's work lists that agent as an author too. Authors, including coauthors, never review or tie-break their own work;
+   the review gate and committee tooling enforce this by excluding declared authors, forming the panel from the remaining
+   seats, and routing a tie-break whose seat is excluded to the owner.
 4. At most 3 substantive review rounds per change, then the step-back committee for an exit criterion. The committee's
    converged criterion, or its tie-break ruling, is binding.
 5. The scientific protocol in `docs/plan/OXYFORMER_V2_PLAN.md` and `configs/approvals.yaml` stays fixed: estimands, the
@@ -96,6 +102,33 @@ production recipe, (3) final cells sized from those measurements. The decision i
   diagnostic campaign or raising the per-chain leaf bound, the owner answered verbatim "just don't be worried... go with
   what you need"; the orchestrator took the first, recorded as `diagnostic_campaign.profile_safety_factor: 1.25`. Bounds unchanged.
 - Everything else in this mandate is unchanged.
+
+## Phase-3 amendment (2026-11-09)
+Owner decisions in the orchestrating session on 2026-11-09 (about 14:20 and 17:00 PST), after the sign_changing diagnostic
+campaign m2-diag-A reported 15 of 20 chains (interim cv_tmle mean +0.0038 against the planted +0.0178, every chain flagging
+bias_investigation_required) and the recipe cost study reported uncalibrated (ratio 2.43). To the orchestrator's recommendation to
+plan the next phase now rather than wait for the certified 20-chain aggregate, the owner answered verbatim "let's go with your
+recommendation" and, to the clarifying question, "Yes, plan now (Recommended)". The planning committee (Terra, Gemini Argon, Muse
+Wonder) converged on attribution before sizing and routed one science question to the owner; its design is recorded in the swarm
+PLAN.md ledger and `final-cells/design-memo.md`. The owner then answered four questions, verbatim:
+
+- Tickets: "Approve all four (Recommended)": file and dispatch p3-oracle-path, p3-wandb-hook, p3-final-cell-mode and
+  p3-attribution-run, engineering units whose scope is analysis code, run logging, admission validation and a CPU audit. The
+  logging-off numerics test is a CPU unit test on synthetic data, not a training run.
+- Code author: "Sol 6.1 authors; amend the mandate (Recommended)": Bounded item 3 now names Codex gpt-6.1-sol; gpt-6-astra reviews and
+  tie-breaks and never authors.
+- Cost replay: "Approve on the pinned tree with a W&B waiver (Recommended)": one exact replay of an existing screening-cell repetition
+  (same lock, seed and dataset; 17 leaves; about 33 GPU-hours; `standard` partition; tree 626d4dd) to re-calibrate the cost study
+  against the sealed receipt. Weights & Biases logging is waived for this timing replay only.
+- W&B credential: "Secret env on the login node": `WANDB_API_KEY` is exported in the owner's credential shell and read at launch; it
+  never goes into files, logs or the repository. Entity goodarzilab, project oxyformer-v2. Every new training run logs to W&B (owner
+  rule of 2026-11-07, brood-lord PR 364).
+
+Effect on this mandate: Bounded item 3 as amended above; the four engineering units and the replay are granted work under items 2,
+5 and 9 and `owner_decisions.month2_phase3` in `configs/approvals.yaml`. Final-cell repetitions, recipe and scenarios, any pilot or
+ladder beyond the approved 20 repetitions, the final-coverage, anchor and refit-audit allocations, and the choice of variance target
+for the SE/SD gate remain owner decisions under stop-and-ask items 1 and 4. A tie-break on work gpt-6-astra coauthored routes to
+the owner by the tooling's existing rule.
 
 ## Concurrence party
 The step-back committee of hanig-review-gate: two members on contrasting providers, the author excluded. Hani Goodarzi

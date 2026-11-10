@@ -291,6 +291,34 @@ owner_decisions:
     recipe_cost_study: "bounded-slice measurement of the registered production recipe and intermediate cells at the current tree, reported to the owner before any final-cell sizing"
     final_cells: "sized from the diagnostic and cost-study measurements; repetitions, recipe and scenarios for the final cells are a later owner decision; release_gates are unchanged"
 
+  # Owner decisions 2026-11-09 (orchestrating session). After the sign_changing diagnostic (15 of 20 chains collected: cv_tmle mean
+  # +0.0038 against the planted +0.0178, every chain flagging bias_investigation_required) and the uncalibrated recipe cost study
+  # (ratio 2.43), the owner answered the recommendation to plan the next phase now, verbatim: "let's go with your recommendation" and
+  # "Yes, plan now (Recommended)"; then four questions: tickets "Approve all four (Recommended)"; code author "Sol 6.1 authors; amend
+  # the mandate (Recommended)"; cost replay "Approve on the pinned tree with a W&B waiver (Recommended)"; W&B credential "Secret env
+  # on the login node". The planning committee's design (attribution before sizing) is recorded in the swarm PLAN.md ledger and the
+  # mandate's Phase-3 amendment. Final-cell repetitions, recipe and scenarios remain a later owner decision.
+  month2_phase3:
+    decided_on: "2026-11-09"
+    purpose: "attribution before sizing: CPU-only oracle-nuisance replay on the saved m2-diag-A artifacts, a W&B logging hook, final-cell admission from an owner block, and one cost re-calibration replay; campaigns remain separate owner decisions"
+    engineering_units: [p3-oracle-path, p3-wandb-hook, p3-final-cell-mode, p3-attribution-run]
+    code_author: "codex/gpt-6.1-sol"       # owner decision 2026-11-06, reconfirmed 2026-11-09; codex/gpt-6-astra reviews and tie-breaks, never authors
+    run_logging:
+      required: true                       # owner rule 2026-11-07 (brood-lord PR 364): every training run logs to Weights & Biases
+      entity: goodarzilab
+      project: oxyformer-v2
+      credential: "WANDB_API_KEY exported in the owner's credential shell on the login node and read at launch; never written to files, logs or the repository"
+      unit_tests_are_not_training_runs: true   # the logging-off numerics test is a CPU unit test on synthetic data
+      waived_for: [cost_recalibration_replay]
+    cost_recalibration_replay:
+      source_campaign: m2-diag-A
+      tree: "626d4dd603ce399b68b93bee644fe27cf452377f"
+      repetitions: 1                       # one exact replay of an existing screening-cell repetition (same lock, seed and dataset), 17 leaves
+      partition: standard
+      gpu_hours_max: 34
+      purpose: "time one complete screening-cell repetition end to end and reconcile it with the sealed receipt (30.46 H100-h) and the harness projection (73.9 H100-h, ratio 2.43); timing only, not a new scientific repetition"
+    final_cells: "repetitions, recipe and scenarios for any final cell, and the SE variance target the committee routed to the owner, remain later owner decisions"
+
 # Not yet approved. A unit that needs one of these must stop and report; the orchestrator brings it to the owner.
 pending_owner_approval:
   - any relief, flag or distance sensitivity analyses beyond plan_fixed
