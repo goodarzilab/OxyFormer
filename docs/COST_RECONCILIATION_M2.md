@@ -46,3 +46,6 @@ match the archive.
 Stored cell hours may be rounded: formula consistency uses relative tolerance
 1e-6. JSON preserves source calibration verbatim; Markdown summarizes it beside the
 descriptive factor. Calibration and transfer limits still apply.
+
+Output destinations must be distinct. Aliases between outputs, or from outputs
+to source artifacts, refuse before any write.
