@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import numpy as np
 import pytest
+import torch
 
 from test_scores import make_fixture
 from test_coverage import synthetic_endpoint, smoke_recipe
@@ -26,7 +27,7 @@ def pinned_estimates():
             'cv_tmle': cv_tmle(n, d, weights, 'identity', n.spec, **common).estimate.to_json()}
 
 def test_existing_estimators_byte_identical():
-    assert {k: sha256(v.encode()).hexdigest() for k,v in pinned_estimates().items()} == json.loads(Path('tests/fixtures/oracle/estimates.json').read_text())
+    assert {k: sha256(v.encode()).hexdigest() for k,v in pinned_estimates().items()} == json.loads(Path('tests/fixtures/oracle/estimates.json').read_text())['cuda' if torch.version.cuda else 'cpu']
 
 @pytest.mark.parametrize('case,expected', [('i', 'branch i'), ('ii', 'branch ii'), ('partial', 'inconclusive (partial recovery)'), ('single', 'inconclusive (partial recovery)')])
 def test_decision_rules(case, expected):

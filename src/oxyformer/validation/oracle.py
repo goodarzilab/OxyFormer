@@ -1,4 +1,3 @@
-"""Finite-mixture oracle; no regression fitting."""
 from dataclasses import dataclass
 from fractions import Fraction
 
@@ -21,7 +20,6 @@ class OracleNuisances:
     r_d: tuple
 
 class ObservedLawOracle:
-    """Origin-weighted selected law given approved adjustment."""
     def __init__(self, observed, truth, policy):
         self.observed, self.policy = observed, policy
         self.frame = observed.frame
