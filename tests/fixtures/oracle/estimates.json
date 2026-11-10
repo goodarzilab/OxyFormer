@@ -1,1 +1,1 @@
-{"cv_tmle": "360c2fbb47a7727b6f1d2ab06eb641cd80e80caaa33b47d061c9c5c0453ed98b", "one_step": "3f2ecdbeb61f62e6326df9fccddafd1bf9f2fdf529d25363fc1bcac18269f827"}
+{"cpu": {"cv_tmle": "360c2fbb47a7727b6f1d2ab06eb641cd80e80caaa33b47d061c9c5c0453ed98b", "one_step": "28cc0cb99d295a89d97ef670e14b6205704c1e85fc745f7c98e648fe72bf63bc"}, "cuda": {"cv_tmle": "360c2fbb47a7727b6f1d2ab06eb641cd80e80caaa33b47d061c9c5c0453ed98b", "one_step": "3f2ecdbeb61f62e6326df9fccddafd1bf9f2fdf529d25363fc1bcac18269f827"}}

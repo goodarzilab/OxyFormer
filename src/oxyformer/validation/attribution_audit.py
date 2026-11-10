@@ -1,4 +1,3 @@
-"""CPU attribution audit of saved nuisances."""
 import argparse
 from dataclasses import replace
 from hashlib import sha256
@@ -40,7 +39,7 @@ def paired(differences):
     mean = float(np.mean(differences)) if n else None
     half = float(t.ppf(.975, n-1)*np.std(differences, ddof=1)/np.sqrt(n)) if n > 1 else None
     return {'n': number(n, 'paired repetitions'),
-            'mean': number(mean, 'paired oracle minus fitted'),
+            'mean': number(mean, 'paired oracle-fitted'),
             'lower': number(None if half is None else mean-half, 'paired t interval, 95%'),
             'upper': number(None if half is None else mean+half, 'paired t interval, 95%')}
 
@@ -81,31 +80,31 @@ def replay(endpoint, parts, oracle, locations):
             changes.update(mu_a=true.mu_a, mu_d=true.mu_d)
         if cell in ('oracle', 'oracle_g'):
             changes.update(r_a=true.r_a, r_d=true.r_d)
-        nuisances = replace(fitted, **changes)
+        n = replace(fitted, **changes)
         common = dict(split=split, policy=endpoint.policy)
-        tmle = cv_tmle(nuisances, endpoint.data, weights, 'identity', fitted.spec, **common)
-        estimates = {'one_step': one_step(nuisances, endpoint.data, weights, fitted.spec, **common),
+        tmle = cv_tmle(n, endpoint.data, weights, 'identity', fitted.spec, **common)
+        estimates = {'one_step': one_step(n, endpoint.data, weights, fitted.spec, **common),
                      'cv_tmle': tmle.estimate}
         influence = align_estimates(estimates)
         spatial = spatial_sensitivities(influence, groups, locations, interpretation='geographic_process')
         cluster = cluster_covariance(influence, groups, interpretation='geographic_process')
-        y = np.asarray(join_outcomes(nuisances, endpoint.data, split, fitted.spec))
-        rows = {(i, seed): j for j, (i, seed) in enumerate(zip(nuisances.original_ids, nuisances.seed_ids))}
+        y = np.asarray(join_outcomes(n, endpoint.data, split, fitted.spec))
+        rows = {(i, seed): j for j, (i, seed) in enumerate(zip(n.original_ids, n.seed_ids))}
         q = np.array([weights[i] for i in split.original_ids]); q /= q.sum()
         results[cell] = {}
         for column, (method, estimate) in enumerate(estimates.items()):
             residuals = []
             for seed, fluctuation in tmle.by_seed:
                 indices = [rows[i, seed] for i in split.original_ids]
-                mu = np.array(fluctuation.mu_a if method == 'cv_tmle' else np.asarray(nuisances.mu_a)[indices])
-                residuals.append((np.asarray(nuisances.r_a)[indices]-1)*(y[indices]-mu))
+                mu = np.array(fluctuation.mu_a if method == 'cv_tmle' else np.asarray(n.mu_a)[indices])
+                residuals.append((np.asarray(n.r_a)[indices]-1)*(y[indices]-mu))
             residual = q*np.mean(residuals, axis=0)
             se = {f'spatial_{b:g}_km': cov.standard_errors[column] for b, cov in spatial.items()}
             se['county_0_km'] = cluster.standard_errors[column]
             se['iid'] = np.sqrt(len(q)/(len(q)-1)*np.sum(np.asarray(estimate.influence)**2))
             se['frame_conditional'] = np.sqrt(np.sum(residual**2))
             results[cell][method] = {'estimate': number(estimate.value, f'{cell}; {method}'),
-                'se': {name: number(float(value), 'diagonal residual-only diagnostic' if name == 'frame_conditional'
+                'se': {name: number(float(value), 'residual-only diagonal' if name == 'frame_conditional'
                                    else name) for name, value in se.items()}}
     return results
 
@@ -162,7 +161,7 @@ def audit_attempt(path):
                     'saved estimate mismatch')
         output.append({'repetition_id': record['draw']['repetition_id'], 'cells': cells,
             'psi0_frame': number(psi, 'fixed-frame integration'),
-            'saved_causal_truth': number(record['causal_truth'], 'saved terminal-leaf record'),
+            'saved_causal_truth': number(record['causal_truth'], 'saved causal truth'),
             'truth_difference': number(psi-record['causal_truth'], 'recomputed minus saved truth')})
     return output
 
