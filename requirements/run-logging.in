@@ -1,2 +1,3 @@
-# Provision from conda-forge only: conda install --override-channels -c conda-forge wandb=0.30.0
+# Separate oxyformer-p3 environment only; see oxyformer-p3-conda.txt.
+# Provision from conda-forge; never install into the pinned campaign environment.
 wandb==0.30.0

@@ -10,6 +10,7 @@ requires-python = ">=3.11"
 dependencies = ["PyYAML>=6"]
 
 [project.optional-dependencies]
+# Separate oxyformer-p3 clone; complete package list: requirements/oxyformer-p3-conda.txt
 run-logging = ["wandb==0.30.0"]
 
 [tool.setuptools.packages.find]
