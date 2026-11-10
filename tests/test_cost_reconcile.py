@@ -28,8 +28,6 @@ def inputs(tmp_path):
                    'setup_seconds': 10., 'import_seconds': 2.,
                    'export_seconds': 3., 'publication_seconds': 4.}
                   for step, fraction in enumerate((.75, .25))]
-        write(root / 'budget_record.json', {'binding': binding, 'complete': True, 'success': True,
-              'profile': {'complete_repetition_seconds': [seconds]}, 'leaves': leaves})
         coverage = {'binding': binding, 'states': [{'binding': {'draw': draw},
                     'compute_seconds': seconds, 'pending': None, 'record': {'status': 'success'},
                     'parts': ['part']}]}
@@ -226,3 +224,22 @@ def test_calibration_disclosure(inputs):
     for expected in ('False', 'frame mismatch', 'receipt-tree', 'frame_matches',
                      'uncalibrated', '31.8/29.0', 'transfer uncertainty'):
         assert expected in opening
+
+
+def test_tree_provenance(inputs):
+    r = cr.reconcile(*inputs)
+    text = cr.markdown(r)
+    section = text.split('**harness**')[1].split('**chains**')[0]
+    assert '- tree: ' + cr.REPORT_TREE in section
+    assert '- chain_tree: ' + cr.TREE in text
+
+
+def test_input_output_collision(inputs, monkeypatch):
+    p = inputs[1].with_name('reconciliation.json')
+    p.write_bytes(inputs[1].read_bytes())
+    original = p.read_bytes()
+    monkeypatch.setattr('sys.argv', ['cost_reconcile', '--manifest', str(inputs[0]),
+                                    '--report', str(p), '--out', str(p.parent)])
+    with pytest.raises(ValueError, match='input'):
+        cr.main()
+    assert p.read_bytes() == original
