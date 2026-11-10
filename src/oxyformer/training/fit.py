@@ -734,8 +734,6 @@ def _train_one(config, bundle, encoder_state, view, stopping, epochs, seed, budg
                 score = (float(_outcome_loss(config, predicted[:, 0], stopping, reduction="mean"))
                          if bundle["kind"] == "outcome" else pair_metrics(predicted, stop_inputs.origin_weights)[0])
             require(math.isfinite(score), "nonfinite stopping loss")
-        run_logging.emit(config.run_logger, dict(event='evaluation', phase='nuisance',
-            kind=bundle['kind'], epoch=progress['epoch'], loss=score), config.device)
         progress["epoch"] += 1
         progress["history"].append(score)
         if score is None or progress["best_loss"] is None or score < progress["best_loss"]:
@@ -743,6 +741,9 @@ def _train_one(config, bundle, encoder_state, view, stopping, epochs, seed, budg
             best = deepcopy(model.state_dict())
         else:
             progress["bad_epochs"] += 1
+        run_logging.emit(config.run_logger, dict(event='evaluation', phase='nuisance',
+            kind=bundle['kind'], epoch=progress['epoch'], loss=score,
+            best_epoch=progress['best_epoch'], best_loss=progress['best_loss']), config.device)
         scheduler.step()
         complete = progress["epoch"] >= epochs or progress["bad_epochs"] >= config.settings.patience
         if complete:
@@ -756,9 +757,6 @@ def _train_one(config, bundle, encoder_state, view, stopping, epochs, seed, budg
     if complete:
         model.load_state_dict(best, strict=True)
         model.eval()
-        run_logging.emit(config.run_logger, dict(event='selection', phase='nuisance',
-            kind=bundle['kind'], best_epoch=progress['best_epoch'],
-            best_loss=progress['best_loss']), config.device)
     return model, state, complete, reason
 
 
@@ -1110,8 +1108,6 @@ def _fit_controller(config, outer, manifest, identity, controller, root, budget)
             initialization = CheckpointArtifact.from_json(controller["initializations"][fold])
             bundle, encoder_state = _bundle(config, local, fitting, initialization, kind, config.grid[grid])
             view = subset(all_view, fitting)
-            run_logging.emit(config.run_logger, dict(event='task_start', phase='nuisance',
-                kind=kind, inner_fold=fold, grid=grid, epochs=epochs), config.device)
             model, state, complete, reason = _train_one(config, bundle, encoder_state, view, stopping,
                 epochs, identity.seed, budget, controller["active"])
             controller["parameter_count"] = sum(p.numel() for p in model.parameters())
