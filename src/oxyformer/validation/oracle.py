@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from collections import namedtuple
 from fractions import Fraction
 
 import numpy as np
@@ -11,24 +11,18 @@ from oxyformer.validation.scm import (
     observation_log_probability,
 )
 
-@dataclass(frozen=True)
-class OracleNuisances:
-    original_ids: tuple
-    mu_a: tuple
-    mu_d: tuple
-    r_a: tuple
-    r_d: tuple
+OracleNuisances = namedtuple('OracleNuisances', 'original_ids mu_a mu_d r_a r_d')
 
 class ObservedLawOracle:
     def __init__(self, observed, truth, policy):
         self.observed, self.policy = observed, policy
         self.frame = observed.frame
         self.config = SCMConfig.from_json(truth.generator_configuration)
-        require(truth.observation_hash == observed.content_hash, "observation hash mismatch")
-        require(truth.frame_hash == self.frame.content_hash, "frame hash mismatch")
-        require(truth.config_hash == self.config.content_hash, "config hash mismatch")
-        require(truth.policy_id == policy.policy_id, "policy mismatch")
-        require(truth.status == 'integrated', "integrated truth required")
+        require(truth.observation_hash == observed.content_hash, "wrong observation hash")
+        require(truth.frame_hash == self.frame.content_hash, "wrong frame hash")
+        require(truth.config_hash == self.config.content_hash, "wrong config hash")
+        require(truth.policy_id == policy.policy_id, "wrong policy")
+        require(truth.status == 'integrated', "truth not integrated")
         fixed = {oid: a for oid, a, key in zip(self.frame.original_ids, observed.a, self.frame.support_keys)
                  if not dict(policy.components_by_key)[key]}
         self.config.validate_policy(policy, self.frame, fixed_exposures=fixed)
@@ -40,7 +34,7 @@ class ObservedLawOracle:
         state = LatentState(local=measured.get('local_confounder', 0.),
                             regional=measured.get('regional_confounder', 0.))
         key = adjustment_key(self.frame, row, state, self.config)
-        require(key in self.groups, 'no selected adjustment stratum')
+        require(key in self.groups, 'empty adjustment stratum')
         return self.groups[key]
 
     def _kernels(self, point, terms):
@@ -52,34 +46,34 @@ class ObservedLawOracle:
                     break
         return entries
 
-    def evaluate(self, original_id, exposure):
-        row = self.rows[original_id]
+    def evaluate(self, oid, a):
+        row = self.rows[oid]
         terms = self._terms(row)
-        point = exact(exposure)
+        point = exact(a)
         key = self.frame.support_keys[row]
         components = dict(self.policy.components_by_key)[key]
         delta = exact(self.policy.delta_mmhg)
         def moves(a):
             return delta != 0 and any(exact(lo) <= a <= exact(hi)-delta for lo, hi in components)
         factual = self._kernels(point, terms)
-        require(bool(factual), 'outside conditional support')
+        require(bool(factual), 'outside support')
         incoming = self._kernels(point-delta, terms) if moves(point-delta) else []
-        reference = max(k for _, k in factual+incoming)
+        ref = max(k for _, k in factual+incoming)
         def logs(entries, at):
-            return np.array([wide(k-reference)+t.log_weight-t.law.log_normalizer
+            return np.array([wide(k-ref)+t.log_weight-t.law.log_normalizer
                              +observation_log_probability(float(at), t.state, self.config)
                              for t, k in entries], dtype=np.longdouble)
-        denominator = logs(factual, point)
-        log_denominator = logsumexp(denominator)
-        weights = np.exp(denominator-log_denominator)
+        denom = logs(factual, point)
+        log_denom = logsumexp(denom)
+        weights = np.exp(denom-log_denom)
         means = [structural_mean([wide(point-t.law.error)], self.frame, t.row, t.state, self.config)[0]
                  for t, _ in factual]
         mean = np.sum(weights*np.asarray(means, dtype=np.longdouble))
         numerator = list(logs(incoming, point-delta))
         if not moves(point):
-            numerator.extend(denominator)
-        ratio = np.exp(logsumexp(numerator)-log_denominator) if numerator else np.longdouble(0)
-        require(bool(np.isfinite(mean) and np.isfinite(ratio)), 'nonfinite oracle nuisance')
+            numerator.extend(denom)
+        ratio = np.exp(logsumexp(numerator)-log_denom) if numerator else np.longdouble(0)
+        require(bool(np.isfinite(mean) and np.isfinite(ratio)), 'nonfinite oracle')
         return mean, ratio
 
     def nuisances(self, original_ids):
