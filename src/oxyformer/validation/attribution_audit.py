@@ -127,7 +127,11 @@ def load(path):
     def dependency(expected, cls=None):
         for name, hashed in zip(request.dependency_paths, request.dependency_hashes):
             if hashed == expected:
-                raw = Path(name).read_bytes()
+                source = Path(name)
+                # Only rebase paths explicitly anchored inside the saved attempt.
+                if not source.exists() and source.is_relative_to(request.output_dir):
+                    source = path/source.relative_to(request.output_dir)
+                raw = source.read_bytes()
                 require(sha256(raw).hexdigest() == expected, 'dependency digest mismatch')
                 return cls.from_json(raw.decode()) if cls else json.loads(raw)
         raise ContractError('missing dependency: '+expected)
@@ -160,6 +164,7 @@ def audit(path):
             require(abs(cells['fitted'][m]['estimate']['value']-saved['value']) < 1e-12,
                     'estimate mismatch')
         output.append({'repetition_id': record['draw']['repetition_id'], 'cells': cells,
+            'excluded_fixed_exposure_rows': num(oracle.excluded_fixed_exposure_rows, 'zero weight; empty frozen support'),
             'psi0_frame': num(psi, 'fixed-frame integration'),
             'saved_causal_truth': num(record['causal_truth'], 'saved causal truth'),
             'truth_difference': num(psi-record['causal_truth'], 'recomputed - saved truth')})

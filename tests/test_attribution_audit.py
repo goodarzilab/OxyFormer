@@ -137,3 +137,17 @@ def test_t_interval():
     result=audit.paired([1.,2.,3.])
     assert result['mean']['value'] == 2
     assert result['lower']['value'] == pytest.approx(2-t.ppf(.975,2)/np.sqrt(3))
+
+def test_relocated_dependencies(tmp_path):
+    saved_fixture(tmp_path/'saved')
+    moved = tmp_path/'moved'
+    (tmp_path/'saved').rename(moved)
+    assert len(audit.audit(moved)) == 1
+
+def test_missing_dependency_path(tmp_path):
+    saved_fixture(tmp_path/'saved')
+    missing = tmp_path/'saved/endpoint.json'
+    missing.unlink()
+    assert audit.main([str(tmp_path/'saved'), '--output-dir', str(tmp_path/'out')]) == 1
+    report = json.loads((tmp_path/'out/attribution_audit.json').read_text())
+    assert str(missing) in report['skipped'][0]['status']

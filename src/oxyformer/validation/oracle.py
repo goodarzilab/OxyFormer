@@ -26,6 +26,8 @@ class ObservedLawOracle:
         fixed = {oid: a for oid, a, key in zip(self.frame.original_ids, observed.a, self.frame.support_keys)
                  if not dict(policy.components_by_key)[key]}
         self.config.validate_policy(policy, self.frame, fixed_exposures=fixed)
+        self.excluded_ids = frozenset(fixed)
+        self.excluded_fixed_exposure_rows = len(fixed)
         self.groups = _groups(self.frame, self.config, policy)
         self.rows = dict(zip(self.frame.original_ids, range(len(self.frame.original_ids))))
 
@@ -47,6 +49,7 @@ class ObservedLawOracle:
         return entries
 
     def evaluate(self, oid, a):
+        require(oid not in self.excluded_ids, 'excluded fixed-exposure training row')
         row = self.rows[oid]
         terms = self._terms(row)
         point = exact(a)
@@ -59,17 +62,17 @@ class ObservedLawOracle:
         require(bool(factual), 'outside support')
         incoming = self._kernels(point-delta, terms) if moves(point-delta) else []
         ref = max(k for _, k in factual+incoming)
-        def logs(entries, at):
+        def logs(entries):
             return np.array([wide(k-ref)+t.log_weight-t.law.log_normalizer
-                             +observation_log_probability(float(at), t.state, self.config)
+                             +observation_log_probability(float(point), t.state, self.config)
                              for t, k in entries], dtype=np.longdouble)
-        denom = logs(factual, point)
+        denom = logs(factual)
         log_denom = logsumexp(denom)
         weights = np.exp(denom-log_denom)
         means = [structural_mean([wide(point-t.law.error)], self.frame, t.row, t.state, self.config)[0]
                  for t, _ in factual]
         mean = np.sum(weights*np.asarray(means, dtype=np.longdouble))
-        numerator = list(logs(incoming, point-delta))
+        numerator = list(logs(incoming))
         if not moves(point):
             numerator.extend(denom)
         ratio = np.exp(logsumexp(numerator)-log_denom) if numerator else np.longdouble(0)
@@ -77,6 +80,7 @@ class ObservedLawOracle:
         return mean, ratio
 
     def nuisances(self, original_ids):
+        original_ids = tuple(i for i in original_ids if i not in self.excluded_ids)
         values = []
         for oid in original_ids:
             row = self.rows[oid]
