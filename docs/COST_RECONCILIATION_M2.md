@@ -38,14 +38,11 @@ scenario differs between the receipt (null_effect) and the chains (sign_changing
 only available scenario adjustment and label it [derived]. Limits: no new GPU timing; no claim about hardware other than the H100s
 the chains ran on.
 
-Leaf wall time is checked against the sum of its recorded phases. The sum of
-leaf compute includes wrapper work, synchronisation and already-complete calls;
-the profile repetition timer encloses only draw execution. Both totals and their
-difference are reported separately, with the profile checked against the
-archived cumulative repetition timer. No equality between these scopes is assumed.
+Leaf phases must conserve wall time. Leaf compute includes wrapper work and
+already-complete calls; repetition compute encloses draw execution only.
+Both scopes and their difference are reported; the repetition timer must
+match the archive.
 
 Stored cell hours may be rounded: formula consistency uses relative tolerance
-1e-6. The JSON preserves the complete source calibration block verbatim.
-Markdown discloses its passed flag, ratio, reasons and receipt identity beside
-the descriptive factor. Neither the factor nor the scenario adjustment overrides
-the source calibration or establishes a transferable recalibration.
+1e-6. JSON preserves source calibration verbatim; Markdown summarizes it beside the
+descriptive factor. Calibration and transfer limits still apply.
