@@ -155,3 +155,12 @@ def test_leaf_wrapper_compute_is_separate_from_repetition(inputs):
     assert result['compute_seconds']['value'] == 3600.
     assert result['leaf_compute_seconds']['value'] == 3603.
     assert result['leaf_wrapper_seconds'] == cr.q(3.)
+
+
+def test_formula_counts_are_derived(inputs):
+    result = cr.reconcile(*inputs)
+    for term in result['terms'].values():
+        assert term['harness_count']['basis'] == '[derived]'
+    for cell in result['harness_formula'].values():
+        for count in cell['counts'].values():
+            assert count['basis'] == '[derived]'
