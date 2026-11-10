@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import statistics
 import tarfile
@@ -59,7 +60,7 @@ def relabel(value, *, count=False):
             if count:
                 labels.add('derived')
             return q(number(value), ', '.join(sorted(labels)))
-        return {k: relabel(v, count=count or k in ('counts', 'harness_count')) for k, v in value.items()}
+        return {k: relabel(v, count=count or k in ('counts', 'harness_count', 'outer_folds', 'seed_count', 'scoring_operations')) for k, v in value.items()}
     if isinstance(value, list):
         return [relabel(v, count=count) for v in value]
     if type(value) in (int, float):
@@ -79,7 +80,8 @@ def read_chain(entry, manifest):
         raise ValueError('requires successful complete pinned-tree chain')
     if binding['scenario']['name'] != 'sign_changing':
         raise ValueError('requires sign_changing diagnostic chain')
-    if binding['study'] != dict(frozen_epochs=30, grid_points=2, reference_cap=32, seed_count=1):
+    screening = dict(frozen_epochs=30, grid_points=2, reference_cap=32, seed_count=1)
+    if any(binding['study'].get(k) != v for k, v in screening.items()):
         raise ValueError('requires screening study')
     times = budget['profile']['complete_repetition_seconds']
     if len(times) != 1 or times[0] <= 0:
@@ -115,8 +117,8 @@ def read_chain(entry, manifest):
             raise ValueError('archive repetition not complete')
         if state['binding']['draw'] != binding['draws'][0]:
             raise ValueError('archive draw mismatch')
-        if not math.isclose(state['compute_seconds'], times[0], rel_tol=1e-9):
-            raise ValueError('archive compute mismatch')
+        if not math.isclose(state['compute_seconds'], times[0], rel_tol=1e-6, abs_tol=1e-3):
+            raise ValueError(f"archive compute mismatch: archive={state['compute_seconds']}, budget={times[0]}")
         # Completed parts are the only retained fold artifacts. Do not load
         # observations or infer task time from epoch counts or total wall time.
         part_types = []
@@ -127,6 +129,8 @@ def read_chain(entry, manifest):
                 raise ValueError('unexpected completed part type ' + blob['type'] +
                                  '; inspect its timing schema')
     return {'chain': entry['chain'], 'repetition': binding['draws'][0]['repetition_id'],
+            'unrecognized_study_keys': sorted(set(binding['study']) - set(screening)),
+            'archive_budget_discrepancy_seconds': measured(abs(state['compute_seconds'] - times[0])),
             'compute_seconds': repetition, 'compute_hours': q(times[0] / 3600),
             'leaf_compute_seconds': q(total), 'leaf_wrapper_seconds': q(total - times[0]),
             'compute_scope': 'Repetition timer measures execute_draw calls; leaf compute also includes wrapper work and already-complete calls.',
@@ -194,15 +198,46 @@ def reconcile(manifest_path, report_path):
             'chain_mean_null_effect_equivalent_hours': q(mean / scenario_ratio, 'extrapolated'),
             'limit': 'Scenario ratio is descriptive; its transfer uncertainty is not measured.'},
         'candidates': {
-            'representative-fold differences': 'Unresolved: no retained per-operation durations; representative fold/grid/seed sampling may contribute, but cannot be isolated.',
-            'epoch-slicing reconstruction': 'Compatible with excess, not established as its cause: sliced harness calls reconstruct controllers; archives lack timing history separating reconstruction from fitting.',
-            'receipt identity': 'Different scenario and code identity; not an exact replay. Independent complete repetitions corroborate the receipt scale. Frame/source matching flags are harness evidence only; receipt mismatch alone is not established as the cause.'},
+            'representative-fold differences': {
+                'verdict': 'not assessable',
+                'missing_input': 'Per-operation durations by representative fold/grid/seed.'},
+            'epoch-slicing reconstruction': {
+                'verdict': 'not assessable',
+                'missing_input': 'Timing history separating controller reconstruction from fitting.'},
+            'receipt identity': receipt_assessment(hours, receipt['compute_hours'], scenario_ratio)},
         'corrected_projection_hours': {'e': q(mean, 'extrapolated'), 'd': None, 'c': None, 'a': None},
         'transfer_limit': 'No term-level correction factor transfers on the retained evidence; other cells are not recalibrated.',
         'limits': ['CPU accounting only; no new GPU timing or training.',
                    'Timings apply only to the H100 hardware of the collected chains.',
                    'Sealed budget excludes reserved final record/publication; failed attempts outside sealed history are not counted.',
                    'No final cell or repetition count is recommended.']}
+
+
+
+def receipt_assessment(hours, receipt_quantity, scenario_ratio):
+    """Describe scale agreement, without attributing the harness excess."""
+    mean = statistics.mean(hours)
+    sd = statistics.stdev(hours) if len(hours) > 1 else None
+
+    def assess(value, quantity):
+        distance = abs(value - mean)
+        if sd is None:
+            return {'hours': quantity, 'distance_sample_sds': None,
+                    'verdict': 'not assessable', 'missing_input': 'At least two complete repetitions.'}
+        # Zero spread admits only an exact match; avoid non-finite JSON.
+        return {'hours': quantity,
+                'absolute_distance_hours': q(distance),
+                'distance_sample_sds': q(distance / sd) if sd > 0 else None,
+                'verdict': 'consistent' if distance <= 2 * sd else 'inconsistent'}
+
+    return {'rule': 'Consistent within two sample SDs of the chain mean (inclusive); inconsistent beyond. '
+                    'With zero SD only exact equality is consistent; SD distance is unavailable.',
+            'adjustment_direction': 'Multiply receipt hours by 31.8/29.0: null_effect to sign_changing.',
+            'chain_mean_hours': q(mean), 'sample_sd_hours': q(sd) if sd is not None else None,
+            'unadjusted': assess(number(receipt_quantity), relabel(receipt_quantity)),
+            'scenario_adjusted': assess(number(receipt_quantity) * scenario_ratio,
+                                       q(number(receipt_quantity) * scenario_ratio, 'extrapolated')),
+            'limit': 'Scenario transfer uncertainty is unmeasured; scale agreement does not identify a cause.'}
 
 
 def markdown(report):
@@ -236,6 +271,56 @@ def markdown(report):
     return '\n'.join(lines) + '\n'
 
 
+
+def referenced_paths(value, parent):
+    """Collect artifact paths named anywhere in the registered harness report."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == 'path' and isinstance(item, str):
+                path = Path(item)
+                yield path if path.is_absolute() else parent / path
+            else:
+                yield from referenced_paths(item, parent)
+    elif isinstance(value, list):
+        for item in value:
+            yield from referenced_paths(item, parent)
+
+
+def write_outputs(destinations, sources, contents):
+    """Reserve both fresh destinations before writing either payload."""
+    resolved = [p.resolve() for p in destinations]
+    a, b = destinations
+    if resolved[0] == resolved[1] or (a.exists() and b.exists() and a.samefile(b)):
+        raise ValueError('output destinations alias')
+    protected = {p.resolve() for p in sources}
+    if any(p in protected for p in resolved):
+        raise ValueError('output collides with input')
+    # lstat also sees dangling symlinks. O_EXCL repeats the check at creation.
+    for path in destinations:
+        if os.path.lexists(path):
+            raise FileExistsError('output must be fresh: ' + str(path))
+    for path in destinations:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    opened = []
+    try:
+        for path in destinations:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            opened.append((path, fd))
+    except BaseException:
+        for path, fd in opened:
+            os.close(fd)
+            path.unlink()
+        raise
+    try:
+        for (_, fd), content in zip(opened, contents):
+            # Keep ownership of descriptors here, including if writing fails.
+            with os.fdopen(fd, 'w', closefd=False) as stream:
+                stream.write(content)
+    finally:
+        for _, fd in opened:
+            os.close(fd)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--manifest', required=True, type=Path)
@@ -246,15 +331,9 @@ def main():
     sources = [args.manifest, args.report] + [
         Path(c[k]['path']) for c in report['chains'] for k in ('budget', 'archive')]
     destinations = [args.out / name for name in ('reconciliation.json', 'reconciliation.md')]
-    a, b = destinations
-    if a.resolve() == b.resolve() or (a.exists() and b.exists() and a.samefile(b)):
-        raise ValueError('output destinations alias')
-    for dest in destinations:
-        if dest.exists() and any(dest.samefile(src) for src in sources):
-            raise ValueError('output collides with input')
-    args.out.mkdir(parents=True, exist_ok=True)
-    (args.out / 'reconciliation.json').write_text(json.dumps(report, indent=2, allow_nan=False) + '\n')
-    (args.out / 'reconciliation.md').write_text(markdown(report))
+    sources.extend(referenced_paths(load(args.report), args.report.parent))
+    contents = [json.dumps(report, indent=2, allow_nan=False) + '\n', markdown(report)]
+    write_outputs(destinations, sources, contents)
 
 
 if __name__ == '__main__':

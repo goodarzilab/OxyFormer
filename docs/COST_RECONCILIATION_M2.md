@@ -41,11 +41,21 @@ the chains ran on.
 Leaf phases must conserve wall time. Leaf compute includes wrapper work and
 already-complete calls; repetition compute encloses draw execution only.
 Both scopes and their difference are reported; the repetition timer must
-match the archive.
+match the independently rounded archive within relative tolerance 1e-6 or absolute
+tolerance 1e-3 seconds. The absolute discrepancy is reported as measured. Extra
+study metadata is listed; the four screening values remain mandatory.
 
 Stored cell hours may be rounded: formula consistency uses relative tolerance
 1e-6. JSON preserves source calibration verbatim; Markdown summarizes it beside the
 descriptive factor. Calibration and transfer limits still apply.
 
 Output destinations must be distinct. Aliases between outputs, or from outputs
-to source artifacts, refuse before any write.
+to any input or report-referenced artifact, refuse before any write. Both files
+must be fresh: pre-existing files, directories and dangling symlinks refuse.
+Both destinations are exclusively created with no symlink following before
+either payload is written; choose a new output directory for each rerun.
+
+Receipt scale is assessed unadjusted and multiplied by 31.8/29.0 (null-effect
+to sign-changing). A distance within two sample SDs is consistent; beyond that
+is inconsistent. This descriptive rule does not establish a cause. Per-operation
+candidates are not assessable without the missing timing history.

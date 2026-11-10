@@ -263,3 +263,137 @@ def test_output_alias_refuses(inputs, monkeypatch, mode):
         assert a.read_text() == b.read_text() == 'preserved'
     else:
         assert not (b if mode == 'forward' else a).exists()
+
+
+@pytest.mark.parametrize('mode', ['receipt_symlink', 'receipt_hardlink', 'overhead_symlink',
+                                  'dangling', 'existing', 'directory', 'forward', 'reverse'])
+@pytest.mark.parametrize('destination', ['reconciliation.json', 'reconciliation.md'])
+def test_fresh_outputs_preserve_sources(inputs, monkeypatch, mode, destination):
+    import hashlib
+    manifest, source = inputs
+    receipt, overhead = manifest.parent / 'receipt.json', manifest.parent / 'overhead.json'
+    receipt.write_text('sealed receipt')
+    overhead.write_text('sealed overhead')
+    harness = cr.load(source)
+    harness['calibration']['receipt']['path'] = str(receipt)
+    harness['overhead']['files'] = [{'path': str(overhead)}]
+    write(source, harness)
+    paths = [p for p in manifest.parent.rglob('*') if p.is_file()]
+    hashes = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
+    out = manifest.parent / 'out'
+    out.mkdir()
+    dest = out / destination
+    other = out / ('reconciliation.md' if destination.endswith('json') else 'reconciliation.json')
+    if mode == 'receipt_symlink':
+        dest.symlink_to(receipt)
+    elif mode == 'receipt_hardlink':
+        dest.hardlink_to(receipt)
+    elif mode == 'overhead_symlink':
+        dest.symlink_to(overhead)
+    elif mode == 'dangling':
+        dest.symlink_to(out / 'absent')
+    elif mode == 'existing':
+        dest.write_text('preserve existing')
+    elif mode == 'directory':
+        dest.mkdir()
+    elif mode == 'forward':
+        dest.symlink_to(other)
+    else:
+        other.symlink_to(dest)
+    monkeypatch.setattr('sys.argv', ['cost_reconcile', '--manifest', str(manifest),
+                                    '--report', str(source), '--out', str(out)])
+    with pytest.raises((ValueError, FileExistsError)):
+        cr.main()
+    assert {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in paths} == hashes
+    if mode == 'existing':
+        assert dest.read_text() == 'preserve existing'
+    if mode == 'dangling':
+        assert not (out / 'absent').exists()
+    if mode not in ('forward', 'reverse'):
+        assert not other.exists()
+
+
+def test_extra_study_metadata(inputs):
+    path = inputs[0].parent / '0/budget_record.json'
+    budget = cr.load(path)
+    budget['binding']['study']['note'] = 'screening'
+    write(path, budget)
+    assert cr.reconcile(*inputs)['chains'][0]['unrecognized_study_keys'] == ['note']
+    budget['binding']['study']['seed_count'] = 2
+    write(path, budget)
+    with pytest.raises(ValueError, match='screening'):
+        cr.reconcile(*inputs)
+
+
+@pytest.mark.parametrize('difference', [1e-5, 1.])
+def test_archive_budget_rounding(inputs, difference):
+    path = inputs[0].parent / '0/budget_record.json'
+    budget = cr.load(path)
+    budget['profile']['complete_repetition_seconds'][0] += difference
+    budget['leaves'][0]['compute_seconds'] += difference
+    budget['leaves'][0]['wall_seconds'] += difference
+    write(path, budget)
+    if difference == 1.:
+        with pytest.raises(ValueError, match=r'archive compute mismatch.*3600.*3601'):
+            cr.reconcile(*inputs)
+    else:
+        chain = cr.reconcile(*inputs)['chains'][0]
+        assert chain['archive_budget_discrepancy_seconds'] == cr.q(
+            abs(3600. - (3600. + difference)), 'measured')
+
+
+def test_copied_formula_counts_outside_count_subtrees(inputs):
+    source = cr.load(inputs[1])
+    # Enumerate semantic counts independently of their position in the JSON.
+    fields = [('outer_folds', 5), ('seed_count', 1),
+              ('scoring_operations', {'one_step': 1, 'cv_tmle': 1, 'spatial_sensitivities': 1})]
+    work = dict(fields)
+    source['calibration']['receipt']['work'] = work
+    write(inputs[1], source)
+    result = cr.reconcile(*inputs)['receipt']['work']
+    def check(source_value, copied):
+        if isinstance(source_value, dict):
+            for key, value in source_value.items():
+                check(value, copied[key])
+        else:
+            assert copied['value'] == source_value
+            assert 'derived' in copied['basis']
+    for key, value in fields:
+        check(value, result[key])
+
+
+@pytest.mark.parametrize('receipt_hours,verdict', [(1.4, 'consistent'), (100., 'inconsistent')])
+def test_candidate_assessment(inputs, receipt_hours, verdict):
+    source = cr.load(inputs[1])
+    source['calibration']['receipt']['compute_hours']['value'] = receipt_hours
+    write(inputs[1], source)
+    result = cr.reconcile(*inputs)
+    assessment = result['candidates']['receipt identity']
+    for name, hours in [('unadjusted', receipt_hours), ('scenario_adjusted', receipt_hours * 31.8 / 29.)]:
+        item = assessment[name]
+        assert item['verdict'] == verdict
+        assert item['distance_sample_sds']['value'] == pytest.approx(abs(hours - 1.5) / math.sqrt(.5))
+    assert 'two sample SDs' in assessment['rule']
+    assert 'null_effect to sign_changing' in assessment['adjustment_direction']
+    for name in ('representative-fold differences', 'epoch-slicing reconstruction'):
+        assert result['candidates'][name]['verdict'] == 'not assessable'
+        assert result['candidates'][name]['missing_input']
+    from pathlib import Path
+    assert 'Independent complete repetitions corroborate the receipt scale.' not in Path(cr.__file__).read_text()
+
+
+def test_exclusive_reservation_failure_writes_no_payload(tmp_path, monkeypatch):
+    import os
+    a, b = tmp_path / 'a.json', tmp_path / 'b.md'
+    real_open = os.open
+    def collide(path, flags, mode):
+        assert flags & os.O_EXCL and flags & os.O_NOFOLLOW
+        if path == b:
+            assert a.read_bytes() == b''
+            b.write_text('concurrent file')
+        return real_open(path, flags, mode)
+    monkeypatch.setattr(cr.os, 'open', collide)
+    with pytest.raises(FileExistsError):
+        cr.write_outputs([a, b], [], ['json payload', 'markdown payload'])
+    assert not a.exists()
+    assert b.read_text() == 'concurrent file'
