@@ -49,6 +49,7 @@ from oxyformer.contracts import CovariateView, SplitManifest
 from oxyformer.models.encoder import FeatureEncoder
 from oxyformer.models.tokens import FeatureBatch, FeatureSpec, FeatureTokenizer
 from oxyformer.provenance import ArtifactLineage, Immutable, canonical_json, require, unique
+from oxyformer.training import run_logging
 from oxyformer.training.checkpoint import (
     CheckpointArtifact, CheckpointIdentity, CheckpointRequest,
     capture_rng, load_checkpoint, model_state_hash, restore_rng, save_checkpoint,
@@ -137,6 +138,8 @@ class PretrainConfig:
     stop_request: CheckpointRequest | None = None
     controller_state: dict | None = None  # JSON-only nested fold/tuning controller state.
     device: str = "cpu"
+    run_logger: object | None = None
+    finish_logging: bool = True
 
     def __post_init__(self):
         require(type(self.settings) is SSLSettings, "expected SSLSettings")
@@ -489,6 +492,7 @@ def _pretrain(view, split, config, seed, started, device):
     root.parent.mkdir(parents=True, exist_ok=True)
     root.mkdir(mode=0o700, exist_ok=False)
     request = config.stop_request or CheckpointRequest()
+    run_logging.start(config.run_logger, config, identity, data=view, split=split, seed=seed, phase='ssl')
     with request.signals():
         return _run(view, settings, config, seed, features, preprocessing, identity,
                     fitting, stopping, loaded, root, request, started, device)
@@ -554,6 +558,7 @@ def _run(view, settings, config, seed, features, preprocessing, identity,
             reason = "batch_limit"
             break
         if progress["phase"] == "train":
+            step_started = time.monotonic()
             indices = sampler.indices(settings.batch_size)
             masked = family_mask(_batch(train_batch, indices), family_indices, settings.mask_rate)
             if progress["epoch_updates"] == 0 and not bool((masked.masked & ~masked.missing).any()):
@@ -578,6 +583,10 @@ def _run(view, settings, config, seed, features, preprocessing, identity,
                 loss.backward()
                 optimizer.step()
                 progress["epoch_updates"] += 1
+            run_logging.step_event(config.run_logger, model=model, loss=loss,
+                learning_rate=optimizer.param_groups[0]['lr'], samples=len(indices),
+                started=step_started, device=device, phase='ssl',
+                step=progress['step'], epoch=progress['epoch'])
             sampler.cursor += len(indices)
             progress["step"] += 1
             if sampler.cursor == sampler.size:
@@ -596,6 +605,8 @@ def _run(view, settings, config, seed, features, preprocessing, identity,
             if end == len(stopping.original_ids):
                 score = _validation_score(progress["validation_units"], progress["validation_counts"], family_indices)
                 require(score is not None and math.isfinite(score), "nonfinite/empty stopping loss")
+                run_logging.emit(config.run_logger, dict(event='evaluation', phase='ssl',
+                    epoch=progress['epoch'], loss=score), device)
                 progress["history"].append(score)
                 if progress["best_loss"] is None or score < progress["best_loss"]:
                     progress["best_loss"], progress["bad_epochs"] = score, 0
@@ -624,5 +635,12 @@ def _run(view, settings, config, seed, features, preprocessing, identity,
         parent_hashes=parents, split_hash=identity.split_hash, config_hash=identity.config_hash,
         model_hash=model_state_hash(model.state_dict()), environment=identity.environment, seed=seed,
         parameter_count=sum(p.numel() for p in model.parameters()))
-    return save_checkpoint(root, identity=identity, lineage=lineage, state=state,
-                           complete=completed, reason=reason, predecessor=config.predecessor)
+    artifact = save_checkpoint(root, identity=identity, lineage=lineage, state=state,
+                               complete=completed, reason=reason, predecessor=config.predecessor)
+    run_logging.emit(config.run_logger, dict(event='checkpoint', phase='ssl',
+        checkpoint=artifact.to_dict(), best_loss=progress['best_loss'],
+        best_epoch=(progress['history'].index(progress['best_loss']) + 1
+                    if progress['history'] else None)), device)
+    if config.finish_logging:
+        run_logging.finish(config.run_logger, device)
+    return artifact

@@ -1,0 +1,2 @@
+# Provision from conda-forge only: conda install --override-channels -c conda-forge wandb=0.30.0
+wandb==0.30.0

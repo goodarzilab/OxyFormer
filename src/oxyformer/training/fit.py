@@ -53,6 +53,7 @@ from oxyformer.models.outcome import OutcomeTransformer
 from oxyformer.models.tokens import FeatureSpec
 from oxyformer.models.treatment_query import TreatmentDesign
 from oxyformer.provenance import ArtifactLineage, Immutable, canonical_json, file_hash, require, write_artifact
+from oxyformer.training import run_logging
 from oxyformer.training.calibration import (
     AffineCalibration, CalibrationPartition, fit_affine, paired_tensors, pair_metrics, transfer_diagnostics,
     CALIBRATION_LOGIT_ABS_MAX, CALIBRATION_LOSS_TOLERANCE,
@@ -195,6 +196,7 @@ class FitConfig:
     checkpoint_margin_seconds: float = 120.
     device: str = "auto"
     deadline_timing: DeadlineTiming | None = None
+    run_logger: object | None = None
 
     def __post_init__(self):
         require(type(self.study) is RecipeStudy, "RecipeStudy required")
@@ -686,6 +688,7 @@ def _train_one(config, bundle, encoder_state, view, stopping, epochs, seed, budg
                 if sampler.cursor == sampler.size:
                     progress["phase"] = "evaluate"
                 continue
+            step_started = time.monotonic()
             model.train()
             optimizer.zero_grad(set_to_none=True)
             predicted = _predict(model, part, metadata, config.policy, policy_cache=policy_cache)
@@ -706,6 +709,10 @@ def _train_one(config, bundle, encoder_state, view, stopping, epochs, seed, budg
             require(bool(torch.isfinite(loss)), "nonfinite nuisance loss")
             _backward_and_clip(loss, model.parameters(), config.settings.gradient_norm)
             optimizer.step()
+            run_logging.step_event(config.run_logger, model=model, loss=loss,
+                learning_rate=optimizer.param_groups[0]['lr'], samples=len(ids),
+                started=step_started, device=config.device, phase='nuisance',
+                kind=bundle['kind'], step=progress['step'], epoch=progress['epoch'])
             require(all(bool(torch.isfinite(p).all()) for p in model.parameters()),
                     "nonfinite nuisance parameters")
             sampler.cursor += len(indices)
@@ -727,6 +734,8 @@ def _train_one(config, bundle, encoder_state, view, stopping, epochs, seed, budg
                 score = (float(_outcome_loss(config, predicted[:, 0], stopping, reduction="mean"))
                          if bundle["kind"] == "outcome" else pair_metrics(predicted, stop_inputs.origin_weights)[0])
             require(math.isfinite(score), "nonfinite stopping loss")
+        run_logging.emit(config.run_logger, dict(event='evaluation', phase='nuisance',
+            kind=bundle['kind'], epoch=progress['epoch'], loss=score), config.device)
         progress["epoch"] += 1
         progress["history"].append(score)
         if score is None or progress["best_loss"] is None or score < progress["best_loss"]:
@@ -747,6 +756,9 @@ def _train_one(config, bundle, encoder_state, view, stopping, epochs, seed, budg
     if complete:
         model.load_state_dict(best, strict=True)
         model.eval()
+        run_logging.emit(config.run_logger, dict(event='selection', phase='nuisance',
+            kind=bundle['kind'], best_epoch=progress['best_epoch'],
+            best_loss=progress['best_loss']), config.device)
     return model, state, complete, reason
 
 
@@ -921,7 +933,8 @@ def _ssl(config, split, fitting, view, root, seed, budget, predecessor):
     seconds = max(.01, config.slice_seconds - (time.monotonic() - budget.started))
     ssl_config = PretrainConfig(settings=settings, output_dir=str(root), device=str(resolve_device(config.device)),
         predecessor=predecessor, stop_request=budget.request, max_batches=remaining,
-        slice_seconds=seconds, checkpoint_margin_seconds=min(config.checkpoint_margin_seconds, seconds / 2))
+        slice_seconds=seconds, checkpoint_margin_seconds=min(config.checkpoint_margin_seconds, seconds / 2),
+        run_logger=config.run_logger, finish_logging=False)
     artifact = pretrain(subset(view, fitting, use="ssl"), split, ssl_config, seed)
     # SSL validation transactions are also charged to the enclosing slice.
     state = load_checkpoint(artifact, artifact.identity)
@@ -990,6 +1003,8 @@ def fit_fold(spec, split, data_manifest, model_config, seed) -> FoldArtifacts:
     config = replace(config, device=str(resolve_device(config.device)))
     with _numerics(config.device):
         identity = _science_identity(config, split, data_manifest, seed, allowed)
+        run_logging.start(config.run_logger, config, identity, data=data_manifest,
+                          split=split, seed=seed, phase='fold')
         controller = dict(position=0, initializations={}, ssl_pending=None, active=None,
                           results=[], final={}, selection=None, calibration=None)
         if config.predecessor is not None:
@@ -1018,6 +1033,9 @@ def fit_fold(spec, split, data_manifest, model_config, seed) -> FoldArtifacts:
         artifact = FoldArtifacts(spec=spec, split=split, data_manifest=data_manifest, fold=config.fold,
             seed=seed, prediction_inputs=_inputs(config, held), checkpoint=checkpoint)
         write_artifact(root / "fold.json", artifact)
+        run_logging.emit(config.run_logger, dict(event='checkpoint', phase='fold',
+            checkpoint=checkpoint.to_dict(), selection=controller['selection']), config.device)
+        run_logging.finish(config.run_logger, config.device)
         return artifact
 
 
@@ -1092,6 +1110,8 @@ def _fit_controller(config, outer, manifest, identity, controller, root, budget)
             initialization = CheckpointArtifact.from_json(controller["initializations"][fold])
             bundle, encoder_state = _bundle(config, local, fitting, initialization, kind, config.grid[grid])
             view = subset(all_view, fitting)
+            run_logging.emit(config.run_logger, dict(event='task_start', phase='nuisance',
+                kind=kind, inner_fold=fold, grid=grid, epochs=epochs), config.device)
             model, state, complete, reason = _train_one(config, bundle, encoder_state, view, stopping,
                 epochs, identity.seed, budget, controller["active"])
             controller["parameter_count"] = sum(p.numel() for p in model.parameters())
@@ -1132,6 +1152,8 @@ def _fit_controller(config, outer, manifest, identity, controller, root, budget)
                                                     selection_inputs, config.policy)
                     result.update(selection_ids=selection_ids,
                         selection_metrics=pair_metrics(selection_logits, selection_inputs.origin_weights))
+                run_logging.emit(config.run_logger, dict(event='evaluation', phase='held_out',
+                    kind=kind, inner_fold=fold, grid=grid, metrics=list(metrics)), config.device)
                 controller["results"].append(result)
         controller["position"] += 1
     calibration = AffineCalibration.from_json(controller["calibration"])
