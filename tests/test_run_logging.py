@@ -732,3 +732,16 @@ def test_start_steps_and_evaluations_are_memory_only(tmp_path, monkeypatch):
         logging.emit(hook, dict(event='evaluation', metrics=[1.]))
     assert hook.logging_ok and not hook.init_attempted and hook.spool is None
     assert [json.loads(row)['event'] for row in hook._events] == ['run_start', 'train_step', 'evaluation']
+
+
+def test_refused_snapshot_cannot_be_published_by_replay(tmp_path, monkeypatch):
+    sdk = FakeSDK()
+    monkeypatch.setitem(sys.modules, 'wandb', sdk)
+    hook = logging.WandbLogger(tmp_path, sync=False)
+    hook.logging_ok = False
+    hook.refusal = 'refused: undeclared config key extra'
+    logging.emit(hook, dict(event='run_start', refused=True, status=hook.refusal))
+    logging.finish(hook)
+    replay = logging.WandbLogger.replay(hook.spool, sync=False)
+    assert replay.finished and not replay.logging_ok
+    assert sdk.kwargs is None and not sdk.events

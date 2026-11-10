@@ -343,6 +343,9 @@ class WandbLogger:
         self.init_attempted = True
         events, captured = self._read_spool()
         self.logging_ok = self.logging_ok and captured
+        if any(event.get('refused') is True for event in events):
+            self.logging_ok = False
+            return
         import wandb
         first = events[0]
         self.run = wandb.init(entity='goodarzilab', project='oxyformer-v2',
