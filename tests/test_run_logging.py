@@ -60,6 +60,12 @@ def test_default_offline_and_sync_is_separate_fact(tmp_path, monkeypatch):
     assert json.loads((tmp_path / 'logging-status.json').read_text()) == dict(logging_ok=True, sync_ok=False)
     assert calls[0][0][1:4] == ['-m', 'wandb', 'sync']
     assert calls[0][1]['timeout'] == 120
+    monkeypatch.delenv('WANDB_API_KEY')
+    calls.clear()
+    hook = logging.WandbLogger(tmp_path)
+    logging.emit(hook, dict(event='run_start'))
+    logging.finish(hook)
+    assert not calls and hook.logging_ok and hook.sync_ok is False
 
 
 @pytest.mark.parametrize('failure', ['init', 'log', 'finish', 'sync'])
@@ -185,15 +191,3 @@ def check_invariance(monkeypatch, config, trace, run, tmp_path, phase, phases):
     logged = [e['train_loss'] for e in sdk.events if e['event'] == 'train_step'
               and e['phase'] == phase and e['train_loss'] is not None]
     assert logged == [float(loss) for loss in results[0][0]]
-
-
-def test_sync_requires_environment_credential(tmp_path, monkeypatch):
-    monkeypatch.setitem(sys.modules, 'wandb', FakeSDK())
-    monkeypatch.delenv('WANDB_API_KEY', raising=False)
-    def forbidden(*args, **kwargs):
-        pytest.fail('Must not fall back to persisted credentials')
-    monkeypatch.setattr(subprocess, 'run', forbidden)
-    hook = logging.WandbLogger(tmp_path)
-    logging.emit(hook, dict(event='run_start'))
-    logging.finish(hook)
-    assert hook.logging_ok and hook.sync_ok is False
