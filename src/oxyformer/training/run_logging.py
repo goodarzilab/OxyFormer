@@ -36,7 +36,6 @@ def noop(event):
 
 
 def emit(hook, event, device='cpu'):
-    """Ignore callback returns/errors and preserve global RNG state."""
     if hook is None:
         return
     rng = capture_rng(device)
@@ -118,7 +117,6 @@ def finish(hook, device='cpu'):
 
 
 class WandbLogger:
-    """One optional offline run; logging/sync completeness is independent."""
     def __init__(self, directory, *, sync=True):
         self.directory = Path(directory)
         self.sync = sync
@@ -136,7 +134,7 @@ class WandbLogger:
         if self.run is None:
             mode = os.environ.get('WANDB_MODE', 'offline')
             if mode not in ('offline', 'dryrun', 'disabled') and not os.environ.get('WANDB_API_KEY'):
-                raise RuntimeError('Online logging requires an environment credential')
+                raise RuntimeError('Environment credential required')
             import wandb
             self.directory.mkdir(parents=True, exist_ok=True)
             self.run = wandb.init(entity='goodarzilab', project='oxyformer-v2',
@@ -147,12 +145,16 @@ class WandbLogger:
         self.run.log(event)
 
     def _finish(self):
+        closed = False
         try:
             if self.run is None:
                 self.logging_ok = False
                 return
             self.run.finish()
+            closed = True
             if self.sync:
+                if not os.environ.get('WANDB_API_KEY'):
+                    raise RuntimeError('Environment credential required')
                 offline_dir = str(Path(self.run.dir).parent)
                 result = subprocess.run([sys.executable, '-m', 'wandb', 'sync',
                     '--entity', 'goodarzilab', '--project', 'oxyformer-v2', offline_dir],
@@ -160,6 +162,8 @@ class WandbLogger:
                     timeout=120, check=False)
                 self.sync_ok = result.returncode == 0
         except Exception:
+            if not closed:
+                self.logging_ok = False
             self.sync_ok = False
         finally:
             self.finished = True
