@@ -397,3 +397,83 @@ def test_exclusive_reservation_failure_writes_no_payload(tmp_path, monkeypatch):
         cr.write_outputs([a, b], [], ['json payload', 'markdown payload'])
     assert not a.exists()
     assert b.read_text() == 'concurrent file'
+
+
+@pytest.mark.parametrize('budget_delta,leaf_delta,archive_delta', [
+    (.0006, 0., 0.), (.001, .0008, .0006), (0., -5e-7, 0.)])
+def test_independently_rounded_enclosure(inputs, budget_delta, leaf_delta, archive_delta):
+    root = inputs[0].parent / '0'
+    path = root / 'budget_record.json'
+    budget = cr.load(path)
+    budget['profile']['complete_repetition_seconds'][0] += budget_delta
+    budget['leaves'][-1]['compute_seconds'] += leaf_delta
+    budget['leaves'][-1]['wall_seconds'] += leaf_delta
+    write(path, budget)
+    archive = root / 'continuation.tar'
+    with tarfile.open(archive) as tar:
+        coverage = json.load(tar.extractfile('coverage.json'))
+        part = json.load(tar.extractfile('blobs/part'))
+    coverage['states'][0]['compute_seconds'] += archive_delta
+    with tarfile.open(archive, 'w') as tar:
+        for name, value in [('coverage.json', coverage), ('blobs/part', part)]:
+            data = json.dumps(value).encode()
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    chain = cr.reconcile(*inputs)['chains'][0]
+    assert chain['archive_budget_discrepancy_seconds']['value'] == pytest.approx(
+        abs(budget_delta - archive_delta))
+    assert chain['leaf_wrapper_seconds']['value'] >= 0
+    assert chain['leaf_timer_residual_seconds']['value'] == pytest.approx(leaf_delta - budget_delta)
+    # A real enclosure violation must still refuse.
+    budget['leaves'][-1]['compute_seconds'] -= 1
+    budget['leaves'][-1]['wall_seconds'] -= 1
+    write(path, budget)
+    with pytest.raises(ValueError, match='leaf compute'):
+        cr.reconcile(*inputs)
+
+
+def test_formula_count_names_not_in_count_registry(inputs):
+    source = cr.load(inputs[1])
+    fields = {'inner_folds': {'value': 5, 'basis': ['measured']},
+              'representative_operations': {'value': 3, 'basis': ['projected']}}
+    source['formula']['e'].update(fields)
+    write(inputs[1], source)
+    result = cr.reconcile(*inputs)['harness_formula']['e']
+    for key, quantity in fields.items():
+        assert result[key]['value'] == quantity['value']
+        for label in ['derived', *quantity['basis']]:
+            assert label in result[key]['basis']
+    assert result['seconds']['inner_ssl']['basis'] == '[measured]'
+
+
+@pytest.mark.parametrize('fail_at', [0, 1])
+def test_output_write_failure_cleans_both_and_retry_succeeds(tmp_path, monkeypatch, fail_at):
+    import hashlib
+    from contextlib import contextmanager
+    source = tmp_path / 'source'
+    source.write_text('sealed')
+    before = hashlib.sha256(source.read_bytes()).hexdigest()
+    destinations = [tmp_path / 'a.json', tmp_path / 'b.md']
+    real_fdopen = cr.os.fdopen
+    calls = []
+    @contextmanager
+    def interrupted(fd, *args, **kwargs):
+        index = len(calls)
+        calls.append(fd)
+        with real_fdopen(fd, *args, **kwargs) as stream:
+            class Writer:
+                def write(self, content):
+                    if index == fail_at:
+                        stream.write(content[:len(content) // 2])
+                        raise OSError('synthetic transient write failure')
+                    return stream.write(content)
+            yield Writer()
+    with monkeypatch.context() as patch:
+        patch.setattr(cr.os, 'fdopen', interrupted)
+        with pytest.raises(OSError, match='transient'):
+            cr.write_outputs(destinations, [source], ['json payload', 'markdown payload'])
+    assert not any(p.exists() for p in destinations)
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == before
+    cr.write_outputs(destinations, [source], ['json payload', 'markdown payload'])
+    assert [p.read_text() for p in destinations] == ['json payload', 'markdown payload']

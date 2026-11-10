@@ -60,7 +60,7 @@ def relabel(value, *, count=False):
             if count:
                 labels.add('derived')
             return q(number(value), ', '.join(sorted(labels)))
-        return {k: relabel(v, count=count or k in ('counts', 'harness_count', 'outer_folds', 'seed_count', 'scoring_operations')) for k, v in value.items()}
+        return {k: relabel(v, count=(count or k in ('counts', 'harness_count', 'outer_folds', 'seed_count', 'scoring_operations')) and k != 'seconds') for k, v in value.items()}
     if isinstance(value, list):
         return [relabel(v, count=count) for v in value]
     if type(value) in (int, float):
@@ -104,7 +104,7 @@ def read_chain(entry, manifest):
     # The leaf timer encloses the per-draw timer, CUDA synchronisation,
     # result writes and calls made after the repetition has already finished.
     # Its excess is accounting evidence, not a timing error or a fit estimate.
-    if total < times[0] - 1e-6:
+    if total < times[0] and not math.isclose(total, times[0], rel_tol=1e-6, abs_tol=1e-3):
         raise ValueError('leaf compute cannot be less than enclosed repetition time')
     archive = root / 'continuation.tar'
     with tarfile.open(archive) as tar:
@@ -132,7 +132,9 @@ def read_chain(entry, manifest):
             'unrecognized_study_keys': sorted(set(binding['study']) - set(screening)),
             'archive_budget_discrepancy_seconds': measured(abs(state['compute_seconds'] - times[0])),
             'compute_seconds': repetition, 'compute_hours': q(times[0] / 3600),
-            'leaf_compute_seconds': q(total), 'leaf_wrapper_seconds': q(total - times[0]),
+            'leaf_compute_seconds': q(total), 'leaf_wrapper_seconds': q(max(0., total - times[0])),
+            'leaf_timer_residual_seconds': q(total - times[0]),
+            'leaf_wrapper_limit': 'Wrapper estimate is the timer residual clipped at zero within rounding tolerance; signed residual is reported separately.',
             'compute_scope': 'Repetition timer measures execute_draw calls; leaf compute also includes wrapper work and already-complete calls.',
             'leaves': leaves,
             'overhead_seconds': {key: q(math.fsum(x[key]['value'] for x in leaves))
@@ -188,7 +190,7 @@ def reconcile(manifest_path, report_path):
             'cell_e_correction_factor': q(mean / anchor),
             'factor_observed_min': q(min(hours) / anchor), 'factor_observed_max': q(max(hours) / anchor),
             'uncertainty': 'Observed range and sample spread across collected repetitions; not a confidence interval or hardware transfer guarantee.'},
-        'terms': terms, 'harness_formula': relabel(formula), 'harness_cells': relabel(harness['cells']),
+        'terms': terms, 'harness_formula': relabel(formula, count=True), 'harness_cells': relabel(harness['cells']),
         'calibration': harness['calibration'],
         'receipt': relabel(receipt), 'harness_overhead': relabel(harness['overhead']),
         'scenario_adjustment': {'ratio': q(scenario_ratio),
@@ -316,6 +318,10 @@ def write_outputs(destinations, sources, contents):
             # Keep ownership of descriptors here, including if writing fails.
             with os.fdopen(fd, 'w', closefd=False) as stream:
                 stream.write(content)
+    except BaseException:
+        for path, _ in opened:
+            path.unlink()
+        raise
     finally:
         for _, fd in opened:
             os.close(fd)

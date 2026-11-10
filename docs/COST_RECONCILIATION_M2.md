@@ -40,7 +40,10 @@ the chains ran on.
 
 Leaf phases must conserve wall time. Leaf compute includes wrapper work and
 already-complete calls; repetition compute encloses draw execution only.
-Both scopes and their difference are reported; the repetition timer must
+Both scopes and their signed timer residual are reported. Independently rounded
+leaf totals use the same tolerance as the archive comparison; the nonnegative
+wrapper estimate clips a tolerated negative residual at zero and discloses this
+limit. Larger enclosure violations still refuse. The repetition timer must
 match the independently rounded archive within relative tolerance 1e-6 or absolute
 tolerance 1e-3 seconds. The absolute discrepancy is reported as measured. Extra
 study metadata is listed; the four screening values remain mandatory.
@@ -53,7 +56,9 @@ Output destinations must be distinct. Aliases between outputs, or from outputs
 to any input or report-referenced artifact, refuse before any write. Both files
 must be fresh: pre-existing files, directories and dangling symlinks refuse.
 Both destinations are exclusively created with no symlink following before
-either payload is written; choose a new output directory for each rerun.
+either payload is written. A caught write error removes both newly created
+files before propagating the error, permitting a retry. Choose a new output
+directory for each successful rerun.
 
 Receipt scale is assessed unadjusted and multiplied by 31.8/29.0 (null-effect
 to sign-changing). A distance within two sample SDs is consistent; beyond that
