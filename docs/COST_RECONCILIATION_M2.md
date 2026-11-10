@@ -13,14 +13,16 @@ The manifest has the coordinator's `chains` list with `chain`,
 resolve against the manifest directory. Inputs are read only; no fit runs.
 Outputs contain input hashes, every retained leaf's compute and overhead,
 repetition totals, the harness formula, receipt, overhead and candidate causes.
-Numeric quantities carry `[measured]`, `[derived]` or `[extrapolated]` labels.
+Numeric quantities preserve all source bases, including projected and uncalibrated.
+Copied counts add `[derived]`; computed quantities use `[derived]` or `[extrapolated]`.
 Identifiers and hashes are strings, not numerical quantities.
 
 The supported terminal archives retain OOFNuisances blobs and coverage state.
 They discard controller task timing history. The module therefore uses the
 contract's fallback: real operation counts/durations, excess shares and term
 correction factors are null. It never divides cumulative fold time by fit
-counts. An unexpected controller archive refuses with an inspection diagnostic;
+counts. Inert extra archive members are ignored. A referenced part of an unexpected
+type refuses with its recorded type in the inspection diagnostic;
 its timing schema needs review before any decomposition can be published.
 
 The corrected screening projection uses the mean of complete repetitions;
@@ -41,3 +43,9 @@ leaf compute includes wrapper work, synchronisation and already-complete calls;
 the profile repetition timer encloses only draw execution. Both totals and their
 difference are reported separately, with the profile checked against the
 archived cumulative repetition timer. No equality between these scopes is assumed.
+
+Stored cell hours may be rounded: formula consistency uses relative tolerance
+1e-6. The JSON preserves the complete source calibration block verbatim.
+Markdown discloses its passed flag, ratio, reasons and receipt identity beside
+the descriptive factor. Neither the factor nor the scenario adjustment overrides
+the source calibration or establishes a transferable recalibration.

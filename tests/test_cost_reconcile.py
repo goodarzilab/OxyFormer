@@ -92,7 +92,7 @@ def test_every_numeric_leaf_has_basis(inputs):
         if isinstance(value, dict):
             if 'value' in value:
                 assert set(value) == {'value', 'basis'}
-                assert value['basis'] in ('[measured]', '[derived]', '[extrapolated]')
+                assert value['basis'] in ('[measured]', '[derived]', '[extrapolated]', '[derived, measured]', ['measured'])
                 assert math.isfinite(value['value'])
             else:
                 for v in value.values():
@@ -160,7 +160,69 @@ def test_leaf_wrapper_compute_is_separate_from_repetition(inputs):
 def test_formula_counts_are_derived(inputs):
     result = cr.reconcile(*inputs)
     for term in result['terms'].values():
-        assert term['harness_count']['basis'] == '[derived]'
+        assert term['harness_count']['basis'] == '[derived, measured]'
     for cell in result['harness_formula'].values():
         for count in cell['counts'].values():
-            assert count['basis'] == '[derived]'
+            assert count['basis'] == '[derived, measured]'
+
+
+@pytest.mark.parametrize('path', ['receipt', 'harness_overhead', 'harness_formula'])
+def test_source_bases(inputs, path):
+    m, p = inputs
+    source = cr.load(p)
+    quantity = {'value': 2, 'basis': ['measured', 'projected', 'uncalibrated', 'derived']}
+    if path == 'harness_formula':
+        source['formula']['e']['seconds']['inner_ssl'] = quantity
+        source['cells']['e']['compute_h100_hours_per_repetition']['value'] = 6.001111111111111
+    else:
+        source['calibration']['receipt']['extra'] = quantity
+        source['overhead']['extra'] = quantity
+    write(p, source)
+    result = cr.reconcile(m, p)[path]
+    item = result['e']['seconds']['inner_ssl'] if path == 'harness_formula' else result['extra']
+    assert item == {'value': 2, 'basis': '[derived, measured, projected, uncalibrated]'}
+
+
+def test_nested_count_labels():
+    result = cr.relabel({'work': {'harness_count': {'value': 2, 'basis': ['measured']},
+                                 'counts': {'x': {'value': 3, 'basis': ['projected']}}}})
+    assert result['work']['harness_count']['basis'] == '[derived, measured]'
+    assert result['work']['counts']['x']['basis'] == '[derived, projected]'
+
+
+def test_rounded_cell_hours(inputs):
+    source = cr.load(inputs[1])
+    source['cells']['e']['compute_h100_hours_per_repetition']['value'] = 7.000001
+    write(inputs[1], source)
+    assert cr.reconcile(*inputs)['summary']['harness_cell_e_hours']['value'] == 7.
+
+
+@pytest.mark.parametrize('kind', ['extra', 'history'])
+def test_archive_schema(inputs, kind):
+    archive = inputs[0].parent / '0/continuation.tar'
+    with tarfile.open(archive, 'a') as tar:
+        name = 'controllerless_marker.json' if kind == 'extra' else 'blobs/part'
+        data = json.dumps({'type': 'ControllerTimingHistory'}).encode()
+        member = tarfile.TarInfo(name)
+        member.size = len(data)
+        tar.addfile(member, io.BytesIO(data))
+    if kind == 'history':
+        with pytest.raises(ValueError, match='ControllerTimingHistory'):
+            cr.reconcile(*inputs)
+    else:
+        assert cr.reconcile(*inputs)['summary']['chain_count']['value'] == 2
+
+
+def test_calibration_disclosure(inputs):
+    source = cr.load(inputs[1])
+    source['calibration'].update(passed=False, reasons=['frame mismatch'],
+                                ratio={'value': 5., 'basis': ['uncalibrated']})
+    source['calibration']['receipt']['tree'] = 'receipt-tree'
+    write(inputs[1], source)
+    result = cr.reconcile(*inputs)
+    assert result['calibration'] == source['calibration']
+    text = cr.markdown(result)
+    opening = text[:text.index('**Accounting**')]
+    for expected in ('False', 'frame mismatch', 'receipt-tree', 'frame_matches',
+                     'uncalibrated', '31.8/29.0', 'transfer uncertainty'):
+        assert expected in opening
