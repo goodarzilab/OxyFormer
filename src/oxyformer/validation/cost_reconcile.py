@@ -51,6 +51,18 @@ def identity(path):
     return {'path': str(path), 'sha256': hashlib.sha256(Path(path).read_bytes()).hexdigest()}
 
 
+
+def identifier_copy(value):
+    """Keep task schedule indices as identifiers, not measured quantities."""
+    if isinstance(value, dict):
+        if 'value' in value and 'basis' in value:
+            return str(number(value))
+        return {k: identifier_copy(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [identifier_copy(v) for v in value]
+    return str(value) if type(value) in (int, float) else value
+
+
 def relabel(value, *, count=False):
     """Copy report evidence with explicit labels on every numerical leaf."""
     if isinstance(value, dict):
@@ -60,7 +72,10 @@ def relabel(value, *, count=False):
             if count:
                 labels.add('derived')
             return q(number(value), ', '.join(sorted(labels)))
-        return {k: relabel(v, count=(count or k in ('counts', 'harness_count', 'outer_folds', 'seed_count', 'scoring_operations')) and k != 'seconds') for k, v in value.items()}
+        return {k: identifier_copy(v) if k in ('tasks_per_outer_seed', 'tasks_by_outer') else
+                relabel(v, count=(count or k in ('work', 'counts', 'harness_count',
+                        'outer_folds', 'seed_count', 'scoring_operations')) and k != 'seconds')
+                for k, v in value.items()}
     if isinstance(value, list):
         return [relabel(v, count=count) for v in value]
     if type(value) in (int, float):
@@ -81,7 +96,8 @@ def read_chain(entry, manifest):
     if binding['scenario']['name'] != 'sign_changing':
         raise ValueError('requires sign_changing diagnostic chain')
     screening = dict(frozen_epochs=30, grid_points=2, reference_cap=32, seed_count=1)
-    if any(binding['study'].get(k) != v for k, v in screening.items()):
+    if any(type(binding['study'].get(k)) not in (int, float) or binding['study'][k] != v
+           for k, v in screening.items()):
         raise ValueError('requires screening study')
     times = budget['profile']['complete_repetition_seconds']
     if len(times) != 1 or times[0] <= 0:
@@ -96,7 +112,7 @@ def read_chain(entry, manifest):
         if not math.isclose(math.fsum(v['value'] for v in phases.values()),
                             wall['value'], rel_tol=1e-9, abs_tol=1e-6):
             raise ValueError('leaf phases do not conserve wall time')
-        leaves.append({'task': leaf['task_id'], 'step': measured(index),
+        leaves.append({'task': leaf['task_id'], 'step': str(index),
                        'wall_seconds': wall, **phases})
     if not leaves or len({leaf['task'] for leaf in leaves}) != len(leaves):
         raise ValueError('missing or duplicate leaf history')
