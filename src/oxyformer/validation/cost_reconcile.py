@@ -50,16 +50,17 @@ def identity(path):
     return {'path': str(path), 'sha256': hashlib.sha256(Path(path).read_bytes()).hexdigest()}
 
 
-def relabel(value):
+def relabel(value, *, count=False):
     """Copy report evidence with explicit labels on every numerical leaf."""
     if isinstance(value, dict):
         if 'value' in value and 'basis' in value:
-            return q(number(value), 'extrapolated' if 'extrapolated' in value['basis'] else 'measured')
-        return {k: relabel(v) for k, v in value.items()}
+            return q(number(value), 'derived' if count else
+                     'extrapolated' if 'extrapolated' in value['basis'] else 'measured')
+        return {k: relabel(v, count=count or k == 'counts') for k, v in value.items()}
     if isinstance(value, list):
-        return [relabel(v) for v in value]
+        return [relabel(v, count=count) for v in value]
     if type(value) in (int, float):
-        return measured(value)
+        return q(value) if count else measured(value)
     return value
 
 
@@ -162,7 +163,7 @@ def reconcile(manifest_path, report_path):
     excess = anchor - mean
     for term in TERMS:
         count, seconds = number(formula['e']['counts'][term]), number(formula['e']['seconds'][term])
-        terms[term] = {'harness_count': q(count, 'measured'),
+        terms[term] = {'harness_count': q(count),
             'harness_seconds_per_operation': relabel(formula['e']['seconds'][term]),
             'harness_total_hours': q(count * seconds / 3600),
             'real_count': None, 'real_seconds': None, 'excess_share': None,
