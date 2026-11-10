@@ -1013,6 +1013,7 @@ def test_ssl_budget_request_observes_each_existing_cooperative_check(tmp_path):
 def test_logging_bitwise_invariance(tmp_path, monkeypatch):
     from test_run_logging import check_invariance
     spec, split, manifest, config = make_case(tmp_path / 'attempt')
+    config = replace(config, deadline_timing=fitting.DeadlineTiming(1000., clock=lambda: 0.))
     trace = []
     original = fitting._backward_and_clip
     def observe(loss, *args, **kwargs):
