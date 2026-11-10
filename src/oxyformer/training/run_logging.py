@@ -21,7 +21,7 @@ _SECRET_FIELD = re.compile(r"(?:api[_-]?key|access[_-]?token|auth[_-]?token|^tok
 
 def sanitize(value):
     if isinstance(value, dict):
-        return {str(k): ('[redacted]' if _SECRET_FIELD.search(str(k)) else sanitize(v))
+        return {sanitize(str(k)): ('[redacted]' if _SECRET_FIELD.search(str(k)) else sanitize(v))
                 for k, v in value.items()}
     if isinstance(value, (tuple, list)):
         return [sanitize(v) for v in value]

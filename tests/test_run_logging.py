@@ -87,7 +87,8 @@ def test_failure_isolation_and_secret_free_diagnostics(tmp_path, monkeypatch, fa
     assert not hook.logging_ok or hook.sync_ok is False
     if failure == 'finish':
         assert hook.logging_ok is False
-    assert key not in capsys.readouterr().out + capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert key not in captured.out + captured.err
     assert key not in (tmp_path / 'logging-status.json').read_text()
 
 
@@ -132,7 +133,7 @@ def test_secret_hygiene_in_run_tree_and_repository(tmp_path, monkeypatch):
     key = '0123456789' * 4
     monkeypatch.setenv('WANDB_API_KEY', key)
     events = []
-    logging.emit(events.append, dict(event='config', nested=dict(api_key=key), value=key))
+    logging.emit(events.append, dict(event='config', nested=dict(api_key=key), value=key, mapping={key: 'fixture'}))
     (tmp_path / 'events.json').write_text(json.dumps(events))
     assert events[0]['nested']['api_key'] == '[redacted]'
     root = Path(__file__).resolve().parents[1]
