@@ -1,8 +1,7 @@
 # Run logging
 
 `FitConfig.run_logger` and `PretrainConfig.run_logger` default to `None`.
-Pass a fresh `run_logging.WandbLogger(directory)` per attempt; `noop` disables
-logging. Nested SSL shares the fold logger.
+Use a fresh `run_logging.WandbLogger(directory)` per attempt; nested SSL shares it.
 
 W&B targets `goodarzilab/oxyformer-v2`; `WANDB_MODE` defaults to `offline`.
 After checkpoint publication, finish precedes sync (120-second timeout).
