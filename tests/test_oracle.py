@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import yaml
 from scipy.special import expit
 
 from test_scm import frame, config, policy
@@ -11,12 +12,15 @@ from oxyformer.validation.generators import generate_suite_a
 from oxyformer.validation.oracle import ObservedLawOracle
 from oxyformer.validation.scm import NUMERIC_DOMAIN
 
+REGISTERED = [(p.stem, yaml.safe_load(p.read_text())) for p in sorted(Path('configs/policies').glob('*.yaml'))]
+assert REGISTERED and all(r['policy'] == 'ShiftOrStayPolicy' and r['boundary_action'] == 'stay' for _, r in REGISTERED)
+
 @pytest.mark.parametrize('weight', NUMERIC_DOMAIN['weight'])
 @pytest.mark.parametrize('beta', [-200., 200.])
-@pytest.mark.parametrize('delta', [0., .02, 2., 200.])
+@pytest.mark.parametrize('delta,law', [(d, 'continuous') for d in (0., .02, 200.)]+[pytest.param(r['delta_mmhg'], r['exposure_law'], id=name) for name,r in REGISTERED])
 @pytest.mark.parametrize('bounds', [(-10010., -10000.), (0., 10.), (10000., 10010.)])
-def test_uniform_edges(delta, bounds, beta, weight):
-    p = policy((bounds,), delta)
+def test_uniform_edges(delta, law, bounds, beta, weight):
+    p = replace(policy((bounds,), delta), exposure_law=law)
     c = config(beta=beta, noise_sd=0.)
     f = replace(frame(2), weights=(weight,)*2)
     sample = generate_suite_a(f, c, p)
@@ -31,13 +35,13 @@ def test_uniform_edges(delta, bounds, beta, weight):
         assert float(r) == pytest.approx(expected, abs=1e-9)
 
 @pytest.mark.parametrize('measured', [False, True])
-def test_selected_mixture(measured):
+def test_mixture(measured):
     c = config(local_confounding='measured' if measured else 'omitted', exposure_error=.4,
                selected_outcome=True, migration=.2)
     p = policy()
     sample = generate_suite_a(frame(2), c, p)
     o = ObservedLawOracle(sample.observations, sample.structural_causal_truth, p)
-    observed_u = dict(zip(sample.observations.measured_columns, sample.observations.measured_x[0])).get('local_confounder')
+    observed_u = sample.observations.measured_x[0][0] if measured else None
     def joint(a):
         den, num = 0., 0.
         for u in (-1., 1.):
@@ -58,13 +62,13 @@ def test_selected_mixture(measured):
         assert float(q) == pytest.approx(num/den, abs=1e-9)
         assert float(r) == pytest.approx(expected_ratio, abs=1e-9)
 
-def test_no_fitting_imports():
+def test_no_fitting():
     tree = ast.parse(Path('src/oxyformer/validation/oracle.py').read_text())
     imports = [n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
     assert not any(any(word in name for word in ('training', 'sklearn', 'targeting', 'models')) for name in imports)
     assert not any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == 'fit' for n in ast.walk(tree))
 
-def test_truth_binding():
+def test_binding():
     from oxyformer.provenance import ContractError
     sample = generate_suite_a(frame(2), config(), policy())
     with pytest.raises(ContractError, match='observation hash'):
