@@ -199,3 +199,64 @@ def test_finish_reaches_callable_hook():
     events = []
     logging.finish(events.append)
     assert events == [dict(event='run_finish')]
+
+
+def test_closed_config_schema():
+    from dataclasses import fields, make_dataclass
+    from oxyformer.training.fit import FitConfig
+    from oxyformer.training.pretrain import PretrainConfig
+    for cls in (FitConfig, PretrainConfig):
+        assert set(logging.CONFIG_SCHEMA[cls.__name__]) == {f.name for f in fields(cls)}
+        assert set(logging.CONFIG_SCHEMA[cls.__name__].values()) <= {'included', 'hashed', 'redacted', 'excluded'}
+    Unknown = make_dataclass('PretrainConfig', [('unclassified', int)])
+    with pytest.raises(ValueError, match='unclassified'):
+        logging.project_config(Unknown(1))
+
+
+def test_stop_snapshot_is_observational():
+    from oxyformer.training.checkpoint import CheckpointRequest
+    request = CheckpointRequest()
+    assert logging.stop_state(None) == logging.stop_state(request) == 'none'
+    request.request()
+    assert logging.stop_state(request) == 'requested'
+    assert logging.stop_state(request, reason='requested') == 'honoured'
+    assert request.requested
+
+
+def test_allocator_windows(tmp_path, monkeypatch):
+    allocator = SimpleNamespace(current=512, peak=8192, resets=0)
+    restore = logging.restore_rng
+    monkeypatch.setattr(logging, 'capture_rng', lambda device: capture_rng())
+    monkeypatch.setattr(logging, 'restore_rng', lambda state, device: restore(state, 'cpu'))
+    def reset(device):
+        allocator.peak = allocator.current
+        allocator.resets += 1
+    monkeypatch.setattr(torch.cuda, 'reset_peak_memory_stats', reset)
+    monkeypatch.setattr(torch.cuda, 'synchronize', lambda device: None)
+    monkeypatch.setattr(torch.cuda, 'max_memory_allocated', lambda device: allocator.peak)
+    events = []
+    model = torch.nn.Linear(1, 1)
+    for peak in (1024, 768):
+        started = logging.window_start(events.append, 'cuda:0')
+        allocator.peak = max(allocator.peak, peak)
+        logging.step_event(events.append, model=model, loss=None, learning_rate=.01,
+                           samples=2, started=started, device='cuda:0')
+    assert allocator.resets == 2
+    assert [e['gpu_peak_bytes'] for e in events] == [1024, 768]
+
+
+def test_online_environment_cannot_enable_network_or_retry(tmp_path, monkeypatch):
+    sdk = FakeSDK()
+    attempts = []
+    def unavailable(**kwargs):
+        attempts.append(kwargs['mode'])
+        raise RuntimeError('service unavailable')
+    sdk.init = unavailable
+    monkeypatch.setitem(sys.modules, 'wandb', sdk)
+    monkeypatch.setenv('WANDB_MODE', 'online')
+    hook = logging.WandbLogger(tmp_path, sync=False)
+    for _ in range(3):
+        logging.emit(hook, dict(event='run_start'))
+    logging.finish(hook)
+    assert attempts == ['offline']
+    assert not hook.logging_ok and hook.finished

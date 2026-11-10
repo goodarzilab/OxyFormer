@@ -558,7 +558,7 @@ def _run(view, settings, config, seed, features, preprocessing, identity,
             reason = "batch_limit"
             break
         if progress["phase"] == "train":
-            step_started = time.monotonic()
+            step_started = run_logging.window_start(config.run_logger, device)
             indices = sampler.indices(settings.batch_size)
             masked = family_mask(_batch(train_batch, indices), family_indices, settings.mask_rate)
             if progress["epoch_updates"] == 0 and not bool((masked.masked & ~masked.missing).any()):
@@ -638,6 +638,7 @@ def _run(view, settings, config, seed, features, preprocessing, identity,
     artifact = save_checkpoint(root, identity=identity, lineage=lineage, state=state,
                                complete=completed, reason=reason, predecessor=config.predecessor)
     run_logging.emit(config.run_logger, dict(event='checkpoint', phase='ssl',
+        stop_request=run_logging.stop_state(config.stop_request, reason=reason),
         checkpoint=artifact.to_dict(), best_loss=progress['best_loss'],
         best_epoch=(progress['history'].index(progress['best_loss']) + 1
                     if progress['history'] else None)), device)

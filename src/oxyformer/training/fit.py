@@ -688,7 +688,7 @@ def _train_one(config, bundle, encoder_state, view, stopping, epochs, seed, budg
                 if sampler.cursor == sampler.size:
                     progress["phase"] = "evaluate"
                 continue
-            step_started = time.monotonic()
+            step_started = run_logging.window_start(config.run_logger, config.device)
             model.train()
             optimizer.zero_grad(set_to_none=True)
             predicted = _predict(model, part, metadata, config.policy, policy_cache=policy_cache)
@@ -1032,6 +1032,7 @@ def fit_fold(spec, split, data_manifest, model_config, seed) -> FoldArtifacts:
             seed=seed, prediction_inputs=_inputs(config, held), checkpoint=checkpoint)
         write_artifact(root / "fold.json", artifact)
         run_logging.emit(config.run_logger, dict(event='checkpoint', phase='fold',
+            stop_request=run_logging.stop_state(config.stop_request, reason=reason),
             checkpoint=checkpoint.to_dict(), selection=controller['selection']), config.device)
         run_logging.finish(config.run_logger, config.device)
         return artifact
