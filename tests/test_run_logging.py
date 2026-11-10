@@ -630,7 +630,7 @@ def test_git_timeout_kills_owned_process_group(tmp_path, monkeypatch):
     monkeypatch.setattr(logging, 'GIT_TIMEOUT', .2, raising=False)
     started = time.monotonic()
     revision = logging.git_revision()
-    assert time.monotonic() - started < 3
+    assert time.monotonic() - started < 1
     assert revision.startswith('unavailable: ')
     pid = int(marker.read_text())
     with pytest.raises(ProcessLookupError):
@@ -692,7 +692,9 @@ def test_finish_external_failures_preserve_checkpoint_and_result(tmp_path, monke
     off_json = off.to_dict()
     shutil.rmtree(config.output_dir)
     hook = logging.WandbLogger(tmp_path / 'logs', sync=False)
+    entered = []
     def unavailable(*args, **kwargs):
+        entered.append(time.monotonic())
         if failure == 'stall':
             time.sleep(30)
         raise OSError('external action unavailable')
@@ -700,6 +702,7 @@ def test_finish_external_failures_preserve_checkpoint_and_result(tmp_path, monke
     monkeypatch.setitem(sys.modules, 'wandb', FakeSDK())
     on = run(replace(config, run_logger=hook))
     assert on.to_dict() == off_json
+    assert entered and time.monotonic() - entered[-1] < 1
     assert not hook.logging_ok and hook.finished
 
 
@@ -709,7 +712,7 @@ def test_start_steps_and_evaluations_are_memory_only(tmp_path, monkeypatch):
     from test_fit import make_case
     _, split, data, config = make_case(tmp_path / 'attempt')
     hook = logging.WandbLogger(tmp_path / 'logs', sync=False)
-    config = replace(config, run_logger=hook)
+    config = replace(config, run_logger=hook, device='cpu')
     identity = SimpleNamespace(config_hash='a' * 64, to_dict=lambda: {})
     model = torch.nn.Linear(1, 1)
     model(torch.ones(1, 1)).sum().backward()
