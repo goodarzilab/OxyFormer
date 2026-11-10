@@ -11,12 +11,14 @@ from oxyformer.validation.generators import generate_suite_a
 from oxyformer.validation.oracle import ObservedLawOracle
 from oxyformer.validation.scm import NUMERIC_DOMAIN
 
+@pytest.mark.parametrize('weight', NUMERIC_DOMAIN['weight'])
+@pytest.mark.parametrize('beta', [-200., 200.])
 @pytest.mark.parametrize('delta', [0., .02, 2., 200.])
 @pytest.mark.parametrize('bounds', [(-10010., -10000.), (0., 10.), (10000., 10010.)])
-def test_uniform_edges(delta, bounds):
+def test_uniform_edges(delta, bounds, beta, weight):
     p = policy((bounds,), delta)
-    c = config(beta=.001, noise_sd=0.)
-    f = replace(frame(2), weights=(NUMERIC_DOMAIN['weight'][0],)*2)
+    c = config(beta=beta, noise_sd=0.)
+    f = replace(frame(2), weights=(weight,)*2)
     sample = generate_suite_a(f, c, p)
     oracle = ObservedLawOracle(sample.observations, sample.structural_causal_truth, p)
     lo, hi = bounds
@@ -25,7 +27,7 @@ def test_uniform_edges(delta, bounds):
         incoming = lo <= a-delta <= hi-delta and delta <= hi-lo and delta != 0
         moved = lo <= a <= hi-delta and delta != 0
         expected = 1. if p.is_identity else float(incoming)+float(not moved)
-        assert float(q) == pytest.approx(50+.001*a, abs=1e-9)
+        assert float(q) == pytest.approx(50+beta*a, abs=1e-9)
         assert float(r) == pytest.approx(expected, abs=1e-9)
 
 @pytest.mark.parametrize('measured', [False, True])

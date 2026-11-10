@@ -47,8 +47,8 @@ def paired(differences):
 def decision(truths, fitted, oracle):
     require(len(truths) == len(fitted) == len(oracle) > 0, 'paired inputs required')
     psi, fit, ora = map(lambda a: float(np.mean(a)), (truths, fitted, oracle))
-    paired = paired(np.asarray(oracle)-np.asarray(fitted))
-    lo, hi, improvement = (paired[k]['value'] for k in ('lower', 'upper', 'mean'))
+    stats = paired(np.asarray(oracle)-np.asarray(fitted))
+    lo, hi, improvement = (stats[k]['value'] for k in ('lower', 'upper', 'mean'))
     excludes = lo is not None and (lo > 0 or hi < 0)
     includes = lo is not None and lo <= 0 <= hi
     first = abs(ora-psi) <= .002 and improvement >= .007 and excludes
@@ -56,11 +56,11 @@ def decision(truths, fitted, oracle):
     return {'rules': RULES, 'truth_flagged': any(abs(v-.0178) > .0005 for v in truths),
             'branch_i': first, 'branch_ii': second,
             'verdict': 'branch i' if first else 'branch ii' if second else RULES['otherwise'],
-            'psi0_frame': number(psi, 'mean fixed-frame causal truth'),
+            'psi0_frame': number(psi, 'mean frame causal truth'),
             'mean_fitted': number(fit, 'paired; fitted'),
             'mean_oracle': number(ora, 'paired; Q0,g0'),
-            'D': number(psi-fit, 'mean truth minus mean fitted'), 'paired': paired,
-            'interval_note': 'paired t' if lo is not None else 'inconclusive: fewer than two repetitions'}
+            'D': number(psi-fit, 'mean truth minus mean fitted'), 'paired': stats,
+            'interval_note': 'paired t' if lo is not None else 'inconclusive: n < 2'}
 
 def replay(endpoint, parts, oracle, locations):
     seeds = tuple(dict.fromkeys(seed for part in parts for seed in part.seed_ids))
@@ -105,7 +105,7 @@ def replay(endpoint, parts, oracle, locations):
             se['iid'] = np.sqrt(len(q)/(len(q)-1)*np.sum(np.asarray(estimate.influence)**2))
             se['frame_conditional'] = np.sqrt(np.sum(residual**2))
             results[cell][method] = {'estimate': number(estimate.value, f'{cell}; {method}'),
-                'se': {name: number(float(value), 'diagonal residual-only fixed-frame diagnostic' if name == 'frame_conditional'
+                'se': {name: number(float(value), 'diagonal residual-only diagnostic' if name == 'frame_conditional'
                                    else name) for name, value in se.items()}}
     return results
 
@@ -183,7 +183,7 @@ def summarize(rows):
                 mean_se = float(np.mean([e['se'][name]['value'] for e in series]))
                 ratios[name] = {'mean_se': number(mean_se, f'{name}; repetition mean'),
                     'sd': number(sd, 'repetition SD, ddof=1'),
-                    'mean_se_over_sd': number(mean_se/sd if sd else None, 'coverage.py mean_se / SD; descriptive, no gate')}
+                    'mean_se_over_sd': number(mean_se/sd if sd else None, 'mean_se / SD; descriptive')}
             summary[method]['cells'][cell] = {'se_summary': ratios, 'paired': paired(np.subtract(values(cell), values('fitted')))}
     return summary
 
@@ -206,7 +206,7 @@ def main(argv=None):
     args.output_dir.mkdir(parents=True, exist_ok=True)
     text = json.dumps(report, indent=2, allow_nan=False)
     (args.output_dir/'attribution_audit.json').write_text(text+'\n')
-    markdown = '# Attribution audit (diagnostic only)\n\nRules, inputs, verdicts and SEs:\n\n```json\n'+text+'\n```\n'
+    markdown = '# Attribution audit (diagnostic only)\n\n```json\n'+text+'\n```\n'
     (args.output_dir/'attribution_audit.md').write_text(markdown)
     print(markdown)
     return 0 if rows else 1
