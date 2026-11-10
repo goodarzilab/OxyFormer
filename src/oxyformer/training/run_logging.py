@@ -8,6 +8,9 @@ import os
 from pathlib import Path
 import re
 import socket
+import signal
+import threading
+from contextlib import contextmanager
 import subprocess
 import sys
 import tempfile
@@ -28,7 +31,13 @@ def sanitize(value):
         return [sanitize(v) for v in value]
     if isinstance(value, str):
         key = os.environ.get('WANDB_API_KEY')
-        return value.replace(key, '[redacted]') if key else value
+        if not key:
+            return value
+        if key.isdecimal():
+            canonical = key.lstrip('0') or '0'
+            value = re.sub(r'[0-9]+', lambda match: '[redacted]'
+                           if (match[0].lstrip('0') or '0') == canonical else match[0], value)
+        return value.replace(key, '[redacted]')
     if isinstance(value, (int, float)):
         key = os.environ.get('WANDB_API_KEY')
         if key and ((key.isdecimal() and value == int(key)) or key in str(value)):
@@ -40,19 +49,37 @@ def noop(event):
     pass
 
 
-def emit(hook, event, device='cpu'):
+def validate_hook(hook):
+    if hook is not None and hook is not noop and type(hook) is not WandbLogger:
+        raise TypeError('run_logger must be a WandbLogger, noop, or None')
+
+
+def inspect_config(hook, config):
+    validate_hook(hook)
     if hook is None or hook is noop:
         return
-    rng = capture_rng(device)
+    unknown = set(vars(config)) - CONFIG_SCHEMA[type(config).__name__].keys()
+    if unknown:
+        hook.logging_ok = False
+        hook.refusal = 'refused: undeclared config key ' + sorted(unknown)[0]
+
+
+def emit(hook, event, device='cpu'):
+    validate_hook(hook)
+    if hook is None or hook is noop:
+        return
+    rng = None
     try:
-        if event.get('event') == 'run_finish' and not isinstance(hook, WandbLogger):
-            event = dict(event, git_sha=git_revision())
+        rng = capture_rng(device)
         hook(sanitize(event))
     except Exception:
-        if isinstance(hook, WandbLogger):
-            hook.logging_ok = False
+        hook.logging_ok = False
     finally:
-        restore_rng(rng, device)
+        if rng is not None:
+            try:
+                restore_rng(rng, device)
+            except Exception:
+                hook.logging_ok = False
 
 
 def step_event(hook, *, model, loss, learning_rate, samples, started, device, **context):
@@ -128,12 +155,59 @@ def window_start(hook, device):
     return time.monotonic()
 
 
-def git_revision():
+GIT_TIMEOUT = 10
+FINISH_TIMEOUT = 180
+
+
+class _FinishTimeout(BaseException):
+    pass
+
+
+@contextmanager
+def _finish_deadline():
+    # Linux main-thread delivery only. Refuse telemetry in threaded callers or
+    # while another component owns SIGALRM, rather than replacing its timer.
+    if threading.current_thread() is not threading.main_thread():
+        raise _FinishTimeout()
+    previous = signal.getsignal(signal.SIGALRM)
+    if signal.getitimer(signal.ITIMER_REAL) != (0., 0.):
+        raise _FinishTimeout()
+    def expired(*args):
+        raise _FinishTimeout()
+    signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, FINISH_TIMEOUT)
     try:
-        return subprocess.check_output(['git', 'rev-parse', 'HEAD'],
-            cwd=Path(__file__).resolve().parents[3], stderr=subprocess.DEVNULL, text=True).strip()
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def git_revision():
+    process = None
+    try:
+        process = subprocess.Popen(['git', 'rev-parse', 'HEAD'],
+            cwd=Path(__file__).resolve().parents[3], stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, text=True, start_new_session=True)
+        output, _ = process.communicate(timeout=GIT_TIMEOUT)
+        if process.returncode:
+            return 'unavailable: git error'
+        return output.strip()
+    except subprocess.TimeoutExpired:
+        return 'unavailable: timeout'
     except (OSError, subprocess.SubprocessError):
-        return None
+        return 'unavailable: git error'
+    finally:
+        if process is not None:
+            # Kill the session even if the leader exited but a descendant kept
+            # the output pipe open. Reap the leader without draining that pipe.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+            if process.stdout is not None:
+                process.stdout.close()
 
 
 def run_config(config, identity, *, data, split, seed, defer_git=False):
@@ -157,6 +231,11 @@ def start(hook, config, identity, *, data, split, seed, phase):
     if hook is None or hook is noop:
         return
     try:
+        inspect_config(hook, config)
+        if hook.refusal:
+            emit(hook, dict(event='status', status=hook.refusal), config.device)
+            emit(hook, dict(event='run_start', refused=True, status=hook.refusal), config.device)
+            return
         metadata = run_config(config, identity, data=data, split=split, seed=seed, defer_git=True)
         emit(hook, dict(event='run_start', phase=phase, **metadata), config.device)
     except Exception:
@@ -181,12 +260,23 @@ class WandbLogger:
         self.attempt_dir = None
         self.status_path = None
         self._events = []
+        self.refusal = None
 
     def __call__(self, event):
         if self.finished:
             return
         if event['event'] == 'run_finish':
-            self._finish()
+            rng = None
+            try:
+                rng = capture_rng('cpu')
+                with _finish_deadline():
+                    self._finish()
+            except _FinishTimeout:
+                self.logging_ok = False
+                self.finished = True
+            finally:
+                if rng is not None:
+                    restore_rng(rng, 'cpu')
             return
         # No filesystem, SDK or provenance subprocess can block a fitting slice.
         try:
@@ -210,9 +300,10 @@ class WandbLogger:
             if event.get('event') == 'run_start' and 'git_sha' in event and event['git_sha'] is None:
                 if not queried:
                     revision, queried = git_revision(), True
-                    if revision is None:
+                    if revision.startswith('unavailable:'):
                         self.logging_ok = False
                 event['git_sha'] = revision
+                event['git_revision'] = revision
             rows.append(json.dumps(sanitize(event)))
         if not rows:
             self.logging_ok = False
@@ -280,7 +371,8 @@ class WandbLogger:
             self._status(pending=True)
             if self.spool is None:
                 self._seal()
-            self._deliver()
+            if not self.refusal:
+                self._deliver()
         except Exception:
             self.logging_ok = False
         closed = False
@@ -303,7 +395,7 @@ class WandbLogger:
             self.sync_ok = False
         finally:
             self.finished = True
-            self._status()
+        self._status()
 
     @classmethod
     def replay(cls, spool, *, sync=True):

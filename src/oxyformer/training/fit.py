@@ -997,6 +997,7 @@ def _lineage(manifest, identity, ids, parents, *, model_hash=None, parameter_cou
 def fit_fold(spec, split, data_manifest, model_config, seed) -> FoldArtifacts:
     """Fit or continue one fold, using only outer-training labels and covariates."""
     config = model_config
+    run_logging.inspect_config(config.run_logger, config)
     allowed = _validate(spec, split, data_manifest, config, seed)
     config = replace(config, device=str(resolve_device(config.device)))
     with _numerics(config.device):

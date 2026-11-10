@@ -417,6 +417,7 @@ def _controller_state(value: dict | None) -> dict:
 def pretrain(training_covariate_view: CovariateView, split_manifest: SplitManifest,
              config: PretrainConfig, seed: int) -> CheckpointArtifact:
     """Fit/continue approved X only; return an immutable, hash-validated artifact."""
+    run_logging.inspect_config(config.run_logger, config)
     started = time.monotonic()
     require(type(training_covariate_view) is CovariateView, "expected CovariateView")
     require(type(split_manifest) is SplitManifest, "expected SplitManifest")
@@ -583,10 +584,16 @@ def _run(view, settings, config, seed, features, preprocessing, identity,
                 loss.backward()
                 optimizer.step()
                 progress["epoch_updates"] += 1
-            run_logging.step_event(config.run_logger, model=model, loss=loss,
-                learning_rate=optimizer.param_groups[0]['lr'], samples=len(indices),
-                started=step_started, device=device, phase='ssl',
-                step=progress['step'], epoch=progress['epoch'])
+            if loss is not None:
+                run_logging.step_event(config.run_logger, model=model, loss=loss,
+                    learning_rate=optimizer.param_groups[0]['lr'], samples=len(indices),
+                    started=step_started, device=device, phase='ssl',
+                    step=progress['step'], epoch=progress['epoch'],
+                    processed_batches=progress['step'] + 1)
+            else:
+                run_logging.emit(config.run_logger, dict(event='batch_skipped', phase='ssl',
+                    step=progress['step'], epoch=progress['epoch'],
+                    processed_batches=progress['step'] + 1), device)
             sampler.cursor += len(indices)
             progress["step"] += 1
             if sampler.cursor == sampler.size:

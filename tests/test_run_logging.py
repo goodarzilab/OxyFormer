@@ -96,14 +96,15 @@ def test_failure_isolation_and_secret_free_diagnostics(tmp_path, monkeypatch, fa
     assert key not in hook.status_path.read_text()
 
 
-def test_rng_identity_even_if_callback_draws_and_raises():
+def test_rng_identity_even_if_capture_draws_and_raises(tmp_path, monkeypatch):
     before = capture_rng()
-    def callback(event):
+    def callback(self, event):
         random.random()
         np.random.random()
         torch.rand(4)
         raise RuntimeError('injected')
-    logging.emit(callback, dict(event='evaluation'))
+    monkeypatch.setattr(logging.WandbLogger, '__call__', callback)
+    logging.emit(logging.WandbLogger(tmp_path), dict(event='evaluation'))
     after = capture_rng()
     assert before['python'] == after['python'] and before['numpy'] == after['numpy']
     assert torch.equal(before['torch'], after['torch'])
@@ -136,8 +137,9 @@ def assert_events(events, phases):
 def test_secret_hygiene_in_run_tree_and_repository(tmp_path, monkeypatch):
     key = '0123456789' * 4
     monkeypatch.setenv('WANDB_API_KEY', key)
-    events = []
-    logging.emit(events.append, dict(event='config', nested=dict(api_key=key), value=key, mapping={key: 'fixture'}))
+    hook = logging.WandbLogger(tmp_path / 'logs', sync=False)
+    logging.emit(hook, dict(event='config', nested=dict(api_key=key), value=key, mapping={key: 'fixture'}))
+    events = [json.loads(row) for row in hook._events]
     (tmp_path / 'events.json').write_text(json.dumps(events))
     assert events[0]['nested']['api_key'] == '[redacted]'
     root = Path(__file__).resolve().parents[1]
@@ -205,11 +207,9 @@ def check_invariance(monkeypatch, config, trace, run, tmp_path, phase, phases):
     assert logged == [float(loss) for loss in results[0][0]]
 
 
-def test_finish_reaches_callable_hook(monkeypatch):
-    monkeypatch.setattr(logging, 'git_revision', lambda: 'a' * 40)
-    events = []
-    logging.finish(events.append)
-    assert events == [dict(event='run_finish', git_sha='a' * 40)]
+def test_finish_rejects_generic_callable():
+    with pytest.raises(TypeError, match='WandbLogger'):
+        logging.finish([].append)
 
 
 def test_closed_config_schema():
@@ -245,13 +245,14 @@ def test_allocator_windows(tmp_path, monkeypatch):
     monkeypatch.setattr(torch.cuda, 'reset_peak_memory_stats', reset)
     monkeypatch.setattr(torch.cuda, 'synchronize', lambda device: None)
     monkeypatch.setattr(torch.cuda, 'max_memory_allocated', lambda device: allocator.peak)
-    events = []
+    hook = logging.WandbLogger(tmp_path, sync=False)
     model = torch.nn.Linear(1, 1)
     for peak in (1024, 768):
-        started = logging.window_start(events.append, 'cuda:0')
+        started = logging.window_start(hook, 'cuda:0')
         allocator.peak = max(allocator.peak, peak)
-        logging.step_event(events.append, model=model, loss=None, learning_rate=.01,
+        logging.step_event(hook, model=model, loss=None, learning_rate=.01,
                            samples=2, started=started, device='cuda:0')
+    events = [json.loads(row) for row in hook._events]
     assert allocator.resets == 2
     assert [e['gpu_peak_bytes'] for e in events] == [1024, 768]
 
@@ -346,8 +347,9 @@ def test_held_out_metric_values_match_checkpoint(tmp_path):
     from oxyformer.training.fit import fit_fold
     from oxyformer.training.checkpoint import load_checkpoint
     spec, split, manifest, config = make_case(tmp_path / 'attempt')
-    events = []
-    artifact = fit_fold(spec, split, manifest, replace(config, run_logger=events.append), 1103).checkpoint
+    hook = logging.WandbLogger(tmp_path / 'logs', sync=False)
+    artifact = fit_fold(spec, split, manifest, replace(config, run_logger=hook), 1103).checkpoint
+    events = [json.loads(row) for row in hook._events]
     results = load_checkpoint(artifact, artifact.identity)['controller']['results']
     evaluations = [e for e in events if e['event'] == 'evaluation' and e['phase'] == 'held_out']
     assert evaluations
@@ -422,12 +424,13 @@ def test_numeric_runtime_key_and_refresh_token_are_redacted(tmp_path, monkeypatc
 
 
 def test_replay_preserves_prior_capture_failure(tmp_path, monkeypatch):
-    class DroppingLogger(logging.WandbLogger):
-        def __call__(self, event):
-            if event.get('event') == 'train_step' and event.get('step') == 1:
-                raise OSError('one lost event')
-            return super().__call__(event)
-    hook = DroppingLogger(tmp_path, sync=False)
+    original = logging.WandbLogger.__call__
+    def dropping(self, event):
+        if event.get('event') == 'train_step' and event.get('step') == 1:
+            raise OSError('one lost event')
+        return original(self, event)
+    monkeypatch.setattr(logging.WandbLogger, '__call__', dropping)
+    hook = logging.WandbLogger(tmp_path, sync=False)
     logging.emit(hook, dict(event='run_start'))
     logging.emit(hook, dict(event='train_step', step=1))
     logging.emit(hook, dict(event='train_step', step=2))
@@ -463,8 +466,9 @@ def test_selection_evaluations_match_checkpoint(tmp_path):
     from oxyformer.training.fit import fit_fold
     from oxyformer.training.checkpoint import load_checkpoint
     spec, split, manifest, config = make_case(tmp_path / 'attempt')
-    events = []
-    artifact = fit_fold(spec, split, manifest, replace(config, run_logger=events.append), 1103).checkpoint
+    hook = logging.WandbLogger(tmp_path / 'logs', sync=False)
+    artifact = fit_fold(spec, split, manifest, replace(config, run_logger=hook), 1103).checkpoint
+    events = [json.loads(row) for row in hook._events]
     results = [r for r in load_checkpoint(artifact, artifact.identity)['controller']['results']
                if r['kind'] == 'origin']
     assert any(r['selection_metrics'] != r['metrics'] for r in results)
@@ -486,14 +490,11 @@ def test_slow_git_provenance_failure_cannot_consume_ssl_slice(tmp_path, monkeypa
     config = replace(config, slice_seconds=30., checkpoint_margin_seconds=1., max_batches=1)
     clock, queried = [0.], [False]
     monkeypatch.setattr(logging.time, 'monotonic', lambda: clock[0])
-    original = subprocess.check_output
-    def slow_git(command, *args, **kwargs):
-        if command == ['git', 'rev-parse', 'HEAD'] and kwargs.get('text'):
-            queried[0] = True
-            clock[0] += 35.
-            raise OSError('slow provenance filesystem')
-        return original(command, *args, **kwargs)
-    monkeypatch.setattr(subprocess, 'check_output', slow_git)
+    def slow_git():
+        queried[0] = True
+        clock[0] += 35.
+        return 'unavailable: injected slow provenance'
+    monkeypatch.setattr(logging, 'git_revision', slow_git)
     monkeypatch.setitem(sys.modules, 'wandb', FakeSDK())
     artifacts = []
     for hook in (None, logging.noop, logging.WandbLogger(tmp_path / 'logs', sync=False)):
@@ -553,3 +554,178 @@ def test_leading_zero_numeric_key_is_redacted(tmp_path, monkeypatch):
     logging.emit(hook, dict(event='run_start', mapping={int(key): 'fixture'}))
     logging.finish(hook)
     assert sdk.kwargs['config']['mapping'] == {'[redacted]': 'fixture'}
+
+
+@pytest.mark.parametrize('phase', ['fit', 'ssl'])
+def test_generic_hook_rejected_before_training(tmp_path, phase):
+    def callback(event):
+        pytest.fail('generic callback ran')
+    if phase == 'fit':
+        from test_fit import make_case
+        from oxyformer.training.fit import fit_fold
+        spec, split, data, config = make_case(tmp_path / 'attempt')
+        run = lambda: fit_fold(spec, split, data, replace(config, run_logger=callback), 1103)
+    else:
+        from test_pretrain import make_case
+        from oxyformer.training.pretrain import pretrain
+        data, split, config = make_case(tmp_path / 'attempt')
+        run = lambda: pretrain(data, split, replace(config, run_logger=callback), 1103)
+    with pytest.raises(TypeError, match='WandbLogger'):
+        run()
+    assert not Path(config.output_dir).exists()
+
+
+def test_decimal_string_credentials_redacted(tmp_path, monkeypatch):
+    key = '0' + '123456789' * 4 + '012'
+    monkeypatch.setenv('WANDB_API_KEY', key)
+    forms = [key, str(int(key)), '000' + str(int(key))]
+    sdk = FakeSDK()
+    monkeypatch.setitem(sys.modules, 'wandb', sdk)
+    hook = logging.WandbLogger(tmp_path, sync=False)
+    logging.emit(hook, dict(event='run_start', values=forms,
+                           mapping={value: value for value in forms}))
+    logging.finish(hook)
+    assert sdk.kwargs['config']['values'] == ['[redacted]'] * 3
+    assert sdk.kwargs['config']['mapping'] == {'[redacted]': '[redacted]'}
+    for path in tmp_path.rglob('*'):
+        if path.is_file():
+            assert all(form.encode() not in path.read_bytes() for form in forms)
+
+
+@pytest.mark.parametrize('phase', ['fit', 'ssl'])
+def test_entrypoint_refuses_unknown_config_before_copy(tmp_path, monkeypatch, phase):
+    monkeypatch.setitem(sys.modules, 'wandb', FakeSDK())
+    hook = logging.WandbLogger(tmp_path / 'logs', sync=False)
+    if phase == 'fit':
+        from test_fit import make_case
+        from oxyformer.training.fit import fit_fold
+        spec, split, data, config = make_case(tmp_path / 'attempt')
+        config = replace(config, run_logger=hook)
+        config.__dict__['new_runtime_key'] = 'do not export'
+        artifact = fit_fold(spec, split, data, config, 1103).checkpoint
+    else:
+        from test_pretrain import make_case
+        from oxyformer.training.pretrain import pretrain
+        data, split, config = make_case(tmp_path / 'attempt')
+        config = replace(config, run_logger=hook)
+        config.__dict__['new_runtime_key'] = 'do not export'
+        artifact = pretrain(data, split, config, 1103)
+    assert artifact.sha256 and not hook.logging_ok
+    events = [json.loads(row) for row in hook.spool.read_text().splitlines()[1:-1]]
+    assert any(e.get('status') == 'refused: undeclared config key new_runtime_key' for e in events)
+    assert any(e['event'] == 'run_start' and e.get('refused') is True for e in events)
+    assert not any('do not export' in str(e) for e in events)
+
+
+def test_git_timeout_kills_owned_process_group(tmp_path, monkeypatch):
+    import os
+    import time
+    executable = tmp_path / 'git'
+    marker = tmp_path / 'pid'
+    executable.write_text('#!/usr/bin/env python3\nimport os,time\n'
+                          f'open({str(marker)!r}, "w").write(str(os.getpid()))\n'
+                          'time.sleep(100)\n')
+    executable.chmod(0o700)
+    monkeypatch.setenv('PATH', str(tmp_path) + ':' + os.environ['PATH'])
+    monkeypatch.setattr(logging, 'GIT_TIMEOUT', .2, raising=False)
+    started = time.monotonic()
+    revision = logging.git_revision()
+    assert time.monotonic() - started < 3
+    assert revision.startswith('unavailable: ')
+    pid = int(marker.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+def test_ssl_skipped_batches_have_no_train_step(tmp_path, monkeypatch):
+    from test_pretrain import make_case
+    from oxyformer.training.pretrain import pretrain
+    import oxyformer.training.pretrain as module
+    view, split, config = make_case(tmp_path / 'attempt')
+    hook = logging.WandbLogger(tmp_path / 'logs', sync=False)
+    original = module.balanced_loss
+    calls = [0]
+    def skip_second(losses, families):
+        calls[0] += 1
+        return None if calls[0] == 2 else original(losses, families)
+    monkeypatch.setattr(module, 'balanced_loss', skip_second)
+    norms = []
+    original_step = torch.optim.AdamW.step
+    def record_update(optimizer, *args, **kwargs):
+        gradients = [p.grad.detach().double().norm() for group in optimizer.param_groups
+                     for p in group['params'] if p.grad is not None]
+        norms.append(torch.stack(gradients).norm().item())
+        return original_step(optimizer, *args, **kwargs)
+    monkeypatch.setattr(torch.optim.AdamW, 'step', record_update)
+    monkeypatch.setitem(sys.modules, 'wandb', FakeSDK())
+    pretrain(view, split, replace(config, run_logger=hook, max_batches=3), 1103)
+    events = [json.loads(row) for row in hook._events]
+    steps = [e for e in events if e['event'] == 'train_step']
+    skipped = [e for e in events if e['event'] == 'batch_skipped']
+    assert len(steps) == len(norms) == 2
+    assert len(skipped) == 1 and skipped[0]['processed_batches'] == 2
+    assert [e['processed_batches'] for e in steps] == [1, 3]
+    assert [e['gradient_norm'] for e in steps] == norms
+    assert all(e['train_loss'] is not None for e in steps)
+
+
+@pytest.mark.parametrize('action', ['_prepare_directory', '_seal', '_deliver', '_status'])
+@pytest.mark.parametrize('failure', ['raise', 'stall'])
+@pytest.mark.parametrize('phase', ['fit', 'ssl'])
+def test_finish_external_failures_preserve_checkpoint_and_result(tmp_path, monkeypatch, action, failure, phase):
+    import time
+    import oxyformer.training.checkpoint as checkpoint
+    monkeypatch.setattr(checkpoint.zipfile.time, 'localtime',
+                        lambda *args: (2026, 1, 1, 0, 0, 0, 3, 1, 0))
+    monkeypatch.setattr(logging, 'FINISH_TIMEOUT', .1)
+    if phase == 'fit':
+        from test_fit import make_case
+        from oxyformer.training.fit import fit_fold
+        spec, split, data, config = make_case(tmp_path / 'attempt')
+        run = lambda config: fit_fold(spec, split, data, config, 1103)
+    else:
+        from test_pretrain import make_case
+        from oxyformer.training.pretrain import pretrain
+        data, split, config = make_case(tmp_path / 'attempt')
+        run = lambda config: pretrain(data, split, config, 1103)
+    off = run(config)
+    off_json = off.to_dict()
+    shutil.rmtree(config.output_dir)
+    hook = logging.WandbLogger(tmp_path / 'logs', sync=False)
+    def unavailable(*args, **kwargs):
+        if failure == 'stall':
+            time.sleep(30)
+        raise OSError('external action unavailable')
+    monkeypatch.setattr(logging.WandbLogger, action, unavailable)
+    monkeypatch.setitem(sys.modules, 'wandb', FakeSDK())
+    on = run(replace(config, run_logger=hook))
+    assert on.to_dict() == off_json
+    assert not hook.logging_ok and hook.finished
+
+
+def test_start_steps_and_evaluations_are_memory_only(tmp_path, monkeypatch):
+    import builtins
+    import socket
+    from test_fit import make_case
+    _, split, data, config = make_case(tmp_path / 'attempt')
+    hook = logging.WandbLogger(tmp_path / 'logs', sync=False)
+    config = replace(config, run_logger=hook)
+    identity = SimpleNamespace(config_hash='a' * 64, to_dict=lambda: {})
+    model = torch.nn.Linear(1, 1)
+    model(torch.ones(1, 1)).sum().backward()
+    sdk = FakeSDK()
+    monkeypatch.setitem(sys.modules, 'wandb', sdk)
+    def forbidden(*args, **kwargs):
+        raise AssertionError('external action during capture')
+    with monkeypatch.context() as context:
+        for owner, name in [(builtins, 'open'), (Path, 'open'), (Path, 'mkdir'),
+                            (subprocess, 'Popen'), (subprocess, 'run'),
+                            (subprocess, 'check_output'), (socket, 'create_connection'),
+                            (sdk, 'init'), (sdk, 'log'), (sdk, 'finish')]:
+            context.setattr(owner, name, forbidden)
+        logging.start(hook, config, identity, data=data, split=split, seed=1103, phase='fold')
+        logging.step_event(hook, model=model, loss=torch.tensor(1.), learning_rate=.01,
+                           samples=1, started=0., device='cpu', step=0, epoch=0)
+        logging.emit(hook, dict(event='evaluation', metrics=[1.]))
+    assert hook.logging_ok and not hook.init_attempted and hook.spool is None
+    assert [json.loads(row)['event'] for row in hook._events] == ['run_start', 'train_step', 'evaluation']
