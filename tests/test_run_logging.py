@@ -7,6 +7,7 @@ import random
 import re
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -98,7 +99,7 @@ def test_default_offline_and_sync_is_separate_fact(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize('failure', ['init', 'log', 'finish', 'sync'])
-def test_failure_isolation_and_secret_free_diagnostics(tmp_path, monkeypatch, failure, capsys):
+def test_failure_isolation_and_secret_free_diagnostics(tmp_path, monkeypatch, failure, capfd):
     sdk = FakeSDK()
     key = '0123456789' * 4
     monkeypatch.setenv('WANDB_API_KEY', key)
@@ -119,7 +120,7 @@ def test_failure_isolation_and_secret_free_diagnostics(tmp_path, monkeypatch, fa
         assert hook.logging_ok is False
     if failure == 'finish':
         assert hook.logging_ok is False
-    captured = capsys.readouterr()
+    captured = capfd.readouterr()
     assert key not in captured.out + captured.err
     assert key not in hook.status_path.read_text()
 
@@ -202,7 +203,7 @@ def test_real_offline_sdk(tmp_path, monkeypatch):
 def check_invariance(monkeypatch, config, trace, run, tmp_path, phase, phases):
     import oxyformer.training.checkpoint as checkpoint
     monkeypatch.setattr(checkpoint.zipfile.time, 'localtime',
-                        lambda *args: (2026, 1, 1, 0, 0, 0, 3, 1, 0))
+                        lambda *args: time.struct_time((2026, 1, 1, 0, 0, 0, 3, 1, 0)))
     sdk = FakeSDK()
     monkeypatch.setitem(sys.modules, 'wandb', sdk)
     results = []
@@ -350,7 +351,7 @@ def test_slow_sdk_failure_cannot_consume_ssl_slice(tmp_path, monkeypatch):
     from oxyformer.training.pretrain import pretrain
     import oxyformer.training.checkpoint as checkpoint
     monkeypatch.setattr(checkpoint.zipfile.time, 'localtime',
-                        lambda *args: (2026, 1, 1, 0, 0, 0, 3, 1, 0))
+                        lambda *args: time.struct_time((2026, 1, 1, 0, 0, 0, 3, 1, 0)))
     view, split, config = make_case(tmp_path / 'attempt')
     config = replace(config, slice_seconds=30., checkpoint_margin_seconds=1., max_batches=1)
     clock = [0.]
@@ -411,7 +412,7 @@ def test_slow_spool_failure_cannot_consume_ssl_slice(tmp_path, monkeypatch):
     from oxyformer.training.pretrain import pretrain
     import oxyformer.training.checkpoint as checkpoint
     monkeypatch.setattr(checkpoint.zipfile.time, 'localtime',
-                        lambda *args: (2026, 1, 1, 0, 0, 0, 3, 1, 0))
+                        lambda *args: time.struct_time((2026, 1, 1, 0, 0, 0, 3, 1, 0)))
     view, split, config = make_case(tmp_path / 'attempt')
     config = replace(config, slice_seconds=30., checkpoint_margin_seconds=1., max_batches=1)
     clock, failed = [0.], shared_list([False])
@@ -513,7 +514,7 @@ def test_slow_git_provenance_failure_cannot_consume_ssl_slice(tmp_path, monkeypa
     from oxyformer.training.pretrain import pretrain
     import oxyformer.training.checkpoint as checkpoint
     monkeypatch.setattr(checkpoint.zipfile.time, 'localtime',
-                        lambda *args: (2026, 1, 1, 0, 0, 0, 3, 1, 0))
+                        lambda *args: time.struct_time((2026, 1, 1, 0, 0, 0, 3, 1, 0)))
     view, split, config = make_case(tmp_path / 'attempt')
     config = replace(config, slice_seconds=30., checkpoint_margin_seconds=1., max_batches=1)
     clock, queried = [0.], shared_list([False])
@@ -704,7 +705,7 @@ def test_finish_external_failures_preserve_checkpoint_and_result(tmp_path, monke
     import time
     import oxyformer.training.checkpoint as checkpoint
     monkeypatch.setattr(checkpoint.zipfile.time, 'localtime',
-                        lambda *args: (2026, 1, 1, 0, 0, 0, 3, 1, 0))
+                        lambda *args: time.struct_time((2026, 1, 1, 0, 0, 0, 3, 1, 0)))
     monkeypatch.setattr(logging, 'FINISH_TIMEOUT', .1)
     if phase == 'fit':
         from test_fit import make_case
@@ -842,7 +843,9 @@ def test_finish_does_not_access_parent_rng(tmp_path, monkeypatch):
     hook = logging.WandbLogger(tmp_path, sync=False)
     logging.emit(hook, dict(event='run_start'))
     original = logging.capture_rng
+    accesses = shared_list()
     def stalled(*args, **kwargs):
+        accesses.append(True)
         time.sleep(.4)
         return original(*args, **kwargs)
     monkeypatch.setattr(logging, 'capture_rng', stalled)
@@ -850,6 +853,7 @@ def test_finish_does_not_access_parent_rng(tmp_path, monkeypatch):
     started = time.monotonic()
     logging.finish(hook)
     assert time.monotonic() - started < .5
+    assert not accesses
 
 
 @pytest.mark.parametrize('form', ['exact', 'integer', 'zeros'])
