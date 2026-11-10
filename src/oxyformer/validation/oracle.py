@@ -1,4 +1,4 @@
-"""Evaluator-only finite-mixture nuisances; no regression or training imports."""
+"""Finite-mixture oracle; no regression fitting."""
 from dataclasses import dataclass
 from fractions import Fraction
 
@@ -8,10 +8,9 @@ from scipy.special import logsumexp
 from oxyformer.provenance import require
 from oxyformer.validation.generators import _groups
 from oxyformer.validation.scm import (
-    SCMConfig, adjustment_key, exact, wide, structural_mean,
+    SCMConfig, LatentState, adjustment_key, exact, wide, structural_mean,
     observation_log_probability,
 )
-
 
 @dataclass(frozen=True)
 class OracleNuisances:
@@ -21,36 +20,29 @@ class OracleNuisances:
     r_a: tuple
     r_d: tuple
 
-
 class ObservedLawOracle:
-    """Origin-weighted selected law, conditioning on approved adjustment only.
-
-    Terms marginalize unmeasured causes, error, and source-frame rows sharing X.
-    The selection normalizer cancels in the pushforward density ratio. Coarse
-    exponential kernels cancel exactly before numeric logarithms are evaluated.
-    """
-    def __init__(self, observations, truth, policy):
-        self.observations, self.policy = observations, policy
-        self.frame = observations.frame
+    """Origin-weighted selected law given approved adjustment."""
+    def __init__(self, observed, truth, policy):
+        self.observed, self.policy = observed, policy
+        self.frame = observed.frame
         self.config = SCMConfig.from_json(truth.generator_configuration)
-        require(truth.observation_hash == observations.content_hash, "oracle observation hash mismatch")
-        require(truth.frame_hash == self.frame.content_hash, "oracle frame hash mismatch")
-        require(truth.config_hash == self.config.content_hash, "oracle config hash mismatch")
-        require(truth.policy_id == policy.policy_id, "oracle policy mismatch")
-        require(truth.status == 'integrated', "oracle requires integrated continuous truth")
-        fixed = {oid: a for oid, a, key in zip(self.frame.original_ids, observations.a, self.frame.support_keys)
+        require(truth.observation_hash == observed.content_hash, "observation hash mismatch")
+        require(truth.frame_hash == self.frame.content_hash, "frame hash mismatch")
+        require(truth.config_hash == self.config.content_hash, "config hash mismatch")
+        require(truth.policy_id == policy.policy_id, "policy mismatch")
+        require(truth.status == 'integrated', "integrated truth required")
+        fixed = {oid: a for oid, a, key in zip(self.frame.original_ids, observed.a, self.frame.support_keys)
                  if not dict(policy.components_by_key)[key]}
         self.config.validate_policy(policy, self.frame, fixed_exposures=fixed)
         self.groups = _groups(self.frame, self.config, policy)
         self.rows = dict(zip(self.frame.original_ids, range(len(self.frame.original_ids))))
 
     def _terms(self, row):
-        measured = dict(zip(self.observations.measured_columns, self.observations.measured_x[row]))
-        from oxyformer.validation.scm import LatentState
+        measured = dict(zip(self.observed.measured_columns, self.observed.measured_x[row]))
         state = LatentState(local=measured.get('local_confounder', 0.),
                             regional=measured.get('regional_confounder', 0.))
         key = adjustment_key(self.frame, row, state, self.config)
-        require(key in self.groups, 'unit has no positive-mass selected adjustment stratum')
+        require(key in self.groups, 'no selected adjustment stratum')
         return self.groups[key]
 
     def _kernels(self, point, terms):
@@ -63,7 +55,6 @@ class ObservedLawOracle:
         return entries
 
     def evaluate(self, original_id, exposure):
-        """Return Q(exposure,X), g_shift(exposure|X)/g(exposure|X)."""
         row = self.rows[original_id]
         terms = self._terms(row)
         point = exact(exposure)
@@ -73,7 +64,7 @@ class ObservedLawOracle:
         def moves(a):
             return delta != 0 and any(exact(lo) <= a <= exact(hi)-delta for lo, hi in components)
         factual = self._kernels(point, terms)
-        require(bool(factual), 'oracle evaluation outside conditional support')
+        require(bool(factual), 'outside conditional support')
         incoming = self._kernels(point-delta, terms) if moves(point-delta) else []
         reference = max(k for _, k in factual+incoming)
         def logs(entries, at):
@@ -97,7 +88,7 @@ class ObservedLawOracle:
         values = []
         for oid in original_ids:
             row = self.rows[oid]
-            a = self.observations.a[row]
+            a = self.observed.a[row]
             moved = self.policy.shift_mask([a], [self.frame.support_keys[row]])[0]
             d = exact(a)+(exact(self.policy.delta_mmhg) if moved else Fraction(0))
             qa, ra = self.evaluate(oid, a)
