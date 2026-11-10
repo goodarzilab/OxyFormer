@@ -1008,3 +1008,43 @@ def test_ssl_budget_request_observes_each_existing_cooperative_check(tmp_path):
     clock[0] = timing.deadline - timing.margin_seconds
     assert request.requested
     assert timing.margin_seconds >= 2 * (clock[0] - 200.) + 30.
+
+
+def test_logging_bitwise_invariance(tmp_path, monkeypatch):
+    import shutil
+    import sys
+    from oxyformer.training import run_logging
+    from test_run_logging import FakeSDK, assert_events
+    # ZIP member dates are wall-clock metadata, independent of numerics.
+    import oxyformer.training.checkpoint as checkpoint_module
+    monkeypatch.setattr(checkpoint_module.zipfile.time, 'localtime',
+                        lambda *args: (2026, 1, 1, 0, 0, 0, 3, 1, 0))
+    sdk = FakeSDK()
+    monkeypatch.setitem(sys.modules, 'wandb', sdk)
+    spec, split, manifest, config = make_case(tmp_path / 'attempt')
+    original = fitting._backward_and_clip
+    trace = []
+    def observe(loss, *args, **kwargs):
+        trace.append(loss.detach().clone())
+        return original(loss, *args, **kwargs)
+    monkeypatch.setattr(fitting, '_backward_and_clip', observe)
+    results = []
+    deterministic = torch.are_deterministic_algorithms_enabled()
+    torch.use_deterministic_algorithms(True)
+    try:
+        for hook in (None, run_logging.noop, run_logging.WandbLogger(tmp_path / 'logs', sync=False)):
+            trace.clear()
+            artifact = fit_fold(spec, split, manifest, replace(config, run_logger=hook), 1103)
+            results.append((list(trace), artifact.checkpoint.sha256))
+            shutil.rmtree(config.output_dir)
+    finally:
+        torch.use_deterministic_algorithms(deterministic)
+    for trace, digest in results[1:]:
+        assert digest == results[0][1]
+        assert len(trace) == len(results[0][0])
+        assert all(torch.equal(x, y) for x, y in zip(trace, results[0][0]))
+    assert config.run_logger is None
+    assert_events(sdk.events, ('ssl', 'nuisance'))
+    logged = [e['train_loss'] for e in sdk.events
+              if e['event'] == 'train_step' and e['phase'] == 'nuisance']
+    assert logged == [float(loss) for loss in results[0][0]]
