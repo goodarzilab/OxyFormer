@@ -1531,3 +1531,31 @@ def test_owner_campaign_requires_one_cell(owner_cell):
     cells['another'] = deepcopy(cells['example_cell'])
     with pytest.raises(ContractError, match='exactly one cell'):
         campaign.validate_campaign(declaration, approvals)
+
+
+@pytest.mark.parametrize('target', ['declaration', 'approvals', 'both'])
+def test_owner_campaign_accepts_container_subclasses(owner_cell, target):
+    from collections import OrderedDict
+
+    class Text(str):
+        pass
+
+    class Sequence(list):
+        pass
+
+    def wrap(value):
+        if isinstance(value, dict):
+            return OrderedDict((Text(key), wrap(item)) for key, item in value.items())
+        if isinstance(value, list):
+            return Sequence(wrap(item) for item in value)
+        if isinstance(value, str):
+            return Text(value)
+        return value
+
+    declaration, approvals = owner_cell
+    expected = deepcopy(declaration)
+    if target in ('declaration', 'both'):
+        declaration = wrap(declaration)
+    if target in ('approvals', 'both'):
+        approvals = wrap(approvals)
+    assert campaign.validate_campaign(declaration, approvals) == expected
