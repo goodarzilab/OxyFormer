@@ -1,4 +1,3 @@
-"""Independent closed forms for finite-mixture oracle nuisances."""
 import ast
 from dataclasses import replace
 from pathlib import Path
@@ -12,10 +11,9 @@ from oxyformer.validation.generators import generate_suite_a
 from oxyformer.validation.oracle import ObservedLawOracle
 from oxyformer.validation.scm import NUMERIC_DOMAIN
 
-
 @pytest.mark.parametrize('delta', [0., .02, 2., 200.])
 @pytest.mark.parametrize('bounds', [(-10010., -10000.), (0., 10.), (10000., 10010.)])
-def test_uniform_closed_form_and_domain_edges(delta, bounds):
+def test_uniform_edges(delta, bounds):
     p = policy((bounds,), delta)
     c = config(beta=.001, noise_sd=0.)
     f = replace(frame(2), weights=(NUMERIC_DOMAIN['weight'][0],)*2)
@@ -30,9 +28,8 @@ def test_uniform_closed_form_and_domain_edges(delta, bounds):
         assert float(q) == pytest.approx(50+.001*a, abs=1e-9)
         assert float(r) == pytest.approx(expected, abs=1e-9)
 
-
 @pytest.mark.parametrize('measured', [False, True])
-def test_mixture_error_selection_closed_form(measured):
+def test_selected_mixture(measured):
     c = config(local_confounding='measured' if measured else 'omitted', exposure_error=.4,
                selected_outcome=True, migration=.2)
     p = policy()
@@ -59,15 +56,13 @@ def test_mixture_error_selection_closed_form(measured):
         assert float(q) == pytest.approx(num/den, abs=1e-9)
         assert float(r) == pytest.approx(expected_ratio, abs=1e-9)
 
-
-def test_oracle_has_no_fitting_imports():
+def test_no_fitting_imports():
     tree = ast.parse(Path('src/oxyformer/validation/oracle.py').read_text())
     imports = [n.module for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
     assert not any(any(word in name for word in ('training', 'sklearn', 'targeting', 'models')) for name in imports)
     assert not any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == 'fit' for n in ast.walk(tree))
 
-
-def test_binding_refuses_wrong_saved_truth():
+def test_truth_binding():
     from oxyformer.provenance import ContractError
     sample = generate_suite_a(frame(2), config(), policy())
     with pytest.raises(ContractError, match='observation hash'):
