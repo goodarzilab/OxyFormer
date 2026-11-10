@@ -245,8 +245,11 @@ def main():
     report = reconcile(args.manifest, args.report)
     sources = [args.manifest, args.report] + [
         Path(c[k]['path']) for c in report['chains'] for k in ('budget', 'archive')]
-    for name in ('reconciliation.json', 'reconciliation.md'):
-        dest = args.out / name
+    destinations = [args.out / name for name in ('reconciliation.json', 'reconciliation.md')]
+    a, b = destinations
+    if a.resolve() == b.resolve() or (a.exists() and b.exists() and a.samefile(b)):
+        raise ValueError('output destinations alias')
+    for dest in destinations:
         if dest.exists() and any(dest.samefile(src) for src in sources):
             raise ValueError('output collides with input')
     args.out.mkdir(parents=True, exist_ok=True)
