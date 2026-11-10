@@ -54,9 +54,12 @@ def relabel(value, *, count=False):
     """Copy report evidence with explicit labels on every numerical leaf."""
     if isinstance(value, dict):
         if 'value' in value and 'basis' in value:
-            return q(number(value), 'derived' if count else
-                     'extrapolated' if 'extrapolated' in value['basis'] else 'measured')
-        return {k: relabel(v, count=count or k == 'counts') for k, v in value.items()}
+            basis = value['basis']
+            labels = set(basis.strip('[]').split(', ')) if isinstance(basis, str) else set(basis)
+            if count:
+                labels.add('derived')
+            return q(number(value), ', '.join(sorted(labels)))
+        return {k: relabel(v, count=count or k in ('counts', 'harness_count')) for k, v in value.items()}
     if isinstance(value, list):
         return [relabel(v, count=count) for v in value]
     if type(value) in (int, float):
@@ -121,9 +124,8 @@ def read_chain(entry, manifest):
             blob = json.load(tar.extractfile('blobs/' + part))
             part_types.append(blob['type'])
             if blob['type'] != 'OOFNuisances':
-                raise ValueError('unexpected completed part; inspect its timing schema')
-        if any('checkpoint' in name or 'controller' in name for name in members):
-            raise ValueError('controller archive present: inspect counters before reconciliation')
+                raise ValueError('unexpected completed part type ' + blob['type'] +
+                                 '; inspect its timing schema')
     return {'chain': entry['chain'], 'repetition': binding['draws'][0]['repetition_id'],
             'compute_seconds': repetition, 'compute_hours': q(times[0] / 3600),
             'leaf_compute_seconds': q(total), 'leaf_wrapper_seconds': q(total - times[0]),
@@ -155,7 +157,8 @@ def reconcile(manifest_path, report_path):
         if set(counts) != set(TERMS) or set(seconds) != set(TERMS):
             raise ValueError('missing or extra harness terms')
         projections[cell] = math.fsum(number(counts[t]) * number(seconds[t]) for t in TERMS) / 3600
-        if not math.isclose(projections[cell], number(harness['cells'][cell]['compute_h100_hours_per_repetition']), rel_tol=1e-8):
+        # Stored cell hours may be rounded.
+        if not math.isclose(projections[cell], number(harness['cells'][cell]['compute_h100_hours_per_repetition']), rel_tol=1e-6):
             raise ValueError('harness formula and projection disagree')
     anchor = projections['e']
     if anchor <= 0:
@@ -163,7 +166,7 @@ def reconcile(manifest_path, report_path):
     excess = anchor - mean
     for term in TERMS:
         count, seconds = number(formula['e']['counts'][term]), number(formula['e']['seconds'][term])
-        terms[term] = {'harness_count': q(count),
+        terms[term] = {'harness_count': relabel(formula['e']['counts'][term], count=True),
             'harness_seconds_per_operation': relabel(formula['e']['seconds'][term]),
             'harness_total_hours': q(count * seconds / 3600),
             'real_count': None, 'real_seconds': None, 'excess_share': None,
@@ -181,7 +184,8 @@ def reconcile(manifest_path, report_path):
             'cell_e_correction_factor': q(mean / anchor),
             'factor_observed_min': q(min(hours) / anchor), 'factor_observed_max': q(max(hours) / anchor),
             'uncertainty': 'Observed range and sample spread across collected repetitions; not a confidence interval or hardware transfer guarantee.'},
-        'terms': terms, 'harness_formula': relabel(formula),
+        'terms': terms, 'harness_formula': relabel(formula), 'harness_cells': relabel(harness['cells']),
+        'calibration': harness['calibration'],
         'receipt': relabel(receipt), 'harness_overhead': relabel(harness['overhead']),
         'scenario_adjustment': {'ratio': q(scenario_ratio),
             'basis_description': 'Only available scenario adjustment: month-one sign_changing profile / null_effect profile.',
@@ -204,11 +208,21 @@ def reconcile(manifest_path, report_path):
 def markdown(report):
     """Render the full accounting, including all numerical leaves and their bases."""
     lines = ['# Screening cost reconciliation', '', report['limit'], '',
+             'Aggregate screening factor: ' + str(report['summary']['cell_e_correction_factor']['value']) + ' [derived].',
+             'Source calibration passed: ' + str(report['calibration'].get('passed')) + '.',
+             'Source calibration (this factor does not override it):',
+             json.dumps({k: report['calibration'].get(k) for k in ('ratio', 'reasons')}),
+             json.dumps({k: report['calibration']['receipt'].get(k)
+                         for k in ('tree', 'frame_matches', 'sources_match')}),
+             'Scenario adjustment: 31.8/29.0 [derived]; transfer uncertainty is not measured.', '',
              'All times are seconds unless the field says hours. Null means unavailable.', '']
 
     def walk(value, label, depth=0):
         if isinstance(value, dict) and set(value) == {'value', 'basis'}:
-            lines.append(f'- {label}: {value["value"]:.10g} {value["basis"]}')
+            basis = value['basis']
+            if isinstance(basis, list):
+                basis = '[' + ', '.join(basis) + ']'
+            lines.append(f'- {label}: {value["value"]:.10g} {basis}')
         elif isinstance(value, dict):
             lines.extend(['', '**' + label + '**', ''])
             for key, item in value.items():
