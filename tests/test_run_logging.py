@@ -1,6 +1,7 @@
 """Offline synthetic telemetry tests; never call the W&B service."""
+from dataclasses import replace
 import json
-import os
+import shutil
 from pathlib import Path
 import random
 import re
@@ -153,3 +154,32 @@ def test_real_offline_sdk(tmp_path, monkeypatch):
     for path in tmp_path.rglob('*'):
         if path.is_file():
             assert key.encode() not in path.read_bytes(), path
+
+
+def check_invariance(monkeypatch, config, trace, run, tmp_path, phase, phases):
+    import oxyformer.training.checkpoint as checkpoint
+    # Paths and ZIP dates affect archive bytes independently of numerics.
+    monkeypatch.setattr(checkpoint.zipfile.time, 'localtime',
+                        lambda *args: (2026, 1, 1, 0, 0, 0, 3, 1, 0))
+    sdk = FakeSDK()
+    monkeypatch.setitem(sys.modules, 'wandb', sdk)
+    results = []
+    deterministic = torch.are_deterministic_algorithms_enabled()
+    torch.use_deterministic_algorithms(True)
+    try:
+        for hook in (None, logging.noop, logging.WandbLogger(tmp_path / 'logs', sync=False)):
+            trace.clear()
+            artifact = run(replace(config, run_logger=hook))
+            results.append((list(trace), artifact.sha256))
+            shutil.rmtree(config.output_dir)
+    finally:
+        torch.use_deterministic_algorithms(deterministic)
+    for losses, digest in results[1:]:
+        assert digest == results[0][1]
+        assert len(losses) == len(results[0][0])
+        assert all(torch.equal(x, y) for x, y in zip(losses, results[0][0]))
+    assert config.run_logger is None
+    assert_events(sdk.events, phases)
+    logged = [e['train_loss'] for e in sdk.events if e['event'] == 'train_step'
+              and e['phase'] == phase and e['train_loss'] is not None]
+    assert logged == [float(loss) for loss in results[0][0]]
