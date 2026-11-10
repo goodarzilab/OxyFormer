@@ -71,12 +71,13 @@ def step_event(hook, *, model, loss, learning_rate, samples, started, device, **
 
 
 def run_config(config, identity, *, data, split, seed):
-    excluded = {'run_logger', 'data', 'deadline_timing', 'stop_request', 'predecessor'}
+    excluded = {'run_logger', 'data', 'stop_request', 'predecessor'}
     values = {}
     for field in fields(config):
         if field.name in excluded:
             continue
         value = getattr(config, field.name)
+        value = value.report() if field.name == 'deadline_timing' and value is not None else value
         values[field.name] = value.to_dict() if hasattr(value, 'to_dict') else value
     predecessor = config.predecessor
     predecessor = getattr(predecessor, 'checkpoint', predecessor)
@@ -112,8 +113,7 @@ def start(hook, config, identity, *, data, split, seed, phase):
 
 
 def finish(hook, device='cpu'):
-    if isinstance(hook, WandbLogger):
-        emit(hook, {'event': 'run_finish'}, device)
+    emit(hook, {'event': 'run_finish'}, device)
 
 
 class WandbLogger:
