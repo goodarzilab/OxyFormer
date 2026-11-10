@@ -107,3 +107,18 @@ def test_saved_fixed_training_row(tmp_path):
     n = o.nuisances(f.original_ids)
     assert n.original_ids == ('o0', 'o1')
     assert o.excluded_fixed_exposure_rows == 1
+
+def test_disjoint_resolved_support():
+    from oxyformer.provenance import ContractError
+    bounds = ((0., 4.), (6., 10.))
+    p = policy(bounds)
+    sample = generate_suite_a(frame(2), config(support_gaps=True, noise_sd=0.), p)
+    o = ObservedLawOracle(sample.observations, sample.structural_causal_truth, p)
+    for a in (0., 1., 2., 3., 4., 6., 7., 8., 9., 10.):
+        incoming = sum(lo <= a-2 <= hi-2 for lo, hi in bounds)
+        moves = any(lo <= a <= hi-2 for lo, hi in bounds)
+        q, r = o.evaluate('o0', a)
+        assert float(q) == pytest.approx(50+a, abs=1e-9)
+        assert float(r) == pytest.approx(incoming+int(not moves), abs=1e-9)
+    with pytest.raises(ContractError, match='outside support'):
+        o.evaluate('o0', 5.)

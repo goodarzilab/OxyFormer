@@ -116,6 +116,7 @@ def load(path):
         members = archive.getmembers()
         require(len({m.name for m in members}) == len(members) and all(m.isfile() for m in members), 'invalid tar members')
         header = json.load(archive.extractfile('coverage.json'))
+        require(bool(header['states']), 'empty states')
         def blob(key):
             require(len(key) == 64 and all(c in '0123456789abcdef' for c in key), 'invalid blob key')
             value = archive.extractfile('blobs/'+key).read()
@@ -129,8 +130,12 @@ def load(path):
             if hashed == expected:
                 source = Path(name)
                 # Only rebase paths explicitly anchored inside the saved attempt.
-                if not source.exists() and source.is_relative_to(request.output_dir):
-                    source = path/source.relative_to(request.output_dir)
+                resolved = source.resolve()
+                anchor = Path(request.output_dir).resolve()
+                if not source.exists() and resolved.is_relative_to(anchor):
+                    target = (path/resolved.relative_to(anchor)).resolve()
+                    require(target.is_relative_to(path.resolve()), 'external dependency: '+str(source))
+                    source = target
                 raw = source.read_bytes()
                 require(sha256(raw).hexdigest() == expected, 'dependency digest mismatch')
                 return cls.from_json(raw.decode()) if cls else json.loads(raw)

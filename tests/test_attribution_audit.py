@@ -44,23 +44,24 @@ def test_rules(case, expected):
     assert result['truth_flagged'] is False
     assert audit.decision([.02]*4, fitted*4 if len(fitted)==1 else fitted, [.02]*4)['truth_flagged']
 
-def saved_fixture(root):
+def saved_fixture(root, seeds=(1103,)):
     base, frame = synthetic_endpoint(root)
     sample = generate_suite_a(frame, config('sign_changing'), base.policy, seed=7)
     endpoint = bind_observations(base, sample.observations)
-    split = replace(endpoint.outer, seed_ids=(1103,))
-    ids = split.original_ids
+    split = replace(endpoint.outer, seed_ids=seeds)
+    ids = split.original_ids*len(seeds)
     weights = dict(zip(frame.original_ids, frame.weights))
-    lineage = replace(split.lineage, unit_ids=ids, split_hash=split.content_hash,
+    lineage = replace(split.lineage, unit_ids=split.original_ids, split_hash=split.content_hash,
         parent_hashes=(endpoint.data.manifest.content_hash,))
-    n = OOFNuisances(spec=split.spec, original_ids=ids, fold_ids=split.fold_ids, seed_ids=(1103,)*len(ids),
+    n = OOFNuisances(spec=split.spec, original_ids=ids, fold_ids=split.fold_ids*len(seeds),
+        seed_ids=tuple(seed for seed in seeds for _ in split.original_ids),
         mu_a=(50.,)*len(ids), mu_d=(50.1,)*len(ids), r_a=(1.,)*len(ids), r_d=(1.,)*len(ids),
         origin_weights=tuple(weights[i] for i in ids), lineage=lineage)
     parts = []
     for fold in range(5):
         selected = [j for j in range(len(ids)) if n.fold_ids[j] == fold]
         values = {name: tuple(getattr(n, name)[j] for j in selected) for name in audit.FIELDS}
-        parts.append(replace(n, lineage=replace(lineage, unit_ids=values['original_ids']), **values))
+        parts.append(replace(n, lineage=replace(lineage, unit_ids=tuple(dict.fromkeys(values['original_ids']))), **values))
     oracle = ObservedLawOracle(sample.observations, sample.structural_causal_truth, base.policy)
     recipe = smoke_recipe(base, frame)
     with patch.object(audit, 'cv_tmle', wraps=cv_tmle) as calls:
@@ -151,3 +152,39 @@ def test_missing_dependency_path(tmp_path):
     assert audit.main([str(tmp_path/'saved'), '--output-dir', str(tmp_path/'out')]) == 1
     report = json.loads((tmp_path/'out/attribution_audit.json').read_text())
     assert str(missing) in report['skipped'][0]['status']
+
+def test_complete_multiseed_archive(tmp_path):
+    expected, _ = saved_fixture(tmp_path/'saved', seeds=(1103, 1104))
+    assert audit.audit(tmp_path/'saved')[0]['cells'] == expected
+
+@pytest.mark.parametrize('style', ['parent', 'symlink'])
+def test_external_parent_path_is_not_rebased(tmp_path, style):
+    saved_fixture(tmp_path/'old/saved')
+    request_path = tmp_path/'old/saved/_execution/request.json'
+    request = StageRequest.from_json(request_path.read_text())
+    external = tmp_path/'old/shared'
+    external.mkdir()
+    (tmp_path/'old/saved/endpoint.json').rename(external/'endpoint.json')
+    pointer = tmp_path/'old/saved/../shared/endpoint.json'
+    if style == 'symlink':
+        pointer = tmp_path/'old/saved/link.json'
+        pointer.symlink_to('../shared/endpoint.json')
+    request_path.write_text(replace(request, dependency_paths=(
+        str(pointer), request.dependency_paths[1])).to_json())
+    (tmp_path/'old').rename(tmp_path/'moved')
+    from oxyformer.provenance import ContractError
+    with pytest.raises((FileNotFoundError, ContractError), match='old/saved'):
+        audit.audit(tmp_path/'moved/saved')
+
+def test_empty_states_is_unreadable(tmp_path):
+    saved_fixture(tmp_path/'saved')
+    original = json.load
+    def empty(stream, *args, **kwargs):
+        value = original(stream, *args, **kwargs)
+        if isinstance(value, dict) and 'states' in value:
+            value['states'] = []
+        return value
+    with patch.object(json, 'load', empty):
+        assert audit.main([str(tmp_path/'saved'), '--output-dir', str(tmp_path/'out')]) == 1
+    result = json.loads((tmp_path/'out/attribution_audit.json').read_text())
+    assert 'empty states' in result['skipped'][0]['status']
