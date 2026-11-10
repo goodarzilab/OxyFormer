@@ -173,8 +173,8 @@ def reconcile(manifest_path, report_path):
             'correction_factor': None, 'reason': LIMIT}
     receipt = harness['calibration']['receipt']
     scenario_ratio = 31.8 / 29.0
-    return {'manifest': identity(manifest_path), 'harness': identity(report_path),
-        'tree': TREE, 'chains': chains, 'granularity': 'leaf and repetition', 'limit': LIMIT,
+    return {'manifest': identity(manifest_path), 'harness': {**identity(report_path), 'tree': REPORT_TREE},
+        'chain_tree': TREE, 'chains': chains, 'granularity': 'leaf and repetition', 'limit': LIMIT,
         'summary': {'chain_count': q(len(chains)), 'mean_compute_hours': q(mean),
             'min_compute_hours': q(min(hours)), 'max_compute_hours': q(max(hours)),
             'sample_sd_hours': q(statistics.stdev(hours)) if len(hours) > 1 else None,
@@ -243,6 +243,12 @@ def main():
     parser.add_argument('--out', required=True, type=Path)
     args = parser.parse_args()
     report = reconcile(args.manifest, args.report)
+    sources = [args.manifest, args.report] + [
+        Path(c[k]['path']) for c in report['chains'] for k in ('budget', 'archive')]
+    for name in ('reconciliation.json', 'reconciliation.md'):
+        dest = args.out / name
+        if dest.exists() and any(dest.samefile(src) for src in sources):
+            raise ValueError('output collides with input')
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / 'reconciliation.json').write_text(json.dumps(report, indent=2, allow_nan=False) + '\n')
     (args.out / 'reconciliation.md').write_text(markdown(report))
