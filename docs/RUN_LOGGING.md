@@ -5,11 +5,17 @@ Use a fresh `run_logging.WandbLogger(directory)` per attempt; nested SSL shares
 it. W&B is imported lazily. Provision W&B in the separate `oxyformer-p3`
 clone from conda-forge; never modify the pinned training environment.
 
-The hook always writes offline, including when `WANDB_MODE=online`. Failed
-initialization is attempted once. Finish/sync follow checkpoints (120-second
-sync timeout). `logging-status.json` records `logging_ok` / `sync_ok` as separate
+The hook spools redacted JSONL events locally during training. SDK initialization
+and replay into an offline W&B run happen only after checkpoint creation,
+including when `WANDB_MODE=online`. Failed initialization is attempted once;
+it cannot consume the fitting time slice. Finish/sync follow checkpoints
+(120-second sync timeout). `logging-status.json` records `logging_ok` / `sync_ok` as separate
 completeness facts. Retain offline runs and retry with
-`python -m wandb sync /path/to/offline-run` from the clone.
+`python -m wandb sync /path/to/offline-run` from the clone. If SDK initialization
+failed, recover the retained JSONL file with
+`WandbLogger.replay("/path/to/events-....jsonl")` from the clone, without retraining.
+A null `logging_ok` means SDK processing is pending; true/false records its final
+completeness independently of the scientific checkpoint.
 Credentials come only from runtime `WANDB_API_KEY`; never dump the environment.
 Events redact secrets. Service uploads remain unverified.
 

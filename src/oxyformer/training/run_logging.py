@@ -10,6 +10,7 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 
 import torch
@@ -92,7 +93,7 @@ def stop_state(request, *, reason=None):
 
 def project_config(config):
     schema = CONFIG_SCHEMA[type(config).__name__]
-    names = {f.name for f in fields(config)}
+    names = {f.name for f in fields(config)} | set(getattr(config, '__dict__', {}))
     if names != schema.keys():
         raise ValueError('unclassified configuration keys: ' + str(names ^ schema.keys()))
     values = {}
@@ -166,6 +167,7 @@ class WandbLogger:
         self.sync_ok = None
         self.finished = False
         self.init_attempted = False
+        self.spool = None
 
     def __call__(self, event):
         if self.finished:
@@ -173,44 +175,75 @@ class WandbLogger:
         if event['event'] == 'run_finish':
             self._finish()
             return
-        if self.run is None:
-            if self.init_attempted:
-                return
-            self.init_attempted = True
-            import wandb
-            self.directory.mkdir(parents=True, exist_ok=True)
+        self.directory.mkdir(parents=True, exist_ok=True)
+        if self.spool is None:
+            fd, name = tempfile.mkstemp(prefix='events-', suffix='.jsonl', dir=self.directory)
+            os.close(fd)
+            self.spool = Path(name)
+        with self.spool.open('a') as stream:
+            stream.write(json.dumps(sanitize(event)) + '\n')
+
+    def _deliver(self):
+        if self.init_attempted:
+            return
+        self.init_attempted = True
+        import wandb
+        with self.spool.open() as stream:
+            first = json.loads(next(stream))
             self.run = wandb.init(entity='goodarzilab', project='oxyformer-v2',
                 mode='offline', dir=str(self.directory),
-                config=event if event['event'] == 'run_start' else None,
+                config=first if first['event'] == 'run_start' else None,
                 settings=wandb.Settings(console='off', disable_git=True,
                                         disable_code=True, disable_job_creation=True))
-        self.run.log(event)
+            self.run.log(first)
+            for line in stream:
+                self.run.log(json.loads(line))
+
+    def _status(self, *, pending=False):
+        try:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            (self.directory / 'logging-status.json').write_text(json.dumps(
+                dict(logging_ok=None if pending else self.logging_ok, sync_ok=self.sync_ok)))
+        except OSError:
+            self.logging_ok = False
 
     def _finish(self):
+        # Both callers have persisted their checkpoint before reaching this path.
+        self._status(pending=True)
+        try:
+            if self.spool is None:
+                self.logging_ok = False
+            else:
+                self._deliver()
+        except Exception:
+            self.logging_ok = False
         closed = False
         try:
-            if self.run is None:
-                self.logging_ok = False
-                return
-            self.run.finish()
-            closed = True
-            if self.sync:
-                if not os.environ.get('WANDB_API_KEY'):
-                    raise RuntimeError('Environment credential required')
-                offline_dir = str(Path(self.run.dir).parent)
-                result = subprocess.run([sys.executable, '-m', 'wandb', 'sync',
-                    '--entity', 'goodarzilab', '--project', 'oxyformer-v2', offline_dir],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    timeout=120, check=False)
-                self.sync_ok = result.returncode == 0
+            if self.run is not None:
+                self.run.finish()
+                closed = True
+                if self.sync:
+                    if not os.environ.get('WANDB_API_KEY'):
+                        raise RuntimeError('Environment credential required')
+                    offline_dir = str(Path(self.run.dir).parent)
+                    result = subprocess.run([sys.executable, '-m', 'wandb', 'sync',
+                        '--entity', 'goodarzilab', '--project', 'oxyformer-v2', offline_dir],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        timeout=120, check=False)
+                    self.sync_ok = result.returncode == 0
         except Exception:
             if not closed:
                 self.logging_ok = False
             self.sync_ok = False
         finally:
             self.finished = True
-            try:
-                (self.directory / 'logging-status.json').write_text(json.dumps(
-                    dict(logging_ok=self.logging_ok, sync_ok=self.sync_ok)))
-            except OSError:
-                self.logging_ok = False
+            self._status()
+
+    @classmethod
+    def replay(cls, spool, *, sync=True):
+        """Recover a retained event spool without rerunning scientific work."""
+        spool = Path(spool)
+        hook = cls(spool.parent, sync=sync)
+        hook.spool = spool
+        finish(hook)
+        return hook

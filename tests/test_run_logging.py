@@ -53,6 +53,7 @@ def test_default_offline_and_sync_is_separate_fact(tmp_path, monkeypatch):
     monkeypatch.setattr(subprocess, 'run', sync)
     hook = logging.WandbLogger(tmp_path)
     logging.emit(hook, dict(event='run_start', recipe_hash='a' * 64))
+    assert sdk.kwargs is None  # SDK work cannot consume the fitting slice.
     logging.finish(hook)
     assert sdk.kwargs['mode'] == 'offline'
     assert sdk.kwargs['entity'] == 'goodarzilab' and sdk.kwargs['project'] == 'oxyformer-v2'
@@ -80,11 +81,14 @@ def test_failure_isolation_and_secret_free_diagnostics(tmp_path, monkeypatch, fa
         monkeypatch.setattr(subprocess, 'run', broken)
     else:
         monkeypatch.setattr(sdk, failure, broken)
+        monkeypatch.setattr(subprocess, 'run', lambda *args, **kwargs: SimpleNamespace(returncode=0))
     hook = logging.WandbLogger(tmp_path)
     logging.emit(hook, dict(event='run_start'))
     logging.finish(hook)
     assert hook.finished
     assert not hook.logging_ok or hook.sync_ok is False
+    if failure != 'sync':
+        assert hook.logging_ok is False
     if failure == 'finish':
         assert hook.logging_ok is False
     captured = capsys.readouterr()
@@ -291,3 +295,81 @@ def test_real_offline_training_payloads(tmp_path, monkeypatch, phase):
     for path in tmp_path.rglob('*'):
         if path.is_file():
             assert key.encode() not in path.read_bytes(), path
+
+
+def test_unknown_runtime_attribute_is_not_silently_dropped(tmp_path):
+    from test_pretrain import make_case
+    _, _, config = make_case(tmp_path)
+    config.__dict__['new_runtime_key'] = 1
+    with pytest.raises(ValueError, match='new_runtime_key'):
+        logging.project_config(config)
+
+
+def test_sdk_import_failure_persists_status(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, 'wandb', None)
+    directory = tmp_path / 'fresh'
+    hook = logging.WandbLogger(directory, sync=False)
+    logging.emit(hook, dict(event='run_start'))
+    logging.finish(hook)
+    status = json.loads((directory / 'logging-status.json').read_text())
+    assert status['logging_ok'] is False and hook.finished
+
+
+def test_slow_sdk_failure_cannot_consume_ssl_slice(tmp_path, monkeypatch):
+    from test_pretrain import make_case
+    from oxyformer.training.pretrain import pretrain
+    import oxyformer.training.checkpoint as checkpoint
+    monkeypatch.setattr(checkpoint.zipfile.time, 'localtime',
+                        lambda *args: (2026, 1, 1, 0, 0, 0, 3, 1, 0))
+    view, split, config = make_case(tmp_path / 'attempt')
+    config = replace(config, slice_seconds=30., checkpoint_margin_seconds=1., max_batches=1)
+    clock = [0.]
+    monkeypatch.setattr(logging.time, 'monotonic', lambda: clock[0])
+    sdk = FakeSDK()
+    def slow_failure(**kwargs):
+        clock[0] += 35.
+        raise RuntimeError('slow offline init failure')
+    sdk.init = slow_failure
+    monkeypatch.setitem(sys.modules, 'wandb', sdk)
+    artifacts = []
+    for hook in (None, logging.WandbLogger(tmp_path / 'logs', sync=False)):
+        clock[0] = 0.
+        artifacts.append(pretrain(view, split, replace(config, run_logger=hook), 1103))
+        shutil.rmtree(config.output_dir)
+    assert [a.step for a in artifacts] == [1, 1]
+    assert artifacts[0].sha256 == artifacts[1].sha256
+
+
+def test_held_out_metric_values_match_checkpoint(tmp_path):
+    from test_fit import make_case
+    from oxyformer.training.fit import fit_fold
+    from oxyformer.training.checkpoint import load_checkpoint
+    spec, split, manifest, config = make_case(tmp_path / 'attempt')
+    events = []
+    artifact = fit_fold(spec, split, manifest, replace(config, run_logger=events.append), 1103).checkpoint
+    results = load_checkpoint(artifact, artifact.identity)['controller']['results']
+    evaluations = [e for e in events if e['event'] == 'evaluation' and e['phase'] == 'held_out']
+    assert evaluations
+    for event in evaluations:
+        result = next(r for r in results if r['kind'] == event['kind'] and
+                      r['fold'] == event['inner_fold'] and r['grid'] == event['grid'])
+        assert event['metrics'] == list(result['metrics'])
+        assert all(type(value) is float for value in event['metrics'])
+
+
+def test_retained_spool_can_be_replayed(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, 'wandb', None)
+    key = '0123456789' * 4
+    monkeypatch.setenv('WANDB_API_KEY', key)
+    hook = logging.WandbLogger(tmp_path, sync=False)
+    logging.emit(hook, dict(event='run_start', api_key=key))
+    logging.emit(hook, dict(event='train_step', train_loss=1.))
+    logging.finish(hook)
+    assert not hook.logging_ok and hook.spool.is_file()
+    assert key not in hook.spool.read_text()
+    sdk = FakeSDK()
+    monkeypatch.setitem(sys.modules, 'wandb', sdk)
+    recovered = logging.WandbLogger.replay(hook.spool, sync=False)
+    assert recovered.logging_ok and recovered.finished and sdk.closed
+    assert sdk.events == [dict(event='run_start', api_key='[redacted]'),
+                          dict(event='train_step', train_loss=1.)]
