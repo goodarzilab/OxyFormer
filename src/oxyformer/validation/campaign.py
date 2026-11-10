@@ -84,7 +84,7 @@ def validate_campaign(campaign, approvals=_REPOSITORY_APPROVALS):
             "unknown or missing campaign declaration fields")
     cell = campaign["cell"]
     require(isinstance(cell, str) and cell in cells, "campaign cell not named by owner block: " + str(cell))
-    require(isinstance(campaign["study"], dict) and campaign["study"] == cells[cell]
+    require(isinstance(campaign["study"], dict) and dict(campaign["study"]) == dict(cells[cell])
             and all(type(v) is int for v in campaign["study"].values()), "campaign cell study mismatch")
     for key in ("purpose", "partitions", "repetitions_per_scenario", "scenarios"):
         expected_type = int if key == "repetitions_per_scenario" else str if key == "purpose" else list

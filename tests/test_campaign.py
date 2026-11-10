@@ -1559,3 +1559,14 @@ def test_owner_campaign_accepts_container_subclasses(owner_cell, target):
     if target in ('approvals', 'both'):
         approvals = wrap(approvals)
     assert campaign.validate_campaign(declaration, approvals) == expected
+
+
+@pytest.mark.parametrize('reverse_owner', [False, True])
+def test_owner_campaign_study_mapping_order_is_not_semantic(owner_cell, reverse_owner):
+    from collections import OrderedDict
+    declaration, approvals = owner_cell
+    cells = approvals['owner_decisions']['example_final']['cells']
+    items = list(cells['example_cell'].items())
+    cells['example_cell'] = OrderedDict(reversed(items) if reverse_owner else items)
+    declaration['study'] = OrderedDict(items if reverse_owner else reversed(items))
+    assert campaign.validate_campaign(declaration, approvals) == declaration
