@@ -355,7 +355,7 @@ def diagnostic_profile_tasks(endpoint, frame, approvals, *, campaign_id, evaluat
         recipe['campaign_mode'] = 'diagnostic'
         if pilot_recipe is not None:
             recipe.update(deepcopy(pilot_recipe))
-        metadata = campaign.screening_metadata(recipe)
+        metadata = campaign.screening_metadata(recipe, approvals)
         task.update(metadata)
         task['parameters'].update(metadata, partition=c['partition'])
         task['resources']['partition'] = c['partition']
@@ -375,7 +375,7 @@ def diagnostic_profile_tasks(endpoint, frame, approvals, *, campaign_id, evaluat
                 task['continuation']['predecessor'] = profile_ids[previous]
             task['needs'] = {profile_ids.get(unit, unit): paths for unit, paths in task['needs'].items()}
     recipe = deepcopy(tasks[0]['parameters']['recipe'])
-    metadata = campaign.screening_metadata(recipe)
+    metadata = campaign.screening_metadata(recipe, approvals)
     estimate = deepcopy(original['tasks'][-1])
     estimate['id'] = campaign_id + '-estimate'
     campaign.concrete_id(estimate['id'])
