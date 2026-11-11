@@ -134,9 +134,8 @@ def pilot_declaration(recipe, approvals=_REPOSITORY_APPROVALS):
     validated = validate_campaign(declared, approvals)
     require(validated["campaign_mode"] == mode and recipe.get("study") == validated["study"],
             "pilot recipe study/mode drift")
-    require(validated["cell"] == "d" and validated["study"] ==
-            {"reference_cap": 32, "frozen_epochs": 60, "grid_points": 2, "seed_count": 1},
-            "pilot supports approved cell d only")
+    from oxyformer.training.fit import RecipeStudy
+    RecipeStudy(**validated["study"])  # The owner selects the cell; the engine bounds its dimensions.
     require(validated["scenarios"] == ["sign_changing"]
             and validated["repetitions_per_scenario"] == 5, "pilot supports five sign_changing pairs only")
     require(validated.get("gate_se") in ("spatial_primary", "unclustered_influence"),

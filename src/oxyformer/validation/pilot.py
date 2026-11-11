@@ -164,6 +164,8 @@ def interval(values, basis):
 
 def paired_readout(lock, records):
     validate_pins(lock)
+    from oxyformer.validation.campaign import pilot_declaration
+    pilot_cell = "cell " + pilot_declaration(lock["recipe"])["cell"]
     by_id = {r['draw']['repetition_id']: r for r in records}
     require(len(by_id) == len(records), 'duplicate pilot readout repetition')
     rows = []
@@ -185,26 +187,26 @@ def paired_readout(lock, records):
             estimate = record.get('estimates', {}).get(method) if record['status'] == 'success' else None
             fitted = None if estimate is None else estimate['value']
             row['methods'][method] = {'status': record['status'],
-                'pilot': number(fitted, 'cell d; ' + method),
+                'pilot': number(fitted, pilot_cell + '; ' + method),
                 'pilot_se_definitions': {} if estimate is None else {
-                    name: {key: number(value, 'cell d; ' + method + '; ' + name) if type(value) in (int, float) else value
+                    name: {key: number(value, pilot_cell + '; ' + method + '; ' + name) if type(value) in (int, float) else value
                            for key, value in definition.items()}
                     for name, definition in estimate['se_definitions'].items()},
                 'source': number(source_estimate, 'cell e; source chain record; ' + method),
                 'oracle_cells': {cell: cells[cell][method] for cell in attribution_audit.CELLS if cell != 'fitted'},
                 'pilot_minus_source': number(None if fitted is None else fitted - source_estimate,
-                                             'paired cell d minus cell e; ' + method),
+                                             'paired ' + pilot_cell + ' minus cell e; ' + method),
                 'oracle_minus_pilot': {cell: number(None if fitted is None else cells[cell][method]['estimate']['value'] - fitted,
-                                            'paired ' + cell + ' minus cell d; ' + method)
+                                            'paired ' + cell + ' minus ' + pilot_cell + '; ' + method)
                                       for cell in attribution_audit.CELLS if cell != 'fitted'}}
         rows.append(row)
     summary = {}
     for method in ('one_step', 'cv_tmle'):
         successful = [row['methods'][method] for row in rows if row['methods'][method]['status'] == 'success']
         summary[method] = {'pilot_minus_source': interval([r['pilot_minus_source']['value'] for r in successful],
-                                                        'paired cell d minus cell e; ' + method),
+                                                        'paired ' + pilot_cell + ' minus cell e; ' + method),
             'oracle_minus_pilot': {cell: interval([r['oracle_minus_pilot'][cell]['value'] for r in successful],
-                                                 'paired ' + cell + ' minus cell d; ' + method)
+                                                 'paired ' + cell + ' minus ' + pilot_cell + '; ' + method)
                                   for cell in attribution_audit.CELLS if cell != 'fitted'}}
     report = {'label': LABEL, 'certifies_release_criteria': False,
         'statement': 'Planned five pairs (n = 5) are exploratory; descriptive paired t intervals certify nothing. Each collector states its observed pair count. Draws are never pooled away.',
