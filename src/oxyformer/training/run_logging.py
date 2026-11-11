@@ -30,16 +30,18 @@ def sanitize(value):
         return [sanitize(v) for v in value]
     if isinstance(value, str):
         key = os.environ.get('WANDB_API_KEY')
-        if not key:
+        if not key or len(key) < 32:
             return value
         if key.isdecimal():
             canonical = key.lstrip('0') or '0'
             value = re.sub(r'[0-9]+', lambda match: '[redacted]'
                            if (match[0].lstrip('0') or '0') == canonical else match[0], value)
         return value.replace(key, '[redacted]')
+    if isinstance(value, bool):
+        return value
     if isinstance(value, (int, float)):
         key = os.environ.get('WANDB_API_KEY')
-        if key and ((key.isdecimal() and value == int(key)) or key in str(value)):
+        if key and len(key) >= 32 and ((key.isdecimal() and value == int(key)) or key in str(value)):
             return '[redacted]'
     return value
 

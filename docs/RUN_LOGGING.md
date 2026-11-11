@@ -1,85 +1,46 @@
 # Run logging
 
-`FitConfig.run_logger` / `PretrainConfig.run_logger` default to `None`.
-Use a fresh `run_logging.WandbLogger(base_directory)` per attempt; nested SSL
-shares the fold logger. Off and `run_logging.noop` skip telemetry. W&B is lazy;
-provision it only in the separate `oxyformer-p3` clone from conda-forge.
+Use a fresh exact WandbLogger(base_directory) per attempt; nested SSL shares it.
+None/noop disable telemetry. Other callables/subclasses fail before training.
+Install the optional SDK only in the separate oxyformer-p3 environment.
 
-During fitting the hook buffers redacted JSON events in memory. Filesystem,
-Git provenance lookup and SDK operations happen after checkpoint creation,
-so a slow logging filesystem or SDK outage cannot consume the fitting slice.
-W&B start records receive Git provenance before publication. Both source checkouts and recipes stay
-pinned. SDK initialization always uses offline mode, including when
-`WANDB_MODE=online`, and is attempted once.
+Capture is redacted JSON in RAM: loss, LR, applied gradient norm, throughput,
+Torch peak, evaluations, selection, declared config/provenance, seed/fold,
+hardware/job, checkpoint pins/paths and resume lineage. SSL updates/skips carry
+processed_batches; only updates emit train_step. CONFIG_SCHEMA classifies every
+field. Inspect the original config before copying: extras refuse telemetry with
+logging_ok=False and a flagged snapshot. Sealed refusal survives dropped events
+and replay. Stop snapshots read stored none/requested/honoured state, not polling.
 
-Each logger allocates a unique `attempt-*` subdirectory under its base. Its
-`status_path` identifies its own `logging-status.json`; sharing a base never
-overwrites another attempt. Null `logging_ok` means SDK processing is pending;
-true/false records final logging completeness, separately from `sync_ok`.
-Sync follows the saved checkpoint and offline SDK finish, with a 120-second
-timeout. Credentials come only from runtime `WANDB_API_KEY`; never dump the
-environment. Redaction covers secret fields and numeric representations of the
-runtime key. Online uploads remain unverified.
+All I/O follows scientific checkpoint persistence. Git owns a process group and
+ten-second timeout; kill/reap it before starting SDK delivery. Errors record
+unavailable: reason. The disposable SDK/spool worker has a 180-second deadline
+and is killed/reaped on completion/timeout, isolating native stalls and RNG.
 
-The retained `spool` has a sealed event count, digest and capture-completeness
-flag. Failed capture stays incomplete after replay. Partial or modified spools
-are refused before SDK publication. Recover a complete captured spool after an
-SDK failure with `WandbLogger.replay("/path/to/events-complete.jsonl")` from the
-clone, without retraining. Replay has its own status and preserves the original.
-For an existing W&B offline run, use `python -m wandb sync /path/to/offline-run`.
+Lazy SDK init is attempted once, always offline, targeting goodarzilab/oxyformer-v2.
+Each attempt owns its directory/status. Pending/null means incomplete; logging_ok
+and sync_ok are separate. Post-fit sync has a 120-second timeout and needs runtime
+WANDB_API_KEY. Never dump credentials/environment. Matching requires >=32-character
+keys; secret-labelled fields remain redacted and credential-bearing paths refuse.
+Spools seal count/digest/capture/refusal; invalid spools cannot claim completion.
+WandbLogger.replay("/path/to/events-complete.jsonl") preserves failures and original
+status. Sync existing runs with python -m wandb sync /path/to/offline-run.
 
-`CONFIG_SCHEMA` classifies every runtime dataclass field and rejects unknown
-fields or instance keys. Structured settings use their contract serializers;
-data uses pins and lineage; the logger is excluded. Initial stop state is
-`none` or `requested`; checkpoint events record `honoured` for a requested stop.
-Snapshots read stored request state without invoking deadline polling. Evaluation
-events cover stopping, held-out and selection partitions, retaining numeric
-values and the selection partition's original IDs.
+GPU windows synchronize/reset Torch peak before the step and sample after update,
+including live allocations. Non-Torch allocations/context are excluded; CPU is zero.
+The logger owns peak counters. Hardware measurements and GPU nondeterminism are
+not universal guarantees; online upload is unverified. The following rulings apply,
+with A2/B2 replacing affected sentences. No deadline refund, checkpoint format
+change, predecessor deletion or archive-hash normalization is used.
 
-Each GPU window synchronizes and resets the Torch allocator peak immediately
-before a training step, then samples after the optimizer update. It includes
-allocations live at window start; CUDA context and allocations outside Torch's
-allocator are excluded. CPU peaks are zero. The logger owns the device's peak
-counters during these windows; allocator doubles verify successive windows.
+Requirement provenance: orchestrator ruling 2026-11-11
 
-Both loops test off/no-op/on and SDK failure with deterministic CPU kernels,
-bitwise backward losses and complete checkpoint SHA-256, fixed paths/ZIP dates,
-and unchanged Python/NumPy/Torch RNG. Clock doubles also test slow filesystem,
-provenance and SDK failures. GPU nondeterminism remains; hardware measurements
-apply only to the hardware used.
+RULING A (N2, capture time versus checkpoint invariance). Per-step capture is in-memory only and bounded: each capture call must cost well under one millisecond on the CPU test double (add a test that times 1,000 capture calls and asserts a mean below 1 ms, with no I/O, Git, subprocess, network or SDK call). Bitwise invariance (C4: logging off / no-op / on identical per-step losses and checkpoint SHA-256) is REQUIRED for fits bounded by step, batch or epoch counts (batch_limit, max_epochs, patience, requested). For wall-clock slice_limit fits, capture time counts against the slice like any other in-process work: the slice boundary may move by the bounded capture cost, but per-step numerics are unchanged and the resumed trajectory reaches the same result (test: logging-on versus logging-off under slice_limit produce identical per-step losses for their common steps, and after resume to the same batch count identical final checkpoint SHA-256). Document this as an accepted limit of wall-clock slices. The reviewer's 35-second capture double is OUTSIDE the envelope (capture cost is bounded by the new test): record it in evidence.md as out-of-envelope with the measured bound; do not refund or exclude capture time from the scientific deadline (that would change deadline accounting, which N2 forbids).
 
-The narrowed contract accepts exactly `WandbLogger`, `noop`, or `None`.
-Generic callables and logger subclasses are rejected with `TypeError` before
-training starts. Construct one fresh logger per attempt; event callbacks are
-no longer an extension interface.
+RULING B (N3, numeric retention versus exact-key secrecy). The credential envelope is a Weights & Biases API key of at least 32 characters (real keys are 40). Redaction covers the exact key, its decimal-integer form and its leading-zero variants, in values and mapping keys, only for keys that meet that length; metric values are never altered unless they contain such a match. A 5-digit synthetic key is outside the envelope: tests use 40-character keys (the existing leading-zero regression keeps WANDB_API_KEY constructed at runtime as `"0" + "1234567890" * 3 + "123456789"`). Record the reviewer's 12345/123456 case in evidence.md as out-of-envelope. C3 (no key, token or key-shaped string in any file, log, config dump or the repository) stands unchanged.
 
-The five settled contract questions are:
+Requirement provenance: orchestrator clarification 2026-11-11
 
-- Non-interference covers checkpoint bytes, per-step numerics and the returned
-  training artifact. Finish runs after checkpoint persistence, with a 180-second
-  delivery deadline, following the separate ten-second Git lookup. On Linux
-  SDK/spool delivery runs in a disposable forked process; its process group is
-  killed and its leader reaped after completion or timeout. Native
-  SDK waits and RNG operations cannot block or mutate the training process.
-  A delivery timeout marks logging incomplete;
-  a pending/null status also means incomplete. Scientific results stay usable.
-- Credential redaction includes exact runtime key text, its decimal integer,
-  and digit strings differing only by leading zeros, in values and mapping keys.
-- SSL `train_step` means an applied optimizer update. Skipped batches emit
-  `batch_skipped`; both events carry cumulative `processed_batches`.
-- Config inspection uses the caller's original object before copying. Extra
-  instance keys refuse telemetry while training proceeds: `logging_ok=False`,
-  a `refused: undeclared config key <name>` status event and a flagged start
-  snapshot are retained at finish. Undeclared values are never exported.
-- Git uses one subprocess in its own process group with a ten-second timeout.
-  The group is killed and its leader reaped after the lookup. Timeout/error
-  records `git_revision = 'unavailable: <reason>'` (also in `git_sha`), marks
-  logging incomplete and continues finish.
+CLARIFICATION A2 (to RULING A, slice_limit resume test). Checkpoint archives embed resume ancestry (metadata.predecessor_hash and ArtifactLineage.parent_hashes, src/oxyformer/training/checkpoint.py, outside this unit's scope), so two runs whose wall-clock slices cut at different steps legitimately have different archive SHA-256 values even when training is bitwise identical. Therefore: for slice_limit fits the invariance test compares (i) the full per-step loss trajectory, (ii) the complete encoded training state and (iii) every tensor payload byte of the final checkpoint, plus all archive metadata EXCEPT the lineage and predecessor_hash keys; those three must be identical between logging off and logging on, and the lineage/predecessor difference is recorded as expected. Full archive SHA-256 equality stays REQUIRED for count-bounded fits (batch_limit, max_epochs, patience, requested), whose ancestry is identical by construction. Your check-ruling-a-lineage.py measurement (0.255 ms mean capture; identical losses, state and tensors; only lineage and predecessor_hash differ) already satisfies A2; turn it into the regression. Do not change checkpoint.py, drop predecessor binding or normalize archive hashes.
 
-Refusal state is sealed independently of captured events, so losing a flagged
-start event cannot bypass refusal during replay. Credential-bearing logging
-directories are refused before creation or SDK handoff. Spool metadata is also
-sanitized; if redaction prevents integrity validation, telemetry stays incomplete.
-
-Git is looked up and reaped before the SDK worker starts. Killing a stalled
-SDK worker therefore cannot strand Git in its separate process group.
+CLARIFICATION B2 (to RULING B, documentation). docs/RUN_LOGGING.md and SUMMARY.md must never contain a literal key-shaped string. Express the leading-zero example compositionally, for example: "a synthetic 40-digit key consisting of the digit 0 followed by the digits 1-9 and 0 repeated to length 40", or in code form '"0" + "1234567890" * 3 + "123456789"', and keep building the test fixture at runtime as it does today. The retained test_secret_hygiene_in_run_tree_and_repository stays unchanged and must pass on the docs. Where my ruling text is quoted in your records, replace the literal assignment with that compositional description.

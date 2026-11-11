@@ -22,6 +22,12 @@ from oxyformer.training.checkpoint import capture_rng
 _manager = None
 
 
+def freeze_zip_time(monkeypatch):
+    import oxyformer.training.checkpoint as checkpoint
+    monkeypatch.setattr(checkpoint.zipfile.time, 'localtime',
+        lambda *args: time.struct_time((2026, 1, 1, 0, 0, 0, 3, 1, 0)))
+
+
 def shared_manager():
     global _manager
     if _manager is None:
@@ -202,9 +208,7 @@ def test_real_offline_sdk(tmp_path, monkeypatch):
 
 
 def check_invariance(monkeypatch, config, trace, run, tmp_path, phase, phases):
-    import oxyformer.training.checkpoint as checkpoint
-    monkeypatch.setattr(checkpoint.zipfile.time, 'localtime',
-                        lambda *args: time.struct_time((2026, 1, 1, 0, 0, 0, 3, 1, 0)))
+    freeze_zip_time(monkeypatch)
     sdk = FakeSDK()
     monkeypatch.setitem(sys.modules, 'wandb', sdk)
     results = []
@@ -350,9 +354,7 @@ def test_sdk_import_failure_persists_status(tmp_path, monkeypatch):
 def test_slow_sdk_failure_cannot_consume_ssl_slice(tmp_path, monkeypatch):
     from test_pretrain import make_case
     from oxyformer.training.pretrain import pretrain
-    import oxyformer.training.checkpoint as checkpoint
-    monkeypatch.setattr(checkpoint.zipfile.time, 'localtime',
-                        lambda *args: time.struct_time((2026, 1, 1, 0, 0, 0, 3, 1, 0)))
+    freeze_zip_time(monkeypatch)
     view, split, config = make_case(tmp_path / 'attempt')
     config = replace(config, slice_seconds=30., checkpoint_margin_seconds=1., max_batches=1)
     clock = [0.]
@@ -411,9 +413,7 @@ def test_retained_spool_can_be_replayed(tmp_path, monkeypatch):
 def test_slow_spool_failure_cannot_consume_ssl_slice(tmp_path, monkeypatch):
     from test_pretrain import make_case
     from oxyformer.training.pretrain import pretrain
-    import oxyformer.training.checkpoint as checkpoint
-    monkeypatch.setattr(checkpoint.zipfile.time, 'localtime',
-                        lambda *args: time.struct_time((2026, 1, 1, 0, 0, 0, 3, 1, 0)))
+    freeze_zip_time(monkeypatch)
     view, split, config = make_case(tmp_path / 'attempt')
     config = replace(config, slice_seconds=30., checkpoint_margin_seconds=1., max_batches=1)
     clock, failed = [0.], shared_list([False])
@@ -513,9 +513,7 @@ def test_selection_evaluations_match_checkpoint(tmp_path):
 def test_slow_git_provenance_failure_cannot_consume_ssl_slice(tmp_path, monkeypatch):
     from test_pretrain import make_case
     from oxyformer.training.pretrain import pretrain
-    import oxyformer.training.checkpoint as checkpoint
-    monkeypatch.setattr(checkpoint.zipfile.time, 'localtime',
-                        lambda *args: time.struct_time((2026, 1, 1, 0, 0, 0, 3, 1, 0)))
+    freeze_zip_time(monkeypatch)
     view, split, config = make_case(tmp_path / 'attempt')
     config = replace(config, slice_seconds=30., checkpoint_margin_seconds=1., max_batches=1)
     clock, queried = [0.], shared_list([False])
@@ -704,9 +702,7 @@ def test_ssl_skipped_batches_have_no_train_step(tmp_path, monkeypatch):
 @pytest.mark.parametrize('phase', ['fit', 'ssl'])
 def test_finish_external_failures_preserve_checkpoint_and_result(tmp_path, monkeypatch, action, failure, phase):
     import time
-    import oxyformer.training.checkpoint as checkpoint
-    monkeypatch.setattr(checkpoint.zipfile.time, 'localtime',
-                        lambda *args: time.struct_time((2026, 1, 1, 0, 0, 0, 3, 1, 0)))
+    freeze_zip_time(monkeypatch)
     monkeypatch.setattr(logging, 'FINISH_TIMEOUT', .1)
     if phase == 'fit':
         from test_fit import make_case
@@ -940,3 +936,154 @@ def test_finish_timeout_cannot_orphan_git_group(tmp_path, monkeypatch):
         if alive:
             os.killpg(pid, signal.SIGKILL)
     assert not alive, 'finish timeout left an owned Git process behind'
+
+
+@pytest.fixture
+def captured_losses(monkeypatch):
+    freeze_zip_time(monkeypatch)
+    trace, active = [], False
+    original = torch.Tensor.backward
+    def observe(loss, *args, **kwargs):
+        nonlocal active
+        if active:
+            return original(loss, *args, **kwargs)
+        active = True
+        try:
+            trace.append(loss.detach().clone())
+            return original(loss, *args, **kwargs)
+        finally:
+            active = False
+    monkeypatch.setattr(torch.Tensor, 'backward', observe)
+    deterministic = torch.are_deterministic_algorithms_enabled()
+    torch.use_deterministic_algorithms(True)
+    try:
+        yield trace
+    finally:
+        torch.use_deterministic_algorithms(deterministic)
+
+
+def test_capture_mean_below_one_millisecond_without_io(tmp_path, monkeypatch, record_property):
+    import builtins
+    import socket
+    sdk = FakeSDK()
+    monkeypatch.setitem(sys.modules, 'wandb', sdk)
+    hook = logging.WandbLogger(tmp_path, sync=False)
+    model = torch.nn.Linear(2, 1)
+    model(torch.ones(1, 2)).sum().backward()
+    loss = torch.tensor(1.)
+    def capture(step):
+        logging.step_event(hook, model=model, loss=loss, learning_rate=.1,
+            samples=2, started=0., device='cpu', step=step, epoch=0)
+    capture(0)  # Warm the CPU kernels before timing.
+    def forbidden(*args, **kwargs):
+        raise AssertionError('external action during capture')
+    with monkeypatch.context() as guard:
+        for owner, name in [(builtins, 'open'), (Path, 'open'), (Path, 'mkdir'),
+                (subprocess, 'Popen'), (subprocess, 'run'), (subprocess, 'check_output'),
+                (socket, 'socket'), (socket, 'create_connection'), (logging, 'git_revision'),
+                (sdk, 'init'), (sdk, 'log'), (sdk, 'finish')]:
+            guard.setattr(owner, name, forbidden)
+        started = time.perf_counter_ns()
+        for i in range(1000):
+            capture(i)
+        mean_ms = (time.perf_counter_ns() - started) / 1000 / 1e6
+    record_property('capture_mean_ms', mean_ms)
+    assert hook.logging_ok and len(hook._events) == 1001
+    assert mean_ms < 1., mean_ms  # elapsed ns / 1000 calls / 1e6 ns per ms
+
+
+def test_slice_resume_preserves_training_payload(tmp_path, monkeypatch, captured_losses, record_property):
+    import zipfile
+    from test_pretrain import make_case
+    from oxyformer.training.pretrain import pretrain
+    clock = [0.]
+    step, capture = torch.optim.AdamW.step, logging.WandbLogger.__call__
+    def update(optimizer, *args, **kwargs):
+        result = step(optimizer, *args, **kwargs)
+        clock[0] += 1.
+        return result
+    def buffer(hook, event):
+        if event.get('event') == 'train_step':
+            clock[0] += .0002  # Bounded capture cost; no deadline refund.
+        return capture(hook, event)
+    monkeypatch.setattr(torch.optim.AdamW, 'step', update)
+    monkeypatch.setattr(logging.WandbLogger, '__call__', buffer)
+    monkeypatch.setattr(logging.time, 'monotonic', lambda: clock[0])
+    view, split, config = make_case(tmp_path / 'initial')
+    config = replace(config, settings=replace(config.settings, max_epochs=1), finish_logging=False)
+    results = []
+    for enabled in (False, True):
+        captured_losses.clear()
+        clock[0] = 0.
+        hook = logging.WandbLogger(tmp_path / 'logs', sync=False) if enabled else None
+        first = pretrain(view, split, replace(config, run_logger=hook,
+            slice_seconds=2.1003, checkpoint_margin_seconds=.1), 1103)
+        assert first.reason == 'slice_limit'
+        prefix = list(captured_losses)
+        clock[0] = 0.
+        last = pretrain(view, split, replace(config, run_logger=hook, predecessor=first,
+            output_dir=str(tmp_path / 'resumed'), slice_seconds=3600.,
+            checkpoint_margin_seconds=.1, max_batches=100), 1103)
+        assert last.step == 3 and last.reason == 'max_epochs'
+        with zipfile.ZipFile(last.path) as archive:
+            metadata = json.loads(archive.read('metadata.json'))
+            tensors = {name: archive.read(name) for name in archive.namelist()
+                       if name.startswith('tensors/')}
+        results.append((first.step, prefix, list(captured_losses), metadata, tensors, last.sha256))
+        shutil.rmtree(config.output_dir)
+        shutil.rmtree(tmp_path / 'resumed')
+    off, on = results
+    assert (off[0], on[0]) == (3, 2)
+    assert all(torch.equal(x, y) for x, y in zip(off[1][:on[0]], on[1]))
+    assert len(off[2]) == len(on[2]) == 3
+    assert all(torch.equal(x, y) for x, y in zip(off[2], on[2]))
+    assert off[3]['state'] == on[3]['state'] and off[4] == on[4]
+    assert {k: v for k, v in off[3].items() if k not in ('lineage', 'predecessor_hash')} == {
+            k: v for k, v in on[3].items() if k not in ('lineage', 'predecessor_hash')}
+    assert {k for k in off[3] if off[3][k] != on[3][k]} == {'lineage', 'predecessor_hash'}
+    assert off[5] != on[5]  # Different ancestry legitimately changes archive bytes.
+    record_property('expected_ancestry_difference', [off[3]['predecessor_hash'], on[3]['predecessor_hash']])
+
+
+@pytest.mark.parametrize('phase,reason', [('fit', 'batch_limit'), ('fit', 'requested'),
+    ('ssl', 'batch_limit'), ('ssl', 'requested'), ('ssl', 'patience')])
+def test_count_bounded_archive_invariance(tmp_path, monkeypatch, captured_losses, phase, reason):
+    from oxyformer.training.checkpoint import CheckpointRequest
+    monkeypatch.setitem(sys.modules, 'wandb', FakeSDK())
+    if phase == 'fit':
+        from test_fit import make_case
+        from oxyformer.training.fit import fit_fold
+        spec, split, data, config = make_case(tmp_path / 'attempt')
+        run = lambda cfg: fit_fold(spec, split, data, cfg, 1103).checkpoint
+    else:
+        import importlib
+        module = importlib.import_module('oxyformer.training.pretrain')
+        from test_pretrain import make_case
+        data, split, config = make_case(tmp_path / 'attempt')
+        run = lambda cfg: module.pretrain(data, split, cfg, 1103)
+        if reason == 'patience':
+            config = replace(config, settings=replace(config.settings, patience=1))
+            monkeypatch.setattr(module, '_validation_score', lambda *args: 1.)
+    results = []
+    for hook in (None, logging.noop, logging.WandbLogger(tmp_path / 'logs', sync=False)):
+        request = CheckpointRequest()
+        if reason == 'requested':
+            request.request()
+        captured_losses.clear()
+        artifact = run(replace(config, run_logger=hook, stop_request=request,
+                               max_batches=1 if reason == 'batch_limit' else None))
+        assert artifact.reason == reason
+        results.append((artifact.sha256, list(captured_losses)))
+        shutil.rmtree(config.output_dir)
+    for digest, trace in results[1:]:
+        assert digest == results[0][0] and len(trace) == len(results[0][1])
+        assert all(torch.equal(x, y) for x, y in zip(trace, results[0][1]))
+
+
+@pytest.mark.parametrize('key', ['0' + '1234567890' * 3 + '123456789',
+                               '0' * 39 + '1', '0' * 40], ids=['leading_zero', 'numeric_one', 'numeric_zero'])
+def test_qualified_credential_preserves_unmatched_metrics(monkeypatch, key):
+    monkeypatch.setenv('WANDB_API_KEY', key)
+    value = dict(loss=123456, count=int(key) + 1, mapping={str(int(key) + 1): 17},
+                 enabled=True, disabled=False)
+    assert len(key) == 40 and logging.sanitize(value) == value
