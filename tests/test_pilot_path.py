@@ -295,6 +295,8 @@ def test_first_leaf_checks_real_generation_inputs(owner, archive_manifest, tmp_p
     lock['recipe'] = recipe
     scenario = json.loads(truth.generator_configuration)['payload']
     lock['scenario_family'] = [scenario]
+    from test_campaign import STAMPS
+    lock.update(deepcopy(STAMPS))
     task = {'id': 'pilot-leaf', 'stage': 'coverage', **campaign.screening_metadata(recipe),
         'recipe_lock': {'dependency':'lock','path':'recipe_lock.json','sha256':'a'*64},
         'continuation': {'owner':'x','step':0,'predecessor':None},
@@ -350,3 +352,24 @@ def test_legacy_lifecycle_golden_bytes(mode):
     plan = expand_campaign(legacy_spec(mode), approvals)
     assert coverage.digest(plan) == expected['expansion_hash']
     validate_plan(plan, approvals)
+
+
+@pytest.mark.parametrize('blob_kind', ['observations', 'structural_causal_truth'])
+def test_saved_blob_tamper_is_named_before_regeneration(owner, archive_manifest, tmp_path, blob_kind):
+    import shutil
+    lock = locked(owner, archive_manifest)
+    pin = lock['paired_draws'][0]
+    original = Path(pin['source_path'])
+    copied = tmp_path/'tampered-source'
+    shutil.copytree(original, copied)
+    pin['source_path'] = str(copied)
+    with tarfile.open(copied/'continuation.tar', 'r:') as archive:
+        header = json.load(archive.extractfile('coverage.json'))
+        key = header['states'][0]['sample'][blob_kind]
+        raw = archive.extractfile('blobs/'+key).read()
+    archive = copied/'continuation.tar'
+    payload = archive.read_bytes()
+    assert raw in payload
+    archive.write_bytes(payload.replace(raw, b'X'+raw[1:], 1))
+    with pytest.raises(ContractError, match='paired source chain c1: source archive hash mismatch'):
+        pilot.verify_regeneration(lock)
