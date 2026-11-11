@@ -20,7 +20,7 @@ from oxyformer.training.nested_cv import PreparedEndpoint
 from oxyformer.contracts import StageRequest, StageResult
 from oxyformer.execution import identity
 from oxyformer.execution.campaign import expand_campaign, validate_plan, concrete_id
-from oxyformer.provenance import ContractError, file_hash, require
+from oxyformer.provenance import ContractError, canonical_json, file_hash, require
 from oxyformer.validation.coverage import (MIN_REPETITIONS, RETRY_RULES, dependency, digest,
     finite, integer, publish, read_json, repetition_plan, summarize, validate_draws, prepare_batch, atomic_json, fixed_exposures,
     leaf_budget, leaf_allocation, maximum_leaf_stage_seconds, remaining_compute, load_budget, BUDGET_RECORD, usable_leaf_compute, RESUME_OVERHEAD_FLOOR_SECONDS)
@@ -1248,7 +1248,8 @@ def collect(request, config, task):
     if is_pilot(lock["recipe"]):
         from oxyformer.validation.pilot import paired_readout
         report, markdown = paired_readout(lock, records)
-        values.update({"paired_readout.json": report, "paired_readout.md": markdown})
+        # Keep the fully labelled document intact through generic publication.
+        values.update({"paired_readout.json": canonical_json(report), "paired_readout.md": markdown})
     return values, passing
 
 
