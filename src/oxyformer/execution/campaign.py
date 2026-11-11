@@ -15,6 +15,14 @@ RESERVED = {'code_commit.txt', 'run.log', 'task.json', 'src', '_execution'}
 KINDS = {'diagnostic', 'screening', 'primary', 'ablation', 'final-coverage', 'anchor', 'refit-audit'}
 
 
+def _pilot(spec):
+    return spec.get('campaign_mode') not in (None, 'screening', 'diagnostic')
+
+
+def _diagnostic(spec):
+    return spec.get('campaign_mode') == 'diagnostic' or _pilot(spec)
+
+
 def concrete_id(value):
     require(isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,31}', value),
         'IDs must be concrete and at most 32 characters')
@@ -103,7 +111,7 @@ def _spec_check(spec, approvals):
         concrete_id(ref['dependency'])
         require(ref['dependency'] not in external, 'admission receipt must be a separate dependency')
         external.add(ref['dependency'])
-    if spec.get('campaign_mode') == 'diagnostic':
+    if _diagnostic(spec):
         external.update(spec.get('collector_inputs', {}))
     variables = [dependency_variable(x) for x in external]
     require(len(set(variables)) == len(variables), 'dependency normalization collision')
@@ -128,7 +136,23 @@ def _spec_check(spec, approvals):
         require(spec.get('gpu_concurrency_max') == decision['gpu_concurrency_max'], 'screening concurrency drift')
         require(all(s['gpus'] == 1 and s.get('partition', 'standard') == 'standard'
                     for w in spec['work'] for s in w['slices']), 'screening requires standard single-GPU leaves')
-    if spec.get('campaign_mode') == 'diagnostic' or spec['kind'] == 'diagnostic':
+    if _pilot(spec):
+        from oxyformer.validation.campaign import pilot_declaration, pilot_runtime, screening_metadata
+        declaration = pilot_declaration(spec, approvals)
+        runtime = pilot_runtime(spec, approvals)
+        c = runtime['diagnostic_campaign']
+        require(spec['kind'] == 'diagnostic', 'pilot uses bounded diagnostic expansion')
+        require(all(spec.get(k) == v for k, v in screening_metadata(spec).items()), 'pilot specification drift')
+        require(spec.get('partition') == c['partition'], 'pilot partition drift')
+        require(spec.get('gpu_concurrency_max') == runtime['gpu_concurrency_max'][c['partition']], 'pilot concurrency drift')
+        for work in spec['work']:
+            require(work['parameters']['study'] == declaration['study'], 'pilot leaf study drift')
+            require(0 < len(work['slices']) <= c['leaves_per_chain_max'], 'pilot chain leaf bound')
+            require(len(work['parameters']['draws']) == 1, 'pilot requires one pair per chain')
+            for segment in work['slices']:
+                require(segment['gpus'] == 1 and segment['wall_seconds'] / 3600 <= c['gpu_hours_per_leaf_max'],
+                        'pilot leaf GPU-hour bound')
+    elif spec.get('campaign_mode') == 'diagnostic' or spec['kind'] == 'diagnostic':
         from oxyformer.validation.campaign import month2_decision, screening_metadata
         d = month2_decision(approvals)
         require(d == month2_decision(), 'month2_followon drift')
@@ -163,7 +187,7 @@ def _spec_check(spec, approvals):
     collector = spec['collector']
     concrete_id(collector['stage'])
     outputs_valid(collector['outputs'])
-    if spec.get('campaign_mode') in ('screening', 'diagnostic'):
+    if spec.get('campaign_mode') in ('screening', 'diagnostic') or _pilot(spec):
         require(collector.get('gpus') == 0, 'screening collection requires CPU only')
     resources(collector.get('gpus', 0), collector['wall_seconds'])
     if spec['kind'] in {'final-coverage', 'anchor', 'refit-audit'}:
@@ -179,7 +203,7 @@ def _spec_check(spec, approvals):
 
 def _id(spec, slot):
     # Collector fan-in does not change the already declared execution chains.
-    if spec.get('campaign_mode') == 'diagnostic':
+    if _diagnostic(spec):
         spec = {k: v for k, v in spec.items() if k != 'collector_inputs'}
     digest = sha256(canonical_json({'campaign': spec, 'slot': slot}).encode()).hexdigest()
     return spec['id'][:8] + '-' + digest[:22]
@@ -187,9 +211,9 @@ def _id(spec, slot):
 
 def _unit(spec, task, prerequisites, gpus, seconds, role):
     flags, hours = resources(gpus, seconds)
-    if spec.get('campaign_mode') in ('screening', 'diagnostic'):
+    if spec.get('campaign_mode') in ('screening', 'diagnostic') or _pilot(spec):
         flags[flags.index('--cpus-per-task=4')] = '--cpus-per-task=8'
-    diagnostic = spec.get('campaign_mode') == 'diagnostic'
+    diagnostic = _diagnostic(spec)
     if diagnostic and gpus:
         flags[0] = '--partition=' + spec['partition']
         flags[flags.index('--gpus=1')] = '--gres=gpu:1'
@@ -199,7 +223,7 @@ def _unit(spec, task, prerequisites, gpus, seconds, role):
         'outputs': ['code_commit.txt', 'run.log', '_execution/result.json', *task['outputs']],
         'inputs': [PYTHON], 'sbatch': flags, 'gpu_hours': hours,
         'pool': 'gpu' if gpus else 'cpu', 'write_scopes': [task['id'] + '/**'],
-        'command': stage_command(task, cuda=spec.get('campaign_mode') in ('screening', 'diagnostic') and gpus > 0),
+        'command': stage_command(task, cuda=(spec.get('campaign_mode') in ('screening', 'diagnostic') or _pilot(spec)) and gpus > 0),
         'max_attempts': 3 if diagnostic and role == 'leaf' else 1,
         **({'retry': {'mode': 'restart', 'max_lost': {'wall_seconds': seconds}},
             'concurrency_limits': {'gpu': spec['gpu_concurrency_max'], 'cpu': 6}} if diagnostic and role == 'leaf' else {})}
@@ -227,7 +251,7 @@ def _build(spec):
                 'continuation': {'owner': owner, 'step': step, 'predecessor': previous}}
             if spec.get('campaign_mode') == 'screening':
                 task.update({k: spec[k] for k in ('campaign_mode', 'study', 'campaign_label', 'certifies_release_criteria', 'final_cells')})
-            if spec.get('campaign_mode') == 'diagnostic':
+            if _diagnostic(spec):
                 from oxyformer.validation.campaign import screening_metadata
                 task.update(screening_metadata(spec))
             if 'admission_receipt' in spec:
@@ -241,7 +265,7 @@ def _build(spec):
         needs[task['id']] = ['_execution/task.json', '_execution/request.json',
             '_execution/result.json', *task['outputs']]
     collected = list(leaves)
-    if spec.get('campaign_mode') == 'diagnostic':
+    if _diagnostic(spec):
         extra = spec.get('collector_inputs', {})
         require(not set(extra).intersection(needs), 'duplicate diagnostic collector dependency')
         needs.update(deepcopy(extra))
@@ -251,7 +275,7 @@ def _build(spec):
         'recipe_lock': spec['recipe_lock'], 'expected_leaves': collected}
     if spec.get('campaign_mode') == 'screening':
         task.update({k: spec[k] for k in ('campaign_mode', 'study', 'campaign_label', 'certifies_release_criteria', 'final_cells')})
-    if spec.get('campaign_mode') == 'diagnostic':
+    if _diagnostic(spec):
         from oxyformer.validation.campaign import screening_metadata
         task.update(screening_metadata(spec))
     if 'admission_receipt' in spec:
