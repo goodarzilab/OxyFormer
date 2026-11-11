@@ -150,7 +150,8 @@ def locked_probe_inputs(request, config, task):
     lock_hash = file_hash(lock_path)
     lock = read_json(lock_path)
     from oxyformer.validation.campaign import is_pilot, pilot_declaration
-    if is_pilot(lock['recipe']):
+    if is_pilot(lock) or is_pilot(lock.get('recipe', {})):
+        require(isinstance(lock.get('recipe'), dict), 'pilot lock requires its declared recipe')
         require(lock['owner_decision_hash'] == digest(pilot_declaration(lock['recipe'], config.get('approvals'))),
                 'pilot owner block changed')
     elif lock.get('campaign_mode') == 'diagnostic':
@@ -550,7 +551,8 @@ def setup_admission_plan(lock, plans, lock_unit, approvals):
     from oxyformer.execution.campaign import _unit
     lock_hash = digest(lock)
     from oxyformer.validation.campaign import is_pilot, pilot_declaration
-    if is_pilot(lock['recipe']):
+    if is_pilot(lock) or is_pilot(lock.get('recipe', {})):
+        require(isinstance(lock.get('recipe'), dict), 'pilot lock requires its declared recipe')
         require(lock['owner_decision_hash'] == digest(pilot_declaration(lock['recipe'], approvals)),
                 'pilot owner block changed')
     elif lock.get('campaign_mode') == 'diagnostic':
@@ -600,7 +602,7 @@ def setup_admission_plan(lock, plans, lock_unit, approvals):
         'recipe_lock': recipe_ref, 'parameters': {'lock_input': lock_ref, 'probe_inputs': receipts},
         'needs': {**base, **{ref['dependency']: ['setup_probe.json'] for ref in receipts.values()}},
         'outputs': ['admission.json', 'artifact_manifest.json']})
-    if lock.get('campaign_mode') == 'diagnostic' or is_pilot(lock['recipe']):
+    if lock.get('campaign_mode') == 'diagnostic' or is_pilot(lock) or is_pilot(lock.get('recipe', {})):
         from oxyformer.validation.campaign import screening_metadata
         for task in tasks:
             task.update(screening_metadata(lock['recipe']))
@@ -617,7 +619,8 @@ def admit(request, config, task):
     lock = read_json(path)
     lock_hash = file_hash(path)
     from oxyformer.validation.campaign import is_pilot, pilot_declaration, pilot_runtime, pilot_sizing
-    if is_pilot(lock['recipe']):
+    if is_pilot(lock) or is_pilot(lock.get('recipe', {})):
+        require(isinstance(lock.get('recipe'), dict), 'pilot lock requires its declared recipe')
         require(lock['owner_decision_hash'] == digest(pilot_declaration(lock['recipe'], config.get('approvals'))),
                 'pilot owner block changed')
         from oxyformer.validation.pilot import verify_regeneration
