@@ -22,6 +22,11 @@ STUDY = {'reference_cap': 32, 'frozen_epochs': 60, 'grid_points': 2, 'seed_count
 ORIGINAL_PROFILE = campaign._profile
 
 
+@pytest.fixture(autouse=True)
+def pilot_publication_store(tmp_path, monkeypatch):
+    monkeypatch.setenv('OXYFORMER_PUBLICATION_STORE', str(tmp_path/'.publications'))
+
+
 @pytest.fixture
 def owner(tmp_path, monkeypatch):
     from oxyformer.execution.runner import read_mapping
@@ -270,7 +275,15 @@ def test_pilot_profile_builder_cell(owner, tmp_path):
     built = real_frame.diagnostic_profile_tasks(endpoint, frame, approvals, campaign_id='pilot-d',
         evaluation_namespace='pilot-evaluation', prior_locks=[], cpu_wall_hours_budget=10000,
         campaign_mode='example_pilot', paired_manifest='/synthetic/manifest.json')
+    legacy = real_frame.screening_profile_tasks(endpoint, frame, approvals)
+    pilot_profiles = [t for t in built['tasks'] if t['stage'] == 'simulation-smoke']
+    assert not {t['id'] for t in pilot_profiles}.intersection(t['id'] for t in legacy['tasks'])
+    known = {t['id'] for t in pilot_profiles}
+    assert all(t['continuation']['predecessor'] is None or t['continuation']['predecessor'] in known for t in pilot_profiles)
     for task in built['tasks']:
+        if task['stage'] in ('campaign-estimate','campaign-lock'):
+            assert all(ref['dependency'] in known for ref in task['parameters']['profiles'].values())
+            assert all(ref['dependency'] in known for refs in task['parameters']['probe_profiles'].values() for ref in refs.values())
         assert task['parameters']['recipe']['study'] == STUDY
         assert task['parameters']['study'] == STUDY
         assert task['parameters']['partition'] == 'preemptible'
@@ -402,3 +415,45 @@ def test_owner_study_must_still_be_supported_by_engine(owner, dimension, value):
     recipe['pilot_declaration']['study'][dimension] = value
     with pytest.raises(ContractError, match='study'):
         campaign.pilot_declaration(recipe, approvals)
+
+
+@pytest.mark.parametrize('pilot_named', [False, True])
+def test_public_probe_preserves_legacy_shape_and_requires_pilot_recipe(owner, tmp_path, monkeypatch, pilot_named):
+    estimate = write(tmp_path/'budget_estimate.json', {})
+    lock = {'estimate_input':{'dependency':'estimate','path':'budget_estimate.json'},
+            'estimate_hash':file_hash(estimate)}
+    if pilot_named:
+        lock['campaign_mode'] = owner[1]['campaign_mode']
+    path = write(tmp_path/'recipe_lock.json', lock)
+    first = {'needs':{},'parameters':{'scenario':{'name':'sign_changing'}}}
+    expansion = write(tmp_path/'expanded_units.json', {'lock_hash':file_hash(path),'plans':[{'tasks':[first]}]})
+    paths = {p.name:p for p in (estimate,path,expansion)}
+    monkeypatch.setattr(campaign_probe, 'dependency', lambda req,cfg,ref:paths[ref['path']])
+    task = {'parameters':{'lock_input':{'dependency':'lock','path':'recipe_lock.json'}}}
+    if pilot_named:
+        with pytest.raises(ContractError, match='pilot lock requires its declared recipe'):
+            campaign_probe.locked_probe_inputs(None, {'approvals':owner[0]}, task)
+    else:
+        resolved = campaign_probe.locked_probe_inputs(None, {}, task)
+        assert resolved[0] == lock and resolved[3] == first and resolved[4] == {}
+
+
+def test_legacy_admission_plan_preserves_recipe_free_probe_shape():
+    refs = {str(depth):{'reference':{'dependency':'profile-'+str(depth),'path':'budget_record.json'}} for depth in (1,2)}
+    lock = {'campaign_id':'legacy-probe', 'admission_receipt':{'dependency':'admit','path':'admission.json'},
+            'budget':{'profiles':{'sign_changing':{'setup_profile_sources':refs}}}}
+    first = {'needs':{},'parameters':{'scenario':{'name':'sign_changing'}}}
+    plan = campaign_probe.setup_admission_plan(lock, [{'tasks':[first]}], 'lock', {})
+    assert plan['lock_hash'] == coverage.digest(lock)
+    assert plan['tasks'][-1]['id'] == 'admit'
+    assert all('campaign_mode' not in task for task in plan['tasks'])
+
+
+def test_legacy_admit_still_checks_estimate_without_a_pilot_recipe(tmp_path, monkeypatch):
+    estimate = write(tmp_path/'budget_estimate.json', {})
+    lock = write(tmp_path/'recipe_lock.json', {'estimate_input':{'dependency':'estimate','path':'budget_estimate.json'},
+                                             'estimate_hash':'0'*64})
+    monkeypatch.setattr(campaign_probe, 'dependency', lambda req,cfg,ref:lock if ref['dependency']=='lock' else estimate)
+    task = {'parameters':{'lock_input':{'dependency':'lock','path':'recipe_lock.json'}}}
+    with pytest.raises(ContractError, match='admission estimate_hash mismatch'):
+        campaign_probe.admit(None, {}, task)
