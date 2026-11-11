@@ -50,6 +50,7 @@ def archive_manifest(tmp_path_factory):
         path = root / ('c' + str(index))
         actual = generate_suite_a
         def generated(*args, **kwargs):
+            args = (args[0], replace(args[1], name='sign_changing'), *args[2:])
             return actual(*args, **{**kwargs, 'seed': index + 6})
         with patch('test_attribution_audit.generate_suite_a', generated):
             saved_fixture(path)
@@ -209,6 +210,41 @@ def test_pilot_estimate_lock_expansion_and_admission_dispatch(diagnostic_request
         assert plan['spec']['work'][0]['parameters']['study'] == STUDY
     assert len(expansion['plans'][0]['tasks'][-1]['expected_leaves']) == sum(len(p['expected_leaves']) for p in expansion['plans'])
     assert all(t['study'] == STUDY for t in expansion['admission']['tasks'])
+    cfg = coverage.read_json(req.config_path)
+    deps = {k: Path(v) for k,v in cfg['dependencies'].items()}
+    deps['campaign-lock'] = root
+    from test_coverage import successful_records
+    _, records = successful_records(5, 'sign_changing')
+    budgets = {}
+    for plan, batch, record in zip(expansion['plans'], lock['batches'], records):
+        record['draw'] = batch['draws'][0]
+        for estimate in record['estimates'].values():
+            estimate['se_definitions'] = {
+                'unclustered_influence': {'se': .5, 'variance_target':'fixed_frame_repetition','assumptions':'synthetic'},
+                'spatial_primary': {'se':1.,'variance_target':'geographic_process','assumptions':'synthetic'}}
+        for leaf in plan['tasks'][:-1]:
+            directory = tmp_path/'collected'/leaf['id']
+            value = {'lock_hash':coverage.digest(lock),'batch_id':batch['batch_id'],'mode':'diagnostic',
+                     'scenario':batch['scenario'],'draws':batch['draws'],'records':[record]}
+            result_path = write(directory/'result.json', value)
+            deps[leaf['id']] = directory
+            budgets[leaf['id']] = {'payload_hash':file_hash(result_path),
+                'binding':{'recipe_hash':coverage.digest(lock['recipe'])},
+                'leaves':[{'wall_seconds':100.}], 'complete':True}
+    monkeypatch.setattr(campaign, 'load_lock', lambda *args:lock)
+    monkeypatch.setattr(campaign, 'load_budget', lambda req, cfg, unit, **kw:budgets[unit])
+    collector = request(tmp_path/'collector', expansion['plans'][0]['tasks'][-1], deps, approvals)
+    result = campaign.run_stage(collector)
+    assert result.status == 'pass', result.message
+    readout = coverage.read_json(Path(collector.output_dir)/'paired_readout.json')
+    assert len(readout['pairs']) == 5
+    assert (Path(collector.output_dir)/'paired_readout.md').read_text().startswith('# diagnostic pilot')
+    gate = coverage.read_json(Path(collector.output_dir)/'gate.json')
+    assert gate['certifies_release_criteria'] is False
+    summary = gate['scenario_summaries']['sign_changing']
+    assert summary['gate_se'] == 'unclustered_influence'
+    assert summary['methods']['one_step']['mean_se'] == .5
+    assert summary['coverage_pass'] is False
     # Registered public admission must run the regeneration verifier before reading receipts.
     with patch.object(pilot, 'verify_regeneration', side_effect=ContractError('falsified before admission')) as verify:
         admit_task = {'parameters': {'lock_input': {'dependency':'lock','path':'recipe_lock.json'}}}

@@ -72,6 +72,8 @@ def pin_draws(manifest_path, declaration):
         require(state['record']['status'] == 'success', 'paired source chain ' + chain + ': draw not successful')
         obs = ObservedRecords.from_json(state['sample']['observations'])
         truth = TruthArtifact.from_json(state['sample']['structural_causal_truth'])
+        require(SCMConfig.from_json(truth.generator_configuration).name == draw['scenario'],
+                'paired source chain ' + chain + ': source scenario mismatch')
         pins.append({'source_campaign': manifest['campaign'], 'source_chain': chain,
             'source_path': str(path.resolve()), 'draw_index': index, 'draw': deepcopy(draw),
             'repetition_id': draw['repetition_id'], 'seed': draw['seed'], 'scenario': draw['scenario'],
@@ -205,7 +207,7 @@ def paired_readout(lock, records):
                                                  'paired ' + cell + ' minus cell d; ' + method)
                                   for cell in attribution_audit.CELLS if cell != 'fitted'}}
     report = {'label': LABEL, 'certifies_release_criteria': False,
-        'statement': 'Five pairs (n = 5) are exploratory; descriptive paired t intervals certify nothing. Draws are never pooled away.',
+        'statement': 'Planned five pairs (n = 5) are exploratory; descriptive paired t intervals certify nothing. Each collector states its observed pair count. Draws are never pooled away.',
         'pairs': rows, 'summary': summary}
     markdown = '# ' + LABEL + '\n\n' + report['statement'] + '\n\n```json\n' + json.dumps(report, indent=2) + '\n```\n'
     return report, markdown
