@@ -251,6 +251,17 @@ def test_pilot_estimate_lock_expansion_and_admission_dispatch(diagnostic_request
     assert result.status == 'pass', result.message
     readout = coverage.read_json(Path(collector.output_dir)/'paired_readout.json')
     assert len(readout['pairs']) == 5
+    def labeled(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if type(child) in (int,float):
+                    assert key == 'value' and value['basis']
+                else:
+                    labeled(child)
+        elif isinstance(value, list):
+            for child in value:
+                labeled(child)
+    labeled(readout)
     assert (Path(collector.output_dir)/'paired_readout.md').read_text().startswith('# diagnostic pilot')
     gate = coverage.read_json(Path(collector.output_dir)/'gate.json')
     assert gate['certifies_release_criteria'] is False
