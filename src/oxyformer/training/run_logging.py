@@ -34,16 +34,26 @@ def sanitize(value):
             return value
         if key.isdecimal():
             canonical = key.lstrip('0') or '0'
-            value = re.sub(r'[0-9]+', lambda match: '[redacted]'
-                           if (match[0].lstrip('0') or '0') == canonical else match[0], value)
+            value = re.sub('0*' + re.escape(canonical), '[redacted]', value)
         return value.replace(key, '[redacted]')
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
         key = os.environ.get('WANDB_API_KEY')
-        if key and len(key) >= 32 and ((key.isdecimal() and value == int(key)) or key in str(value)):
+        if key and len(key) >= 32 and ((key.isdecimal() and value == int(key)) or sanitize(str(value)) != str(value)):
             return '[redacted]'
     return value
+
+
+def _bits(value, width=0):
+    return [digit == '1' for digit in format(value, f'0{width}b')]
+
+
+def _from_bits(value, width=None):
+    if (type(value) is not list or not value or any(type(b) is not bool for b in value)
+            or (width is not None and len(value) != width)):
+        raise ValueError('invalid spool bits')
+    return int(''.join('1' if b else '0' for b in value), 2)
 
 
 def noop(event):
@@ -62,7 +72,11 @@ def inspect_config(hook, config):
     unknown = set(vars(config)) - CONFIG_SCHEMA[type(config).__name__].keys()
     if unknown:
         hook.logging_ok = False
-        hook.refusal = 'refused: undeclared config key ' + sorted(map(str, unknown))[0]
+        try:
+            name = sorted(map(str, unknown))[0]
+        except Exception:
+            name = '<unprintable>'
+        hook.refusal = 'refused: undeclared config key ' + name
 
 
 def emit(hook, event, device='cpu'):
@@ -343,7 +357,7 @@ class WandbLogger:
             rows.append(json.dumps(sanitize(event)))
         if not rows:
             self.logging_ok = False
-        header = json.dumps(sanitize(dict(schema='oxyformer-events-v1', capture_ok=self.logging_ok,
+        header = json.dumps(sanitize(dict(schema='oxyformer-events-bits', capture_ok=self.logging_ok,
                                          refusal=self.refusal)))
         digest = sha256()
         pending = self.attempt_dir / 'events-pending.jsonl'
@@ -351,7 +365,7 @@ class WandbLogger:
             for line in (header, *rows):
                 stream.write(line + '\n')
                 digest.update((line + '\n').encode())
-            stream.write(json.dumps(sanitize(dict(sealed=True, count=len(rows), sha256=digest.hexdigest()))) + '\n')
+            stream.write(json.dumps(sanitize(dict(sealed=True, count=_bits(len(rows)), digest=_bits(int(digest.hexdigest(), 16), 256)))) + '\n')
         final = self.attempt_dir / 'events-complete.jsonl'
         os.replace(pending, final)
         self.spool = final
@@ -363,10 +377,14 @@ class WandbLogger:
         header, footer = json.loads(lines[0]), json.loads(lines[-1])
         rows = lines[1:-1]
         digest = sha256(''.join(line + '\n' for line in lines[:-1]).encode()).hexdigest()
-        if (header.get('schema') != 'oxyformer-events-v1' or
+        schema = header.get('schema')
+        count, checksum = footer.get('count'), footer.get('sha256')
+        if schema == 'oxyformer-events-bits':
+            count = _from_bits(count)
+            checksum = format(_from_bits(footer.get('digest'), 256), '064x')
+        if (schema not in ('oxyformer-events-v1', 'oxyformer-events-bits') or
                 type(header.get('capture_ok')) is not bool or footer.get('sealed') is not True or
-                type(footer.get('count')) is not int or footer['count'] != len(rows) or
-                footer.get('sha256') != digest):
+                type(count) is not int or count != len(rows) or checksum != digest):
             raise ValueError('incomplete event spool')
         if header.get('refusal') is not None:
             self.refusal = header['refusal']

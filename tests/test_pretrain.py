@@ -1,5 +1,6 @@
 """Synthetic, offline CPU checks for permissions, masking and fold-local SSL."""
 from dataclasses import FrozenInstanceError, replace
+from test_run_logging import captured_losses
 from pathlib import Path
 import math
 
@@ -540,22 +541,9 @@ def test_checkpoint_load_across_same_model_cards(tmp_path, monkeypatch):
         load_checkpoint(artifact, replace(artifact.identity, environment=different))
 
 
-def test_logging_bitwise_invariance(tmp_path, monkeypatch):
+def test_logging_bitwise_invariance(tmp_path, monkeypatch, captured_losses):
     from test_run_logging import check_invariance
     view, split, config = make_case(tmp_path)
-    trace = []
-    original = torch.Tensor.backward
-    active = False
-    def observe(loss, *args, **kwargs):
-        nonlocal active
-        if active:
-            return original(loss, *args, **kwargs)
-        active = True
-        try:
-            trace.append(loss.detach().clone())
-            return original(loss, *args, **kwargs)
-        finally:
-            active = False
-    monkeypatch.setattr(torch.Tensor, 'backward', observe)
+    trace = captured_losses
     check_invariance(monkeypatch, config, trace,
         lambda cfg: pretrain(view, split, cfg, 1103), tmp_path, 'ssl', ('ssl',))

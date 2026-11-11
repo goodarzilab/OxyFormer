@@ -22,7 +22,8 @@ Each attempt owns its directory/status. Pending/null means incomplete; logging_o
 and sync_ok are separate. Post-fit sync has a 120-second timeout and needs runtime
 WANDB_API_KEY. Never dump credentials/environment. Matching requires >=32-character
 keys; secret-labelled fields remain redacted and credential-bearing paths refuse.
-Spools seal count/digest/capture/refusal; invalid spools cannot claim completion.
+Spools encode protocol counts/digests as boolean bits, avoiding numeric-key
+collisions, and seal capture/refusal; invalid spools cannot claim completion.
 WandbLogger.replay("/path/to/events-complete.jsonl") preserves failures and original
 status. Sync existing runs with python -m wandb sync /path/to/offline-run.
 
