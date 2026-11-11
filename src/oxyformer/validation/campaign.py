@@ -59,6 +59,20 @@ def validate_campaign(campaign, approvals=_REPOSITORY_APPROVALS):
     decision = approvals["owner_decisions"].get(mode)
     fields = {"purpose", "cells", "partitions", "repetitions_per_scenario", "scenarios",
               "certifies_release_criteria"}
+    prefix = "owner_decisions." + mode + "."
+    if isinstance(decision, dict) and "gate_se" in decision:
+        require(decision.get("purpose") == "diagnostic_pilot", "invalid " + prefix + "gate_se purpose")
+        require(isinstance(decision["gate_se"], str) and decision["gate_se"] in
+                ("unclustered_influence", "spatial_primary"), "invalid " + prefix + "gate_se")
+        fields.add("gate_se")
+    if "gate_se" in campaign:
+        require(campaign.get("purpose") == "diagnostic_pilot", "invalid campaign gate_se purpose")
+        require(isinstance(campaign["gate_se"], str) and campaign["gate_se"] in
+                ("unclustered_influence", "spatial_primary"), "invalid campaign gate_se")
+    require(("gate_se" in campaign) == (isinstance(decision, dict) and "gate_se" in decision),
+            "campaign gate_se mismatch with owner block")
+    if "gate_se" in campaign:
+        require(campaign["gate_se"] == decision["gate_se"], "campaign gate_se mismatch with owner block")
     require(isinstance(decision, dict) and set(decision) == fields,
             "missing or malformed owner campaign approval: " + mode)
     prefix = "owner_decisions." + mode + "."
