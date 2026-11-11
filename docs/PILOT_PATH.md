@@ -36,12 +36,10 @@ its actual generation inputs must agree with the source. Regenerated observation
 and structural-truth content hashes must match. A failure stops the chain.
 Leaves use the declared partition, eight CPUs, CUDA, and `--no-requeue`.
 
-The collector uses the declared gate SE and publishes `paired_readout.json` and
-`paired_readout.md`. Each draw retains its truth, pilot estimate and named SE
-definitions, source estimate, replayed oracle cells, and both paired contrasts.
-Summary contrasts use paired t intervals; five pairs are exploratory. Local
-collectors describe their local pair; the first chain's collector receives all
-five chains. Every numerical readout value has a basis label.
+The collector uses the declared gate SE and labels the result diagnostic pilot;
+no release criterion is certified. The first chain's collector receives all five
+chains. C5's paired oracle readout is deferred to a follow-up unit under the
+100,000-character diff-budget rule. This C1-C4 path alone does not complete OD-6.
 
 ## Supported envelope and accepted limits
 

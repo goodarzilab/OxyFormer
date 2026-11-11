@@ -142,7 +142,7 @@ def _spec_check(spec, approvals):
         runtime = pilot_runtime(spec, approvals)
         c = runtime['diagnostic_campaign']
         require(spec['kind'] == 'diagnostic', 'pilot uses bounded diagnostic expansion')
-        require(all(spec.get(k) == v for k, v in screening_metadata(spec).items()), 'pilot specification drift')
+        require(all(spec.get(k) == v for k, v in screening_metadata(spec, approvals).items()), 'pilot specification drift')
         require(spec.get('partition') == c['partition'], 'pilot partition drift')
         require(spec.get('gpu_concurrency_max') == runtime['gpu_concurrency_max'][c['partition']], 'pilot concurrency drift')
         for work in spec['work']:
@@ -229,7 +229,7 @@ def _unit(spec, task, prerequisites, gpus, seconds, role):
             'concurrency_limits': {'gpu': spec['gpu_concurrency_max'], 'cpu': 6}} if diagnostic and role == 'leaf' else {})}
 
 
-def _build(spec):
+def _build(spec, approvals=None):
     units, tasks, leaves = [], [], []
     inputs = deepcopy(spec['inputs'])
     if 'admission_receipt' in spec:
@@ -253,7 +253,7 @@ def _build(spec):
                 task.update({k: spec[k] for k in ('campaign_mode', 'study', 'campaign_label', 'certifies_release_criteria', 'final_cells')})
             if _diagnostic(spec):
                 from oxyformer.validation.campaign import screening_metadata
-                task.update(screening_metadata(spec))
+                task.update(screening_metadata(spec, approvals))
             if 'admission_receipt' in spec:
                 task['admission_receipt'] = deepcopy(spec['admission_receipt'])
             tasks.append(task)
@@ -277,7 +277,7 @@ def _build(spec):
         task.update({k: spec[k] for k in ('campaign_mode', 'study', 'campaign_label', 'certifies_release_criteria', 'final_cells')})
     if _diagnostic(spec):
         from oxyformer.validation.campaign import screening_metadata
-        task.update(screening_metadata(spec))
+        task.update(screening_metadata(spec, approvals))
     if 'admission_receipt' in spec:
         task['admission_receipt'] = deepcopy(spec['admission_receipt'])
     tasks.append(task)
@@ -313,7 +313,7 @@ def validate_plan(plan, approvals):
 
     for unit_id in ids:
         visit(unit_id)
-    expected_units, expected_tasks, leaves = _build(spec)
+    expected_units, expected_tasks, leaves = _build(spec, approvals)
     collector_id = expected_units[-1]['id']
     require(collector_id in by_id and set(leaves) <= set(by_id[collector_id]['needs']),
         'collector omitted required leaf dependency')
@@ -329,7 +329,7 @@ def expand_campaign(spec, approvals):
     """Validate a finite, explicit work list; do not infer tuning or repetitions."""
     spec = deepcopy(spec)
     _spec_check(spec, approvals)
-    units, tasks, leaves = _build(spec)
+    units, tasks, leaves = _build(spec, approvals)
     return validate_plan({'schema_version': 1, 'spec': spec, 'units': units,
             'tasks': tasks, 'expected_leaves': leaves}, approvals)
 

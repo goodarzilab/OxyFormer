@@ -21,7 +21,7 @@ def estimate_budget(request):
     require(request.stage == task['stage'] == 'campaign-estimate', 'stage mismatch')
     p = task['parameters']
     recipe = p['recipe']
-    if campaign.screening_metadata(recipe):
+    if campaign.screening_metadata(recipe, config.get("approvals")):
         return campaign.screening_estimate(request, config, p)
     campaign.validate_recipe(recipe)
     inputs = {}
