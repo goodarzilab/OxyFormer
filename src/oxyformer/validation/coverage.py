@@ -552,12 +552,13 @@ def read_json(path):
 def output_metadata(task):
     from oxyformer.validation.campaign import screening_metadata
     recipe = task.get("parameters", {}).get("recipe", task.get("parameters", {}))
-    return screening_metadata(task if task.get("campaign_mode") in ("screening", "diagnostic") else recipe)
+    from oxyformer.validation.campaign import is_pilot
+    return screening_metadata(task if task.get("campaign_mode") in ("screening", "diagnostic") or is_pilot(task) else recipe)
 
 
 def publish(request, values, *, status, message, extra_artifacts=()):
     metadata = output_metadata(read_json(request.task_path))
-    values = {name: {**value, **metadata} for name, value in values.items()}
+    values = {name: ({**value, **metadata} if isinstance(value, dict) else value) for name, value in values.items()}
     root = Path(request.output_dir)
     root.mkdir(parents=True, exist_ok=True)
     lineage = ArtifactLineage(source_hashes=(request.config_hash, request.task_hash),
@@ -566,7 +567,7 @@ def publish(request, values, *, status, message, extra_artifacts=()):
         environment=(("code_identity", request.code_identity),), seed=None, parameter_count=None)
     records = []
     for name, value in values.items():
-        path = atomic_json(root, name, value)
+        path = atomic_write(root, name, value) if isinstance(value, str) else atomic_json(root, name, value)
         records.append(ArtifactRecord(path=name, kind=name.removesuffix(".json"), sha256=file_hash(path), lineage=lineage))
     # Individually published repetition records are explicitly hash-bound too.
     for path in sorted((root / "repetitions").glob("*/result.json")):
@@ -894,7 +895,15 @@ def prepare_batch(request: StageRequest):
         recipe = parameters["recipe"]
         lock = None
     from oxyformer.validation.campaign import screening_metadata, validate_screening
-    if recipe.get("campaign_mode") == "diagnostic":
+    from oxyformer.validation.campaign import is_pilot, pilot_declaration
+    if is_pilot(recipe):
+        declaration = pilot_declaration(recipe, config.get("approvals"))
+        require(mode in ("profile", "diagnostic"), "pilot cannot certify final coverage")
+        require(parameters.get("study") == declaration["study"], "pilot study drift")
+        require(parameters.get("partition") == recipe["pilot_partition"], "pilot partition drift")
+        require(parameters.get("certifies_release_criteria") is False, "pilot certification drift")
+        require(uses_continuation(task), "pilot requires coverage continuation")
+    elif recipe.get("campaign_mode") == "diagnostic":
         from oxyformer.validation.campaign import validate_diagnostic
         decision = validate_diagnostic(recipe, config.get("approvals"))["diagnostic_campaign"]
         require(mode in ("profile", "diagnostic"), "diagnostic cell cannot certify final coverage")
@@ -921,6 +930,9 @@ def prepare_batch(request: StageRequest):
         require(parameters["scenario"] in lock["scenario_family"], "scenario family drift")
     draws = parameters["draws"]
     validate_draws(draws)
+    if lock and is_pilot(recipe) and task["continuation"]["predecessor"] is None:
+        from oxyformer.validation.pilot import verify_regeneration
+        verify_regeneration(lock, draws, template=template, frame=frame, scenario=scenario)
     require(all(d["scenario"] == scenario.name for d in draws), "draw/scenario mismatch")
     seconds = finite(parameters["wall_seconds"], "batch wall seconds")
     require(seconds > 0, "positive batch budget required")
