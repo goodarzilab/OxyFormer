@@ -493,3 +493,17 @@ def intact_pilot_admission(lock_request, lock_result, lock, expansion, deps, tmp
             'campaign-setup-probe', {ref['path']:value})
     req = request(tmp_path/'intact-admission', task, deps, approvals)
     return campaign_probe.admit(req, coverage.read_json(req.config_path), task)
+
+
+def test_pilot_profile_accepts_configured_month2_metadata(owner):
+    approvals, _ = owner
+    approvals = deepcopy(approvals)
+    approvals['owner_decisions']['month2_followon']['final_cells'] = 'Owner decision pending measured pilot profile'
+    from oxyformer.validation import smoke_inputs
+    built = real_frame.diagnostic_profile_tasks(*smoke_inputs.build_inputs(), approvals,
+        campaign_id='pilot-d', evaluation_namespace='pilot-evaluation', prior_locks=[],
+        cpu_wall_hours_budget=10000, campaign_mode='example_pilot', paired_manifest='/synthetic/manifest.json')
+    assert built['tasks']
+    for task in built['tasks']:
+        assert task['final_cells'] == approvals['owner_decisions']['month2_followon']['final_cells']
+        assert task['parameters']['recipe']['study'] == STUDY

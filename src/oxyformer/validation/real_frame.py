@@ -328,7 +328,8 @@ def diagnostic_profile_tasks(endpoint, frame, approvals, *, campaign_id, evaluat
                              calibration_probes=None, campaign_mode="diagnostic", paired_manifest=None):
     """Emit the approved profile subset and sizing/lock tasks, without submission."""
     d = campaign.month2_decision(approvals)
-    require(d == campaign.month2_decision(), 'month2_followon drift')
+    if campaign_mode == 'diagnostic':
+        require(d == campaign.month2_decision(), 'month2_followon drift')
     pilot_recipe = None
     if campaign_mode != 'diagnostic':
         block = approvals.get('owner_decisions', {}).get(campaign_mode)
