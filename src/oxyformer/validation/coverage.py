@@ -278,12 +278,12 @@ def budget_binding(request, task, recipe_hash):
         "task_id": task["id"], "chain": task.get("continuation"),
         "recipe_hash": recipe_hash, "lock_hash": task.get("recipe_lock", {}).get("sha256"),
         "draws": parameters["draws"], "scenario": parameters["scenario"],
-        "mode": parameters["mode"], "code_identity": request.code_identity, **output_metadata(task)}
+        "mode": parameters["mode"], "code_identity": request.code_identity, **_request_metadata(request, task)}
 
 
 def record_measurements(request, completed, started, task, timing, summary):
     """Worker measurements only. They cannot authorize any downstream decision."""
-    value = {**output_metadata(task), "binding": budget_binding(request, task, timing["recipe_hash"]),
+    value = {**_request_metadata(request, task), "binding": budget_binding(request, task, timing["recipe_hash"]),
         "started_monotonic": started, "timing": timing,
         "counts": summary["counts"], "received": summary["received_repetitions"]}
     path = atomic_json(request.output_dir, MEASUREMENTS, value)
@@ -549,16 +549,29 @@ def read_json(path):
     return json.loads(Path(path).read_text())
 
 
-def output_metadata(task):
+_METADATA_DEFAULT = object()
+
+
+def output_metadata(task, approvals=_METADATA_DEFAULT):
     from oxyformer.validation.campaign import screening_metadata
     recipe = task.get("parameters", {}).get("recipe", task.get("parameters", {}))
     from oxyformer.validation.campaign import is_pilot
-    return screening_metadata(task if task.get("campaign_mode") in ("screening", "diagnostic") or is_pilot(task) else recipe)
+    selected = task if task.get("campaign_mode") in ("screening", "diagnostic") or is_pilot(task) else recipe
+    return screening_metadata(selected) if approvals is _METADATA_DEFAULT else screening_metadata(selected, approvals)
+
+
+def _request_metadata(request, task):
+    from oxyformer.validation.campaign import is_pilot
+    recipe = task.get("parameters", {}).get("recipe", task.get("parameters", {}))
+    if is_pilot(task) or is_pilot(recipe):
+        config = yaml.safe_load(Path(request.config_path).read_text())
+        return output_metadata(task, config.get("approvals"))
+    return output_metadata(task)
 
 
 def publish(request, values, *, status, message, extra_artifacts=()):
-    metadata = output_metadata(read_json(request.task_path))
-    values = {name: ({**value, **metadata} if isinstance(value, dict) else value) for name, value in values.items()}
+    metadata = _request_metadata(request, read_json(request.task_path))
+    values = {name: {**value, **metadata} for name, value in values.items()}
     root = Path(request.output_dir)
     root.mkdir(parents=True, exist_ok=True)
     lineage = ArtifactLineage(source_hashes=(request.config_hash, request.task_hash),
@@ -567,7 +580,7 @@ def publish(request, values, *, status, message, extra_artifacts=()):
         environment=(("code_identity", request.code_identity),), seed=None, parameter_count=None)
     records = []
     for name, value in values.items():
-        path = atomic_write(root, name, value) if isinstance(value, str) else atomic_json(root, name, value)
+        path = atomic_json(root, name, value)
         records.append(ArtifactRecord(path=name, kind=name.removesuffix(".json"), sha256=file_hash(path), lineage=lineage))
     # Individually published repetition records are explicitly hash-bound too.
     for path in sorted((root / "repetitions").glob("*/result.json")):
@@ -918,7 +931,7 @@ def prepare_batch(request: StageRequest):
         require(parameters.get("partition") == "standard", "screening partition must be standard")
         require(uses_continuation(task), "screening requires coverage continuation")
     production = mode != "smoke"
-    validate_recipe(recipe, production=production)
+    validate_recipe(recipe, production=production, approvals=config.get("approvals"))
     template_path = dependency(request, config, parameters["endpoint_input"])
     frame_path = dependency(request, config, parameters["frame_input"])
     template = nested_cv.PreparedEndpoint.from_json(template_path.read_text())
@@ -932,7 +945,7 @@ def prepare_batch(request: StageRequest):
     validate_draws(draws)
     if lock and is_pilot(recipe) and task["continuation"]["predecessor"] is None:
         from oxyformer.validation.pilot import verify_regeneration
-        verify_regeneration(lock, draws, template=template, frame=frame, scenario=scenario)
+        verify_regeneration(lock, draws, template=template, frame=frame, scenario=scenario, approvals=config.get("approvals"))
     require(all(d["scenario"] == scenario.name for d in draws), "draw/scenario mismatch")
     seconds = finite(parameters["wall_seconds"], "batch wall seconds")
     require(seconds > 0, "positive batch budget required")
@@ -1238,7 +1251,7 @@ def _run_chain(request, started):
         "publication_verification_seconds": math.fsum(v["publication_seconds"] for v in leaves),
         "admitted_budget_seconds": seconds,
         "production_equivalent": parameters["mode"] != "smoke" and study == RecipeStudy(),
-        "study": study.to_dict(), **output_metadata(task),
+        "study": study.to_dict(), **_request_metadata(request, task),
         "complete_repetition_seconds": [s["compute_seconds"] for s in states if s["record"] is not None
                                         and s["record"]["status"] == "success"],
         "complete": summary["complete"] and not exceeded, "budget_exceeded": exceeded,

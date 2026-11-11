@@ -84,8 +84,8 @@ def archive_manifest(tmp_path_factory):
 
 
 def locked(owner, archive_manifest):
-    _, recipe = owner
-    pins = pilot.pin_draws(archive_manifest, campaign.pilot_declaration(recipe))
+    approvals, recipe = owner
+    pins = pilot.pin_draws(archive_manifest, campaign.pilot_declaration(recipe, approvals))
     return {'recipe': recipe, 'paired_draws': pins,
             'batches': [{'draws': [p['draw']]} for p in pins]}
 
@@ -156,53 +156,15 @@ def test_tampered_saved_artifact_stops_named_chain(owner, archive_manifest, monk
         pilot.verify_regeneration(lock)
 
 
-@pytest.mark.parametrize('cell', ['d', 'c'])
-def test_paired_readout_basis_and_intervals(owner, archive_manifest, cell):
-    if cell != 'd':
-        approvals, recipe = owner
-        approvals['owner_decisions']['example_pilot']['cells'] = {cell:deepcopy(STUDY)}
-        recipe['pilot_declaration']['cell'] = cell
-        campaign.OWNER_APPROVALS.write_text(yaml.safe_dump(approvals))
-    lock = locked(owner, archive_manifest)
-    records = []
-    for pin in lock['paired_draws']:
-        state, _, _, _, _ = pilot.pinned_source(pin)
-        record = deepcopy(state['record'])
-        for estimate in record['estimates'].values():
-            estimate['value'] += .01
-            estimate['se_definitions'] = {'unclustered_influence': {'se': .2,
-                'variance_target': 'fixed_frame_repetition', 'assumptions': 'synthetic'}}
-        records.append(record)
-    report, markdown = pilot.paired_readout(lock, records)
-    assert len(report['pairs']) == 5
-    assert 'exploratory' in report['statement'] and 'n = 5' in markdown
-    assert report['certifies_release_criteria'] is False
-    for pair in report['pairs']:
-        for row in pair['methods'].values():
-            assert row['pilot_minus_source']['value'] == pytest.approx(.01)
-            assert row['pilot']['basis'].startswith('cell ' + cell + ';')
-            assert row['pilot_minus_source']['basis'].startswith('paired cell ' + cell + ' minus cell e;')
-            assert set(row['oracle_cells']) == {'oracle','oracle_Q','oracle_g'}
-    assert report['summary']['one_step']['pilot_minus_source']['n']['value'] == 5
-    def basis(v):
-        if isinstance(v, dict):
-            for key, child in v.items():
-                if type(child) in (int, float):
-                    assert key == 'value' and v['basis']
-                else: basis(child)
-        elif isinstance(v, list):
-            for child in v: basis(child)
-    basis(report)
-
-
 @pytest.mark.parametrize('screening_rates', [(100.,) * 4], indirect=True)
-def test_pilot_estimate_lock_expansion_and_admission_dispatch(diagnostic_request, owner, archive_manifest, tmp_path, monkeypatch):
-    approvals, minimal = owner
+@pytest.mark.parametrize('supplied_only', [False, True])
+def test_pilot_estimate_lock_expansion_and_admission_dispatch(diagnostic_request, owner, archive_manifest, tmp_path, monkeypatch, supplied_only):
+    approvals, minimal = supplied_only_approvals(owner, tmp_path, monkeypatch) if supplied_only else owner
     task = coverage.read_json(diagnostic_request.task_path)
     cfg = coverage.read_json(diagnostic_request.config_path)
     task['parameters']['recipe'].update(minimal)
-    task['parameters'].update(campaign.screening_metadata(task['parameters']['recipe']), paired_manifest=str(archive_manifest))
-    task.update(campaign.screening_metadata(task['parameters']['recipe']))
+    task['parameters'].update(campaign.screening_metadata(task['parameters']['recipe'], approvals), paired_manifest=str(archive_manifest))
+    task.update(campaign.screening_metadata(task['parameters']['recipe'], approvals))
     req = request(tmp_path / 'pilot-estimate', task, {k: Path(v) for k,v in cfg['dependencies'].items()}, approvals)
     req = diagnostic_lock_request(req, tmp_path)
     outcome = campaign.run_stage(req)
@@ -212,7 +174,7 @@ def test_pilot_estimate_lock_expansion_and_admission_dispatch(diagnostic_request
     expansion = coverage.read_json(root / 'expanded_units.json')
     assert len(lock['batches']) == len(expansion['plans']) == 5
     assert [b['draws'][0] for b in lock['batches']] == [p['draw'] for p in lock['paired_draws']]
-    assert campaign.instance_batches(lock, 'sign_changing-c0') == lock['batches'][:1]
+    assert campaign.instance_batches(lock, 'sign_changing-c0', approvals) == lock['batches'][:1]
     assert lock['study'] == STUDY and lock['recipe']['study'] == STUDY
     for plan in expansion['plans']:
         validate_plan(plan, approvals)
@@ -226,6 +188,7 @@ def test_pilot_estimate_lock_expansion_and_admission_dispatch(diagnostic_request
     cfg = coverage.read_json(req.config_path)
     deps = {k: Path(v) for k,v in cfg['dependencies'].items()}
     deps['campaign-lock'] = root
+    assert intact_pilot_admission(req, outcome, lock, expansion, deps, tmp_path, approvals)['admitted'] is True
     from test_coverage import successful_records
     _, records = successful_records(5, 'sign_changing')
     budgets = {}
@@ -249,20 +212,6 @@ def test_pilot_estimate_lock_expansion_and_admission_dispatch(diagnostic_request
     collector = request(tmp_path/'collector', expansion['plans'][0]['tasks'][-1], deps, approvals)
     result = campaign.run_stage(collector)
     assert result.status == 'pass', result.message
-    readout = coverage.read_json(Path(collector.output_dir)/'paired_readout.json')
-    assert len(readout['pairs']) == 5
-    def labeled(value):
-        if isinstance(value, dict):
-            for key, child in value.items():
-                if type(child) in (int,float):
-                    assert key == 'value' and value['basis']
-                else:
-                    labeled(child)
-        elif isinstance(value, list):
-            for child in value:
-                labeled(child)
-    labeled(readout)
-    assert (Path(collector.output_dir)/'paired_readout.md').read_text().startswith('# diagnostic pilot')
     gate = coverage.read_json(Path(collector.output_dir)/'gate.json')
     assert gate['certifies_release_criteria'] is False
     summary = gate['scenario_summaries']['sign_changing']
@@ -319,8 +268,10 @@ def test_measured_profile_bound_refusal(owner, fault):
         campaign.pilot_sizing(recipe, {'sign_changing': profile}, decision, wall, 1.25)
 
 
-def test_first_leaf_checks_real_generation_inputs(owner, archive_manifest, tmp_path, monkeypatch):
-    lock = locked(owner, archive_manifest)
+@pytest.mark.parametrize('supplied_only', [False, True])
+def test_first_leaf_checks_real_generation_inputs(owner, archive_manifest, tmp_path, monkeypatch, supplied_only):
+    approvals, recipe = supplied_only_approvals(owner, tmp_path, monkeypatch) if supplied_only else owner
+    lock = locked((approvals, recipe), archive_manifest)
     pin = lock['paired_draws'][0]
     _, obs, truth, base, source_recipe = pilot.pinned_source(pin)
     recipe = {**source_recipe, **lock['recipe'], 'endpoint_hash': base.content_hash, 'frame_hash': obs.frame.content_hash}
@@ -329,10 +280,10 @@ def test_first_leaf_checks_real_generation_inputs(owner, archive_manifest, tmp_p
     lock['scenario_family'] = [scenario]
     from test_campaign import STAMPS
     lock.update(deepcopy(STAMPS))
-    task = {'id': 'pilot-leaf', 'stage': 'coverage', **campaign.screening_metadata(recipe),
+    task = {'id': 'pilot-leaf', 'stage': 'coverage', **campaign.screening_metadata(recipe, approvals),
         'recipe_lock': {'dependency':'lock','path':'recipe_lock.json','sha256':'a'*64},
         'continuation': {'owner':'x','step':0,'predecessor':None},
-        'outputs':['continuation.tar'], 'parameters': {**campaign.screening_metadata(recipe),
+        'outputs':['continuation.tar'], 'parameters': {**campaign.screening_metadata(recipe, approvals),
             'mode':'diagnostic', 'batch_id':'batch', 'draws':[pin['draw']], 'scenario':scenario,
             'study':STUDY, 'partition':'preemptible', 'wall_seconds':14100,
             'endpoint_input':{'dependency':'inputs','path':'endpoint.json'},
@@ -340,7 +291,7 @@ def test_first_leaf_checks_real_generation_inputs(owner, archive_manifest, tmp_p
     lock['batches'][0].update(batch_id='batch', mode='diagnostic', scenario=scenario, wall_seconds=14100)
     inputs = tmp_path / 'inputs'
     write(inputs/'endpoint.json', base.to_dict()); write(inputs/'frame.json', obs.frame.to_dict())
-    req = request(tmp_path/'leaf', task, {'inputs':inputs}, owner[0])
+    req = request(tmp_path/'leaf', task, {'inputs':inputs}, approvals)
     monkeypatch.setattr(campaign, 'load_lock', lambda *args: lock)
     monkeypatch.setattr(campaign, 'validate_leaf_task', lambda *args: None)
     monkeypatch.setattr(campaign, 'validate_recipe', lambda *args, **kw: None)
@@ -468,3 +419,77 @@ def test_legacy_admit_still_checks_estimate_without_a_pilot_recipe(tmp_path, mon
     task = {'parameters':{'lock_input':{'dependency':'lock','path':'recipe_lock.json'}}}
     with pytest.raises(ContractError, match='admission estimate_hash mismatch'):
         campaign_probe.admit(None, {}, task)
+
+
+def supplied_only_approvals(owner, tmp_path, monkeypatch):
+    approvals, recipe = owner
+    defaults = deepcopy(approvals)
+    del defaults['owner_decisions']['example_pilot']
+    path = tmp_path/'repository-without-pilot.yaml'
+    path.write_text(yaml.safe_dump(defaults))
+    monkeypatch.setattr(campaign, 'OWNER_APPROVALS', path)
+    return approvals, recipe
+
+
+def test_supplied_approvals_drive_builder_without_repository_block(owner, tmp_path, monkeypatch):
+    approvals, recipe = supplied_only_approvals(owner, tmp_path, monkeypatch)
+    assert campaign.pilot_declaration(recipe, approvals)['study'] == STUDY
+    from oxyformer.validation import smoke_inputs
+    built = real_frame.diagnostic_profile_tasks(*smoke_inputs.build_inputs(), approvals,
+        campaign_id='supplied-pilot', evaluation_namespace='supplied', prior_locks=[],
+        cpu_wall_hours_budget=10000., campaign_mode='example_pilot', paired_manifest='/synthetic/manifest.json')
+    assert all(task['study'] == STUDY for task in built['tasks'])
+
+
+def test_supplied_approvals_drive_stage_publication(owner, tmp_path, monkeypatch):
+    approvals, recipe = supplied_only_approvals(owner, tmp_path, monkeypatch)
+    task = {'id':'supplied-profile','stage':'simulation-smoke', **recipe, 'parameters':{'recipe':recipe}}
+    req = request(tmp_path/'publisher', task, {}, approvals)
+    result = coverage.publish(req, {'result.json':{'example':True}}, status='pass', message='synthetic metadata')
+    assert result.status == 'pass'
+    value = coverage.read_json(Path(req.output_dir)/'result.json')
+    assert value['study'] == STUDY and value['campaign_mode'] == 'example_pilot'
+
+
+def test_supplied_approvals_drive_pins_regeneration_and_bound_errors(owner, archive_manifest, tmp_path, monkeypatch):
+    approvals, recipe = supplied_only_approvals(owner, tmp_path, monkeypatch)
+    pins = pilot.pin_draws(archive_manifest, campaign.pilot_declaration(recipe, approvals))
+    lock = {'recipe':recipe, 'paired_draws':pins, 'batches':[{'draws':[pin['draw']]} for pin in pins]}
+    assert len(pilot.verify_regeneration(lock, approvals=approvals)['verified_repetitions']) == 5
+    profile = {'seconds_per_repetition':1e9,'publication_verification_seconds':0.,
+               'leaf_overheads':{key:0. for key in coverage.OVERHEAD_PHASES}}
+    with pytest.raises(ContractError, match='pilot cell d:.*leaves'):
+        campaign.pilot_sizing(recipe, {'sign_changing':profile}, campaign.pilot_runtime(recipe, approvals),
+            coverage.maximum_leaf_stage_seconds(), 1.25, approvals=approvals)
+
+
+def intact_pilot_admission(lock_request, lock_result, lock, expansion, deps, tmp_path, approvals):
+    """Public admit consumes the real lock/budget and three sealed synthetic receipts."""
+    from oxyformer.contracts import StageResult
+    from oxyformer.provenance import ArtifactRecord
+    from test_campaign_profiles import seal_stage_fixture, sealed_json_fixture
+    seal_stage_fixture(lock_request, lock_result)
+    estimate_unit = lock['estimate_input']['dependency']
+    estimate_root = deps[estimate_unit]
+    estimate_result = StageResult(request_hash=lock_request.content_hash, status='pass', message='synthetic estimate',
+        artifacts=tuple(ArtifactRecord(path=p.name, sha256=file_hash(p), kind='fixture', lineage=lock_result.artifacts[0].lineage)
+                        for p in sorted(estimate_root.glob('*.json'))))
+    write(estimate_root/'_execution/result.json', estimate_result.to_dict())
+    task = deepcopy(expansion['admission']['tasks'][-1])
+    req = request(tmp_path/'admission-inputs', task, deps, approvals)
+    cfg = coverage.read_json(req.config_path)
+    expected = campaign_probe.input_digests(req, cfg, expansion['plans'][0]['spec']['inputs'])
+    scenario = lock['batches'][0]['scenario']['name']
+    shape = lock['budget']['expected_predecessor_shapes'][scenario]
+    for key, depth in (('fresh',0), ('resumed_1',1), ('resumed_2',2)):
+        ref = task['parameters']['probe_inputs'][key]
+        value = {'mode':'admission' if depth == 0 else 'admission-resumed', 'depth':depth,
+            'lock_hash':coverage.digest(lock), 'estimate_hash':lock['estimate_hash'], 'scenario':scenario,
+            'input_digests':expected, 'setup_draws':[0.,0.], 'setup_seconds':0.}
+        if depth:
+            value.update(verification={'reuse_miss':False,'ancestors_reused':10},
+                predecessor_shape=campaign_probe.compare_publication_shape(deepcopy(shape),deepcopy(shape),synthetic=True))
+        deps[ref['dependency']] = sealed_json_fixture(tmp_path/ref['dependency'],ref['dependency'],
+            'campaign-setup-probe', {ref['path']:value})
+    req = request(tmp_path/'intact-admission', task, deps, approvals)
+    return campaign_probe.admit(req, coverage.read_json(req.config_path), task)

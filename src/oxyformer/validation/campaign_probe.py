@@ -605,7 +605,7 @@ def setup_admission_plan(lock, plans, lock_unit, approvals):
     if lock.get('campaign_mode') == 'diagnostic' or is_pilot(lock) or is_pilot(lock.get('recipe', {})):
         from oxyformer.validation.campaign import screening_metadata
         for task in tasks:
-            task.update(screening_metadata(lock['recipe']))
+            task.update(screening_metadata(lock['recipe'], approvals))
     units = [_unit({'id': lock['campaign_id'], 'campaign_mode': 'screening'}, task, [], 0, 14400, 'admission')
              for task in tasks]
     return {'schema_version': 1, 'lock_hash': lock_hash, 'receipt_inputs': receipts, 'tasks': tasks, 'units': units}
@@ -624,10 +624,11 @@ def admit(request, config, task):
         require(lock['owner_decision_hash'] == digest(pilot_declaration(lock['recipe'], config.get('approvals'))),
                 'pilot owner block changed')
         from oxyformer.validation.pilot import verify_regeneration
-        verify_regeneration(lock)
+        verify_regeneration(lock, approvals=config.get("approvals"))
         pilot_sizing(lock['recipe'], lock['budget']['profiles'],
             pilot_runtime(lock['recipe'], config.get('approvals')),
-            lock['batches'][0]['wall_seconds'], lock['budget']['profile_safety_factor'])
+            lock['batches'][0]['wall_seconds'], lock['budget']['profile_safety_factor'],
+            approvals=config.get('approvals'))
     require(file_hash(dependency(request, config, lock['estimate_input'])) == lock['estimate_hash'],
             'admission estimate_hash mismatch')
     expansion = read_json(dependency(request, config, {
@@ -677,7 +678,7 @@ def admit(request, config, task):
                 resume_reserve=profile['resume_overhead_seconds'], usable_compute=profile['assumed_usable_per_leaf'])
         except ContractError as exc:
             raise ContractError(f'admission not established: measured setup {setup}; counts {counts}; {exc}') from exc
-    candidate = {**output_metadata(task), 'schema_version': 1, 'admitted': True, 'lock_hash': lock_hash,
+    candidate = {**output_metadata(task, config.get("approvals")), 'schema_version': 1, 'admitted': True, 'lock_hash': lock_hash,
         'estimate_hash': lock['estimate_hash'], 'setup_policy': 'three-receipt-minima-v1',
         'admission_measurements': {'probes': refs, 'setup_draws': draws, 'setup_minima': minima,
             'allowance_seconds': allowance['allowance'], 'projection': allowance,

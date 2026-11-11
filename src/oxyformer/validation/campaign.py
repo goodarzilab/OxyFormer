@@ -164,11 +164,11 @@ def pilot_runtime(recipe, approvals=_REPOSITORY_APPROVALS):
     return decision
 
 
-def pilot_sizing(recipe, profiles, decision, wall, factor):
+def pilot_sizing(recipe, profiles, decision, wall, factor, *, approvals=_REPOSITORY_APPROVALS):
     try:
         return diagnostic_sizing(profiles, decision, wall, factor)
     except ContractError as exc:
-        raise ContractError("pilot cell " + pilot_declaration(recipe)["cell"] + ": GPU-hours/chain bound: " + str(exc)) from exc
+        raise ContractError("pilot cell " + pilot_declaration(recipe, approvals)["cell"] + ": GPU-hours/chain bound: " + str(exc)) from exc
 
 
 def screening_decision(approvals=_REPOSITORY_APPROVALS):
@@ -355,7 +355,7 @@ def diagnostic_sizing(profiles, decision, wall, factor=_REPOSITORY_APPROVALS):
 
 def diagnostic_estimate(request, config, parameters):
     recipe = parameters["recipe"]
-    validate_recipe(recipe)
+    validate_recipe(recipe, approvals=config.get("approvals"))
     pilot = is_pilot(recipe)
     decision = pilot_runtime(recipe, config.get("approvals")) if pilot else validate_diagnostic(recipe, config.get("approvals"))
     c = decision["diagnostic_campaign"]
@@ -390,10 +390,10 @@ def diagnostic_estimate(request, config, parameters):
         profiles[name]["setup_profile_sources"] = (profile_setup_sources(request, config, refs,
             scenario, profiles[name], stamps) if refs is not None else {})
     profiles, calibration = calibrate(request, config, parameters, profiles)
-    rows = (pilot_sizing(recipe, profiles, decision, wall, factor) if pilot
+    rows = (pilot_sizing(recipe, profiles, decision, wall, factor, approvals=config.get("approvals")) if pilot
             else diagnostic_sizing(profiles, decision, wall, factor))
-    owner_hash = digest(pilot_declaration(recipe)) if pilot else digest(decision)
-    return {"schema_version": 1, **screening_metadata(recipe), "estimate_only": True,
+    owner_hash = digest(pilot_declaration(recipe, config.get("approvals"))) if pilot else digest(decision)
+    return {"schema_version": 1, **screening_metadata(recipe, config.get("approvals")), "estimate_only": True,
         "admitted": False, "submission_performed": False, "certifies_production_coverage": False,
         "recipe": deepcopy(recipe), "recipe_hash": digest(recipe), "owner_decision": recipe["campaign_mode"] if pilot else "month2_followon",
         "owner_decision_hash": owner_hash, "scenario_family": scenarios, **stamps,
@@ -415,14 +415,14 @@ def approved_safety_factor(parameters, approvals):
     return decision
 
 
-def screening_metadata(recipe):
+def screening_metadata(recipe, approvals=_REPOSITORY_APPROVALS):
     if is_pilot(recipe):
-        d = pilot_declaration(recipe)
+        d = pilot_declaration(recipe, approvals)
         return {"campaign_mode": d["campaign_mode"], "study": deepcopy(d["study"]),
             "pilot_declaration": d, "pilot_partition": recipe.get("pilot_partition", d["partitions"][0]),
             "campaign_label": "diagnostic pilot; no release criterion certified",
             "certifies_release_criteria": False, "production_equivalent": False,
-            "final_cells": month2_decision()["final_cells"]}
+            "final_cells": month2_decision(approvals)["final_cells"]}
     if recipe.get("campaign_mode") == "diagnostic":
         d = month2_decision()
         return {"campaign_mode": "diagnostic", "study": deepcopy(d["diagnostic_campaign"]["recipe"]),
@@ -445,13 +445,13 @@ def validate_screening(recipe, approvals):
     return decision
 
 
-def validate_recipe(recipe, *, production=True):
+def validate_recipe(recipe, *, production=True, approvals=_REPOSITORY_APPROVALS):
     pilot = is_pilot(recipe)
     screening = recipe.get("campaign_mode") in ("screening", "diagnostic") or pilot
     extra = {"campaign_mode", "study"} if screening else set()
     if pilot:
         extra |= {"pilot_declaration", "pilot_partition"}
-        pilot_declaration(recipe)
+        pilot_declaration(recipe, approvals)
     require(set(recipe) == {"endpoint_hash", "frame_hash", "nested_cv", "inference"} | extra, "unknown recipe fields")
     if screening:
         require(production, "screening study cannot be a smoke recipe")
@@ -501,20 +501,20 @@ def load_lock(request, config, task):
     # A screening collector only verifies receipts and aggregates terminal
     # records. It runs on CPU; fitting leaves still require the exact measured
     # accelerator environment. Profile receipt hashes remain checked above.
-    screening_collector = request.stage == "campaign-collect" and bool(screening_metadata(lock["recipe"]))
+    screening_collector = request.stage == "campaign-collect" and bool(screening_metadata(lock["recipe"], config.get("approvals")))
     require(all(lock[k] == v for k, v in current.items()
                 if not screening_collector or k == "scientific_fingerprint"), "scientific code/environment recipe drift")
-    validate_recipe(lock["recipe"])
+    validate_recipe(lock["recipe"], approvals=config.get("approvals"))
     if is_pilot(lock["recipe"]):
         declaration = pilot_declaration(lock["recipe"], config.get("approvals"))
         require(lock["owner_decision_hash"] == digest(declaration), "pilot owner block changed")
         from oxyformer.validation.pilot import validate_pins
-        validate_pins(lock)
+        validate_pins(lock, approvals=config.get("approvals"))
     elif lock["recipe"].get("campaign_mode") == "diagnostic":
         decision = validate_diagnostic(lock["recipe"], config.get("approvals"))
         require(lock["owner_decision_hash"] == digest(decision), "month2_followon decision hash drift")
         require(all(b["mode"] == "diagnostic" for b in lock["batches"]), "diagnostic batch mode drift")
-    elif screening_metadata(lock["recipe"]):
+    elif screening_metadata(lock["recipe"], config.get("approvals")):
         decision = validate_screening(lock["recipe"], config.get("approvals"))
         require(set(lock["instances"]) == set(decision["scenarios"])
                 and all(b["mode"] == "screening" for b in lock["batches"]),
@@ -523,7 +523,7 @@ def load_lock(request, config, task):
     draws = [draw for batch in lock["batches"] for draw in batch["draws"]]
     validate_draws(draws)
     require(len({b["batch_id"] for b in lock["batches"]}) == len(lock["batches"]), "duplicate locked batches")
-    if screening_metadata(lock["recipe"]):
+    if screening_metadata(lock["recipe"], config.get("approvals")):
         from oxyformer.validation.campaign_probe import require_admission
         require_admission(request, config, task, lock)
     return lock
@@ -559,7 +559,7 @@ def registered_scenarios(endpoint, frame):
 
 def _profile(request, config, reference, scenario, recipe, stamps):
     record = load_budget(request, config, reference["dependency"])
-    screening = bool(screening_metadata(recipe))
+    screening = bool(screening_metadata(recipe, config.get("approvals")))
     require(record["complete"] and record["all_successful"]
             and (screening or record["profile"]["production_equivalent"] is True),
             "complete production profiling required")
@@ -641,10 +641,13 @@ def slice_count(profile, repetitions, seconds, factor, *, enforce_limit=True):
     return count
 
 
-def instance_batches(lock, instance):
-    if lock["recipe"].get("campaign_mode") == "diagnostic" or is_pilot(lock["recipe"]):
+def instance_batches(lock, instance, approvals=_REPOSITORY_APPROVALS):
+    if is_pilot(lock["recipe"]):
+        pilot_declaration(lock["recipe"], approvals)
         return [b for b in lock["batches"] if b["instance"] == instance]
-    if screening_metadata(lock["recipe"]):
+    if lock["recipe"].get("campaign_mode") == "diagnostic":
+        return [b for b in lock["batches"] if b["instance"] == instance]
+    if screening_metadata(lock["recipe"], approvals):
         return [b for b in lock["batches"] if b["scenario"]["name"] == instance]
     return [b for b in lock["batches"] if b["mode"] == instance]
 
@@ -786,11 +789,11 @@ def build_screening_lock(request, config, task):
         prior_seeds.update(d["seed"] for d in profile["draws"])
     seed_namespace = digest([request.content_hash, namespace, estimate])
     batches = []
-    metadata = screening_metadata(p["recipe"])
+    metadata = screening_metadata(p["recipe"], config.get("approvals"))
     pins = []
     if pilot:
         from oxyformer.validation.pilot import pin_draws
-        pins = pin_draws(p["paired_manifest"], pilot_declaration(p["recipe"]))
+        pins = pin_draws(p["paired_manifest"], pilot_declaration(p["recipe"], config.get("approvals")))
     if diagnostic:
         for i, scenario in enumerate(estimate["scenario_family"]):
             name = scenario["name"]
@@ -880,7 +883,7 @@ def build_screening_lock(request, config, task):
             "kind": "diagnostic" if diagnostic else "screening", **metadata, "partition": partition, "gpu_concurrency_max": concurrency,
             "prerequisites": [], "inputs": inputs, "recipe_lock": lock_ref, "work": [work],
             "admission_receipt": deepcopy(p["admission_receipt"]),
-            "collector": {"stage": "campaign-collect", "outputs": COLLECT_OUTPUTS + (["paired_readout.json", "paired_readout.md"] if pilot else []), "wall_seconds": 600, "gpus": 0}}
+            "collector": {"stage": "campaign-collect", "outputs": COLLECT_OUTPUTS, "wall_seconds": 600, "gpus": 0}}
         plans.append(expand_campaign(spec, config["approvals"]))
     if diagnostic:
         # The first chain's collector for each scenario receives every chain's
@@ -906,7 +909,7 @@ def _admit_locked_leaves(request, config, lock, plans):
     """
     if is_pilot(lock["recipe"]):
         from oxyformer.validation.pilot import verify_regeneration
-        verify_regeneration(lock)
+        verify_regeneration(lock, approvals=config.get("approvals"))
     Path(request.output_dir).mkdir(parents=True, exist_ok=True)
     measurements = []
     with TemporaryDirectory(prefix=".admission-", dir=request.output_dir) as temporary:
@@ -979,7 +982,7 @@ def build_lock(request, config, task):
     prior locks as declared inputs; prior final and profile seeds are excluded.
     """
     parameters = task["parameters"]
-    if screening_metadata(parameters["recipe"]):
+    if screening_metadata(parameters["recipe"], config.get("approvals")):
         return build_screening_lock(request, config, task)
     campaign_id = parameters["campaign_id"]
     concrete_id(campaign_id)
@@ -1117,7 +1120,7 @@ def _plan_for_task(request, config, task, lock):
     for plan in plans:
         validate_plan(plan, config["approvals"])
         mode = next(k for k, v in lock["instances"].items() if v == plan["spec"]["id"])
-        declared = instance_batches(lock, mode)
+        declared = instance_batches(lock, mode, config.get("approvals"))
         work = plan["spec"]["work"]
         require(len(work) == len(declared), "expansion omitted locked batch")
         by_batch = {w["parameters"]["batch_id"]: w for w in work}
@@ -1183,7 +1186,7 @@ def collect(request, config, task):
         collected_leaves.extend(other_leaves[key] for key in sorted(other_leaves))
     require(task["expected_leaves"] == [leaf["id"] for leaf in collected_leaves], "partial collector fan-in")
     instance = next(k for k, v in lock["instances"].items() if v == task["campaign"])
-    declared_batches = instance_batches(lock, instance)
+    declared_batches = instance_batches(lock, instance, config.get("approvals"))
     if (lock.get("campaign_mode") == "diagnostic" or is_pilot(lock["recipe"])) and "collector_inputs" in plan["spec"]:
         declared_batches = [b for b in lock["batches"] if b["scenario"] == declared_batches[0]["scenario"]]
     mode = declared_batches[0]["mode"]
@@ -1222,10 +1225,10 @@ def collect(request, config, task):
         name = scenario["name"]
         selected = [r for r in records if r["draw"]["scenario"] == name]
         declared = [d for b in declared_batches if b["scenario"]["name"] == name for d in b["draws"]]
-        summaries[name] = summarize(selected, declared, production_equivalent=not bool(screening_metadata(lock["recipe"])), null_scenario=scenario["effect"] == "null")
+        summaries[name] = summarize(selected, declared, production_equivalent=not bool(screening_metadata(lock["recipe"], config.get("approvals"))), null_scenario=scenario["effect"] == "null")
         if is_pilot(lock["recipe"]):
             summaries[name] = summarize(selected, declared, production_equivalent=False,
-                null_scenario=scenario["effect"] == "null", gate_se=pilot_declaration(lock["recipe"])["gate_se"])
+                null_scenario=scenario["effect"] == "null", gate_se=pilot_declaration(lock["recipe"], config.get("approvals"))["gate_se"])
         elif mode == "diagnostic":
             summaries[name] = diagnostic_summary(selected, declared, null_scenario=scenario["effect"] == "null")
     if mode == "final":
@@ -1238,18 +1241,13 @@ def collect(request, config, task):
             "scenario_summaries": summaries, "retry_rules": lock["retry_rules"],
             "incomplete_chains": [r["batch_id"] for r in results if not r.get("terminal", True)],
             "leaf_runtimes": runtimes, "budget_overruns": [r for r in runtimes if r["overrun_seconds"] > 0]}
-    metadata = screening_metadata(lock["recipe"])
+    metadata = screening_metadata(lock["recipe"], config.get("approvals"))
     gate.update(metadata)
     if mode == "diagnostic" and not is_pilot(lock["recipe"]):
         gate.update(coverage_pass=False, coverage_pass_reason="diagnostic",
             diagnostic_summary={name: value["diagnostic_summary"] for name, value in summaries.items()})
     values = {"result.json": {"records": records, "gate": gate,
         **({"diagnostic_summary": gate["diagnostic_summary"]} if "diagnostic_summary" in gate else {}), **metadata}, "gate.json": gate}
-    if is_pilot(lock["recipe"]):
-        from oxyformer.validation.pilot import paired_readout
-        report, markdown = paired_readout(lock, records)
-        # Keep the fully labelled document intact through generic publication.
-        values.update({"paired_readout.json": canonical_json(report), "paired_readout.md": markdown})
     return values, passing
 
 
@@ -1262,7 +1260,7 @@ def run_stage(request: StageRequest) -> StageResult:
         if request.stage == "campaign-lock":
             lock, plans, budget = build_lock(request, config, task)
             admission = None
-            if screening_metadata(lock['recipe']):
+            if screening_metadata(lock['recipe'], config.get("approvals")):
                 from oxyformer.validation.campaign_probe import setup_admission_plan
                 admission = setup_admission_plan(lock, plans, task['id'], config['approvals'])
             values = {"recipe_lock.json": lock, "task_manifest.json": {"lock_hash": digest(lock),
@@ -1270,10 +1268,10 @@ def run_stage(request: StageRequest) -> StageResult:
                 **({'admission_tasks': admission['tasks']} if admission else {})},
                 "expanded_units.json": {"lock_hash": digest(lock), "plans": plans,
                     **({'admission': admission} if admission else {})},
-                "budget.json": budget, "gate.json": {"pass": True, "admitted": not bool(screening_metadata(lock["recipe"])),
+                "budget.json": budget, "gate.json": {"pass": True, "admitted": not bool(screening_metadata(lock["recipe"], config.get("approvals"))),
                     "lock_hash": digest(lock), "submission_performed": False, "screening_complete": False,
                     "certifies_production_coverage": False}}
-            metadata = screening_metadata(lock["recipe"])
+            metadata = screening_metadata(lock["recipe"], config.get("approvals"))
             if lock["recipe"].get("campaign_mode") == "diagnostic":
                 values["task_manifest.json"].update({key: budget[key] for key in
                     ("profile_safety_factor", "owner_safety_factor_decision")})
