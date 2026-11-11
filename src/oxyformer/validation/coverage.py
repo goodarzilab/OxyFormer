@@ -450,13 +450,33 @@ def validate_success(record, *, null_scenario):
         require(abs(record["truth"]) <= error, "null scenario has nonzero observed-law truth")
 
 
-def summarize(records, declared, *, production_equivalent, null_scenario, expected_rejection=False):
+GATE_VARIANCE_TARGETS = {"unclustered_influence": "fixed_frame_repetition",
+                         "spatial_primary": "geographic_process"}
+
+
+def declared_standard_error(estimate, method, definition):
+    name = f"{method} se_definitions.{definition}"
+    definitions = estimate.get("se_definitions")
+    require(isinstance(definitions, dict), "missing " + name)
+    entry = definitions.get(definition)
+    require(isinstance(entry, dict) and "se" in entry, "missing " + name)
+    value = finite(entry["se"], name)
+    require(value >= 0, "negative " + name)
+    require(entry.get("variance_target") == GATE_VARIANCE_TARGETS[definition],
+            "invalid variance_target for " + name)
+    return value
+
+
+def summarize(records, declared, *, production_equivalent, null_scenario, expected_rejection=False,
+              gate_se=None):
     """Never infer the denominator from the successful subset.
 
     Missing/incomplete draws forbid passage. Failed/rejected draws count as
     noncoverage and, conservatively, potential null rejections. Bias and SE
     summaries are explicitly conditional on an available estimate.
     """
+    require(gate_se is None or (isinstance(gate_se, str) and gate_se in GATE_VARIANCE_TARGETS),
+            "invalid gate_se")
     validate_draws(declared)
     expected = {r["repetition_id"]: r for r in declared}
     observed = {}
@@ -479,13 +499,15 @@ def summarize(records, declared, *, production_equivalent, null_scenario, expect
     for method in METHODS:
         values = np.asarray([r["estimates"][method]["value"] for r in successes], dtype=float)
         errors = np.asarray([r["estimates"][method]["value"] - r["truth"] for r in successes], dtype=float)
-        ses = np.asarray([r["estimates"][method]["se"] for r in successes], dtype=float)
+        reported = [r["estimates"][method]["se"] for r in successes]
+        ses = np.asarray(reported if gate_se is None else [
+            declared_standard_error(r["estimates"][method], method, gate_se) for r in successes], dtype=float)
         # Whole truth-integration interval must be covered; ambiguous endpoints
         # count against coverage. Integration diagnostics are not rigorous CIs.
         covered = sum(abs(r["estimates"][method]["value"] - r["truth"]) + r["truth_integration_error"]
-                      <= Z95 * r["estimates"][method]["se"] for r in successes)
-        rejected = sum(abs(r["estimates"][method]["value"]) > Z95 * r["estimates"][method]["se"]
-                       for r in successes)
+                      <= Z95 * se for r, se in zip(successes, ses))
+        rejected = sum(abs(r["estimates"][method]["value"]) > Z95 * se
+                       for r, se in zip(successes, ses))
         sd = float(np.std(values, ddof=1)) if len(values) > 1 else None
         bias = float(np.mean(errors)) if len(errors) else None
         mean_se = float(np.mean(ses)) if len(ses) else None
@@ -500,9 +522,12 @@ def summarize(records, declared, *, production_equivalent, null_scenario, expect
             "bias_investigation_required": ratio is None or ratio > .20,
             "pass": lower >= .925 and (upper is None or upper <= .075)
                 and ratio is not None and ratio <= .20 and se_ratio is not None and .90 <= se_ratio <= 1.10}
+        if gate_se is not None:
+            summaries[method].update(reported_se_mean=float(np.mean(reported)) if reported else None,
+                                     reported_se_variance_target="geographic_process")
     passing = bool(production_equivalent and n >= MIN_REPETITIONS and complete and failure_upper <= .01
                    and not expected_rejection and all(v["pass"] for v in summaries.values()))
-    return {"declared_repetitions": n, "received_repetitions": len(records), "missing_repetitions": missing,
+    result = {"declared_repetitions": n, "received_repetitions": len(records), "missing_repetitions": missing,
         "counts": counts, "complete": complete, "production_equivalent": bool(production_equivalent),
         "numerical_failure_upper": failure_upper, "methods": summaries, "coverage_pass": passing,
         "expected_eligibility_rejection": bool(expected_rejection),
@@ -510,6 +535,10 @@ def summarize(records, declared, *, production_equivalent, null_scenario, expect
         "conditional_summary_count": len(successes),
         "truth_integration_error_max": max((r["truth_integration_error"] for r in successes), default=None),
         "summary_interpretation": "Bias/SD and SE/SD use successful estimates only; gate bounds retain all declared draws."}
+
+    if gate_se is not None:
+        result.update(gate_se=gate_se, gate_variance_target=GATE_VARIANCE_TARGETS[gate_se])
+    return result
 
 
 def dependency(request, config, reference):
@@ -695,19 +724,65 @@ def estimate_repetition(endpoint, recipe, root, deadline, *, study=None, continu
         else endpoint.data.column(endpoint.data.manifest.weight_field)))
     weights = {oid: weights[oid] for oid in endpoint.outer.original_ids}
     common = dict(split=scoring_split, policy=endpoint.policy)
+    targeted = cv_tmle(nuisances, endpoint.data, weights, "identity", nuisances.spec, **common)
     estimates = {"one_step": one_step(nuisances, endpoint.data, weights, nuisances.spec, **common),
-                 "cv_tmle": cv_tmle(nuisances, endpoint.data, weights, "identity", nuisances.spec, **common).estimate}
+                 "cv_tmle": targeted.estimate}
     by_id = {r.original_id: r for r in endpoint.geography.rows}
     groups = {oid: by_id[oid].county for oid in endpoint.outer.original_ids}
     # Representatives are frozen in the recipe, never selected from outcomes.
     locations = {k: tuple(v) for k, v in recipe["inference"]["county_locations"].items()}
-    covariances = spatial_sensitivities(align_estimates(estimates), groups, locations, interpretation="geographic_process")
-    primary = recipe["inference"]["primary_bandwidth_km"]
+    covariances = spatial_sensitivities(align_estimates(estimates), groups, locations,
+                                       interpretation="geographic_process")
+    return labelled_estimates(estimates, nuisances, endpoint.data, scoring_split, weights, targeted,
+                              groups, locations, recipe["inference"]["primary_bandwidth_km"],
+                              covariances=covariances)
+
+
+def labelled_estimates(estimates, nuisances, data, split, weights, targeted, groups, locations, primary,
+                       *, covariances=None):
+    """Record the audit's SE definitions without changing the registered SE.
+
+    Influence contributions already include target weights and seed averaging.
+    The residual diagonal uses seed-specific targeted means for CV-TMLE, exactly
+    as the attribution audit does; it is conditional on the observed frame.
+    """
+    from oxyformer.data.loaders import join_outcomes
+    from oxyformer.estimation.covariance import align_estimates, spatial_sensitivities, cluster_covariance
+
+    influence = align_estimates(estimates)
+    if covariances is None:
+        covariances = spatial_sensitivities(influence, groups, locations, interpretation="geographic_process")
+    cluster = cluster_covariance(influence, groups, interpretation="geographic_process")
     require(primary in covariances, "unregistered primary spatial bandwidth")
+    y = np.asarray(join_outcomes(nuisances, data, split, nuisances.spec))
+    rows = {(oid, seed): j for j, (oid, seed) in enumerate(zip(nuisances.original_ids, nuisances.seed_ids))}
+    q = np.array([weights[oid] for oid in split.original_ids], dtype=float)
+    q /= q.sum()
     result = {}
     for index, (name, estimate) in enumerate(estimates.items()):
+        residuals = []
+        for seed, fit in targeted.by_seed:
+            ix = [rows[oid, seed] for oid in split.original_ids]
+            mu = np.array(fit.mu_a if name == "cv_tmle" else np.asarray(nuisances.mu_a)[ix])
+            residuals.append((np.asarray(nuisances.r_a)[ix] - 1) * (y[ix] - mu))
+        u = q * np.mean(residuals, axis=0)
+        def definition(se, target, assumptions):
+            return {"se": float(se), "variance_target": target, "assumptions": assumptions}
+        spatial_assumption = "County totals follow a geographic process with the registered Gaussian chord kernel."
+        definitions = {f"spatial_{b:g}_km": definition(cov.standard_errors[index],
+            "geographic_process", spatial_assumption) for b, cov in covariances.items()}
+        definitions["spatial_primary"] = definition(covariances[primary].standard_errors[index],
+            "geographic_process", spatial_assumption)
+        definitions["county_cluster"] = definition(cluster.standard_errors[index], "geographic_process",
+            "County totals are independent clusters with the finite-cluster correction.")
+        definitions["unclustered_influence"] = definition(
+            np.sqrt(len(q)/(len(q)-1)*np.sum(np.asarray(estimate.influence)**2)), "fixed_frame_repetition",
+            "Unclustered influence contributions describe fixed-frame repetitions without certifying geographic coverage.")
+        definitions["residual_frame_conditional"] = definition(np.sqrt(np.sum(u**2)),
+            "frame_conditional_residual", "Only residual variation conditional on the observed frame is included.")
         result[name] = {"value": estimate.value, "se": covariances[primary].standard_errors[index],
-            "spatial_se": {str(b): cov.standard_errors[index] for b, cov in covariances.items()}}
+            "spatial_se": {str(b): cov.standard_errors[index] for b, cov in covariances.items()},
+            "se_definitions": definitions}
     return result
 
 
