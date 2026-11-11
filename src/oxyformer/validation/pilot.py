@@ -11,7 +11,7 @@ from scipy.stats import t
 from oxyformer.contracts import StageRequest
 from oxyformer.provenance import ContractError, file_hash, require
 from oxyformer.validation import attribution_audit
-from oxyformer.validation.coverage import fixed_exposures, validate_draws
+from oxyformer.validation.coverage import fixed_exposures, validate_draws, digest
 from oxyformer.validation.generators import ObservedRecords, TruthArtifact, generate_suite_a
 from oxyformer.validation.scm import SCMConfig
 
@@ -165,7 +165,8 @@ def interval(values, basis):
 def paired_readout(lock, records):
     validate_pins(lock)
     from oxyformer.validation.campaign import pilot_declaration
-    pilot_cell = "cell " + pilot_declaration(lock["recipe"])["cell"]
+    declaration = pilot_declaration(lock["recipe"])
+    pilot_cell = "cell " + declaration["cell"]
     by_id = {r['draw']['repetition_id']: r for r in records}
     require(len(by_id) == len(records), 'duplicate pilot readout repetition')
     rows = []
@@ -209,6 +210,8 @@ def paired_readout(lock, records):
                                                  'paired ' + cell + ' minus ' + pilot_cell + '; ' + method)
                                   for cell in attribution_audit.CELLS if cell != 'fitted'}}
     report = {'label': LABEL, 'certifies_release_criteria': False,
+        'lock_hash': digest(lock), 'owner_block': declaration['campaign_mode'],
+        'pilot_cell': declaration['cell'], 'gate_se': declaration['gate_se'],
         'statement': 'Planned five pairs (n = 5) are exploratory; descriptive paired t intervals certify nothing. Each collector states its observed pair count. Draws are never pooled away.',
         'pairs': rows, 'summary': summary}
     markdown = '# ' + LABEL + '\n\n' + report['statement'] + '\n\n```json\n' + json.dumps(report, indent=2) + '\n```\n'
