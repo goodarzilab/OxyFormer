@@ -325,10 +325,23 @@ def screening_profile_tasks(endpoint, frame, approvals, *, setup_calibration=Non
 
 def diagnostic_profile_tasks(endpoint, frame, approvals, *, campaign_id, evaluation_namespace,
                              prior_locks, cpu_wall_hours_budget, setup_calibration=None,
-                             calibration_probes=None):
+                             calibration_probes=None, campaign_mode="diagnostic", paired_manifest=None):
     """Emit the approved profile subset and sizing/lock tasks, without submission."""
     d = campaign.month2_decision(approvals)
     require(d == campaign.month2_decision(), 'month2_followon drift')
+    pilot_recipe = None
+    if campaign_mode != 'diagnostic':
+        block = approvals.get('owner_decisions', {}).get(campaign_mode)
+        require(isinstance(block, dict) and isinstance(block.get('cells'), dict) and len(block['cells']) == 1,
+                'missing single-cell pilot owner block')
+        cell, study = next(iter(block['cells'].items()))
+        declaration = {**{k: deepcopy(v) for k, v in block.items() if k != 'cells'},
+            'campaign_mode': campaign_mode, 'cell': cell, 'study': deepcopy(study)}
+        pilot_recipe = {'campaign_mode': campaign_mode, 'study': deepcopy(study),
+            'pilot_declaration': declaration, 'pilot_partition': block['partitions'][0]}
+        campaign.pilot_declaration(pilot_recipe, approvals)
+        require(isinstance(paired_manifest, str) and bool(paired_manifest), 'pilot paired manifest required')
+        d = campaign.pilot_runtime(pilot_recipe, approvals)
     c = d['diagnostic_campaign']
     campaign.concrete_id(campaign_id)
     require(len(campaign_id) <= 23, 'campaign ID must leave room for chain suffix')
@@ -340,6 +353,8 @@ def diagnostic_profile_tasks(endpoint, frame, approvals, *, campaign_id, evaluat
         task = deepcopy(source)
         recipe = task['parameters']['recipe']
         recipe['campaign_mode'] = 'diagnostic'
+        if pilot_recipe is not None:
+            recipe.update(deepcopy(pilot_recipe))
         metadata = campaign.screening_metadata(recipe)
         task.update(metadata)
         task['parameters'].update(metadata, partition=c['partition'])
@@ -358,6 +373,8 @@ def diagnostic_profile_tasks(endpoint, frame, approvals, *, campaign_id, evaluat
     p.update(metadata, recipe=recipe, partition=c['partition'],
              profile_safety_factor=c['profile_safety_factor'],
              owner_safety_factor_decision='month2_followon.diagnostic_campaign')
+    if pilot_recipe is not None:
+        p['paired_manifest'] = paired_manifest
     p['profiles'] = {n: p['profiles'][n] for n in c['scenarios']}
     p['probe_profiles'] = {n: p['probe_profiles'][n] for n in c['scenarios']}
     estimate['resources']['partition'] = c['partition']
