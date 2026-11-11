@@ -1,4 +1,6 @@
 """OD-5: labelled uncertainty, explicit selection, sealed legacy behavior."""
+import ast
+from collections import Counter
 from copy import deepcopy
 from dataclasses import replace
 import json
@@ -211,3 +213,15 @@ def collector_gate(f, tmp_path, monkeypatch, module=campaign):
 def test_full_diagnostic_collector_gate_golden(tmp_path, monkeypatch):
     f = labelled_records()
     assert canonical_json(collector_gate(f, tmp_path, monkeypatch)) == canonical_json(f['collector_gate'])
+
+
+def test_pinned_source_scoring_calls():
+    """Keep the scoring operations visible to the pinned-source cost walker."""
+    source = Path(coverage.__file__).read_text()
+    tree = ast.parse(source)
+    estimate = next(n for n in tree.body
+                    if isinstance(n, ast.FunctionDef) and n.name == 'estimate_repetition')
+    calls = Counter(c.func.id for c in ast.walk(estimate)
+                    if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+                    and c.func.id in ('one_step', 'cv_tmle', 'spatial_sensitivities'))
+    assert calls == Counter(one_step=1, cv_tmle=1, spatial_sensitivities=1)

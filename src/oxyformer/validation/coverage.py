@@ -657,6 +657,7 @@ def estimate_repetition(endpoint, recipe, root, deadline, *, study=None, continu
     """All five folds with nested tuning; study overrides require explicit use."""
     from oxyformer.estimation.mtp import one_step
     from oxyformer.estimation.targeting import cv_tmle
+    from oxyformer.estimation.covariance import align_estimates, spatial_sensitivities
     from oxyformer.training.fit import DeadlineTiming, RecipeStudy, subset
 
     study = RecipeStudy() if study is None else study
@@ -730,11 +731,15 @@ def estimate_repetition(endpoint, recipe, root, deadline, *, study=None, continu
     groups = {oid: by_id[oid].county for oid in endpoint.outer.original_ids}
     # Representatives are frozen in the recipe, never selected from outcomes.
     locations = {k: tuple(v) for k, v in recipe["inference"]["county_locations"].items()}
+    covariances = spatial_sensitivities(align_estimates(estimates), groups, locations,
+                                       interpretation="geographic_process")
     return labelled_estimates(estimates, nuisances, endpoint.data, scoring_split, weights, targeted,
-                              groups, locations, recipe["inference"]["primary_bandwidth_km"])
+                              groups, locations, recipe["inference"]["primary_bandwidth_km"],
+                              covariances=covariances)
 
 
-def labelled_estimates(estimates, nuisances, data, split, weights, targeted, groups, locations, primary):
+def labelled_estimates(estimates, nuisances, data, split, weights, targeted, groups, locations, primary,
+                       *, covariances=None):
     """Record the audit's SE definitions without changing the registered SE.
 
     Influence contributions already include target weights and seed averaging.
@@ -745,7 +750,8 @@ def labelled_estimates(estimates, nuisances, data, split, weights, targeted, gro
     from oxyformer.estimation.covariance import align_estimates, spatial_sensitivities, cluster_covariance
 
     influence = align_estimates(estimates)
-    covariances = spatial_sensitivities(influence, groups, locations, interpretation="geographic_process")
+    if covariances is None:
+        covariances = spatial_sensitivities(influence, groups, locations, interpretation="geographic_process")
     cluster = cluster_covariance(influence, groups, interpretation="geographic_process")
     require(primary in covariances, "unregistered primary spatial bandwidth")
     y = np.asarray(join_outcomes(nuisances, data, split, nuisances.spec))
