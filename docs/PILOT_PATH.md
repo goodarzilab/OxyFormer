@@ -15,6 +15,8 @@ Call `real_frame.diagnostic_profile_tasks` with `campaign_mode` set to the block
 name and `paired_manifest` set to the collected-chains manifest path. The builder
 snapshots the declaration in the recipe; every consumer revalidates it against
 the owner block. It emits profile, estimate and lock tasks without submission.
+Pilot profiles use campaign-prefixed IDs and matching predecessor/profile references,
+so an existing screening profile unit cannot be reused for the new study.
 The estimator fits the approved study, retaining the existing nested recipe.
 
 The lock selects the five lowest canonical source draw indices in the declared
