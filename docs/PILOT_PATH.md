@@ -1,6 +1,6 @@
 # Paired diagnostic pilot
 
-This path implements OD-6 for one owner-approved cell d and five sign-changing
+This path implements OD-6 for one owner-approved cell (the planned cell d below) and five sign-changing
 pairs from collected m2-diag-A chains. It certifies no release criterion.
 
 The owner adds a named `owner_decisions` block with purpose `diagnostic_pilot`,

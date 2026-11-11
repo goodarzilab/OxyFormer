@@ -151,7 +151,13 @@ def test_tampered_saved_artifact_stops_named_chain(owner, archive_manifest, monk
         pilot.verify_regeneration(lock)
 
 
-def test_paired_readout_basis_and_intervals(owner, archive_manifest):
+@pytest.mark.parametrize('cell', ['d', 'c'])
+def test_paired_readout_basis_and_intervals(owner, archive_manifest, cell):
+    if cell != 'd':
+        approvals, recipe = owner
+        approvals['owner_decisions']['example_pilot']['cells'] = {cell:deepcopy(STUDY)}
+        recipe['pilot_declaration']['cell'] = cell
+        campaign.OWNER_APPROVALS.write_text(yaml.safe_dump(approvals))
     lock = locked(owner, archive_manifest)
     records = []
     for pin in lock['paired_draws']:
@@ -169,6 +175,8 @@ def test_paired_readout_basis_and_intervals(owner, archive_manifest):
     for pair in report['pairs']:
         for row in pair['methods'].values():
             assert row['pilot_minus_source']['value'] == pytest.approx(.01)
+            assert row['pilot']['basis'].startswith('cell ' + cell + ';')
+            assert row['pilot_minus_source']['basis'].startswith('paired cell ' + cell + ' minus cell e;')
             assert set(row['oracle_cells']) == {'oracle','oracle_Q','oracle_g'}
     assert report['summary']['one_step']['pilot_minus_source']['n']['value'] == 5
     def basis(v):
@@ -373,3 +381,24 @@ def test_saved_blob_tamper_is_named_before_regeneration(owner, archive_manifest,
     archive.write_bytes(payload.replace(raw, b'X'+raw[1:], 1))
     with pytest.raises(ContractError, match='paired source chain c1: source archive hash mismatch'):
         pilot.verify_regeneration(lock)
+
+
+def test_single_owner_cell_drives_study_without_a_hardcoded_cell(owner):
+    approvals, recipe = owner
+    study = {'reference_cap':64,'frozen_epochs':60,'grid_points':4,'seed_count':3}
+    block = approvals['owner_decisions']['example_pilot']
+    block['cells'] = {'c':study}
+    recipe['study'] = deepcopy(study)
+    recipe['pilot_declaration'].update(cell='c', study=deepcopy(study))
+    declaration = campaign.pilot_declaration(recipe, approvals)
+    assert declaration['cell'] == 'c' and declaration['study'] == study
+
+
+@pytest.mark.parametrize('dimension,value', [('grid_points',3), ('seed_count',2)])
+def test_owner_study_must_still_be_supported_by_engine(owner, dimension, value):
+    approvals, recipe = owner
+    approvals['owner_decisions']['example_pilot']['cells']['d'][dimension] = value
+    recipe['study'][dimension] = value
+    recipe['pilot_declaration']['study'][dimension] = value
+    with pytest.raises(ContractError, match='study'):
+        campaign.pilot_declaration(recipe, approvals)
