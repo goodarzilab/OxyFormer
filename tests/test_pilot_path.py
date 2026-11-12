@@ -188,7 +188,13 @@ def test_pilot_estimate_lock_expansion_and_admission_dispatch(diagnostic_request
     cfg = coverage.read_json(req.config_path)
     deps = {k: Path(v) for k,v in cfg['dependencies'].items()}
     deps['campaign-lock'] = root
-    assert intact_pilot_admission(req, outcome, lock, expansion, deps, tmp_path, approvals)['admitted'] is True
+    admission = intact_pilot_admission(req, outcome, lock, expansion, deps, tmp_path, approvals)
+    assert admission['admitted'] is True
+    expected = coverage.read_json(Path('tests/fixtures/pilot/pilot_goldens.json'))
+    identities = pilot_golden_identities(expansion['plans'])
+    assert coverage.digest(normalized_pilot_golden(expansion['admission'], identities)) == expected['setup_admission_plan']
+    assert coverage.digest(normalized_pilot_golden(admission, identities)) == expected['admit']
+    assert_pilot_lifecycle_golden(lock, expansion['plans'], coverage.read_json(root/'budget.json'))
     from test_coverage import successful_records
     _, records = successful_records(5, 'sign_changing')
     budgets = {}
@@ -207,8 +213,25 @@ def test_pilot_estimate_lock_expansion_and_admission_dispatch(diagnostic_request
             budgets[leaf['id']] = {'payload_hash':file_hash(result_path),
                 'binding':{'recipe_hash':coverage.digest(lock['recipe'])},
                 'leaves':[{'wall_seconds':100.}], 'complete':True}
+    # One chain goes through the real sealed execution and budget reader.
+    from test_campaign import seal_budget_fixture
+    sealed_leaf = expansion['plans'][1]['tasks'][0]
+    sealed_root = deps[sealed_leaf['id']]
+    scientific = coverage.read_json(sealed_root/'result.json')
+    scientific['recipe_hash'] = coverage.digest(lock['recipe'])
+    write(sealed_root/'result.json', scientific)
+    for name in ('runtime.json', 'artifact_manifest.json'):
+        write(sealed_root/name, {'fixture':'synthetic'})
+    (sealed_root/'continuation.tar').write_bytes(b'synthetic first leaf')
+    write(sealed_root/'timing.json', {'recipe_hash':scientific['recipe_hash'],
+        'leaves':[{'task_id':sealed_leaf['id'], 'step':0, 'compute_seconds':50.,
+            'wall_seconds':100., 'setup_seconds':20., 'import_seconds':10.,
+            'export_seconds':10., 'publication_seconds':10.}]})
+    seal_budget_fixture(sealed_root, sealed_leaf['id'], sealed_leaf)
+    def collected_budget(req, cfg, unit, **kw):
+        return coverage.load_budget(req, cfg, unit, **kw) if unit == sealed_leaf['id'] else budgets[unit]
     monkeypatch.setattr(campaign, 'load_lock', lambda *args:lock)
-    monkeypatch.setattr(campaign, 'load_budget', lambda req, cfg, unit, **kw:budgets[unit])
+    monkeypatch.setattr(campaign, 'load_budget', collected_budget)
     collector = request(tmp_path/'collector', expansion['plans'][0]['tasks'][-1], deps, approvals)
     result = campaign.run_stage(collector)
     assert result.status == 'pass', result.message
@@ -230,6 +253,7 @@ def test_pilot_estimate_lock_expansion_and_admission_dispatch(diagnostic_request
     directory = deps[first['id']]
     original = (directory/'result.json').read_text()
     config = coverage.read_json(collector.config_path)
+    execution_record = (directory/'_execution/result.json').read_text()
     for fault in ('missing', 'draw', 'seal', 'regeneration'):
         with monkeypatch.context() as m:
             if fault == 'missing':
@@ -237,13 +261,11 @@ def test_pilot_estimate_lock_expansion_and_admission_dispatch(diagnostic_request
             elif fault == 'draw':
                 changed = json.loads(original); changed['draws'] = []
                 write(directory/'result.json', changed)
-                m.setitem(budgets[first['id']], 'payload_hash', file_hash(directory/'result.json'))
+                changed_budget = {**budgets[first['id']], 'payload_hash':file_hash(directory/'result.json')}
+                m.setattr(campaign, 'load_budget', lambda req, cfg, unit, **kw:
+                    changed_budget if unit == first['id'] else budgets[unit])
             elif fault == 'seal':
-                def failed_budget(req, cfg, unit, **kw):
-                    if unit == first['id']:
-                        raise ContractError('sealed execution record missing')
-                    return budgets[unit]
-                m.setattr(campaign, 'load_budget', failed_budget)
+                (directory/'_execution/result.json').unlink()
             else:
                 actual = pilot.generate_suite_a
                 def tamper(*args, **kwargs):
@@ -256,6 +278,7 @@ def test_pilot_estimate_lock_expansion_and_admission_dispatch(diagnostic_request
             with pytest.raises(ContractError, match='paired source chain c2'):
                 campaign.collect(collector, config, coverage.read_json(collector.task_path))
         (directory/'result.json').write_text(original)
+        (directory/'_execution/result.json').write_text(execution_record)
     gate = coverage.read_json(Path(collector.output_dir)/'gate.json')
     assert gate['certifies_release_criteria'] is False
     summary = gate['scenario_summaries']['sign_changing']
@@ -571,6 +594,9 @@ def assert_readout_basis(report, lock):
     walk(report)
     for pair in report['pairs']:
         assert pair['regeneration']['verified_repetitions'] == [pair['repetition_id']]
+        pin = next(p for p in lock['paired_draws'] if p['repetition_id'] == pair['repetition_id'])
+        for name in ('observations_hash', 'truth_hash', 'source_tree'):
+            assert pair['regeneration'][name] == pin[name]
         assert pair['regeneration']['pilot_tree'] == lock['launch_code_identity']
         assert pair['source_tree'] != pair['pilot_tree']
 
@@ -592,7 +618,9 @@ def test_readout_replays_source_and_keeps_all_pairs(owner, archive_manifest, cel
             estimate['se_definitions'] = {'unclustered_influence': {'se': .2,
                 'variance_target':'fixed_frame_repetition', 'assumptions':'synthetic'}}
         records.append(record)
-        regeneration[pin['repetition_id']] = {**pilot.verify_regeneration(lock, [pin['draw']], approvals=approvals), 'pilot_tree': lock['launch_code_identity']}
+        regeneration[pin['repetition_id']] = {**pilot.verify_regeneration(lock, [pin['draw']], approvals=approvals),
+            'pilot_tree': lock['launch_code_identity'], **{name: pin[name] for name in
+                ('observations_hash','truth_hash','source_tree')}}
         expected[pin['repetition_id']] = pilot.attribution_audit.replay(coverage.bind_observations(base, obs),
             state['parts'], ObservedLawOracle(obs, truth, base.policy), source_recipe['inference']['county_locations'])
     with patch.object(pilot.attribution_audit, 'replay', wraps=pilot.attribution_audit.replay) as replay:
@@ -600,15 +628,16 @@ def test_readout_replays_source_and_keeps_all_pairs(owner, archive_manifest, cel
     assert replay.call_count == 5
     assert len(report['pairs']) == 5 and 'exploratory' in markdown
     for i, row in enumerate(report['pairs']):
+        assert row['truth']['value'] == pilot.pinned_source(lock['paired_draws'][i])[2].value
         for method, values in row['methods'].items():
+            assert values['pilot_se_definitions']['unclustered_influence']['se']['value'] == .2
+            assert values['pilot']['value'] == records[i]['estimates'][method]['value']
             assert values['pilot_minus_source']['value'] == pytest.approx((i+1)*.01)
             for oracle, value in values['oracle_cells'].items():
                 assert value['estimate']['value'] == expected[row['repetition_id']][oracle][method]['estimate']['value']
                 assert values['oracle_minus_pilot'][oracle]['value'] == pytest.approx(
                     value['estimate']['value'] - values['pilot']['value'])
     # This helper test uses the same regeneration mapping as the collector.
-    for pin in lock['paired_draws']:
-        regeneration[pin['repetition_id']].update(pilot_tree=lock['launch_code_identity'])
     assert_readout_basis(report, lock)
     assert report['summary']['one_step']['pilot_minus_source']['n']['value'] == 5
     with pytest.raises(ContractError, match='per-draw rows'):
@@ -635,3 +664,34 @@ def test_paired_t_interval(values):
             assert result['upper']['value'] == pytest.approx(hi)
     if len(values) < 2:
         assert result['lower']['value'] is result['upper']['value'] is None
+
+
+def normalized_pilot_golden(value, identities):
+    """Keep semantic fields; erase fixture locations and run-derived hash values."""
+    import re
+    if isinstance(value, dict):
+        return {normalized_pilot_golden(key, identities): normalized_pilot_golden(child, identities)
+            for key, child in value.items()}
+    if isinstance(value, list):
+        return [normalized_pilot_golden(child, identities) for child in value]
+    if isinstance(value, str):
+        for identity, alias in identities.items():
+            value = value.replace(identity, alias)
+        value = re.sub(r'[a-f0-9]{64}', '<sha256>', value)
+        value = re.sub(r"/[^\s\"']*test_pilot_estimate_lock_expan[^/\s\"']*", '<fixture>', value)
+        value = re.sub(r"/[^\s\"']*paired-source[^/\s\"']*", '<source-fixture>', value)
+    return value
+
+
+def assert_pilot_lifecycle_golden(lock, plans, budget):
+    expected = coverage.read_json(Path('tests/fixtures/pilot/pilot_goldens.json'))
+    identities = pilot_golden_identities(plans)
+    for name, value in [('lock',lock), ('expansion',plans), ('budget',budget)]:
+        assert coverage.digest(normalized_pilot_golden(value, identities)) == expected[name]
+
+
+def pilot_golden_identities(plans):
+    # Expanded IDs derive from the lock's run-specific paths/hashes. Preserve
+    # their distinctness and references using each task's stable plan/slot.
+    return {task['id']: f'plan-{i}-task-{j}' for i, plan in enumerate(plans)
+            for j, task in enumerate(plan['tasks'])}
