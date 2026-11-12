@@ -318,6 +318,29 @@ owner_decisions:
       gpu_hours_max: 34
       purpose: "time one complete screening-cell repetition end to end and reconcile it with the sealed receipt (30.46 H100-h) and the harness projection (73.9 H100-h, ratio 2.43); timing only, not a new scientific repetition"
     final_cells: "repetitions, recipe and scenarios for any final cell, and the SE variance target the committee routed to the owner, remain later owner decisions"
+  # Owner decision of 2026-11-12 (structured card in the orchestrating session, answer "I open the PR, you merge (Recommended)")
+  # after unit B (PR #94, c38f473) merged: the bounded diagnostic pilot of OD-6 (approved in principle 2026-11-09). Field set is
+  # exactly what validate_campaign accepts for purpose diagnostic_pilot. Five paired repetitions certify nothing; the collector's
+  # gate is descriptive. Execution still needs the 20-chain m2-diag-A collection, the C5 readout merge and a measured-profile
+  # sizing within leaves_per_chain_max 40 and gpu_hours_per_leaf_max 4 on one tree.
+  m2_pilot_d:
+    purpose: diagnostic_pilot
+    cells:
+      d:
+        reference_cap: 32
+        frozen_epochs: 60
+        grid_points: 2
+        seed_count: 1
+    partitions:
+      - preemptible
+      - standard
+    repetitions_per_scenario: 5
+    scenarios:
+      - sign_changing
+    certifies_release_criteria: false
+    gate_se: unclustered_influence
+    paired_from: m2-diag-A
+    wandb_waiver: "Owner waiver of 2026-11-11 04:10 UTC (card: 'Stop; waive W&B for the pilot'): W&B logging is waived for the m2_pilot_d diagnostic pilot only; see .swarm/final-cells/owner-waiver-wandb-pilot.md in the swarm project and ARC-4942"
 
 # Not yet approved. A unit that needs one of these must stop and report; the orchestrator brings it to the owner.
 pending_owner_approval:
