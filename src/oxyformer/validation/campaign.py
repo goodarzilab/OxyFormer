@@ -1198,15 +1198,35 @@ def collect(request, config, task):
         require(gate["pass"] is True and gate["mode"] == "screening" and gate["lock_hash"] == digest(lock),
                 "screening did not admit final collection")
     results, runtimes = [], []
+    regeneration = {}
+    pilot = is_pilot(lock["recipe"])
     for leaf in collected_leaves:
-        budget = load_budget(request, config, leaf["id"], expected_task=leaf)
-        path = dependency(request, config, {"dependency": leaf["id"], "path": "result.json"})
-        require(file_hash(path) == budget["payload_hash"], "leaf scientific payload hash mismatch")
-        result = read_json(path)
-        parameters = leaf["parameters"]
-        require(result["lock_hash"] == digest(lock) and budget["binding"]["recipe_hash"] == digest(lock["recipe"]), "leaf recipe drift")
-        require(result["batch_id"] == parameters["batch_id"] and result["mode"] == mode
-                and result["scenario"] == parameters["scenario"] and result["draws"] == parameters["draws"], "leaf identity drift")
+        pin = None
+        if pilot:
+            pins = [p for p in lock['paired_draws'] if [p['draw']] == leaf['parameters']['draws']]
+            require(len(pins) == 1, 'pilot leaf must identify one pinned draw')
+            pin = pins[0]
+        try:
+            budget = load_budget(request, config, leaf["id"], expected_task=leaf)
+            path = dependency(request, config, {"dependency": leaf["id"], "path": "result.json"})
+            require(file_hash(path) == budget["payload_hash"], "leaf scientific payload hash mismatch")
+            result = read_json(path)
+            parameters = leaf["parameters"]
+            require(result["lock_hash"] == digest(lock) and budget["binding"]["recipe_hash"] == digest(lock["recipe"]), "leaf recipe drift")
+            require(result["batch_id"] == parameters["batch_id"] and result["mode"] == mode
+                    and result["scenario"] == parameters["scenario"] and result["draws"] == parameters["draws"], "leaf identity drift")
+            if pilot and leaf['continuation']['predecessor'] is None:
+                require(leaf['continuation']['step'] == 0, 'first leaf step drift')
+                from oxyformer.validation.pilot import verify_regeneration
+                verified = verify_regeneration(lock, [pin['draw']], approvals=config.get('approvals'))
+                regeneration[pin['repetition_id']] = {**verified,
+                    'first_leaf': leaf['id'], 'observations_hash': pin['observations_hash'],
+                    'truth_hash': pin['truth_hash'], 'source_tree': pin['source_tree'],
+                    'pilot_tree': lock['launch_code_identity']}
+        except (ContractError, KeyError, TypeError, ValueError, OSError) as exc:
+            if pin is not None:
+                raise ContractError('paired source chain ' + pin['source_chain'] + ': ' + str(exc)) from exc
+            raise
         measured = budget["leaves"][-1]["wall_seconds"]
         budget_seconds = parameters["wall_seconds"]
         runtimes.append({"leaf_id": leaf["id"], "batch_id": parameters["batch_id"],
@@ -1248,6 +1268,14 @@ def collect(request, config, task):
             diagnostic_summary={name: value["diagnostic_summary"] for name, value in summaries.items()})
     values = {"result.json": {"records": records, "gate": gate,
         **({"diagnostic_summary": gate["diagnostic_summary"]} if "diagnostic_summary" in gate else {}), **metadata}, "gate.json": gate}
+    if pilot:
+        from oxyformer.validation.pilot import paired_readout
+        for draw in declarations:
+            pin = next(p for p in lock['paired_draws'] if p['draw'] == draw)
+            require(pin['repetition_id'] in regeneration,
+                'paired source chain ' + pin['source_chain'] + ': missing first-leaf regeneration record')
+        report, markdown = paired_readout(lock, records, regeneration, approvals=config.get('approvals'))
+        values.update({'paired_readout.json': canonical_json(report), 'paired_readout.md': markdown})
     return values, passing
 
 

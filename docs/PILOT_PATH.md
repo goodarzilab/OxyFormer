@@ -36,10 +36,20 @@ its actual generation inputs must agree with the source. Regenerated observation
 and structural-truth content hashes must match. A failure stops the chain.
 Leaves use the declared partition, eight CPUs, CUDA, and `--no-requeue`.
 
-The collector uses the declared gate SE and labels the result diagnostic pilot;
-no release criterion is certified. The first chain's collector receives all five
-chains. C5's paired oracle readout is deferred to a follow-up unit under the
-100,000-character diff-budget rule. This C1-C4 path alone does not complete OD-6.
+The collector uses the declared gate SE and publishes `paired_readout.json` and
+`paired_readout.md`, labelled "diagnostic pilot; no release criterion certified".
+Each draw retains its truth, pilot estimate and SE definitions, source estimate,
+oracle cells replayed on source parts, and both paired contrasts. Every numerical
+basis names both trees, the pilot lock hash, owner block, cell and gate SE.
+Paired t intervals are descriptive; five pairs certify nothing. Local collectors
+retain their own pairs; the first chain's collector receives all five chains.
+
+A sealed, hash-bound first-leaf execution record is the evidence that the
+fail-closed regeneration check returned before fitting. Collection checks it
+through the existing budget and payload loaders, then repeats regeneration for
+each chain. The readout retains that returned mapping and the pinned observation,
+truth and tree identities. Missing or failed evidence refuses publication with
+the source chain named. No new leaf artifact or expansion output is introduced.
 
 ## Supported envelope and accepted limits
 
