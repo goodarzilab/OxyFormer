@@ -5,12 +5,17 @@ import json
 from pathlib import Path
 import tarfile
 
+import numpy as np
+from scipy.stats import t
+
 from oxyformer.contracts import StageRequest
 from oxyformer.provenance import ContractError, file_hash, require
 from oxyformer.validation import attribution_audit
 from oxyformer.validation.coverage import fixed_exposures, validate_draws, digest
 from oxyformer.validation.generators import ObservedRecords, TruthArtifact, generate_suite_a
 from oxyformer.validation.scm import SCMConfig
+
+LABEL = 'diagnostic pilot; no release criterion certified'
 
 RULE = 'lowest canonical draw indices among collected source chains; declared scenario only'
 
@@ -143,3 +148,94 @@ def verify_regeneration(lock, draws=None, *, template=None, frame=None, scenario
                 and regenerated.structural_causal_truth.content_hash == pin['truth_hash'],
                 'paired source chain ' + chain + ': regeneration falsification failed before fitting')
     return {'verified_repetitions': [pin['repetition_id'] for pin in pins], 'selection_rule': RULE}
+
+
+def number(value, basis):
+    return attribution_audit.num(value, basis)
+
+
+def interval(values, basis):
+    n = len(values)
+    mean = float(np.mean(values)) if n else None
+    half = float(t.ppf(.975, n - 1) * np.std(values, ddof=1) / np.sqrt(n)) if n > 1 else None
+    return {'n': number(n, 'paired repetitions; exploratory'), 'mean': number(mean, basis),
+        'lower': number(None if half is None else mean - half, basis + '; paired t 95% interval'),
+        'upper': number(None if half is None else mean + half, basis + '; paired t 95% interval')}
+
+
+def paired_readout(lock, records, regeneration, *, approvals=None):
+    validate_pins(lock, approvals)
+    from oxyformer.validation.campaign import pilot_declaration
+    declaration = (pilot_declaration(lock["recipe"]) if approvals is None
+                   else pilot_declaration(lock["recipe"], approvals))
+    pilot_cell = "cell " + declaration["cell"]
+    by_id = {r['draw']['repetition_id']: r for r in records}
+    require(len(by_id) == len(records), 'duplicate pilot readout repetition')
+    require(bool(records), 'pilot readout requires per-draw rows')
+    require(set(by_id) <= {p['repetition_id'] for p in lock['paired_draws']}, 'unpaired pilot record')
+    rows = []
+    for pin in lock['paired_draws']:
+        if pin['repetition_id'] not in by_id:
+            continue  # Local collectors describe their own declared pairs only.
+        record = by_id[pin['repetition_id']]
+        require(record['draw'] == pin['draw'], 'pilot readout draw mismatch')
+        state, obs, truth, base, recipe = pinned_source(pin)
+        from oxyformer.validation.coverage import bind_observations
+        from oxyformer.validation.oracle import ObservedLawOracle
+        cells = attribution_audit.replay(bind_observations(base, obs), state['parts'],
+            ObservedLawOracle(obs, truth, base.policy), recipe['inference']['county_locations'])
+        require(pin['repetition_id'] in regeneration, 'paired source chain ' + pin['source_chain'] + ': missing first-leaf regeneration record')
+        row = {'regeneration': regeneration[pin['repetition_id']], 'source_tree': pin['source_tree'],
+            'pilot_tree': lock['launch_code_identity'], 'repetition_id': pin['repetition_id'], 'source_chain': pin['source_chain'],
+            'seed': number(pin['seed'], 'pinned source simulation seed'),
+            'truth': number(truth.value, 'per-draw saved structural causal truth'), 'methods': {}}
+        for method in ('one_step', 'cv_tmle'):
+            source_estimate = state['record']['estimates'][method]['value']
+            estimate = record.get('estimates', {}).get(method) if record['status'] == 'success' else None
+            fitted = None if estimate is None else estimate['value']
+            row['methods'][method] = {'status': record['status'],
+                'pilot': number(fitted, pilot_cell + '; ' + method),
+                'pilot_se_definitions': {} if estimate is None else {
+                    name: {key: number(value, pilot_cell + '; ' + method + '; ' + name) if type(value) in (int, float) else value
+                           for key, value in definition.items()}
+                    for name, definition in estimate['se_definitions'].items()},
+                'source': number(source_estimate, 'cell e; source chain record; ' + method),
+                'oracle_cells': {cell: cells[cell][method] for cell in attribution_audit.CELLS if cell != 'fitted'},
+                'pilot_minus_source': number(None if fitted is None else fitted - source_estimate,
+                                             'paired ' + pilot_cell + ' minus cell e; ' + method),
+                'oracle_minus_pilot': {cell: number(None if fitted is None else cells[cell][method]['estimate']['value'] - fitted,
+                                            'paired ' + cell + ' minus ' + pilot_cell + '; ' + method)
+                                      for cell in attribution_audit.CELLS if cell != 'fitted'}}
+        rows.append(row)
+    summary = {}
+    for method in ('one_step', 'cv_tmle'):
+        successful = [row['methods'][method] for row in rows if row['methods'][method]['status'] == 'success']
+        summary[method] = {'pilot_minus_source': interval([r['pilot_minus_source']['value'] for r in successful],
+                                                        'paired ' + pilot_cell + ' minus cell e; ' + method),
+            'oracle_minus_pilot': {cell: interval([r['oracle_minus_pilot'][cell]['value'] for r in successful],
+                                                 'paired ' + cell + ' minus ' + pilot_cell + '; ' + method)
+                                  for cell in attribution_audit.CELLS if cell != 'fitted'}}
+    report = {'label': LABEL, 'certifies_release_criteria': False,
+        'lock_hash': digest(lock), 'owner_block': declaration['campaign_mode'],
+        'pilot_cell': declaration['cell'], 'gate_se': declaration['gate_se'],
+        'statement': 'Planned five pairs (n = 5) are exploratory; descriptive paired t intervals certify nothing. Each collector states its observed pair count. Draws are never pooled away.',
+        'pairs': rows, 'summary': summary}
+    basis = ('pilot_tree=' + lock['launch_code_identity'] + '; lock_hash=' + digest(lock)
+        + '; owner_block=' + declaration['campaign_mode'] + '; cell=' + declaration['cell']
+        + '; gate_se=' + declaration['gate_se'])
+    def label(value, context):
+        if isinstance(value, dict):
+            if 'value' in value and 'basis' in value:
+                value['basis'] += '; ' + context
+            else:
+                for child in value.values():
+                    label(child, context)
+        elif isinstance(value, list):
+            for child in value:
+                label(child, context)
+    for row in rows:
+        label(row, basis + '; source_tree=' + row['source_tree'])
+    label(summary, basis + '; source_tree=' + ','.join(sorted({p['source_tree'] for p in lock['paired_draws']})))
+    report['pilot_tree'] = lock['launch_code_identity']
+    markdown = '# ' + LABEL + '\n\n' + report['statement'] + '\n\n```json\n' + json.dumps(report, indent=2) + '\n```\n'
+    return report, markdown

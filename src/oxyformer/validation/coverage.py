@@ -571,7 +571,7 @@ def _request_metadata(request, task):
 
 def publish(request, values, *, status, message, extra_artifacts=()):
     metadata = _request_metadata(request, read_json(request.task_path))
-    values = {name: {**value, **metadata} for name, value in values.items()}
+    values = {name: ({**value, **metadata} if isinstance(value, dict) else value) for name, value in values.items()}
     root = Path(request.output_dir)
     root.mkdir(parents=True, exist_ok=True)
     lineage = ArtifactLineage(source_hashes=(request.config_hash, request.task_hash),
@@ -580,7 +580,7 @@ def publish(request, values, *, status, message, extra_artifacts=()):
         environment=(("code_identity", request.code_identity),), seed=None, parameter_count=None)
     records = []
     for name, value in values.items():
-        path = atomic_json(root, name, value)
+        path = atomic_write(root, name, value) if isinstance(value, str) else atomic_json(root, name, value)
         records.append(ArtifactRecord(path=name, kind=name.removesuffix(".json"), sha256=file_hash(path), lineage=lineage))
     # Individually published repetition records are explicitly hash-bound too.
     for path in sorted((root / "repetitions").glob("*/result.json")):

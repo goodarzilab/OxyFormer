@@ -86,7 +86,7 @@ def archive_manifest(tmp_path_factory):
 def locked(owner, archive_manifest):
     approvals, recipe = owner
     pins = pilot.pin_draws(archive_manifest, campaign.pilot_declaration(recipe, approvals))
-    return {'recipe': recipe, 'paired_draws': pins,
+    return {'launch_code_identity': '2' * 40, 'recipe': recipe, 'paired_draws': pins,
             'batches': [{'draws': [p['draw']]} for p in pins]}
 
 
@@ -212,6 +212,50 @@ def test_pilot_estimate_lock_expansion_and_admission_dispatch(diagnostic_request
     collector = request(tmp_path/'collector', expansion['plans'][0]['tasks'][-1], deps, approvals)
     result = campaign.run_stage(collector)
     assert result.status == 'pass', result.message
+    readout = coverage.read_json(Path(collector.output_dir)/'paired_readout.json')
+    assert len(readout['pairs']) == 5
+    assert readout['label'] == pilot.LABEL
+    assert readout['certifies_release_criteria'] is False
+    assert 'n = 5' in readout['statement'] and 'exploratory' in readout['statement']
+    assert coverage.MIN_REPETITIONS == 1000
+    assert (Path(collector.output_dir)/'paired_readout.md').read_text().startswith('# ' + pilot.LABEL)
+    assert_readout_basis(readout, lock)
+    # Every collector uses its own declared per-draw rows.
+    local = request(tmp_path/'local', expansion['plans'][1]['tasks'][-1], deps, approvals)
+    local_result = campaign.run_stage(local)
+    assert local_result.status == 'pass', local_result.message
+    assert len(coverage.read_json(Path(local.output_dir)/'paired_readout.json')['pairs']) == 1
+    # Exercise first-leaf failures through collection; no readout is published.
+    first = expansion['plans'][1]['tasks'][0]
+    directory = deps[first['id']]
+    original = (directory/'result.json').read_text()
+    config = coverage.read_json(collector.config_path)
+    for fault in ('missing', 'draw', 'seal', 'regeneration'):
+        with monkeypatch.context() as m:
+            if fault == 'missing':
+                (directory/'result.json').unlink()
+            elif fault == 'draw':
+                changed = json.loads(original); changed['draws'] = []
+                write(directory/'result.json', changed)
+                m.setitem(budgets[first['id']], 'payload_hash', file_hash(directory/'result.json'))
+            elif fault == 'seal':
+                def failed_budget(req, cfg, unit, **kw):
+                    if unit == first['id']:
+                        raise ContractError('sealed execution record missing')
+                    return budgets[unit]
+                m.setattr(campaign, 'load_budget', failed_budget)
+            else:
+                actual = pilot.generate_suite_a
+                def tamper(*args, **kwargs):
+                    value = actual(*args, **kwargs)
+                    if kwargs['seed'] == lock['paired_draws'][1]['seed']:
+                        value = replace(value, structural_causal_truth=replace(value.structural_causal_truth,
+                            value=value.structural_causal_truth.value + .01))
+                    return value
+                m.setattr(pilot, 'generate_suite_a', tamper)
+            with pytest.raises(ContractError, match='paired source chain c2'):
+                campaign.collect(collector, config, coverage.read_json(collector.task_path))
+        (directory/'result.json').write_text(original)
     gate = coverage.read_json(Path(collector.output_dir)/'gate.json')
     assert gate['certifies_release_criteria'] is False
     summary = gate['scenario_summaries']['sign_changing']
@@ -507,3 +551,87 @@ def test_pilot_profile_accepts_configured_month2_metadata(owner):
     for task in built['tasks']:
         assert task['final_cells'] == approvals['owner_decisions']['month2_followon']['final_cells']
         assert task['parameters']['recipe']['study'] == STUDY
+
+
+def assert_readout_basis(report, lock):
+    expected = ('pilot_tree=' + lock['launch_code_identity'], 'lock_hash=' + coverage.digest(lock),
+        'owner_block=example_pilot', 'cell=' + lock['recipe']['pilot_declaration']['cell'],
+        'gate_se=' + lock['recipe']['pilot_declaration']['gate_se'], 'source_tree=' + '1'*40)
+    def walk(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if type(child) in (int, float):
+                    assert key == 'value'
+                    assert all(label in value['basis'] for label in expected)
+                else:
+                    walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+    walk(report)
+    for pair in report['pairs']:
+        assert pair['regeneration']['verified_repetitions'] == [pair['repetition_id']]
+        assert pair['regeneration']['pilot_tree'] == lock['launch_code_identity']
+        assert pair['source_tree'] != pair['pilot_tree']
+
+
+@pytest.mark.parametrize('cell', ['c', 'd'])
+def test_readout_replays_source_and_keeps_all_pairs(owner, archive_manifest, cell):
+    approvals, recipe = owner
+    approvals['owner_decisions']['example_pilot']['cells'] = {cell: deepcopy(STUDY)}
+    recipe['pilot_declaration']['cell'] = cell
+    lock = locked(owner, archive_manifest)
+    records, regeneration = [], {}
+    expected = {}
+    from oxyformer.validation.oracle import ObservedLawOracle
+    for i, pin in enumerate(lock['paired_draws']):
+        state, obs, truth, base, source_recipe = pilot.pinned_source(pin)
+        record = deepcopy(state['record'])
+        for estimate in record['estimates'].values():
+            estimate['value'] += (i+1)*.01
+            estimate['se_definitions'] = {'unclustered_influence': {'se': .2,
+                'variance_target':'fixed_frame_repetition', 'assumptions':'synthetic'}}
+        records.append(record)
+        regeneration[pin['repetition_id']] = {**pilot.verify_regeneration(lock, [pin['draw']], approvals=approvals), 'pilot_tree': lock['launch_code_identity']}
+        expected[pin['repetition_id']] = pilot.attribution_audit.replay(coverage.bind_observations(base, obs),
+            state['parts'], ObservedLawOracle(obs, truth, base.policy), source_recipe['inference']['county_locations'])
+    with patch.object(pilot.attribution_audit, 'replay', wraps=pilot.attribution_audit.replay) as replay:
+        report, markdown = pilot.paired_readout(lock, records, regeneration, approvals=approvals)
+    assert replay.call_count == 5
+    assert len(report['pairs']) == 5 and 'exploratory' in markdown
+    for i, row in enumerate(report['pairs']):
+        for method, values in row['methods'].items():
+            assert values['pilot_minus_source']['value'] == pytest.approx((i+1)*.01)
+            for oracle, value in values['oracle_cells'].items():
+                assert value['estimate']['value'] == expected[row['repetition_id']][oracle][method]['estimate']['value']
+                assert values['oracle_minus_pilot'][oracle]['value'] == pytest.approx(
+                    value['estimate']['value'] - values['pilot']['value'])
+    # This helper test uses the same regeneration mapping as the collector.
+    for pin in lock['paired_draws']:
+        regeneration[pin['repetition_id']].update(pilot_tree=lock['launch_code_identity'])
+    assert_readout_basis(report, lock)
+    assert report['summary']['one_step']['pilot_minus_source']['n']['value'] == 5
+    with pytest.raises(ContractError, match='per-draw rows'):
+        pilot.paired_readout(lock, [], {}, approvals=approvals)
+    del regeneration[lock['paired_draws'][0]['repetition_id']]
+    with pytest.raises(ContractError, match='chain c1.*regeneration record'):
+        pilot.paired_readout(lock, records, regeneration, approvals=approvals)
+
+
+@pytest.mark.parametrize('values', [[], [2.], [1., 3., -2., 7., 4.]])
+def test_paired_t_interval(values):
+    import numpy as np
+    from scipy.stats import t
+    result = pilot.interval(values, 'fixed vector')
+    assert result['n']['value'] == len(values)
+    if not values:
+        assert result['mean']['value'] is None
+    else:
+        mean = np.mean(values)
+        assert result['mean']['value'] == mean
+        if len(values) > 1:
+            lo, hi = t.interval(.95, len(values)-1, loc=mean, scale=np.std(values, ddof=1)/np.sqrt(len(values)))
+            assert result['lower']['value'] == pytest.approx(lo)
+            assert result['upper']['value'] == pytest.approx(hi)
+    if len(values) < 2:
+        assert result['lower']['value'] is result['upper']['value'] is None
