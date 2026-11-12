@@ -191,7 +191,7 @@ def test_pilot_estimate_lock_expansion_and_admission_dispatch(diagnostic_request
     admission = intact_pilot_admission(req, outcome, lock, expansion, deps, tmp_path, approvals)
     assert admission['admitted'] is True
     expected = coverage.read_json(Path('tests/fixtures/pilot/pilot_goldens.json'))
-    identities = pilot_golden_identities(expansion['plans'])
+    identities = pilot_golden_identities(expansion['plans'], expansion['admission'])
     assert coverage.digest(normalized_pilot_golden(expansion['admission'], identities)) == expected['setup_admission_plan']
     assert coverage.digest(normalized_pilot_golden(admission, identities)) == expected['admit']
     assert_pilot_lifecycle_golden(lock, expansion['plans'], coverage.read_json(root/'budget.json'))
@@ -214,7 +214,6 @@ def test_pilot_estimate_lock_expansion_and_admission_dispatch(diagnostic_request
                 'binding':{'recipe_hash':coverage.digest(lock['recipe'])},
                 'leaves':[{'wall_seconds':100.}], 'complete':True}
     # One chain goes through the real sealed execution and budget reader.
-    from test_campaign import seal_budget_fixture
     sealed_leaf = expansion['plans'][1]['tasks'][0]
     sealed_root = deps[sealed_leaf['id']]
     scientific = coverage.read_json(sealed_root/'result.json')
@@ -227,7 +226,7 @@ def test_pilot_estimate_lock_expansion_and_admission_dispatch(diagnostic_request
         'leaves':[{'task_id':sealed_leaf['id'], 'step':0, 'compute_seconds':50.,
             'wall_seconds':100., 'setup_seconds':20., 'import_seconds':10.,
             'export_seconds':10., 'publication_seconds':10.}]})
-    seal_budget_fixture(sealed_root, sealed_leaf['id'], sealed_leaf)
+    seal_pilot_leaf(sealed_root, sealed_leaf, approvals)
     def collected_budget(req, cfg, unit, **kw):
         return coverage.load_budget(req, cfg, unit, **kw) if unit == sealed_leaf['id'] else budgets[unit]
     monkeypatch.setattr(campaign, 'load_lock', lambda *args:lock)
@@ -254,7 +253,10 @@ def test_pilot_estimate_lock_expansion_and_admission_dispatch(diagnostic_request
     original = (directory/'result.json').read_text()
     config = coverage.read_json(collector.config_path)
     execution_record = (directory/'_execution/result.json').read_text()
-    for fault in ('missing', 'draw', 'seal', 'regeneration'):
+    source_archive = Path(lock['paired_draws'][1]['source_path'])/'continuation.tar'
+    source_bytes = source_archive.read_bytes()
+    for fault in ('missing', 'draw', 'seal', 'failed-seal', 'regeneration', 'source'):
+        fault_collector = collector
         with monkeypatch.context() as m:
             if fault == 'missing':
                 (directory/'result.json').unlink()
@@ -266,6 +268,13 @@ def test_pilot_estimate_lock_expansion_and_admission_dispatch(diagnostic_request
                     changed_budget if unit == first['id'] else budgets[unit])
             elif fault == 'seal':
                 (directory/'_execution/result.json').unlink()
+            elif fault == 'failed-seal':
+                changed = json.loads(execution_record); changed['status'] = 'fail'
+                write(directory/'_execution/result.json', changed)
+                fault_collector = replace(collector, dependency_hashes=tuple(
+                    file_hash(path) for path in collector.dependency_paths))
+            elif fault == 'source':
+                source_archive.write_bytes(source_bytes[:-1] + bytes([source_bytes[-1] ^ 1]))
             else:
                 actual = pilot.generate_suite_a
                 def tamper(*args, **kwargs):
@@ -276,9 +285,10 @@ def test_pilot_estimate_lock_expansion_and_admission_dispatch(diagnostic_request
                     return value
                 m.setattr(pilot, 'generate_suite_a', tamper)
             with pytest.raises(ContractError, match='paired source chain c2'):
-                campaign.collect(collector, config, coverage.read_json(collector.task_path))
+                campaign.collect(fault_collector, config, coverage.read_json(collector.task_path))
         (directory/'result.json').write_text(original)
         (directory/'_execution/result.json').write_text(execution_record)
+        source_archive.write_bytes(source_bytes)
     gate = coverage.read_json(Path(collector.output_dir)/'gate.json')
     assert gate['certifies_release_criteria'] is False
     summary = gate['scenario_summaries']['sign_changing']
@@ -670,13 +680,28 @@ def normalized_pilot_golden(value, identities):
     """Keep semantic fields; erase fixture locations and run-derived hash values."""
     import re
     if isinstance(value, dict):
-        return {normalized_pilot_golden(key, identities): normalized_pilot_golden(child, identities)
+        result = {normalized_pilot_golden(key, identities): normalized_pilot_golden(child, identities)
             for key, child in value.items()}
+        # These fan-in/dependency lists are sorted by run-derived concrete IDs.
+        for name in ('needs', 'expected_leaves'):
+            if isinstance(result.get(name), list):
+                result[name] = sorted(result[name])
+        return result
     if isinstance(value, list):
         return [normalized_pilot_golden(child, identities) for child in value]
     if isinstance(value, str):
         for identity, alias in identities.items():
             value = value.replace(identity, alias)
+        if value.startswith('set -euo pipefail\n'):
+            import shlex
+            lines = []
+            for line in value.splitlines():
+                if line.startswith('printf %s '):
+                    encoded = shlex.split(line)[2]
+                    task = normalized_pilot_golden(json.loads(encoded), identities)
+                    line = line.replace(shlex.quote(encoded), shlex.quote(canonical_json(task)))
+                lines.append(line)
+            value = '\n'.join(lines)
         value = re.sub(r'[a-f0-9]{64}', '<sha256>', value)
         value = re.sub(r"/[^\s\"']*test_pilot_estimate_lock_expan[^/\s\"']*", '<fixture>', value)
         value = re.sub(r"/[^\s\"']*paired-source[^/\s\"']*", '<source-fixture>', value)
@@ -690,8 +715,40 @@ def assert_pilot_lifecycle_golden(lock, plans, budget):
         assert coverage.digest(normalized_pilot_golden(value, identities)) == expected[name]
 
 
-def pilot_golden_identities(plans):
+def pilot_golden_identities(plans, admission=None):
     # Expanded IDs derive from the lock's run-specific paths/hashes. Preserve
     # their distinctness and references using each task's stable plan/slot.
-    return {task['id']: f'plan-{i}-task-{j}' for i, plan in enumerate(plans)
+    identities = {task['id']: f'plan-{i}-task-{j}' for i, plan in enumerate(plans)
             for j, task in enumerate(plan['tasks'])}
+    if admission is not None:
+        identities.update({task['id']: f'admission-task-{j}'
+            for j, task in enumerate(admission['tasks'])})
+    return identities
+
+
+def seal_pilot_leaf(root, task, approvals):
+    """Seal a synthetic first leaf with actual pilot approvals and budget binding."""
+    from oxyformer.contracts import StageRequest, StageResult
+    from oxyformer.provenance import ArtifactLineage, ArtifactRecord
+    from test_campaign_profiles import seal_stage_fixture
+    cfg = write(root/'_execution/config.json', {'approvals':approvals})
+    task_path = write(root/'_execution/task.json', task)
+    req = StageRequest(stage=task['stage'], config_path=str(cfg), config_hash=file_hash(cfg),
+        task_path=str(task_path), task_hash=file_hash(task_path), dependency_paths=(),
+        dependency_hashes=(), output_dir=str(root), code_identity='c'*40)
+    timing = coverage.read_json(root/'timing.json')
+    wall = task['parameters']['wall_seconds']
+    timing['leaves'][0].update(leaf_budget=coverage.task_leaf_budget(task),
+        post_check_reserve_seconds=coverage.publication_reserve(wall))
+    scientific = coverage.read_json(root/'result.json')
+    counts = {status: sum(r['status'] == status for r in scientific['records']) for status in coverage.STATUSES}
+    write(root/coverage.BUDGET_RECORD, {'schema_version':1,
+        'binding':coverage.budget_binding(req, task, scientific['recipe_hash']),
+        'chained':True, 'leaves':timing['leaves'], 'counts':counts, 'received':sum(counts.values())})
+    lineage = ArtifactLineage(source_hashes=(req.config_hash,), unit_ids=(req.content_hash,),
+        parent_hashes=(), split_hash=None, config_hash=req.config_hash, model_hash=None,
+        environment=(('fixture','synthetic'),), seed=None, parameter_count=None)
+    result = StageResult(request_hash=req.content_hash, status='pass', message='synthetic first leaf',
+        artifacts=tuple(ArtifactRecord(path=p.name, sha256=file_hash(p), kind='fixture', lineage=lineage)
+            for p in sorted([*root.glob('*.json'), *root.glob('*.tar')])))
+    seal_stage_fixture(req, result)
