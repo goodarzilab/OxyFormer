@@ -325,10 +325,24 @@ def screening_profile_tasks(endpoint, frame, approvals, *, setup_calibration=Non
 
 def diagnostic_profile_tasks(endpoint, frame, approvals, *, campaign_id, evaluation_namespace,
                              prior_locks, cpu_wall_hours_budget, setup_calibration=None,
-                             calibration_probes=None):
+                             calibration_probes=None, campaign_mode="diagnostic", paired_manifest=None):
     """Emit the approved profile subset and sizing/lock tasks, without submission."""
     d = campaign.month2_decision(approvals)
-    require(d == campaign.month2_decision(), 'month2_followon drift')
+    if campaign_mode == 'diagnostic':
+        require(d == campaign.month2_decision(), 'month2_followon drift')
+    pilot_recipe = None
+    if campaign_mode != 'diagnostic':
+        block = approvals.get('owner_decisions', {}).get(campaign_mode)
+        require(isinstance(block, dict) and isinstance(block.get('cells'), dict) and len(block['cells']) == 1,
+                'missing single-cell pilot owner block')
+        cell, study = next(iter(block['cells'].items()))
+        declaration = {**{k: deepcopy(v) for k, v in block.items() if k != 'cells'},
+            'campaign_mode': campaign_mode, 'cell': cell, 'study': deepcopy(study)}
+        pilot_recipe = {'campaign_mode': campaign_mode, 'study': deepcopy(study),
+            'pilot_declaration': declaration, 'pilot_partition': block['partitions'][0]}
+        campaign.pilot_declaration(pilot_recipe, approvals)
+        require(isinstance(paired_manifest, str) and bool(paired_manifest), 'pilot paired manifest required')
+        d = campaign.pilot_runtime(pilot_recipe, approvals)
     c = d['diagnostic_campaign']
     campaign.concrete_id(campaign_id)
     require(len(campaign_id) <= 23, 'campaign ID must leave room for chain suffix')
@@ -340,7 +354,9 @@ def diagnostic_profile_tasks(endpoint, frame, approvals, *, campaign_id, evaluat
         task = deepcopy(source)
         recipe = task['parameters']['recipe']
         recipe['campaign_mode'] = 'diagnostic'
-        metadata = campaign.screening_metadata(recipe)
+        if pilot_recipe is not None:
+            recipe.update(deepcopy(pilot_recipe))
+        metadata = campaign.screening_metadata(recipe, approvals)
         task.update(metadata)
         task['parameters'].update(metadata, partition=c['partition'])
         task['resources']['partition'] = c['partition']
@@ -348,8 +364,19 @@ def diagnostic_profile_tasks(endpoint, frame, approvals, *, campaign_id, evaluat
             task['parameters']['scenario']['name'], 1)
         task['continuation']['owner'] = digest(['diagnostic-profile-chain', task['parameters']])
         tasks.append(task)
+    profile_ids = {}
+    if pilot_recipe is not None:
+        # A new study must not reuse the installed screening profile units.
+        profile_ids = {t['id']: campaign_id + '-p' + str(t['continuation']['step']) for t in tasks}
+        for task in tasks:
+            task['id'] = profile_ids[task['id']]
+            campaign.concrete_id(task['id'])
+            previous = task['continuation']['predecessor']
+            if previous is not None:
+                task['continuation']['predecessor'] = profile_ids[previous]
+            task['needs'] = {profile_ids.get(unit, unit): paths for unit, paths in task['needs'].items()}
     recipe = deepcopy(tasks[0]['parameters']['recipe'])
-    metadata = campaign.screening_metadata(recipe)
+    metadata = campaign.screening_metadata(recipe, approvals)
     estimate = deepcopy(original['tasks'][-1])
     estimate['id'] = campaign_id + '-estimate'
     campaign.concrete_id(estimate['id'])
@@ -358,8 +385,16 @@ def diagnostic_profile_tasks(endpoint, frame, approvals, *, campaign_id, evaluat
     p.update(metadata, recipe=recipe, partition=c['partition'],
              profile_safety_factor=c['profile_safety_factor'],
              owner_safety_factor_decision='month2_followon.diagnostic_campaign')
+    if pilot_recipe is not None:
+        p['paired_manifest'] = paired_manifest
     p['profiles'] = {n: p['profiles'][n] for n in c['scenarios']}
     p['probe_profiles'] = {n: p['probe_profiles'][n] for n in c['scenarios']}
+    if profile_ids:
+        p['profiles'] = {name: {**ref, 'dependency': profile_ids[ref['dependency']]}
+                         for name, ref in p['profiles'].items()}
+        p['probe_profiles'] = {name: {depth: {**ref, 'dependency': profile_ids[ref['dependency']]}
+                                     for depth, ref in refs.items()}
+                              for name, refs in p['probe_profiles'].items()}
     estimate['resources']['partition'] = c['partition']
     # Rebuild dependency declarations from the artifacts each consumer reads.
     estimate['needs'] = deepcopy(tasks[0]['needs'])

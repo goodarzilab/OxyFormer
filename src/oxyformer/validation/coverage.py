@@ -278,12 +278,12 @@ def budget_binding(request, task, recipe_hash):
         "task_id": task["id"], "chain": task.get("continuation"),
         "recipe_hash": recipe_hash, "lock_hash": task.get("recipe_lock", {}).get("sha256"),
         "draws": parameters["draws"], "scenario": parameters["scenario"],
-        "mode": parameters["mode"], "code_identity": request.code_identity, **output_metadata(task)}
+        "mode": parameters["mode"], "code_identity": request.code_identity, **_request_metadata(request, task)}
 
 
 def record_measurements(request, completed, started, task, timing, summary):
     """Worker measurements only. They cannot authorize any downstream decision."""
-    value = {**output_metadata(task), "binding": budget_binding(request, task, timing["recipe_hash"]),
+    value = {**_request_metadata(request, task), "binding": budget_binding(request, task, timing["recipe_hash"]),
         "started_monotonic": started, "timing": timing,
         "counts": summary["counts"], "received": summary["received_repetitions"]}
     path = atomic_json(request.output_dir, MEASUREMENTS, value)
@@ -549,14 +549,28 @@ def read_json(path):
     return json.loads(Path(path).read_text())
 
 
-def output_metadata(task):
+_METADATA_DEFAULT = object()
+
+
+def output_metadata(task, approvals=_METADATA_DEFAULT):
     from oxyformer.validation.campaign import screening_metadata
     recipe = task.get("parameters", {}).get("recipe", task.get("parameters", {}))
-    return screening_metadata(task if task.get("campaign_mode") in ("screening", "diagnostic") else recipe)
+    from oxyformer.validation.campaign import is_pilot
+    selected = task if task.get("campaign_mode") in ("screening", "diagnostic") or is_pilot(task) else recipe
+    return screening_metadata(selected) if approvals is _METADATA_DEFAULT else screening_metadata(selected, approvals)
+
+
+def _request_metadata(request, task):
+    from oxyformer.validation.campaign import is_pilot
+    recipe = task.get("parameters", {}).get("recipe", task.get("parameters", {}))
+    if is_pilot(task) or is_pilot(recipe):
+        config = yaml.safe_load(Path(request.config_path).read_text())
+        return output_metadata(task, config.get("approvals"))
+    return output_metadata(task)
 
 
 def publish(request, values, *, status, message, extra_artifacts=()):
-    metadata = output_metadata(read_json(request.task_path))
+    metadata = _request_metadata(request, read_json(request.task_path))
     values = {name: {**value, **metadata} for name, value in values.items()}
     root = Path(request.output_dir)
     root.mkdir(parents=True, exist_ok=True)
@@ -894,7 +908,15 @@ def prepare_batch(request: StageRequest):
         recipe = parameters["recipe"]
         lock = None
     from oxyformer.validation.campaign import screening_metadata, validate_screening
-    if recipe.get("campaign_mode") == "diagnostic":
+    from oxyformer.validation.campaign import is_pilot, pilot_declaration
+    if is_pilot(recipe):
+        declaration = pilot_declaration(recipe, config.get("approvals"))
+        require(mode in ("profile", "diagnostic"), "pilot cannot certify final coverage")
+        require(parameters.get("study") == declaration["study"], "pilot study drift")
+        require(parameters.get("partition") == recipe["pilot_partition"], "pilot partition drift")
+        require(parameters.get("certifies_release_criteria") is False, "pilot certification drift")
+        require(uses_continuation(task), "pilot requires coverage continuation")
+    elif recipe.get("campaign_mode") == "diagnostic":
         from oxyformer.validation.campaign import validate_diagnostic
         decision = validate_diagnostic(recipe, config.get("approvals"))["diagnostic_campaign"]
         require(mode in ("profile", "diagnostic"), "diagnostic cell cannot certify final coverage")
@@ -909,7 +931,7 @@ def prepare_batch(request: StageRequest):
         require(parameters.get("partition") == "standard", "screening partition must be standard")
         require(uses_continuation(task), "screening requires coverage continuation")
     production = mode != "smoke"
-    validate_recipe(recipe, production=production)
+    validate_recipe(recipe, production=production, approvals=config.get("approvals"))
     template_path = dependency(request, config, parameters["endpoint_input"])
     frame_path = dependency(request, config, parameters["frame_input"])
     template = nested_cv.PreparedEndpoint.from_json(template_path.read_text())
@@ -921,6 +943,9 @@ def prepare_batch(request: StageRequest):
         require(parameters["scenario"] in lock["scenario_family"], "scenario family drift")
     draws = parameters["draws"]
     validate_draws(draws)
+    if lock and is_pilot(recipe) and task["continuation"]["predecessor"] is None:
+        from oxyformer.validation.pilot import verify_regeneration
+        verify_regeneration(lock, draws, template=template, frame=frame, scenario=scenario, approvals=config.get("approvals"))
     require(all(d["scenario"] == scenario.name for d in draws), "draw/scenario mismatch")
     seconds = finite(parameters["wall_seconds"], "batch wall seconds")
     require(seconds > 0, "positive batch budget required")
@@ -1226,7 +1251,7 @@ def _run_chain(request, started):
         "publication_verification_seconds": math.fsum(v["publication_seconds"] for v in leaves),
         "admitted_budget_seconds": seconds,
         "production_equivalent": parameters["mode"] != "smoke" and study == RecipeStudy(),
-        "study": study.to_dict(), **output_metadata(task),
+        "study": study.to_dict(), **_request_metadata(request, task),
         "complete_repetition_seconds": [s["compute_seconds"] for s in states if s["record"] is not None
                                         and s["record"]["status"] == "success"],
         "complete": summary["complete"] and not exceeded, "budget_exceeded": exceeded,

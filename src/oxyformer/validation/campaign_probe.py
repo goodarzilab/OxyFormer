@@ -149,7 +149,12 @@ def locked_probe_inputs(request, config, task):
     lock_path = dependency(request, config, p['lock_input'])
     lock_hash = file_hash(lock_path)
     lock = read_json(lock_path)
-    if lock.get('campaign_mode') == 'diagnostic':
+    from oxyformer.validation.campaign import is_pilot, pilot_declaration
+    if is_pilot(lock) or is_pilot(lock.get('recipe', {})):
+        require(isinstance(lock.get('recipe'), dict), 'pilot lock requires its declared recipe')
+        require(lock['owner_decision_hash'] == digest(pilot_declaration(lock['recipe'], config.get('approvals'))),
+                'pilot owner block changed')
+    elif lock.get('campaign_mode') == 'diagnostic':
         from oxyformer.validation.campaign import validate_diagnostic
         decision = validate_diagnostic(lock['recipe'], config.get('approvals'))
         require(lock['owner_decision_hash'] == digest(decision), 'month2_followon decision hash drift')
@@ -545,7 +550,12 @@ def setup_admission_plan(lock, plans, lock_unit, approvals):
     """Two independent jobs per logical probe; three final receipts feed admit."""
     from oxyformer.execution.campaign import _unit
     lock_hash = digest(lock)
-    if lock.get('campaign_mode') == 'diagnostic':
+    from oxyformer.validation.campaign import is_pilot, pilot_declaration
+    if is_pilot(lock) or is_pilot(lock.get('recipe', {})):
+        require(isinstance(lock.get('recipe'), dict), 'pilot lock requires its declared recipe')
+        require(lock['owner_decision_hash'] == digest(pilot_declaration(lock['recipe'], approvals)),
+                'pilot owner block changed')
+    elif lock.get('campaign_mode') == 'diagnostic':
         from oxyformer.validation.campaign import validate_diagnostic
         decision = validate_diagnostic(lock['recipe'], approvals)
         require(plans[0]['tasks'][0]['parameters']['scenario']['name'] == decision['diagnostic_campaign']['scenarios'][0],
@@ -592,10 +602,10 @@ def setup_admission_plan(lock, plans, lock_unit, approvals):
         'recipe_lock': recipe_ref, 'parameters': {'lock_input': lock_ref, 'probe_inputs': receipts},
         'needs': {**base, **{ref['dependency']: ['setup_probe.json'] for ref in receipts.values()}},
         'outputs': ['admission.json', 'artifact_manifest.json']})
-    if lock.get('campaign_mode') == 'diagnostic':
+    if lock.get('campaign_mode') == 'diagnostic' or is_pilot(lock) or is_pilot(lock.get('recipe', {})):
         from oxyformer.validation.campaign import screening_metadata
         for task in tasks:
-            task.update(screening_metadata(lock['recipe']))
+            task.update(screening_metadata(lock['recipe'], approvals))
     units = [_unit({'id': lock['campaign_id'], 'campaign_mode': 'screening'}, task, [], 0, 14400, 'admission')
              for task in tasks]
     return {'schema_version': 1, 'lock_hash': lock_hash, 'receipt_inputs': receipts, 'tasks': tasks, 'units': units}
@@ -608,6 +618,17 @@ def admit(request, config, task):
     path = dependency(request, config, p['lock_input'])
     lock = read_json(path)
     lock_hash = file_hash(path)
+    from oxyformer.validation.campaign import is_pilot, pilot_declaration, pilot_runtime, pilot_sizing
+    if is_pilot(lock) or is_pilot(lock.get('recipe', {})):
+        require(isinstance(lock.get('recipe'), dict), 'pilot lock requires its declared recipe')
+        require(lock['owner_decision_hash'] == digest(pilot_declaration(lock['recipe'], config.get('approvals'))),
+                'pilot owner block changed')
+        from oxyformer.validation.pilot import verify_regeneration
+        verify_regeneration(lock, approvals=config.get("approvals"))
+        pilot_sizing(lock['recipe'], lock['budget']['profiles'],
+            pilot_runtime(lock['recipe'], config.get('approvals')),
+            lock['batches'][0]['wall_seconds'], lock['budget']['profile_safety_factor'],
+            approvals=config.get('approvals'))
     require(file_hash(dependency(request, config, lock['estimate_input'])) == lock['estimate_hash'],
             'admission estimate_hash mismatch')
     expansion = read_json(dependency(request, config, {
@@ -657,7 +678,7 @@ def admit(request, config, task):
                 resume_reserve=profile['resume_overhead_seconds'], usable_compute=profile['assumed_usable_per_leaf'])
         except ContractError as exc:
             raise ContractError(f'admission not established: measured setup {setup}; counts {counts}; {exc}') from exc
-    candidate = {**output_metadata(task), 'schema_version': 1, 'admitted': True, 'lock_hash': lock_hash,
+    candidate = {**output_metadata(task, config.get("approvals")), 'schema_version': 1, 'admitted': True, 'lock_hash': lock_hash,
         'estimate_hash': lock['estimate_hash'], 'setup_policy': 'three-receipt-minima-v1',
         'admission_measurements': {'probes': refs, 'setup_draws': draws, 'setup_minima': minima,
             'allowance_seconds': allowance['allowance'], 'projection': allowance,
