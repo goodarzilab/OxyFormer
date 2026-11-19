@@ -36,6 +36,9 @@ or concurrent invocations. Resume requires the identical clean checkout,
 environment, device and thread count. Keep prepared inputs and slice files in
 place. Identity mismatches refuse; recover by restoring the original environment
 or using a new state directory for a new run.
+Fit state and score output paths that resolve inside the checkout must already
+be ignored by Git; otherwise they refuse before writing, so use a state directory
+outside the checkout.
 
 Cell d uses reference cap 32, 60 nuisance epochs, two grid points and seed 1103;
 SSL remains 30 epochs. The five outer and three inner folds, approved primary
@@ -46,9 +49,11 @@ the primary spatial bandwidth is 100 km.
 W&B is loaded only when requested, with entity goodarzilab and project oxyformer-v2.
 The orchestrator installs it before running; a missing package refuses before
 training. W&B reads its credential from the environment. Driver logging records
-configuration, slice fold/epoch/stop reason/wall time and final estimates; it has
-no per-epoch curves. `--run-logging none` is an explicit recorded choice for
-synthetic tests; real training requires W&B under the owner rule.
+configuration, slice fold/checkpoint position/stop reason/wall time and final
+estimates; it has no per-epoch curves.
+`checkpoint_position` is the nested-CV controller position; `train_epoch` is
+included only when active model progress is present in the existing checkpoint
+metadata. `--run-logging none` is an explicit recorded choice for synthetic tests; real training requires W&B under the owner rule.
 
 Read result.json for both one_step and cv_tmle, all pilot SE definitions, counts,
 recipe and identities. result.md gives the primary readout. Different SEs target
