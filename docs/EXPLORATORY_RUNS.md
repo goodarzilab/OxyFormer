@@ -1,0 +1,57 @@
+# Exploratory real USALEEP fits
+
+The owner decision of 2026-11-19 permits reading outcomes on the full approved
+tract frame. No outcome-sealed reserve is withheld. Support design and inference
+therefore use the same tracts. Results are exploratory, certify no release
+criteria, and do not authorize effect release or establish a causal clinical
+recommendation. The sealed campaign paths retain their existing behavior.
+
+Use the pinned Python environment and checkout. Run every command in a scheduler
+allocation; this driver never submits a job. Preparation and scoring need CPU;
+a real fit invocation needs one GPU. The orchestrator chooses allocations.
+
+```sh
+python -m oxyformer.explore.real_fit prepare \
+  --tract-inputs /path/to/tract-inputs --atlas /path/to/atlas-collect \
+  --usaleep-tar /path/to/fetch-us/payload.tar \
+  --usaleep-receipts /path/to/fetch-us/receipts.json --out /path/to/prepared
+
+python -m oxyformer.explore.real_fit fit --prepared /path/to/prepared \
+  --fold 0 --seed 1103 --state /path/to/fold-0 \
+  --slice-seconds 10800 --run-logging wandb
+
+python -m oxyformer.explore.real_fit score --prepared /path/to/prepared \
+  --state /path/to/fold-0 --state /path/to/fold-1 --state /path/to/fold-2 \
+  --state /path/to/fold-3 --state /path/to/fold-4 --out /path/to/result \
+  --run-logging wandb
+```
+
+Repeat fit for folds 0 through 4, each with its own state directory. Repeat each
+invocation until its progress.json says complete. Each call creates a fresh slice
+and atomically replaces the journal. SIGTERM and SIGUSR1 request a cooperative
+checkpoint; allow time after signaling for checkpoint serialization. A completed
+fold is a no-op. An interrupted process can leave an orphan slice; keep it for
+diagnosis and resume from the last journal. Never share one state between folds
+or concurrent invocations. Resume requires the identical clean checkout,
+environment, device and thread count. Keep prepared inputs and slice files in
+place. Identity mismatches refuse; recover by restoring the original environment
+or using a new state directory for a new run.
+
+Cell d uses reference cap 32, 60 nuisance epochs, two grid points and seed 1103;
+SSL remains 30 epochs. The five outer and three inner folds, approved primary
+flags 1 and 3, and approved covariates are unchanged. Treatment centering/scaling
+uses the allocation-qualified support pool. County centroids use target tracts;
+the primary spatial bandwidth is 100 km.
+
+W&B is loaded only when requested, with entity goodarzilab and project oxyformer-v2.
+The orchestrator installs it before running; a missing package refuses before
+training. W&B reads its credential from the environment. Driver logging records
+configuration, slice fold/epoch/stop reason/wall time and final estimates; it has
+no per-epoch curves. `--run-logging none` is an explicit recorded choice for
+synthetic tests; real training requires W&B under the owner rule.
+
+Read result.json for both one_step and cv_tmle, all pilot SE definitions, counts,
+recipe and identities. result.md gives the primary readout. Different SEs target
+different sources of variation: a small frame-conditional residual SE is not a
+certificate of geographic coverage. prepare_audit.json records source hashes,
+flag counts and the exclusions at each design layer.
