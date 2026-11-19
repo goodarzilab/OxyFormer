@@ -207,6 +207,12 @@ def recipe_for(endpoint, approvals):
         inference=dict(primary_bandwidth_km=100, county_locations=locations))
 
 
+def recipe_study(recipe):
+    study = recipe['study']
+    return RecipeStudy(reference_cap=study['reference_cap'], frozen_epochs=study['frozen_epochs'],
+                       grid_points=study['grid_points'], seed_count=study['seed_count'])
+
+
 def prepare(tract_inputs, atlas, usaleep_tar, usaleep_receipts, out):
     out = Path(out)
     require(not out.exists(), 'prepared output already exists')
@@ -332,10 +338,7 @@ def fit(prepared, fold, seed, state, slice_seconds, run_logging, *, device='cuda
             destination = root / ('slice-' + uuid.uuid4().hex)
             request = CheckpointRequest()
             config = endpoint.configuration(fold, destination, **nested_cv._settings(recipe, endpoint),
-                study=RecipeStudy(reference_cap=recipe['study']['reference_cap'],
-                    frozen_epochs=recipe['study']['frozen_epochs'],
-                    grid_points=recipe['study']['grid_points'],
-                    seed_count=recipe['study']['seed_count']), device=device, slice_seconds=slice_seconds,
+                study=recipe_study(recipe), device=device, slice_seconds=slice_seconds,
                 checkpoint_margin_seconds=min(60., slice_seconds / 10), stop_request=request,
                 predecessor=None if record['predecessor'] is None else FoldArtifacts.from_json(record['predecessor']))
             started = time.monotonic()
@@ -385,7 +388,7 @@ def score(prepared, states, out, run_logging):
         destination.mkdir(parents=True, exist_ok=True)
         # All prediction parts exist, so estimate_repetition performs no fitting.
         estimates = coverage.estimate_repetition(endpoint, recipe, destination, time.monotonic(),
-            study=RecipeStudy(**recipe['study']), continuation=dict(parts=parts))
+            study=recipe_study(recipe), continuation=dict(parts=parts))
         require(estimates is not None, 'scoring incomplete')
         result = dict(estimates=estimates, n={k: audit[k] for k in
             ('rows_read', 'frame_rows', 'labelled', 'eligible', 'support_pool', 'support_candidates', 'targets',
