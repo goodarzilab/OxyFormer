@@ -201,7 +201,7 @@ def recipe_for(endpoint, approvals):
         points = [(r.latitude, r.longitude) for r in endpoint.geography.rows
                   if r.county == county and r.original_id in targets]
         locations[county] = [sum(p[j] for p in points) / len(points) for j in range(2)]
-    return dict(cell='d', seed=1103, study=study,
+    return dict(cell='d', seed=1103, study={key: study[key] for key in STUDY},
         # The registered base stays 150; RecipeStudy supplies the effective cell-d 60.
         nested_cv=dict(ssl_epochs=30, frozen_epochs=150, batch_size=256, precision='fp32'),
         inference=dict(primary_bandwidth_km=100, county_locations=locations))
@@ -268,7 +268,10 @@ def checkpoint_progress(checkpoint):
     progress = dict(checkpoint_position=checkpoint.epoch)
     controller = load_checkpoint(checkpoint, checkpoint.identity)['controller']
     if controller['active'] is not None:
-        progress['train_epoch'] = controller['active']['progress']['epoch']
+        metadata = controller['active'].get('progress')
+        epoch = metadata.get('epoch') if isinstance(metadata, dict) else None
+        if type(epoch) is int:
+            progress['train_epoch'] = epoch
     elif controller['ssl_pending'] is not None:
         progress['train_epoch'] = CheckpointArtifact.from_json(controller['ssl_pending']).epoch
     return progress
@@ -329,7 +332,10 @@ def fit(prepared, fold, seed, state, slice_seconds, run_logging, *, device='cuda
             destination = root / ('slice-' + uuid.uuid4().hex)
             request = CheckpointRequest()
             config = endpoint.configuration(fold, destination, **nested_cv._settings(recipe, endpoint),
-                study=RecipeStudy(**recipe['study']), device=device, slice_seconds=slice_seconds,
+                study=RecipeStudy(reference_cap=recipe['study']['reference_cap'],
+                    frozen_epochs=recipe['study']['frozen_epochs'],
+                    grid_points=recipe['study']['grid_points'],
+                    seed_count=recipe['study']['seed_count']), device=device, slice_seconds=slice_seconds,
                 checkpoint_margin_seconds=min(60., slice_seconds / 10), stop_request=request,
                 predecessor=None if record['predecessor'] is None else FoldArtifacts.from_json(record['predecessor']))
             started = time.monotonic()

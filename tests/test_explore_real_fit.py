@@ -306,3 +306,108 @@ def test_cell_d_uses_effective_study_epochs(tmp_path, monkeypatch):
     assert observed[0].study.reference_cap == 32 and len(observed[0].grid) == 2
     assert observed[0].study.seeds == (1103,)
     print('base_frozen_epochs=150 effective_frozen_epochs=60 driver_frozen_epochs=60 reference_cap=32 grid_points=2 seed=1103')
+
+
+@pytest.mark.parametrize('active, expected_epoch', [
+    ({'progress': {}}, None),
+    ({'progress': {'epoch': 7}}, 7),
+    ({}, None),
+    ({'progress': None}, None),
+    ({'progress': {'epoch': None}}, None),
+    ({'progress': {'epoch': '7'}}, None),
+    ({'progress': {'epoch': 7.5}}, None),
+    ({'progress': {'epoch': True}}, None),
+])
+def test_optional_epoch_publishes_journal(tmp_path, monkeypatch, active, expected_epoch):
+    from types import SimpleNamespace
+    fit_fixture(tmp_path, monkeypatch)
+    checkpoint = SimpleNamespace(epoch=11, identity='synthetic', reason='slice_limit')
+    predecessor = '{"synthetic": "returned predecessor"}'
+    artifact = SimpleNamespace(complete=False, checkpoint=checkpoint, to_json=lambda: predecessor)
+    monkeypatch.setattr(nested_cv, 'run_fold', lambda *a, **k: artifact)
+    monkeypatch.setattr(driver, 'load_checkpoint', lambda *a: {
+        'controller': {'active': active, 'ssl_pending': None}})
+    state = tmp_path / 'state'
+    returned = driver.fit('fixture', 0, 1103, state, 10, 'none', device='cpu')
+    # Inspect the published replacement, not just the metadata helper's return.
+    published = json.loads((state / 'progress.json').read_text())
+    assert published == returned
+    assert published['predecessor'] == predecessor
+    assert published['status'] == 'incomplete' and published['parts'] == []
+    assert len(published['slices']) == 1
+    event = published['slices'][0]
+    assert event['checkpoint_position'] == 11
+    assert event['stop_reason'] == 'slice_limit' and event['complete'] is False
+    assert event['fold'] == 0 and event['wall_seconds'] >= 0
+    assert Path(event['output_dir']).parent == state
+    if expected_epoch is None:
+        assert 'train_epoch' not in event
+    else:
+        assert event['train_epoch'] == expected_epoch
+
+
+@pytest.mark.parametrize('drift', ['registered', 'extra', 'missing', 'changed'])
+def test_cell_d_approval_boundaries(tmp_path, monkeypatch, drift):
+    from types import SimpleNamespace
+    endpoint = tiny_endpoint(tmp_path)
+    approvals = deepcopy(driver.read_mapping(driver.gate.OWNER_APPROVALS))
+    approval_path = tmp_path / 'approvals.json'
+    approval_path.write_text(json.dumps(approvals))
+    monkeypatch.setattr(driver.gate, 'OWNER_APPROVALS', approval_path)
+    inputs, atlas = tmp_path / 'inputs', tmp_path / 'atlas'
+    (inputs / '_execution').mkdir(parents=True)
+    atlas.mkdir()
+    (inputs / '_execution/result.json').write_text('{}')
+    roles = ['data_manifest', 'covariates', 'geography', 'entity_graph']
+    for name in roles:
+        (inputs / (name + '.json')).write_text('{}')
+    for name in ('atlas.parquet', 'quality.json', 'artifact_manifest.json'):
+        (atlas / name).write_text('{}')
+    publication = SimpleNamespace(status='pass', artifacts=[
+        SimpleNamespace(path=name + '.json', sha256='fixture') for name in roles])
+    monkeypatch.setattr(driver, 'StageResult', SimpleNamespace(from_json=lambda _: publication))
+    monkeypatch.setattr(driver.gate, 'collected_atlas_inputs', lambda *a: {})
+    monkeypatch.setattr(driver, 'build_endpoint', lambda *a: (endpoint, {}))
+    # The manifest is only needed to forward IDs to the mocked atlas loader.
+    manifest = SimpleNamespace(original_ids=endpoint.data.manifest.original_ids)
+    monkeypatch.setattr(driver, 'read_artifact',
+                        lambda path, *args: manifest if Path(path).name == 'data_manifest.json' else endpoint)
+    payload, receipts = acquisition(tmp_path / 'acquisition')
+    prepared = tmp_path / 'prepared'
+    driver.prepare(inputs, atlas, payload, receipts, prepared)
+    assert driver.load_prepared(prepared)[1]['study'] == driver.STUDY
+
+    study = approvals['owner_decisions']['m2_pilot_d']['cells']['d']
+    if drift == 'extra':
+        study['rationale'] = 'synthetic metadata'
+    elif drift == 'missing':
+        del study['seed_count']
+    elif drift == 'changed':
+        study['frozen_epochs'] = 61
+    approval_path.write_text(json.dumps(approvals))
+    monkeypatch.setattr(driver, 'checkout_identity', lambda: 'synthetic-checkout')
+    observed = []
+    def make_study(**fields):
+        observed.append(fields)
+        return RecipeStudy(**fields)
+    monkeypatch.setattr(driver, 'RecipeStudy', make_study)
+    class Configured(Exception):
+        pass
+    def inspect_config(config, *args, **kwargs):
+        assert config.frozen_epochs == 60
+        raise Configured
+    monkeypatch.setattr(nested_cv, 'run_fold', inspect_config)
+    state = tmp_path / 'state'
+    if drift == 'registered':
+        with pytest.raises(Configured):
+            driver.fit(prepared, 0, 1103, state, 10, 'none', device='cpu')
+        assert observed == [dict(reference_cap=32, frozen_epochs=60, grid_points=2, seed_count=1)]
+    else:
+        with pytest.raises(ContractError, match='cell d recipe drift'):
+            driver.prepare(inputs, atlas, payload, receipts, tmp_path / 'refused')
+        assert not (tmp_path / 'refused').exists()
+        with pytest.raises(ContractError, match='cell d recipe drift'):
+            driver.load_prepared(prepared)
+        with pytest.raises(ContractError, match='cell d recipe drift'):
+            driver.fit(prepared, 0, 1103, state, 10, 'none', device='cpu')
+        assert observed == [] and not state.exists()

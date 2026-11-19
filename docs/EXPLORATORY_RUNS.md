@@ -40,7 +40,8 @@ Fit state and score output paths that resolve inside the checkout must already
 be ignored by Git; otherwise they refuse before writing, so use a state directory
 outside the checkout.
 
-Cell d uses reference cap 32, 60 nuisance epochs, two grid points and seed 1103;
+Cell d uses reference cap 32, 60 nuisance epochs, two grid points and seed 1103.
+Extending the cell-d approval block beyond its four registered fields needs an owner decision.
 SSL remains 30 epochs. The cell-d study overrides the registered 150-epoch base
 settings to 60 effective nuisance epochs. The five outer and three inner folds, approved primary
 flags 1 and 3, and approved covariates are unchanged. Treatment centering/scaling
