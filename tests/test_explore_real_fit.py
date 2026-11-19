@@ -173,7 +173,7 @@ def test_score(tmp_path, monkeypatch):
     all_ids = endpoint.data.manifest.original_ids
     y = dict(zip(all_ids, endpoint.data.column(endpoint.data.manifest.outcome_field)))
     recipe = driver.recipe_for(endpoint, driver.read_mapping(driver.gate.OWNER_APPROVALS))
-    audit = {k: 10 for k in ('frame_rows', 'labelled', 'eligible', 'support_pool', 'support_candidates', 'targets')}
+    audit = {k: 10 for k in ('rows_read', 'frame_rows', 'labelled', 'eligible', 'support_pool', 'support_candidates', 'targets')}
     audit.update(in_frame_by_flag={'1': 10}, exclusions_by_reason={}, layer_counts={})
     monkeypatch.setattr(driver, 'load_prepared', lambda p: (endpoint, recipe, audit))
     states = []
@@ -182,7 +182,7 @@ def test_score(tmp_path, monkeypatch):
         part = OOFNuisances(spec=endpoint.data.manifest.spec, original_ids=ids, fold_ids=(fold,) * len(ids),
             seed_ids=(1103,) * len(ids), mu_a=tuple(y[i] - .1 for i in ids), mu_d=tuple(y[i] + .1 for i in ids),
             r_a=(1.,) * len(ids), r_d=(1.,) * len(ids), origin_weights=(1.,) * len(ids),
-            lineage=replace(endpoint.data.manifest.lineage, unit_ids=ids))
+            lineage=replace(endpoint.data.manifest.lineage, unit_ids=ids, split_hash=endpoint.outer.content_hash))
         root = tmp_path / str(fold)
         driver.atomic_record(root / 'progress.json', dict(status='complete', parts=[part.to_json()],
             identity=dict(prepared_hash=endpoint.content_hash, recipe=recipe, fold=fold, seed=1103,
@@ -207,3 +207,17 @@ def test_score(tmp_path, monkeypatch):
     driver.atomic_record(states[0] / 'progress.json', record)
     with pytest.raises(ContractError, match='complete folds'):
         driver.score('fixture', states, tmp_path / 'bad-score', 'none')
+
+
+def test_wandb_driver_config(monkeypatch):
+    from types import SimpleNamespace
+    logger = FakeLogger()
+    calls = []
+    def initialize(**kwargs):
+        calls.append(kwargs)
+        return logger
+    monkeypatch.setenv('WANDB_API_KEY', 'synthetic-secret')
+    monkeypatch.setattr(driver.importlib, 'import_module', lambda name: SimpleNamespace(init=initialize))
+    assert driver.logger_for('wandb', {'recipe': driver.STUDY}) is logger
+    assert calls == [dict(entity='goodarzilab', project='oxyformer-v2', config={'recipe': driver.STUDY})]
+    assert 'synthetic-secret' not in json.dumps(calls)
