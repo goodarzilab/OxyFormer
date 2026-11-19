@@ -278,7 +278,7 @@ def state_lock(root):
         yield
 
 
-def fit(prepared, fold, seed, state, slice_seconds, run_logging, *, device='auto'):
+def fit(prepared, fold, seed, state, slice_seconds, run_logging, *, device='cuda:0'):
     require(type(fold) is int and fold in range(5) and seed == 1103, 'unsupported fold or seed')
     require(math.isfinite(slice_seconds) and 0 < slice_seconds <= 10800, 'slice must be in (0, 10800] seconds')
     endpoint, recipe, _ = load_prepared(prepared)
@@ -352,7 +352,7 @@ def score(prepared, states, out, run_logging):
             study=RecipeStudy(**recipe['study']), continuation=dict(parts=parts))
         require(estimates is not None, 'scoring incomplete')
         result = dict(estimates=estimates, n={k: audit[k] for k in
-            ('frame_rows', 'labelled', 'eligible', 'support_pool', 'support_candidates', 'targets',
+            ('rows_read', 'frame_rows', 'labelled', 'eligible', 'support_pool', 'support_candidates', 'targets',
              'in_frame_by_flag', 'exclusions_by_reason', 'layer_counts')},
             run_logging=run_logging, **log_config)
         destination = Path(out)
@@ -362,7 +362,8 @@ def score(prepared, states, out, run_logging):
                  'Certifies no release criterion. Effect release authorized: false.', '',
                  '| Estimator | Estimate | Primary SE |', '| --- | ---: | ---: |']
         lines += [f"| {name} | {v['value']:.8g} | {v['se']:.8g} |" for name, v in estimates.items()]
-        lines += ['', 'All variance definitions, layer counts, recipe and identities are in result.json.']
+        lines += ['', 'Full readout (including every SE definition and identity):', '', '```json',
+                  json.dumps(result, indent=2), '```']
         (destination / 'result.md').write_text('\n'.join(lines) + '\n')
         if logger is not None:
             logger.log(dict(final_estimates=estimates))
