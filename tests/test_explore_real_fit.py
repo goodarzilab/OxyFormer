@@ -92,9 +92,11 @@ def test_unsealed():
 class FakeLogger:
     def __init__(self):
         self.configs, self.events, self.finished = [], [], 0
+        self.directories = []
 
-    def factory(self, mode, config):
+    def factory(self, mode, config, directory=None):
         self.configs.append(config)
+        self.directories.append(directory)
         return self
 
     def log(self, event):
@@ -137,6 +139,7 @@ def test_resume_and_logging(tmp_path, monkeypatch):
     before = (state / 'progress.json').read_bytes()
     assert driver.fit('fixture', 0, 1103, state, 120, 'none', device='cpu') == record
     assert (state / 'progress.json').read_bytes() == before
+    assert logger.directories == [state.resolve(), state.resolve()]
     assert all('epoch' not in e for e in logger.events)
     assert logger.configs and all({'fold', 'checkpoint_position', 'stop_reason', 'wall_seconds'} <= e.keys() for e in logger.events)
     for path in tmp_path.rglob('*'):
@@ -201,6 +204,7 @@ def test_score(tmp_path, monkeypatch):
         assert {'county_cluster', 'spatial_primary', 'unclustered_influence',
                 'residual_frame_conditional', 'spatial_50_km', 'spatial_100_km',
                 'spatial_200_km'} <= estimate['se_definitions'].keys()
+    assert logger.directories == [tmp_path / 'score']
     assert logger.events[-1]['final_estimates'] == result['estimates']
     assert (tmp_path / 'score' / 'result.md').exists()
     record = json.loads((states[0] / 'progress.json').read_text())
@@ -210,7 +214,7 @@ def test_score(tmp_path, monkeypatch):
         driver.score('fixture', states, tmp_path / 'bad-score', 'none')
 
 
-def test_wandb_driver_config(monkeypatch):
+def test_wandb_driver_config(monkeypatch, tmp_path):
     from types import SimpleNamespace
     logger = FakeLogger()
     calls = []
@@ -219,8 +223,8 @@ def test_wandb_driver_config(monkeypatch):
         return logger
     monkeypatch.setenv('WANDB_API_KEY', 'synthetic-secret')
     monkeypatch.setattr(driver.importlib, 'import_module', lambda name: SimpleNamespace(init=initialize))
-    assert driver.logger_for('wandb', {'recipe': driver.STUDY}) is logger
-    assert calls == [dict(entity='goodarzilab', project='oxyformer-v2', config={'recipe': driver.STUDY})]
+    assert driver.logger_for('wandb', {'recipe': driver.STUDY}, tmp_path) is logger
+    assert calls == [dict(entity='goodarzilab', project='oxyformer-v2', config={'recipe': driver.STUDY}, dir=str(tmp_path))]
     assert 'synthetic-secret' not in json.dumps(calls)
 
 
