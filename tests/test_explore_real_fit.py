@@ -265,3 +265,44 @@ def test_checkpoint_position_and_train_epoch_are_distinct(monkeypatch):
     assert driver.checkpoint_progress(checkpoint) == dict(checkpoint_position=11, train_epoch=7)
     controller['active'] = None
     assert driver.checkpoint_progress(checkpoint) == dict(checkpoint_position=11)
+
+
+def test_real_fit_requires_wandb_before_state_or_training(tmp_path, monkeypatch):
+    values = real_fixture()
+    outcomes = {r.original_id: (75., r.outcome_flag) for r in values['geography'].rows}
+    endpoint, _ = driver.build_endpoint(values, driver.read_mapping(driver.gate.DESIGN_CONFIG), outcomes)
+    recipe = driver.recipe_for(endpoint, values['approvals'])
+    monkeypatch.setattr(driver, 'load_prepared', lambda _: (endpoint, recipe, {}))
+    monkeypatch.setattr(driver, 'checkout_identity', lambda: 'synthetic-checkout')
+    monkeypatch.setattr(nested_cv, 'run_fold', lambda *a, **k: pytest.fail('training reached without required W&B'))
+    state = tmp_path / 'real-state'
+    with pytest.raises(ContractError, match='W&B logging is required for real endpoints'):
+        driver.fit('fixture', 0, 1103, state, .001, 'none', device='cpu')
+    assert not state.exists()
+
+
+def test_cell_d_uses_effective_study_epochs(tmp_path, monkeypatch):
+    endpoint = tiny_endpoint(tmp_path)
+    recipe = driver.recipe_for(endpoint, driver.read_mapping(driver.gate.OWNER_APPROVALS))
+    config = endpoint.configuration(0, tmp_path / 'work', **nested_cv._settings(recipe, endpoint),
+                                    study=RecipeStudy(**recipe['study']))
+    assert config.settings.frozen_epochs == 150  # Registered base, not the effective override.
+    assert config.frozen_epochs == 60
+    assert config.study.reference_cap == 32
+    assert len(config.grid) == 2 and config.study.seeds == (1103,)
+    observed = []
+    class ReachedConfiguration(Exception):
+        pass
+    def inspect_config(actual, *args, **kwargs):
+        observed.append(actual)
+        raise ReachedConfiguration
+    monkeypatch.setattr(driver, 'load_prepared', lambda _: (endpoint, recipe, {}))
+    monkeypatch.setattr(driver, 'checkout_identity', lambda: 'synthetic-checkout')
+    monkeypatch.setattr(nested_cv, 'run_fold', inspect_config)
+    with pytest.raises(ReachedConfiguration):
+        driver.fit('fixture', 0, 1103, tmp_path / 'driver-state', .001, 'none', device='cpu')
+    assert observed[0].settings.frozen_epochs == 150
+    assert observed[0].frozen_epochs == 60
+    assert observed[0].study.reference_cap == 32 and len(observed[0].grid) == 2
+    assert observed[0].study.seeds == (1103,)
+    print('base_frozen_epochs=150 effective_frozen_epochs=60 driver_frozen_epochs=60 reference_cap=32 grid_points=2 seed=1103')

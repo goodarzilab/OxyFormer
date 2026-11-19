@@ -41,7 +41,8 @@ be ignored by Git; otherwise they refuse before writing, so use a state director
 outside the checkout.
 
 Cell d uses reference cap 32, 60 nuisance epochs, two grid points and seed 1103;
-SSL remains 30 epochs. The five outer and three inner folds, approved primary
+SSL remains 30 epochs. The cell-d study overrides the registered 150-epoch base
+settings to 60 effective nuisance epochs. The five outer and three inner folds, approved primary
 flags 1 and 3, and approved covariates are unchanged. Treatment centering/scaling
 uses the allocation-qualified support pool. County centroids use target tracts;
 the primary spatial bandwidth is 100 km.
@@ -54,7 +55,9 @@ configuration, slice fold/checkpoint position/stop reason/wall time and final
 estimates; it has no per-epoch curves.
 `checkpoint_position` is the nested-CV controller position; `train_epoch` is
 included only when active model progress is present in the existing checkpoint
-metadata. `--run-logging none` is an explicit recorded choice for synthetic tests; real training requires W&B under the owner rule.
+metadata. `--run-logging none` is an explicit recorded choice for synthetic fits
+and scoring; real fits refuse it before creating state or starting training,
+as required by the owner rule.
 
 Read result.json for both one_step and cv_tmle, all pilot SE definitions, counts,
 recipe and identities. result.md gives the primary readout. Different SEs target
