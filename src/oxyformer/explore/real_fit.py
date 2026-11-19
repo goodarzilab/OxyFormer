@@ -35,7 +35,7 @@ from oxyformer.execution.runner import read_mapping
 from oxyformer.models.treatment_query import TreatmentDesign
 from oxyformer.provenance import canonical_json, file_hash, read_artifact, require
 from oxyformer.training import nested_cv
-from oxyformer.training.checkpoint import CheckpointRequest
+from oxyformer.training.checkpoint import CheckpointArtifact, CheckpointRequest, load_checkpoint
 from oxyformer.training.fit import FoldArtifacts, RecipeStudy, subset, resolve_device
 from oxyformer.training.pretrain import environment_identity
 from oxyformer.validation import coverage
@@ -250,6 +250,29 @@ def load_prepared(directory):
     return endpoint, recipe, audit
 
 
+def write_directory(path):
+    """Reject output that would dirty the checkout before creating any files."""
+    destination, checkout = Path(path).resolve(), ROOT.resolve()
+    if destination.is_relative_to(checkout):
+        ignored = subprocess.run(['git', 'check-ignore', '--quiet', '--', str(destination) + os.sep],
+                                 cwd=checkout, check=False)
+        require(ignored.returncode == 0,
+                f'{destination}: unignored write path inside checkout; '
+                'use a state directory outside the checkout or an already ignored directory')
+    return destination
+
+
+def checkpoint_progress(checkpoint):
+    """Distinguish controller position from an active model's training epoch."""
+    progress = dict(checkpoint_position=checkpoint.epoch)
+    controller = load_checkpoint(checkpoint, checkpoint.identity)['controller']
+    if controller['active'] is not None:
+        progress['train_epoch'] = controller['active']['progress']['epoch']
+    elif controller['ssl_pending'] is not None:
+        progress['train_epoch'] = CheckpointArtifact.from_json(controller['ssl_pending']).epoch
+    return progress
+
+
 def checkout_identity():
     require(not subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT).strip(), 'dirty checkout refused')
     return subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT).decode().strip()
@@ -281,12 +304,12 @@ def state_lock(root):
 def fit(prepared, fold, seed, state, slice_seconds, run_logging, *, device='cuda:0'):
     require(type(fold) is int and fold in range(5) and seed == 1103, 'unsupported fold or seed')
     require(math.isfinite(slice_seconds) and 0 < slice_seconds <= 10800, 'slice must be in (0, 10800] seconds')
+    root = write_directory(state)
     endpoint, recipe, _ = load_prepared(prepared)
     device = str(resolve_device(device))
     identity = dict(prepared_hash=endpoint.content_hash, recipe=recipe, checkout=checkout_identity(),
                     environment=dict(environment_identity(torch.device(device))), fold=fold, seed=seed,
                     run_logging=run_logging)
-    root = Path(state).resolve()
     with state_lock(root):
         path = root / 'progress.json'
         record = json.loads(path.read_text()) if path.exists() else dict(identity=identity,
@@ -314,7 +337,7 @@ def fit(prepared, fold, seed, state, slice_seconds, run_logging, *, device='cuda
                     part = nested_cv.predict(artifact, view, endpoint.policy)
                     record['parts'] = [part.to_json()]
                     record['status'] = 'complete'
-                event = dict(fold=fold, epoch=artifact.checkpoint.epoch, stop_reason=artifact.checkpoint.reason,
+                event = dict(fold=fold, **checkpoint_progress(artifact.checkpoint), stop_reason=artifact.checkpoint.reason,
                              wall_seconds=time.monotonic() - started, complete=artifact.complete,
                              output_dir=str(destination))
                 record['slices'].append(event)
@@ -328,6 +351,7 @@ def fit(prepared, fold, seed, state, slice_seconds, run_logging, *, device='cuda
 
 
 def score(prepared, states, out, run_logging):
+    destination = write_directory(out)
     endpoint, recipe, audit = load_prepared(prepared)
     records = [json.loads((Path(s) / 'progress.json').read_text()) for s in states]
     require(len(records) == 5 and all(r['status'] == 'complete' for r in records), 'five complete folds required')
@@ -346,16 +370,15 @@ def score(prepared, states, out, run_logging):
     log_config = dict(prepared_hash=endpoint.content_hash, recipe=recipe, tree=identities[0]['checkout'], **LABELS)
     logger = logger_for(run_logging, log_config)
     try:
-        Path(out).mkdir(parents=True, exist_ok=True)
+        destination.mkdir(parents=True, exist_ok=True)
         # All prediction parts exist, so estimate_repetition performs no fitting.
-        estimates = coverage.estimate_repetition(endpoint, recipe, Path(out), time.monotonic(),
+        estimates = coverage.estimate_repetition(endpoint, recipe, destination, time.monotonic(),
             study=RecipeStudy(**recipe['study']), continuation=dict(parts=parts))
         require(estimates is not None, 'scoring incomplete')
         result = dict(estimates=estimates, n={k: audit[k] for k in
             ('rows_read', 'frame_rows', 'labelled', 'eligible', 'support_pool', 'support_candidates', 'targets',
              'in_frame_by_flag', 'exclusions_by_reason', 'layer_counts')},
             run_logging=run_logging, **log_config)
-        destination = Path(out)
         destination.mkdir(parents=True, exist_ok=True)
         atomic_record(destination / 'result.json', result)
         lines = ['# Exploratory USALEEP estimate', '', LABELS['sealing'], '',

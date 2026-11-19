@@ -137,7 +137,8 @@ def test_resume_and_logging(tmp_path, monkeypatch):
     before = (state / 'progress.json').read_bytes()
     assert driver.fit('fixture', 0, 1103, state, 120, 'none', device='cpu') == record
     assert (state / 'progress.json').read_bytes() == before
-    assert logger.configs and all({'fold', 'epoch', 'stop_reason', 'wall_seconds'} <= e.keys() for e in logger.events)
+    assert all('epoch' not in e for e in logger.events)
+    assert logger.configs and all({'fold', 'checkpoint_position', 'stop_reason', 'wall_seconds'} <= e.keys() for e in logger.events)
     for path in tmp_path.rglob('*'):
         if path.is_file():
             assert sentinel.encode() not in path.read_bytes(), path
@@ -221,3 +222,42 @@ def test_wandb_driver_config(monkeypatch):
     assert driver.logger_for('wandb', {'recipe': driver.STUDY}) is logger
     assert calls == [dict(entity='goodarzilab', project='oxyformer-v2', config={'recipe': driver.STUDY})]
     assert 'synthetic-secret' not in json.dumps(calls)
+
+
+@pytest.mark.parametrize('operation', ['fit', 'score'])
+@pytest.mark.parametrize('through_symlink', [False, True])
+def test_unignored_checkout_output_refuses_before_writing(tmp_path, monkeypatch, operation, through_symlink):
+    import subprocess
+    checkout = tmp_path / 'checkout'
+    checkout.mkdir()
+    subprocess.run(['git', 'init', '-q', str(checkout)], check=True)
+    (checkout / '.gitignore').write_text('/ignored-runs/\n')
+    monkeypatch.setattr(driver, 'ROOT', checkout)
+    monkeypatch.setattr(driver, 'load_prepared', lambda _: pytest.fail('loaded prepared data before path refusal'))
+    base = checkout
+    if through_symlink:
+        base = tmp_path / 'alias'
+        base.symlink_to(checkout, target_is_directory=True)
+    destination = base / 'review-runs' / 'fold-0'
+    assert not destination.exists()
+    with pytest.raises(ContractError, match='use a state directory outside the checkout') as failure:
+        if operation == 'fit':
+            driver.fit('fixture', 0, 1103, destination, .001, 'none', device='cpu')
+        else:
+            driver.score('fixture', [], destination, 'none')
+    assert str(destination.resolve()) in str(failure.value)
+    assert not (checkout / 'review-runs').exists()
+    assert driver.write_directory(checkout / 'ignored-runs') == checkout / 'ignored-runs'
+    assert driver.write_directory(checkout / 'ignored-runs' / 'fold-0') == checkout / 'ignored-runs' / 'fold-0'
+    assert driver.write_directory(tmp_path / 'outside') == tmp_path / 'outside'
+    assert not (checkout / 'ignored-runs').exists() and not (tmp_path / 'outside').exists()
+
+
+def test_checkpoint_position_and_train_epoch_are_distinct(monkeypatch):
+    from types import SimpleNamespace
+    checkpoint = SimpleNamespace(epoch=11, identity='synthetic-identity')
+    controller = dict(active=dict(progress=dict(epoch=7)), ssl_pending=None)
+    monkeypatch.setattr(driver, 'load_checkpoint', lambda *args: {'controller': controller}, raising=False)
+    assert driver.checkpoint_progress(checkpoint) == dict(checkpoint_position=11, train_epoch=7)
+    controller['active'] = None
+    assert driver.checkpoint_progress(checkpoint) == dict(checkpoint_position=11)
