@@ -202,6 +202,7 @@ def recipe_for(endpoint, approvals):
                   if r.county == county and r.original_id in targets]
         locations[county] = [sum(p[j] for p in points) / len(points) for j in range(2)]
     return dict(cell='d', seed=1103, study=study,
+        # The registered base stays 150; RecipeStudy supplies the effective cell-d 60.
         nested_cv=dict(ssl_epochs=30, frozen_epochs=150, batch_size=256, precision='fp32'),
         inference=dict(primary_bandwidth_km=100, county_locations=locations))
 
@@ -309,6 +310,8 @@ def fit(prepared, fold, seed, state, slice_seconds, run_logging, *, device='cuda
     require(math.isfinite(slice_seconds) and 0 < slice_seconds <= 10800, 'slice must be in (0, 10800] seconds')
     root = write_directory(state)
     endpoint, recipe, _ = load_prepared(prepared)
+    require(run_logging != 'none' or endpoint.data.manifest.spec.endpoint.startswith('synthetic'),
+            'W&B logging is required for real endpoints; use --run-logging wandb')
     device = str(resolve_device(device))
     identity = dict(prepared_hash=endpoint.content_hash, recipe=recipe, checkout=checkout_identity(),
                     environment=dict(environment_identity(torch.device(device))), fold=fold, seed=seed,
