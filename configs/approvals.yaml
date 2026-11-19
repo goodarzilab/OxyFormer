@@ -342,6 +342,28 @@ owner_decisions:
     paired_from: m2-diag-A
     wandb_waiver: "Owner waiver of 2026-11-11 04:10 UTC (card: 'Stop; waive W&B for the pilot'): W&B logging is waived for the m2_pilot_d diagnostic pilot only; see .swarm/final-cells/owner-waiver-wandb-pilot.md in the swarm project and ARC-4942"
 
+  # Owner decision of 2026-11-19 (orchestrating session, about 14:00 UTC), verbatim: "Please do away with sealing... we are not
+  # saving lives here... we are just exploring. Just run stuff get a read out and refine accordingly if needed"; clarifying cards
+  # answered "Everything (Recommended)" (scope) and "Cheap pilot-style recipe (Recommended)" (first real-data run). Supersedes the
+  # 2026-11-14 card "Pilot only, nothing new". See the mandate's Exploratory amendment. No campaign mode reads this block.
+  exploratory_unsealed:
+    decided_on: "2026-11-19"
+    scope: exploratory
+    certifies_release_criteria: false
+    outcome_reserve_withheld: false        # plan_fixed.support_design_fraction is not withheld from exploratory runs; all frame tracts and their outcomes may be read
+    recipe_frozen_before_real_estimate: false
+    recipe_changes: "orchestrator decision, recorded in the swarm PLAN.md ledger, including refinements after a readout and sensitivity analyses on approved data"
+    lifecycle: "plain Slurm units pinned to a commit; no campaign estimate, lock or admission for new exploratory runs"
+    first_real_data_run:
+      recipe_family: m2_pilot_d.cells.d     # settings chosen from the paired pilot readout
+      gpu_hours_estimate: 58
+    partitions: [preemptible, standard]
+    gpu_concurrency_max: {standard: 4, preemptible: 16}
+    gpu_hours_lost_per_attempt_max: 4
+    run_logging_required: true             # owner rule 2026-11-07: every training run logs to Weights & Biases
+    valid_until: "2026-12-31"
+    unchanged: "public data only and no applications; main untouched; promotion, the final-coverage, anchor and refit-audit allocations, and the US lung and Mexico pipelines still stop and ask"
+
 # Not yet approved. A unit that needs one of these must stop and report; the orchestrator brings it to the owner.
 pending_owner_approval:
   - any relief, flag or distance sensitivity analyses beyond plan_fixed

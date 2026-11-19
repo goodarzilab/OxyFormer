@@ -130,6 +130,33 @@ ladder beyond the approved 20 repetitions, the final-coverage, anchor and refit-
 for the SE/SD gate remain owner decisions under stop-and-ask items 1 and 4. A tie-break on work gpt-6-astra coauthored routes to
 the owner by the tooling's existing rule.
 
+## Exploratory amendment (2026-11-19)
+Owner decisions in the orchestrating session on 2026-11-19 (about 14:00 UTC), after the orchestrator's ETA report for the
+m2_pilot_d paired pilot named the sealed real-data routes still to be decided. The owner wrote, verbatim: "Please do away with
+sealing... we are not saving lives here... we are just exploring. Just run stuff get a read out and refine accordingly if
+needed". To the two clarifying questions the owner answered, verbatim: scope "Everything (Recommended)" and first real-data run
+"Cheap pilot-style recipe (Recommended)". This supersedes the owner's 2026-11-14 card "Pilot only, nothing new". The decision is
+recorded in `configs/approvals.yaml` under `owner_decisions.exploratory_unsealed`. Effect on this mandate:
+
+- **Run and validity.** The run is exploratory. Every result is labelled exploratory, certifies no release criterion and is
+  never presented as a pre-registered test. Stop-and-ask items 1 and 7 are satisfied for the following, and only for them:
+  - Real-data fits on the approved USALEEP tract frame may read outcomes on all frame tracts. The outcome-sealed design
+    reserve (`plan_fixed.support_design_fraction`) is not withheld from exploratory runs.
+  - The recipe need not be frozen before a real estimate is read. Recipe, cell, scenario, repetition and sensitivity choices
+    for exploratory runs, including refinements after a readout, are orchestrator decisions recorded in the swarm PLAN.md
+    ledger. This covers the `pending_owner_approval` sensitivity analyses on already-approved data.
+  - New exploratory runs, both simulation and real data, may run as plain Slurm units pinned to a commit, without the campaign
+    estimate, lock and admission lifecycle.
+  - The first real-data run uses the pilot-style recipe family (m2_pilot_d cell d), with settings chosen from the paired pilot
+    readout.
+- **Unchanged.** The Month-2 GPU concurrency caps (at most 4 GPU units on `standard` and 16 on `preemptible`), partitions
+  `standard` and `preemptible` with account `root` only, at most 4 GPU-hours lost per Slurm attempt, and W&B logging for every
+  training run (owner rule of 2026-11-07). Also unchanged: public data only and no data access that needs an application;
+  merges into `dev` only, with `main` untouched; promotion to shared paths; and the final-coverage, anchor and refit-audit
+  allocations. The US lung and Mexico pipelines still stop and ask. The science plan text is not edited: its sealing and
+  pre-registration provisions do not bind exploratory runs.
+- Valid until 2026-12-31 or until the owner revokes it. Everything else in this mandate is unchanged.
+
 ## Concurrence party
 The step-back committee of hanig-review-gate: two members on contrasting providers, the author excluded. Hani Goodarzi
 remains the owner and can take any decision back.
