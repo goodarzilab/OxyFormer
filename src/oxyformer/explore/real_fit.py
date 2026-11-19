@@ -278,7 +278,7 @@ def checkout_identity():
     return subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT).decode().strip()
 
 
-def logger_for(mode, config):
+def logger_for(mode, config, directory=None):
     require(mode in ('wandb', 'none'), 'explicit run logging mode required')
     if mode == 'none':
         return None
@@ -286,8 +286,11 @@ def logger_for(mode, config):
         wandb = importlib.import_module('wandb')
     except ImportError as exc:
         raise ValueError('wandb requested but package is absent; no training started') from exc
+    require(directory is not None, 'W&B output directory required')
+    directory = write_directory(directory)
+    directory.mkdir(parents=True, exist_ok=True)
     # Credentials are deliberately not inspected or included in config.
-    return wandb.init(entity='goodarzilab', project='oxyformer-v2', config=config)
+    return wandb.init(entity='goodarzilab', project='oxyformer-v2', config=config, dir=str(directory))
 
 
 @contextmanager
@@ -317,7 +320,7 @@ def fit(prepared, fold, seed, state, slice_seconds, run_logging, *, device='cuda
         require(record['identity'] == identity, 'journal identity differs')
         if record['status'] == 'complete':
             return record
-        logger = logger_for(run_logging, identity)
+        logger = logger_for(run_logging, identity, root)
         try:
             atomic_record(path, record)
             destination = root / ('slice-' + uuid.uuid4().hex)
@@ -368,7 +371,7 @@ def score(prepared, states, out, run_logging):
         require(set(part.fold_ids) == {fold} and set(part.seed_ids) == {1103}, 'prediction fold/seed differs')
         parts.append(part.to_json())
     log_config = dict(prepared_hash=endpoint.content_hash, recipe=recipe, tree=identities[0]['checkout'], **LABELS)
-    logger = logger_for(run_logging, log_config)
+    logger = logger_for(run_logging, log_config, destination)
     try:
         destination.mkdir(parents=True, exist_ok=True)
         # All prediction parts exist, so estimate_repetition performs no fitting.

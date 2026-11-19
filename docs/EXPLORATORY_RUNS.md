@@ -48,7 +48,8 @@ the primary spatial bandwidth is 100 km.
 
 W&B is loaded only when requested, with entity goodarzilab and project oxyformer-v2.
 The orchestrator installs it before running; a missing package refuses before
-training. W&B reads its credential from the environment. Driver logging records
+training. W&B reads its credential from the environment and keeps its local run
+files under the validated state/output directory. Driver logging records
 configuration, slice fold/checkpoint position/stop reason/wall time and final
 estimates; it has no per-epoch curves.
 `checkpoint_position` is the nested-CV controller position; `train_epoch` is
