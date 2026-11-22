@@ -155,6 +155,14 @@ recorded in `configs/approvals.yaml` under `owner_decisions.exploratory_unsealed
   merges into `dev` only, with `main` untouched; promotion to shared paths; and the final-coverage, anchor and refit-audit
   allocations. The US lung and Mexico pipelines still stop and ask. The science plan text is not edited: its sealing and
   pre-registration provisions do not bind exploratory runs.
+- **Policy and support sensitivity (2026-11-22).** The first exploratory real-data run moved only 91 of 2,603 target tracts
+  (3.5%). Asked "May exploratory runs vary the shift size and the support caliper?", the owner answered by card, verbatim:
+  "Yes, both (Recommended)". Exploratory runs may use a 1 mmHg shift as well as the primary 2 mmHg, and may widen the support
+  covariate caliper up to 3.0 IQR (the approved recipe uses 2.0). Bin width and the per-bin tract minimum stay as approved. The
+  science plan's 2 mmHg policy on the approved support remains the primary; these variants are exploratory sensitivities on the
+  exploratory path only, and every readout reports the shift, the caliper, the shifted fraction and the achieved average shift.
+  Bounded item 5 is satisfied for these two parameters, and only for them, in exploratory runs. Recorded in
+  `configs/approvals.yaml` under `owner_decisions.exploratory_unsealed.policy_support_sensitivity`.
 - Valid until 2026-12-31 or until the owner revokes it. Everything else in this mandate is unchanged.
 
 ## Concurrence party

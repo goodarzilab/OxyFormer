@@ -363,6 +363,16 @@ owner_decisions:
     run_logging_required: true             # owner rule 2026-11-07: every training run logs to Weights & Biases
     valid_until: "2026-12-31"
     unchanged: "public data only and no applications; main untouched; promotion, the final-coverage, anchor and refit-audit allocations, and the US lung and Mexico pipelines still stop and ask"
+    # Owner decision of 2026-11-22 (orchestrating session, about 01:25 UTC), card answered "Yes, both (Recommended)" to "May
+    # exploratory runs vary the shift size and the support caliper?", after the first exploratory real-data run moved only 91 of
+    # 2,603 target tracts (3.5%). See the mandate's Exploratory amendment. Applies only on the exploratory path.
+    policy_support_sensitivity:
+      decided_on: "2026-11-22"
+      delta_mmhg_allowed: [1.0, 2.0]       # 2.0 stays the science plan's primary shift
+      raw_x_radius_iqr_max: 3.0            # support covariate caliper; the approved support_recipe uses 2.0
+      unchanged_support_settings: {bin_width_mmhg: 1.0, min_bin_tracts: 2}
+      primary_policy_unchanged: true       # the plan's 2 mmHg policy on the approved support remains the primary
+      readout_must_report: [shifted_fraction, achieved_mean_shift_mmhg, delta_mmhg, raw_x_radius_iqr]
 
 # Not yet approved. A unit that needs one of these must stop and report; the orchestrator brings it to the owner.
 pending_owner_approval:
