@@ -497,6 +497,7 @@ def test_default_identity_and_variant_audit(monkeypatch, tmp_path):
 def test_policy_readout_diagnostics(tmp_path, zero):
     from types import SimpleNamespace
     endpoint = tiny_endpoint(tmp_path)
+    endpoint = replace(endpoint, policy=replace(endpoint.policy, components_by_key=(('s', ((0., 6.),)),)))
     if zero:
         endpoint = replace(endpoint, policy=replace(endpoint.policy, delta_mmhg=0.))
     readout = driver.policy_readout(endpoint, 2.)
@@ -536,3 +537,17 @@ def test_scored_policy_reporting(tmp_path, monkeypatch):
         return result
     monkeypatch.setattr(driver, 'score', checked)
     test_score(tmp_path, monkeypatch)
+
+
+def test_sensitivity_cli_forwards_only_prepare_flags(monkeypatch):
+    observed = []
+    monkeypatch.setattr(driver, 'prepare', lambda **kwargs: observed.append(kwargs))
+    driver.main(['prepare', '--tract-inputs', 'inputs', '--atlas', 'atlas',
+                 '--usaleep-tar', 'payload', '--usaleep-receipts', 'receipts', '--out', 'prepared',
+                 '--delta-mmhg', '1', '--support-caliper-iqr', '3'])
+    assert observed[0]['delta_mmhg'] == 1.
+    assert observed[0]['support_caliper_iqr'] == 3.
+    driver.main(['prepare', '--tract-inputs', 'inputs', '--atlas', 'atlas',
+                 '--usaleep-tar', 'payload', '--usaleep-receipts', 'receipts', '--out', 'prepared'])
+    assert observed[1]['delta_mmhg'] == 2.
+    assert observed[1]['support_caliper_iqr'] is None
