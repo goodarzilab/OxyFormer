@@ -65,3 +65,29 @@ recipe and identities. result.md gives the primary readout. Different SEs target
 different sources of variation: a small frame-conditional residual SE is not a
 certificate of geographic coverage. prepare_audit.json records source hashes,
 flag counts and the exclusions at each design layer.
+
+Preparation accepts `--delta-mmhg` (default 2.0) and
+`--support-caliper-iqr` (default the approved `raw_x_radius`, 2.0 IQR).
+The owner's 2026-11-22 `policy_support_sensitivity` decision permits delta 1.0
+or 2.0 and a caliper from the approved value through 3.0 IQR. Non-default
+settings require that decision; bin width and per-bin tract minimum stay fixed.
+The original design is still validated against approvals before applying these
+exploratory overrides. Fit and score use the prepared policy without new flags.
+
+Both settings are recorded in `prepare_audit.json`; the endpoint carries delta
+and the frozen support components. No endpoint schema change or sidecar is used
+(orchestrator narrowing of S3, 2026-11-22). Older default preparations still load.
+
+Every preparation and score reports `n_targets`, `n_moved_targets`,
+`shifted_fraction` (moved / targets) and `achieved_mean_shift_mmhg` (fraction times
+delta). The denominator is the final target set for that preparation, which can
+change with either override. A small shifted fraction means the policy leaves
+most targets unchanged. Delta 1 answers a different question from delta 2;
+it is never rescaled into a 2-mmHg claim. A wider caliper loosens neighbour
+comparability. Results remain exploratory and certify nothing.
+
+The score's `policy_diagnostics` contains per-estimator value and primary SE
+rescaled per mover and per achieved mmHg. These are descriptive rescalings, not
+new estimands. Among movers it also reports Kish ESS of the scored `r_d`, the
+largest tract's share of its sum and its 99th percentile. With no movers these
+diagnostics are null; ESS and share are also null if all mover ratios are zero.

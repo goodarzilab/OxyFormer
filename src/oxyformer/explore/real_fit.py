@@ -20,6 +20,7 @@ import tempfile
 import time
 import uuid
 
+import numpy as np
 import torch
 
 from oxyformer.contracts import CovariateView, DataManifest, StageResult
@@ -98,8 +99,71 @@ def read_outcomes(payload, receipts):
     return result, entry['sha256']
 
 
-def build_endpoint(values, design, outcomes):
+def validate_support_settings(design, approvals, delta_mmhg=2.0, support_caliper_iqr=None):
+    """Validate exploratory bounds without mutating the approved design."""
+    approved = SupportRecipe(**design['support'])
+    caliper = approved.raw_x_radius if support_caliper_iqr is None else support_caliper_iqr
+    require(math.isfinite(delta_mmhg), 'delta_mmhg_allowed: finite delta required')
+    require(math.isfinite(caliper), 'support_caliper_iqr: finite caliper required')
+    if delta_mmhg != 2.0 or caliper != approved.raw_x_radius:
+        block = approvals.get('owner_decisions', {}).get('exploratory_unsealed', {}).get(
+            'policy_support_sensitivity')
+        require(isinstance(block, dict), 'policy_support_sensitivity approval required for non-default delta/caliper')
+        require(delta_mmhg in block['delta_mmhg_allowed'], 'delta_mmhg_allowed bound exceeded')
+        require(approved.raw_x_radius <= caliper <= block['raw_x_radius_iqr_max'],
+                'support_caliper_iqr bound: approved raw_x_radius <= caliper <= raw_x_radius_iqr_max')
+        for name in ('bin_width_mmhg', 'min_bin_tracts'):
+            require(getattr(approved, name) == block['unchanged_support_settings'][name],
+                    f'{name} must remain unchanged')
+    return caliper
+
+
+def support_settings(design, approvals, delta_mmhg=2.0, support_caliper_iqr=None):
+    caliper = validate_support_settings(design, approvals, delta_mmhg, support_caliper_iqr)
+    return replace(SupportRecipe(**design['support']), raw_x_radius=caliper)
+
+
+def target_policy(endpoint):
+    ids = endpoint.outer.original_ids
+    positions = {oid: j for j, oid in enumerate(endpoint.data.manifest.original_ids)}
+    policy_positions = {oid: j for j, oid in enumerate(endpoint.policy_covariates.original_ids)}
+    a = endpoint.data.column(endpoint.data.manifest.exposure_field)
+    cov = endpoint.policy_covariates
+    selected = PolicyCovariates(original_ids=ids,
+        geography_ids=tuple(cov.geography_ids[policy_positions[i]] for i in ids),
+        support_keys=tuple(cov.support_keys[policy_positions[i]] for i in ids))
+    return endpoint.policy.apply([a[positions[i]] for i in ids], selected)
+
+
+def policy_readout(endpoint, caliper):
+    result = target_policy(endpoint)
+    n = len(result.moved)
+    moved = sum(result.moved)
+    fraction = moved / n
+    return dict(delta_mmhg=endpoint.policy.delta_mmhg, support_caliper_iqr=caliper,
+        n_targets=n, n_moved_targets=moved, shifted_fraction=fraction,
+        achieved_mean_shift_mmhg=fraction * endpoint.policy.delta_mmhg)
+
+
+def policy_diagnostics(endpoint, readout, estimates, nuisances):
+    """Descriptive rescalings and shifted-ratio concentration among movers."""
+    fraction, shift = readout['shifted_fraction'], readout['achieved_mean_shift_mmhg']
+    def rescale(divisor):
+        return {name: dict(value=v['value'] / divisor, se=v['se'] / divisor)
+                for name, v in estimates.items()} if divisor else None
+    moved = dict(zip(endpoint.outer.original_ids, target_policy(endpoint).moved))
+    ratios = np.asarray([r for oid, r in zip(nuisances.original_ids, nuisances.r_d) if moved[oid]],
+                        dtype=float)
+    total = float(ratios.sum())
+    return dict(per_mover=rescale(fraction), per_achieved_mmhg=rescale(shift),
+        mover_r_d_kish_ess=float(total ** 2 / np.dot(ratios, ratios)) if total else None,
+        mover_r_d_max_share=float(ratios.max() / total) if total else None,
+        mover_r_d_p99=float(np.quantile(ratios, .99)) if len(ratios) else None)
+
+
+def build_endpoint(values, design, outcomes, *, delta_mmhg=2.0, support_caliper_iqr=None):
     """Use the real-frame design sequence with an explicitly empty reserve."""
+    validate_support_settings(design, values['approvals'], delta_mmhg, support_caliper_iqr)
     manifest, covariates = values['data_manifest'], values['covariates']
     geography, atlas, graph = values['geography'], values['atlas'], values['entity_graph']
     require(manifest.spec.endpoint == ENDPOINT, 'wrong endpoint')
@@ -111,6 +175,7 @@ def build_endpoint(values, design, outcomes):
                 for r in geography.rows), 'outcome flag/availability metadata differs')
     gate._validate_data(manifest, covariates, geography, atlas, graph)
     gate.validate_approvals(design, values['approvals'], manifest, covariates, geography, atlas)
+    support_recipe = support_settings(design, values['approvals'], delta_mmhg, support_caliper_iqr)
     atlas_coverage = gate.atlas_coverage(values)
     require(atlas_coverage['complete'], 'incomplete atlas coverage')
     missing = set(atlas_coverage['accounted_missing_dem_tract_ids'])
@@ -120,7 +185,7 @@ def build_endpoint(values, design, outcomes):
         groups=dependence_groups(rows, graph))
     screens = county_screen(rows, a)
     frozen = freeze_support(rows, reservation.design_ids, a, covariates,
-                            recipe=SupportRecipe(**design['support']))
+                            recipe=support_recipe, delta_mmhg=delta_mmhg)
     supported = supported_ids(rows, a, frozen)
     reasons = {}
     for row in rows:
@@ -187,6 +252,7 @@ def build_endpoint(values, design, outcomes):
         exclusions_by_reason=dict(Counter(reason for _, reason in scenario.exclusions)),
         design_ids=list(reservation.design_ids), sealed_subblocks=list(reservation.sealed_subblocks),
         layer_counts={name: len(ids) for name, ids in scenario.layer_ids}, **LABELS)
+    audit.update(policy_readout(endpoint, support_recipe.raw_x_radius))
     return endpoint, audit
 
 
@@ -213,9 +279,13 @@ def recipe_study(recipe):
                        grid_points=study['grid_points'], seed_count=study['seed_count'])
 
 
-def prepare(tract_inputs, atlas, usaleep_tar, usaleep_receipts, out):
+def prepare(tract_inputs, atlas, usaleep_tar, usaleep_receipts, out, *,
+            delta_mmhg=2.0, support_caliper_iqr=None):
     out = Path(out)
     require(not out.exists(), 'prepared output already exists')
+    approvals = read_mapping(gate.OWNER_APPROVALS)
+    design = read_mapping(gate.DESIGN_CONFIG)
+    validate_support_settings(design, approvals, delta_mmhg, support_caliper_iqr)
     paths = {}
     result_path = Path(tract_inputs) / '_execution/result.json'
     publication = StageResult.from_json(result_path.read_text())
@@ -230,10 +300,13 @@ def prepare(tract_inputs, atlas, usaleep_tar, usaleep_receipts, out):
     atlas_paths = {('atlas-collect', name): Path(atlas) / name for name in
                    ('atlas.parquet', 'quality.json', 'artifact_manifest.json')}
     values.update(gate.collected_atlas_inputs(atlas_paths, values['data_manifest'].original_ids))
-    values['approvals'] = read_mapping(gate.OWNER_APPROVALS)
-    design = read_mapping(gate.DESIGN_CONFIG)
+    values['approvals'] = approvals
     outcomes, member_hash = read_outcomes(usaleep_tar, usaleep_receipts)
-    endpoint, audit = build_endpoint(values, design, outcomes)
+    if delta_mmhg == 2.0 and support_caliper_iqr is None:
+        endpoint, audit = build_endpoint(values, design, outcomes)
+    else:
+        endpoint, audit = build_endpoint(values, design, outcomes, delta_mmhg=delta_mmhg,
+                                         support_caliper_iqr=support_caliper_iqr)
     recipe = recipe_for(endpoint, values['approvals'])
     for path in [*atlas_paths.values(), result_path,
                  Path(usaleep_tar), Path(usaleep_receipts), gate.OWNER_APPROVALS, gate.DESIGN_CONFIG]:
@@ -390,7 +463,10 @@ def score(prepared, states, out, run_logging):
         estimates = coverage.estimate_repetition(endpoint, recipe, destination, time.monotonic(),
             study=recipe_study(recipe), continuation=dict(parts=parts))
         require(estimates is not None, 'scoring incomplete')
-        result = dict(estimates=estimates, n={k: audit[k] for k in
+        readout = policy_readout(endpoint, audit.get('support_caliper_iqr', 2.0))
+        nuisances = coverage.OOFNuisances.from_json((destination / 'nuisances.json').read_text())
+        diagnostics = policy_diagnostics(endpoint, readout, estimates, nuisances)
+        result = dict(estimates=estimates, **readout, policy_diagnostics=diagnostics, n={k: audit[k] for k in
             ('rows_read', 'frame_rows', 'labelled', 'eligible', 'support_pool', 'support_candidates', 'targets',
              'in_frame_by_flag', 'exclusions_by_reason', 'layer_counts')},
             run_logging=run_logging, **log_config)
@@ -417,6 +493,8 @@ def main(argv=None):
     p = commands.add_parser('prepare')
     for name in ('tract-inputs', 'atlas', 'usaleep-tar', 'usaleep-receipts', 'out'):
         p.add_argument('--' + name, required=True)
+    p.add_argument('--delta-mmhg', type=float, default=2.0)
+    p.add_argument('--support-caliper-iqr', type=float, default=None)
     p = commands.add_parser('fit')
     for name in ('prepared', 'state'):
         p.add_argument('--' + name, required=True)

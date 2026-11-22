@@ -411,3 +411,171 @@ def test_cell_d_approval_boundaries(tmp_path, monkeypatch, drift):
         with pytest.raises(ContractError, match='cell d recipe drift'):
             driver.fit(prepared, 0, 1103, state, 10, 'none', device='cpu')
         assert observed == [] and not state.exists()
+
+
+def sensitivity_approvals():
+    return {'owner_decisions': {'exploratory_unsealed': {'policy_support_sensitivity': {
+        'delta_mmhg_allowed': [1., 2.], 'raw_x_radius_iqr_max': 3.,
+        'unchanged_support_settings': {'bin_width_mmhg': 1., 'min_bin_tracts': 2}}}}}
+
+
+@pytest.mark.parametrize('delta,caliper,bound', [
+    (1., 3., None), (2., 2., None), (1.5, 2., 'delta_mmhg_allowed'),
+    (2., 3.5, 'raw_x_radius_iqr_max'), (2., 1.5, 'approved raw_x_radius'),
+    (float('nan'), 2., 'delta_mmhg_allowed'), (2., float('inf'), 'support_caliper_iqr')])
+def test_sensitivity_bounds(delta, caliper, bound):
+    design = {'support': dict(bin_width_mmhg=1., min_bin_tracts=2, raw_x_radius=2.)}
+    before = deepcopy(design)
+    if bound:
+        with pytest.raises(ContractError, match=bound):
+            driver.support_settings(design, sensitivity_approvals(), delta, caliper)
+    else:
+        assert driver.support_settings(design, sensitivity_approvals(), delta, caliper).raw_x_radius == caliper
+    assert design == before
+
+
+@pytest.mark.parametrize('delta,caliper', [(1., 2.), (2., 3.)])
+def test_sensitivity_requires_owner_block(delta, caliper, tmp_path):
+    design = {'support': dict(bin_width_mmhg=1., min_bin_tracts=2, raw_x_radius=2.)}
+    assert driver.support_settings(design, {}, 2., None).raw_x_radius == 2.
+    with pytest.raises(ContractError, match='policy_support_sensitivity'):
+        driver.support_settings(design, {}, delta, caliper)
+
+
+@pytest.mark.parametrize('name,value', [('bin_width_mmhg', .5), ('min_bin_tracts', 3)])
+def test_sensitivity_fixed_settings(name, value):
+    design = {'support': dict(bin_width_mmhg=1., min_bin_tracts=2, raw_x_radius=2.)}
+    design['support'][name] = value
+    with pytest.raises(ContractError, match=name):
+        driver.support_settings(design, sensitivity_approvals(), 1., 3.)
+
+
+def test_invalid_override_precedes_input_reads(tmp_path, monkeypatch):
+    design = {'support': dict(bin_width_mmhg=1., min_bin_tracts=2, raw_x_radius=2.)}
+    monkeypatch.setattr(driver, 'read_mapping', lambda path: sensitivity_approvals()
+                        if path == driver.gate.OWNER_APPROVALS else deepcopy(design))
+    monkeypatch.setattr(driver, 'read_outcomes', lambda *a: pytest.fail('outcomes read'))
+    with pytest.raises(ContractError, match='delta_mmhg_allowed'):
+        driver.prepare('missing', 'missing', 'missing', 'missing', tmp_path / 'out', delta_mmhg=1.5)
+    assert not (tmp_path / 'out').exists()
+
+
+def test_default_identity_and_variant_audit(monkeypatch, tmp_path):
+    values = real_fixture()
+    outcomes = {r.original_id: (75., r.outcome_flag) for r in values['geography'].rows}
+    design = driver.read_mapping(driver.gate.DESIGN_CONFIG)
+    freeze = driver.freeze_support
+    baseline_support = []
+    def legacy(*args, recipe, **kwargs):
+        frozen = freeze(*args, recipe=recipe)  # Original path: no delta keyword.
+        baseline_support.append(frozen)
+        return frozen
+    monkeypatch.setattr(driver, 'freeze_support', legacy)
+    baseline, _ = driver.build_endpoint(values, design, outcomes)
+    monkeypatch.setattr(driver, 'freeze_support', freeze)
+    actual, audit = driver.build_endpoint(values, design, outcomes)
+    assert actual.content_hash == baseline.content_hash
+    assert actual.to_json() == baseline.to_json()
+    assert actual.policy.policy_id == baseline_support[0].policy.policy_id
+    assert actual.policy.support_design_hash == baseline_support[0].policy.support_design_hash
+    assert actual.treatment_design.design_hash == baseline_support[0].content_hash
+    variant, changed = driver.build_endpoint(values, design, outcomes, delta_mmhg=1., support_caliper_iqr=3.)
+    assert variant.policy.delta_mmhg == changed['delta_mmhg'] == 1.
+    assert changed['support_caliper_iqr'] == 3.
+    assert variant.content_hash != actual.content_hash
+    for e, a in [(actual, audit), (variant, changed)]:
+        assert a['n_targets'] == len(e.outer.original_ids)
+        assert a['n_moved_targets'] == sum(driver.target_policy(e).moved)
+        assert a['achieved_mean_shift_mmhg'] == pytest.approx(a['shifted_fraction'] * a['delta_mmhg'], abs=1e-12)
+    # Legacy prepared directories contain no sensitivity fields in their audit.
+    prepared = tmp_path / 'legacy'
+    prepared.mkdir()
+    (prepared / 'endpoint.json').write_text(baseline.to_json())
+    driver.atomic_record(prepared / 'prepare_audit.json', {'prepared_hash': baseline.content_hash})
+    driver.atomic_record(prepared / 'recipe.json', driver.recipe_for(baseline, values['approvals']))
+    assert driver.load_prepared(prepared)[0].content_hash == baseline.content_hash
+
+
+@pytest.mark.parametrize('zero', [False, True])
+def test_policy_readout_diagnostics(tmp_path, zero):
+    from types import SimpleNamespace
+    endpoint = tiny_endpoint(tmp_path)
+    endpoint = replace(endpoint, policy=replace(endpoint.policy, components_by_key=(('s', ((0., 6.),)),)))
+    if zero:
+        endpoint = replace(endpoint, policy=replace(endpoint.policy, delta_mmhg=0.))
+    readout = driver.policy_readout(endpoint, 2.)
+    ids = endpoint.outer.original_ids
+    ratios = tuple(float(j + 1) for j in range(len(ids)))
+    nuisances = SimpleNamespace(original_ids=ids[::-1], r_d=ratios[::-1])
+    estimates = {'one_step': dict(value=4., se=2.), 'cv_tmle': dict(value=3., se=1.)}
+    d = driver.policy_diagnostics(endpoint, readout, estimates, nuisances)
+    assert readout['achieved_mean_shift_mmhg'] == readout['shifted_fraction'] * endpoint.policy.delta_mmhg
+    if zero:
+        assert readout['n_moved_targets'] == 0
+        assert all(v is None for v in d.values())
+    else:
+        assert 0 < readout['shifted_fraction'] < 1
+        moved_ratios = np.asarray([r for r, m in zip(ratios, driver.target_policy(endpoint).moved) if m])
+        assert d['mover_r_d_kish_ess'] == pytest.approx(moved_ratios.sum() ** 2 / (moved_ratios ** 2).sum())
+        assert d['mover_r_d_max_share'] == pytest.approx(moved_ratios.max() / moved_ratios.sum())
+        assert d['mover_r_d_p99'] == pytest.approx(np.quantile(moved_ratios, .99))
+        for name, v in estimates.items():
+            assert d['per_mover'][name]['value'] == v['value'] / readout['shifted_fraction']
+            assert d['per_mover'][name]['se'] == v['se'] / readout['shifted_fraction']
+            assert d['per_achieved_mmhg'][name]['value'] == v['value'] / readout['achieved_mean_shift_mmhg']
+            assert d['per_achieved_mmhg'][name]['se'] == v['se'] / readout['achieved_mean_shift_mmhg']
+
+
+def test_scored_policy_reporting(tmp_path, monkeypatch):
+    original = driver.score
+    def checked(*args, **kwargs):
+        result = original(*args, **kwargs)
+        saved = json.loads((tmp_path / 'score/result.json').read_text())
+        text = (tmp_path / 'score/result.md').read_text()
+        for name in ('delta_mmhg', 'support_caliper_iqr', 'n_targets', 'n_moved_targets',
+                     'shifted_fraction', 'achieved_mean_shift_mmhg', 'policy_diagnostics'):
+            assert saved[name] == result[name]
+            assert name in text
+        assert result['achieved_mean_shift_mmhg'] == result['shifted_fraction'] * result['delta_mmhg']
+        return result
+    monkeypatch.setattr(driver, 'score', checked)
+    test_score(tmp_path, monkeypatch)
+
+
+def test_sensitivity_cli_forwards_only_prepare_flags(monkeypatch):
+    observed = []
+    monkeypatch.setattr(driver, 'prepare', lambda **kwargs: observed.append(kwargs))
+    driver.main(['prepare', '--tract-inputs', 'inputs', '--atlas', 'atlas',
+                 '--usaleep-tar', 'payload', '--usaleep-receipts', 'receipts', '--out', 'prepared',
+                 '--delta-mmhg', '1', '--support-caliper-iqr', '3'])
+    assert observed[0]['delta_mmhg'] == 1.
+    assert observed[0]['support_caliper_iqr'] == 3.
+    driver.main(['prepare', '--tract-inputs', 'inputs', '--atlas', 'atlas',
+                 '--usaleep-tar', 'payload', '--usaleep-receipts', 'receipts', '--out', 'prepared'])
+    assert observed[1]['delta_mmhg'] == 2.
+    assert observed[1]['support_caliper_iqr'] is None
+
+
+def test_exploratory_recipe_is_applied_after_approval_validation(monkeypatch):
+    from oxyformer.design.support import SupportRecipe
+    values = real_fixture()
+    values['approvals'] = deepcopy(values['approvals'])
+    values['approvals']['owner_decisions']['exploratory_unsealed']['policy_support_sensitivity'] = (
+        sensitivity_approvals()['owner_decisions']['exploratory_unsealed']['policy_support_sensitivity'])
+    outcomes = {r.original_id: (75., r.outcome_flag) for r in values['geography'].rows}
+    design = driver.read_mapping(driver.gate.DESIGN_CONFIG)
+    events = []
+    validate = driver.gate.validate_approvals
+    def checked(*args, **kwargs):
+        validate(*args, **kwargs)
+        events.append('approved')
+    replacement = driver.replace
+    def observed(obj, **kwargs):
+        if isinstance(obj, SupportRecipe) and kwargs.get('raw_x_radius') == 3.:
+            assert events == ['approved'], 'exploratory recipe constructed before approval validation'
+            events.append('override')
+        return replacement(obj, **kwargs)
+    monkeypatch.setattr(driver.gate, 'validate_approvals', checked)
+    monkeypatch.setattr(driver, 'replace', observed)
+    driver.build_endpoint(values, design, outcomes, delta_mmhg=1., support_caliper_iqr=3.)
+    assert events == ['approved', 'override']
