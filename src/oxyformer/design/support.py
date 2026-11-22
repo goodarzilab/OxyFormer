@@ -76,7 +76,7 @@ def neighbors(query, candidates, x, scales, atlas, recipe, *, local):
                          for a, b, scale in zip(x[query.original_id], x[r.original_id], scales)))
 
 
-def freeze_support(rows, design_ids, atlas, covariates, *, recipe=SupportRecipe()):
+def freeze_support(rows, design_ids, atlas, covariates, *, recipe=SupportRecipe(), delta_mmhg=2.0):
     x = dict(zip(covariates.original_ids, covariates.values))
     require(set(x) == {r.original_id for r in rows}, "covariate/geography alignment mismatch")
     require(bool(covariates.columns), "explicit approved features required")
@@ -123,7 +123,7 @@ def freeze_support(rows, design_ids, atlas, covariates, *, recipe=SupportRecipe(
         "strata": sorted(strata.items()), "knots": knots,
     }).encode()).hexdigest()
     policy = ShiftOrStayPolicy(support_design_hash=support_hash,
-                              components_by_key=tuple(sorted(groups.items())), delta_mmhg=2.0)
+                              components_by_key=tuple(sorted(groups.items())), delta_mmhg=delta_mmhg)
     return FrozenSupport(design_ids=tuple(sorted(design_ids)), feature_names=covariates.columns,
                          feature_registry_hash=covariates.registry.content_hash, scales=scales,
                          spline_knots=knots, recipe=recipe, policy=policy,

@@ -651,3 +651,36 @@ def test_support_caliper_keeps_the_thirtieth_covariate():
     assert neighbors(query, [comparison], x, (1.,) * 30, atlas, SupportRecipe(), local=True) == ()
     x[comparison.original_id] = (0.,) * 29 + (2.,)
     assert neighbors(query, [comparison], x, (1.,) * 30, atlas, SupportRecipe(), local=True) == (comparison,)
+
+
+@pytest.mark.parametrize('delta,expected', [(1., (True, True, True, True)), (2., (True, True, True, False))])
+def test_frozen_delta_recheck_pushforward(delta, expected):
+    import numpy as np
+    from oxyformer.design.support import recheck_support
+    from oxyformer.estimation.mtp import pushforward_ratio
+    v = make_inputs()
+    rows = v['geography'].rows
+    atlas = {r.tract_id: r for r in v['atlas'].rows}
+    frozen = freeze_support(rows, (), atlas, v['covariates'], delta_mmhg=delta)
+    assert frozen.policy.delta_mmhg == delta
+    key = rows[0].assignment_geography
+    policy = replace(frozen.policy, components_by_key=((key, ((10., 14.),)),))
+    exposures = [10., 11.5, 12., 13.]
+    assert tuple(policy.shift_mask(exposures, (key,) * 4)) == expected
+    narrow = replace(policy, components_by_key=((key, ((10., 10. + delta),)),))
+    assert tuple(narrow.shift_mask([10., 10.01], (key,) * 2)) == (True, False)
+    seen = []
+    def density(points, keys):
+        seen.append(tuple(points))
+        return np.ones(len(points))
+    pushforward_ratio(policy, [12.], [key], density, exposure_law='continuous')
+    assert seen[0] == (12. - delta,)
+    # A moved evaluation origin has bins 4 and 5 available, but not 6.
+    query = rows[0]
+    a = dict(atlas)
+    a[query.tract_id] = replace(a[query.tract_id], exposure_mmhg=4.25)
+    training = [r for r in rows if r.original_id != query.original_id and
+                4 <= a[r.tract_id].exposure_mmhg < 6]
+    fixed = replace(frozen, policy=replace(frozen.policy,
+        components_by_key=((query.assignment_geography, ((0., 10.),)),)))
+    assert recheck_support([query], training, a, v['covariates'], fixed) == (() if delta == 1. else (query.original_id,))
