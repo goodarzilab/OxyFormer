@@ -451,6 +451,9 @@ def test_sensitivity_fixed_settings(name, value):
 
 
 def test_invalid_override_precedes_input_reads(tmp_path, monkeypatch):
+    design = {'support': dict(bin_width_mmhg=1., min_bin_tracts=2, raw_x_radius=2.)}
+    monkeypatch.setattr(driver, 'read_mapping', lambda path: sensitivity_approvals()
+                        if path == driver.gate.OWNER_APPROVALS else deepcopy(design))
     monkeypatch.setattr(driver, 'read_outcomes', lambda *a: pytest.fail('outcomes read'))
     with pytest.raises(ContractError, match='delta_mmhg_allowed'):
         driver.prepare('missing', 'missing', 'missing', 'missing', tmp_path / 'out', delta_mmhg=1.5)
@@ -551,3 +554,28 @@ def test_sensitivity_cli_forwards_only_prepare_flags(monkeypatch):
                  '--usaleep-tar', 'payload', '--usaleep-receipts', 'receipts', '--out', 'prepared'])
     assert observed[1]['delta_mmhg'] == 2.
     assert observed[1]['support_caliper_iqr'] is None
+
+
+def test_exploratory_recipe_is_applied_after_approval_validation(monkeypatch):
+    from oxyformer.design.support import SupportRecipe
+    values = real_fixture()
+    values['approvals'] = deepcopy(values['approvals'])
+    values['approvals']['owner_decisions']['exploratory_unsealed']['policy_support_sensitivity'] = (
+        sensitivity_approvals()['owner_decisions']['exploratory_unsealed']['policy_support_sensitivity'])
+    outcomes = {r.original_id: (75., r.outcome_flag) for r in values['geography'].rows}
+    design = driver.read_mapping(driver.gate.DESIGN_CONFIG)
+    events = []
+    validate = driver.gate.validate_approvals
+    def checked(*args, **kwargs):
+        validate(*args, **kwargs)
+        events.append('approved')
+    replacement = driver.replace
+    def observed(obj, **kwargs):
+        if isinstance(obj, SupportRecipe) and kwargs.get('raw_x_radius') == 3.:
+            assert events == ['approved'], 'exploratory recipe constructed before approval validation'
+            events.append('override')
+        return replacement(obj, **kwargs)
+    monkeypatch.setattr(driver.gate, 'validate_approvals', checked)
+    monkeypatch.setattr(driver, 'replace', observed)
+    driver.build_endpoint(values, design, outcomes, delta_mmhg=1., support_caliper_iqr=3.)
+    assert events == ['approved', 'override']
