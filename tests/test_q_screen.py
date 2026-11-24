@@ -57,7 +57,7 @@ def test_identity_and_oracle_splice(fixture, oracle_q):
     actual = audit.replay(endpoint, new, oracle, recipe['inference']['county_locations'])['fitted']
     reference = expected['oracle_Q' if oracle_q else 'fitted']
     for method in reference:
-        assert actual[method]['estimate']['value'] == pytest.approx(reference[method]['estimate']['value'], abs=1e-12)
+        assert actual[method]['estimate']['value'] == pytest.approx(reference[method]['estimate']['value'], abs=1e-12, rel=0)
         assert actual[method]['se'] == reference[method]['se']
 
 
