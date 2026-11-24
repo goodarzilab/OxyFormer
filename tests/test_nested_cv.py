@@ -671,3 +671,11 @@ def test_default_science_matches_launch_base(tmp_path, monkeypatch):
     label = 'cuda' if torch.version.cuda else 'cpu'
     expected = json.loads(Path(f'tests/fixtures/q_refit/baseline_{label}.json').read_text())
     assert observed == expected
+
+
+def test_default_cost_walk_keeps_full_mode_schedule():
+    from oxyformer.validation.cost_probe import source_work
+    result = source_work(Path('src/oxyformer/training/nested_cv.py').read_text(),
+        Path('src/oxyformer/validation/coverage.py').read_text(), seed_count=1, grid_points=2)
+    assert result['counts'] == dict(ssl=20, inner_outcome=30, inner_origin=30,
+                                  refit_outcome=5, refit_origin=5, scoring=1)

@@ -547,12 +547,13 @@ def _advance(config, outer, manifest, identity, controller, root, budget, varian
         origin_audit.validate(outer_ids)
         audits[fold] = origin_audit
         tasks.append(("ssl", fold, None))
-        tasks.extend((kind, fold, grid) for kind in (("outcome",) if q_only else ("outcome", "origin")) for grid in range(len(config.grid)))
+        tasks.extend((kind, fold, grid) for kind in ("outcome", "origin") for grid in range(len(config.grid)))
     outer_local, fitting, held = _partition(config, outer, config.fold)
     partitions[3] = (outer_local, fitting, held, ())
-    tasks.extend((("select", 3, None), ("ssl", 3, None), ("outcome", 3, None)))
-    if not q_only:
-        tasks.append(("origin", 3, None))
+    tasks.extend((("select", 3, None), ("ssl", 3, None), ("outcome", 3, None), ("origin", 3, None)))
+    if q_only:
+        # Keep the full-mode declaration readable by the existing cost walker.
+        tasks = [task for task in tasks if task[0] != "origin"]
     while controller["position"] < len(tasks):
         kind, fold, grid = tasks[controller["position"]]
         budget.phase = "ssl" if kind == "ssl" else "evaluation" if kind == "select" else "nuisance"
