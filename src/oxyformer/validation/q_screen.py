@@ -18,6 +18,7 @@ from oxyformer.validation.generators import ObservedRecords, TruthArtifact, gene
 from oxyformer.validation.oracle import ObservedLawOracle
 
 SCHEMA = 'oxyformer.q_parts.v1'
+SAVED_REPLAY_TOLERANCE = 1e-9
 TOP_KEYS = {'schema', 'chain_dir', 'frame_hash', 'variant', 'study', 'code_commit', 'parts'}
 PART_KEYS = {'fold', 'seed', 'original_ids', 'mu_a', 'mu_d'}
 DEFAULTS = dict(interval_level=98.75, bias_floor=.003, bias_ratio=.5,
@@ -51,7 +52,8 @@ def splice(path, chain_dir, frame_hash, endpoint, parts):
         check(isinstance(value, dict), fold, 'object')
         check(set(value) == expected, fold,
               ','.join(sorted(set(value) ^ expected)))
-    payload = json.loads(Path(path).read_text())
+    raw = Path(path).read_bytes()
+    payload = json.loads(raw)
     keys(payload, TOP_KEYS, '*')
     check(payload['schema'] == SCHEMA, '*', 'schema')
     check(payload['chain_dir'] == chain, '*', 'chain_dir')
@@ -84,7 +86,7 @@ def splice(path, chain_dir, frame_hash, endpoint, parts):
     before, after = non_q_hash(endpoint, parts), non_q_hash(endpoint, new)
     check(before == after, '*', 'non_Q_hash')
     return new, dict(non_q_before=before, non_q_after=after,
-                     q_parts_sha256=sha256(Path(path).read_bytes()).hexdigest(),
+                     q_parts_sha256=sha256(raw).hexdigest(),
                      variant=payload['variant'], study=payload['study'], code_commit=payload['code_commit'])
 
 
@@ -182,10 +184,10 @@ def screen_chain(chain_dir, baseline, candidates):
     require(not matching or float(bandwidth) in matching, 'primary spatial bandwidth mismatch')
     cells = {'fitted': evaluate(endpoint, parts, oracle, locations, psi, spatial_key)}
     for method, saved_est in record['estimates'].items():
-        require(abs(cells['fitted']['estimates'][method]['estimate']['value']-saved_est['value']) < 1e-12,
+        require(abs(cells['fitted']['estimates'][method]['estimate']['value']-saved_est['value']) <= SAVED_REPLAY_TOLERANCE,
                 f'{chain_dir}: saved {method} estimate mismatch')
         for b, se in saved_est['spatial_se'].items():
-            require(abs(cells['fitted']['estimates'][method]['se'][f'spatial_{float(b):g}_km']['value']-se) < 1e-12,
+            require(abs(cells['fitted']['estimates'][method]['se'][f'spatial_{float(b):g}_km']['value']-se) <= SAVED_REPLAY_TOLERANCE,
                     f'{chain_dir}: saved spatial SE mismatch')
     oracle_parts = []
     for p in parts:

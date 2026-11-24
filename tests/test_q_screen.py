@@ -234,3 +234,58 @@ def test_single_chain_has_undefined_paired_interval():
     assert result['paired_interval']==[None,None]
     assert result['empirical_sd'] is None
     assert result['verdict']=='fail' and result['failing_criteria']==['paired_interval']
+
+
+@pytest.mark.parametrize('mode', ['diagnostic', 'm2_pilot_d'])
+@pytest.mark.parametrize('method', ['one_step', 'cv_tmle'])
+@pytest.mark.parametrize('bandwidth', [None, '50.0', '100.0', '200.0'])
+@pytest.mark.parametrize('drift', [2e-12, 2e-9])
+def test_saved_record_replay_tolerance(fixture, monkeypatch, mode, method, bandwidth, drift):
+    chain, state, _, _, _, _ = fixture
+    result, states, base, recipe = screen.load(chain)
+    record = deepcopy(states[0]['record'])
+    saved = record['estimates'][method]
+    if bandwidth is None:
+        saved['value'] += drift
+    else:
+        saved['spatial_se'][bandwidth] += drift
+        if bandwidth == '100.0':
+            saved['se'] += drift  # Keep the historical primary-SE fields consistent.
+    result = {**result, 'campaign_mode': mode, 'records': [record]}
+    states = [{**states[0], 'record': record}]
+    monkeypatch.setattr(screen, 'load', lambda path: (result, states, base, recipe))
+    path = write(chain, payload(chain, state, state['parts']))
+    if drift < 1e-9:
+        row = screen.screen_chain(chain, path, {})
+        assert row['cells']['baseline']['estimates'] == row['cells']['fitted']['estimates']
+    else:
+        with pytest.raises(ContractError, match='saved .* mismatch'):
+            screen.screen_chain(chain, path, {})
+
+
+def test_candidate_digest_binds_parsed_bytes(fixture, monkeypatch):
+    from hashlib import sha256
+    chain, state, endpoint, _, _, _ = fixture
+    candidate = payload(chain, state, state['parts'])
+    path = write(chain, candidate)
+    original_bytes = path.read_bytes()
+    replacement = deepcopy(candidate)
+    replacement['parts'][0]['mu_a'][0] += 3.
+    replaced = False
+    read_text, read_bytes = type(path).read_text, type(path).read_bytes
+    def replace_after_read(p, value):
+        nonlocal replaced
+        if p == path and not replaced:
+            replaced = True
+            p.write_text(json.dumps(replacement))
+        return value
+    def text(p, *args, **kwargs):
+        return replace_after_read(p, read_text(p, *args, **kwargs))
+    def binary(p, *args, **kwargs):
+        return replace_after_read(p, read_bytes(p, *args, **kwargs))
+    monkeypatch.setattr(type(path), 'read_text', text)
+    monkeypatch.setattr(type(path), 'read_bytes', binary)
+    new, provenance = screen.splice(path, chain, state['binding']['frame_hash'], endpoint, state['parts'])
+    assert replaced
+    assert new[0].mu_a == tuple(candidate['parts'][0]['mu_a'])
+    assert provenance['q_parts_sha256'] == sha256(original_bytes).hexdigest()

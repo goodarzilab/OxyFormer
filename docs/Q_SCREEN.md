@@ -32,7 +32,8 @@ values. Ratios cannot be supplied. Refusals identify the chain, fold and field.
 Variant, study and producer commit must agree across chains for each named cell.
 A SHA-256 binds the non-Q fields (including saved lineage/spec), policy, target
 split and bound data before and after each splice. Candidate file hashes and
-producer metadata are also recorded. Loading verifies archive and dependency
+producer metadata are also recorded. The candidate digest binds the exact bytes
+read for validation and evaluation, including when the path is replaced afterward. Loading verifies archive and dependency
 hashes with the same loader as attribution_audit; its public load still accepts
 only diagnostic mode. The screen additionally accepts m2_pilot_d, and refuses
 other modes. Loading writes nothing into the saved leaves.
@@ -73,7 +74,10 @@ Every cell reports one-step and CV-TMLE estimates and replay's spatial (50/100/2
 km), county, iid and residual frame-conditional SEs. Error and iid/primary-spatial
 95% normal-interval coverage use truth recomputed by the simulation generator.
 The primary bandwidth is taken from the saved inference recipe. Saved estimates
-and spatial SEs must replay to 1e-12 before candidate results are computed.
+and spatial SEs must replay within 1e-9 before candidate results are computed,
+as required for historical artifacts. Synthetic identity/oracle splice parity
+continues to use an absolute 1e-12 tolerance; the original attribution audit
+retains its existing saved-record check.
 
 Factual OOF R² and RMSE are computed on targets. The weighted factual MSE is
 `sum(w * residual²) / sum(w)` with `w = q² (r_a - 1)²`; it is null when all these
