@@ -55,6 +55,7 @@ from oxyformer.training.pretrain import (StatefulSampler, SSLSettings, PretrainC
 SEEDS = (1103, 2207, 3301)
 STAGES = ("primary", "ablation", "anchor", "refit-audit")
 TRANSFORMER_VARIANTS = ("A0", "A1", "A2", "A3", "A4")
+Q_VARIANTS = ("A0", "A0-SW", "A3-Q", "A4-Q")
 
 
 def digest(value):
@@ -241,7 +242,7 @@ def _partition(config, parent, fold, *, stopping=()):
 
 def _build(bundle, *, encoder_state=None):
     variant = bundle.get("variant", "A0")
-    if variant == "A0":
+    if variant in ("A0", "A0-SW"):
         return fitting._build(bundle, encoder_state=encoder_state)
     features = tuple(FeatureSpec.from_json(v) for v in bundle["preprocessing"])
     encoder = FeatureEncoder(features, dropout=bundle["dropout"]).float()
@@ -256,6 +257,18 @@ def _build(bundle, *, encoder_state=None):
     def offsets(family):
         return CountyOffsets(split, 0, tuple(bundle["counties"]), family=family,
             exposure_assignment_level=bundle["exposure_assignment_level"])
+    if variant in ("A3-Q", "A4-Q"):
+        from oxyformer.models.ablations import EarlyFusionOutcome, VaryingCoefficientOutcome
+        require(bundle["kind"] == "outcome", "Q-only bundle cannot construct an origin model")
+        cls = EarlyFusionOutcome if variant == "A3-Q" else VaryingCoefficientOutcome
+        model = cls(encoder, treatment_design=TreatmentDesign.from_json(bundle["treatment_design"]),
+            raw_x_dim=sum((1 if f.kind == "numeric" else len(f.categories) + 1) + 1 for f in features),
+            family=bundle["family"], county_context=context, group_offsets=offsets(bundle["family"]),
+            dropout=bundle["dropout"])
+        model.check_parameter_cap()
+        if "state" in bundle:
+            model.load_state_dict(bundle["state"], strict=True)
+        return model.float()
     pair = build_variant(variant, encoder,
         treatment_design=TreatmentDesign.from_json(bundle["treatment_design"]),
         raw_x_dim=sum((1 if f.kind == "numeric" else len(f.categories) + 1) + 1 for f in features),
@@ -286,7 +299,34 @@ def _predict(model, view, inputs, policy, *, outcome_mean=False, base_only=False
     return result
 
 
-def _profile(model, config, view, inputs, *, policy_cache=None):
+def support_weights(policy, a_mmhg, support_keys):
+    """Bounded Q loss multipliers; neither outcomes nor density ratios enter."""
+    origin = policy.shift_mask(a_mmhg, support_keys)
+    landing = policy.shift_mask([a - policy.delta_mmhg for a in a_mmhg], support_keys)
+    return tuple(1 + int(o) + int(l) for o, l in zip(origin, landing))
+
+
+def _q_weights(config, ids):
+    inputs = _inputs(config, ids)
+    return support_weights(config.policy, inputs.a_mmhg, inputs.policy_covariates.support_keys)
+
+
+def _q_loss(config, prediction, ids, *, weighted=False, reduction="sum", weight_unit=1.):
+    if not weighted:
+        return _outcome_loss(config, prediction, ids, reduction=reduction, weight_unit=weight_unit)
+    weights = _inputs(config, ids).origin_weights
+    if reduction == "mean":
+        weight_unit = _weight_unit(weights)
+    multipliers = torch.tensor(_q_weights(config, ids), dtype=torch.float64, device=prediction.device)
+    losses = _outcome_loss(config, prediction, ids, reduction="none", weight_unit=weight_unit) * multipliers
+    if reduction == "none":
+        return losses
+    total = losses.sum()
+    mass = sum(w / weight_unit * m for w, m in zip(weights, multipliers.tolist()))
+    return total / mass if reduction == "mean" and mass else total
+
+
+def _profile(model, config, view, inputs, *, policy_cache=None, weighted=False):
     if isinstance(model, OutcomeTransformer) and config.family == "identity":
         model.eval()
         with torch.no_grad():
@@ -294,6 +334,10 @@ def _profile(model, config, view, inputs, *, policy_cache=None):
                             policy_cache=policy_cache)[:, 0]
             target = torch.tensor(_values(config, config.data.manifest.outcome_field, view.original_ids),
                                   dtype=torch.float32, device=base.device)
+            if weighted:
+                multipliers = _q_weights(config, view.original_ids)
+                inputs = replace(inputs, origin_weights=tuple(w * m for w, m in
+                    zip(inputs.origin_weights, multipliers)))
             units = {c: _weight_unit([w for county, w in zip(inputs.counties, inputs.origin_weights)
                                      if county == c]) for c in set(inputs.counties)}
             weights = torch.tensor([w / units[c] for c, w in zip(inputs.counties, inputs.origin_weights)],
@@ -335,6 +379,10 @@ def _train_transaction(config, bundle, encoder_state, view, stopping, epochs, se
     policy_cache = fitting._FitPolicy(config.policy, inputs)
     weight_unit = _weight_unit(inputs.origin_weights)
     original_mass = sum(w / weight_unit for w in inputs.origin_weights)
+    weighted = bundle.get("variant") == "A0-SW"
+    if weighted:
+        original_mass = sum(w / weight_unit * m for w, m in
+                            zip(inputs.origin_weights, _q_weights(config, view.original_ids)))
     sampler = StatefulSampler(len(view.original_ids), seed)
     progress = dict(epoch=0, step=0, phase="start", best_loss=None, best_epoch=0, bad_epochs=0, history=[])
     best = None
@@ -354,7 +402,7 @@ def _train_transaction(config, bundle, encoder_state, view, stopping, epochs, se
         if reason:
             break
         if progress["phase"] == "start":
-            _profile(model, config, view, inputs, policy_cache=policy_cache)
+            _profile(model, config, view, inputs, policy_cache=policy_cache, weighted=weighted)
             progress["phase"] = "train"
         if progress["phase"] == "train":
             indices = sampler.indices(config.settings.batch_size)
@@ -373,7 +421,7 @@ def _train_transaction(config, bundle, encoder_state, view, stopping, epochs, se
             optimizer.zero_grad(set_to_none=True)
             predicted = _predict(model, part, metadata, config.policy, policy_cache=policy_cache)
             if bundle["kind"] == "outcome":
-                loss = _outcome_loss(config, predicted[:, 0], ids, weight_unit=weight_unit)
+                loss = _q_loss(config, predicted[:, 0], ids, weighted=weighted, weight_unit=weight_unit)
                 mass = original_mass
             else:
                 pairs = paired_records(policy_cache.apply(config.policy, metadata),
@@ -397,7 +445,7 @@ def _train_transaction(config, bundle, encoder_state, view, stopping, epochs, se
             if sampler.cursor == sampler.size:
                 progress["phase"] = "evaluate"
             continue
-        _profile(model, config, view, inputs, policy_cache=policy_cache)
+        _profile(model, config, view, inputs, policy_cache=policy_cache, weighted=weighted)
         model.eval()
         score = None
         # A zero-mass stopping set has no checkpoint-selection information;
@@ -407,7 +455,7 @@ def _train_transaction(config, bundle, encoder_state, view, stopping, epochs, se
             stop_inputs = _inputs(config, stopping)
             with torch.no_grad():
                 predicted = _predict(model, stop_view, stop_inputs, config.policy)
-                score = (float(_outcome_loss(config, predicted[:, 0], stopping, reduction="mean"))
+                score = (float(_q_loss(config, predicted[:, 0], stopping, weighted=weighted, reduction="mean"))
                          if bundle["kind"] == "outcome" else pair_metrics(predicted, stop_inputs.origin_weights)[0])
             require(math.isfinite(score), "nonfinite stopping loss")
         progress["epoch"] += 1
@@ -471,7 +519,7 @@ def _grouped_ssl(config, split, fitting, view, root, seed, budget, predecessor, 
 
 fitting_module_ssl = _grouped_ssl
 
-def _advance(config, outer, manifest, identity, controller, root, budget, variant, groups):
+def _advance(config, outer, manifest, identity, controller, root, budget, variant, groups, q_only=False):
     columns = tuple(name for name, _ in config.feature_kinds)
     all_view = config.data.covariates(columns)
     outer_ids = outer.training_ids(config.fold)
@@ -499,10 +547,12 @@ def _advance(config, outer, manifest, identity, controller, root, budget, varian
         origin_audit.validate(outer_ids)
         audits[fold] = origin_audit
         tasks.append(("ssl", fold, None))
-        tasks.extend((kind, fold, grid) for kind in ("outcome", "origin") for grid in range(len(config.grid)))
+        tasks.extend((kind, fold, grid) for kind in (("outcome",) if q_only else ("outcome", "origin")) for grid in range(len(config.grid)))
     outer_local, fitting, held = _partition(config, outer, config.fold)
     partitions[3] = (outer_local, fitting, held, ())
-    tasks.extend((("select", 3, None), ("ssl", 3, None), ("outcome", 3, None), ("origin", 3, None)))
+    tasks.extend((("select", 3, None), ("ssl", 3, None), ("outcome", 3, None)))
+    if not q_only:
+        tasks.append(("origin", 3, None))
     while controller["position"] < len(tasks):
         kind, fold, grid = tasks[controller["position"]]
         budget.phase = "ssl" if kind == "ssl" else "evaluation" if kind == "select" else "nuisance"
@@ -511,115 +561,131 @@ def _advance(config, outer, manifest, identity, controller, root, budget, varian
             return controller, False, reason
         kind, fold, grid = tasks[controller["position"]]
         local, fitting, held, stopping = partitions[fold]
-        if kind == "select":
-            selected = {}
-            for model_kind in ("outcome", "origin"):
-                candidates = []
-                for g in range(len(config.grid)):
-                    values = [r for r in controller["results"] if r["kind"] == model_kind and r["grid"] == g]
-                    scores = _pooled_metrics(values)
-                    candidates.append((scores, g))
-                chosen = min(candidates)[1]
-                values = [r for r in controller["results"] if r["kind"] == model_kind and r["grid"] == chosen]
-                selected[model_kind] = dict(grid=chosen, epochs=int(statistics.median(r["epochs"] for r in values)))
-            # Each OOF classifier is chosen without consulting its own
-            # evaluation scores, including indirectly through other folds.
-            origin = [min((r for r in controller["results"]
-                           if r["kind"] == "origin" and r["fold"] == fold),
-                          key=lambda r: (r["selection_metrics"], r["grid"]))
-                      for fold in audits]
-            selected["origin"]["calibration_grids"] = tuple(r["grid"] for r in origin)
-            ids = tuple(oid for r in origin for oid in r["ids"])
-            logits = [z for r in origin for z in r["predictions"]]
-            weights = _inputs(config, ids).origin_weights
-            calibration = fit_affine(logits, weights, original_ids=ids,
-                fold_ids=tuple(r["fold"] for r in origin for _ in r["ids"]),
-                partitions=tuple(audits.values()), outer_training_ids=outer_ids,
-                lineage=_lineage(manifest, identity, ids, (manifest.content_hash, config.inner.content_hash)))
-            controller.update(selection=selected, calibration=calibration.to_json(), oof_logits=logits)
-        elif kind == "ssl":
-            pending = (CheckpointArtifact.from_json(controller["ssl_pending"])
-                       if controller["ssl_pending"] else None)
-            if pending is None and variant != "A1":
-                controller["counts"]["ssl_fits"] += 1
-            artifact = (_scratch(config, local, fitting, all_view, root / f"preprocess-{fold}", identity.seed)
-                        if variant == "A1" else fitting_module_ssl(config, local, fitting, all_view,
-                            root / f"ssl-{fold}", identity.seed, budget, pending, groups))
-            if not artifact.complete:
-                controller["ssl_pending"] = artifact.to_json()
-                return controller, False, artifact.reason
-            controller["initializations"][fold] = artifact.to_json()
-            controller["ssl_pending"] = None
-        else:
-            # The classifier has its own stopping regime after target filtering.
-            model_ids = tuple(i for i in fitting if kind != "origin" or i in targets)
-            model_stopping = tuple(i for i in stopping if kind != "origin" or i in targets)
-            if fold == 3:
-                grid = controller["selection"][kind]["grid"]
-                epochs = controller["selection"][kind]["epochs"]
+        phase_started = time.monotonic() if q_only else None
+        phase_key = f"{kind}/{fold}/{grid}"
+        try:
+            if kind == "select":
+                selected = {}
+                for model_kind in (("outcome",) if q_only else ("outcome", "origin")):
+                    candidates = []
+                    for g in range(len(config.grid)):
+                        values = [r for r in controller["results"] if r["kind"] == model_kind and r["grid"] == g]
+                        scores = _pooled_metrics(values)
+                        candidates.append((scores, g))
+                    chosen = min(candidates)[1]
+                    values = [r for r in controller["results"] if r["kind"] == model_kind and r["grid"] == chosen]
+                    selected[model_kind] = dict(grid=chosen, epochs=int(statistics.median(r["epochs"] for r in values)))
+                if q_only:
+                    controller["selection"] = selected
+                else:
+                    # Each OOF classifier is chosen without consulting its own
+                    # evaluation scores, including indirectly through other folds.
+                    origin = [min((r for r in controller["results"]
+                                   if r["kind"] == "origin" and r["fold"] == fold),
+                                  key=lambda r: (r["selection_metrics"], r["grid"]))
+                              for fold in audits]
+                    selected["origin"]["calibration_grids"] = tuple(r["grid"] for r in origin)
+                    ids = tuple(oid for r in origin for oid in r["ids"])
+                    logits = [z for r in origin for z in r["predictions"]]
+                    weights = _inputs(config, ids).origin_weights
+                    calibration = fit_affine(logits, weights, original_ids=ids,
+                        fold_ids=tuple(r["fold"] for r in origin for _ in r["ids"]),
+                        partitions=tuple(audits.values()), outer_training_ids=outer_ids,
+                        lineage=_lineage(manifest, identity, ids, (manifest.content_hash, config.inner.content_hash)))
+                    controller.update(selection=selected, calibration=calibration.to_json(), oof_logits=logits)
+            elif kind == "ssl":
+                pending = (CheckpointArtifact.from_json(controller["ssl_pending"])
+                           if controller["ssl_pending"] else None)
+                if pending is None and variant != "A1":
+                    controller["counts"]["ssl_fits"] += 1
+                artifact = (_scratch(config, local, fitting, all_view, root / f"preprocess-{fold}", identity.seed)
+                            if variant == "A1" else fitting_module_ssl(config, local, fitting, all_view,
+                                root / f"ssl-{fold}", identity.seed, budget, pending, groups))
+                if not artifact.complete:
+                    controller["ssl_pending"] = artifact.to_json()
+                    return controller, False, artifact.reason
+                controller["initializations"][fold] = artifact.to_json()
+                controller["ssl_pending"] = None
             else:
-                epochs = config.settings.max_epochs if model_stopping else config.frozen_epochs
-            initialization = CheckpointArtifact.from_json(controller["initializations"][fold])
-            bundle, encoder_state = _bundle(config, local, fitting, initialization, kind, config.grid[grid])
-            bundle["variant"] = variant
-            # SSL and the outcome nuisance use every labelled fitting row.
-            # Classification gradients, stopping and calibration use only T.
-            require(bool(model_ids), "empty target-distribution classifier fitting partition")
-            view = subset(all_view, model_ids)
-            if controller["active"] is None:
-                controller["counts"]["nuisance_fits"] += 1
-            model, state, complete, reason = _train_transaction(config, bundle, encoder_state, view, model_stopping,
-                epochs, identity.seed, budget, controller["active"])
-            controller["parameter_count"] = sum(p.numel() for p in model.parameters())
-            if not complete:
-                controller["active"] = state
-                return controller, False, reason
-            budget.phase = "evaluation"
-            reason = budget.reason()
-            if reason:
-                controller["active"] = state
-                return controller, False, reason
-            controller["active"] = None
-            if fold == 3:
-                with torch.no_grad():
-                    _predict(model, view, _inputs(config, model_ids), config.policy,
-                             outcome_mean=kind == "outcome")
-                bundle["state"] = deepcopy(model.state_dict())
-                controller["final"][kind] = bundle
-            else:
-                metadata = _inputs(config, held)
-                with torch.no_grad():
-                    predicted = _predict(model, subset(all_view, held), metadata, config.policy)
-                    metrics = ((float(_outcome_loss(config, predicted[:, 0], held, reduction="mean")),)
-                               if kind == "outcome" else pair_metrics(predicted, metadata.origin_weights))
-                require(all(math.isfinite(m) for m in metrics), "nonfinite held-out factual loss")
-                mass_unit = _weight_unit(metadata.origin_weights)
-                exact_mass = sum(map(Fraction, metadata.origin_weights), Fraction())
-                result = dict(kind=kind, fold=fold, grid=grid, ids=held,
-                    predictions=predicted.tolist(), metrics=metrics,
-                    mass=sum(w / mass_unit for w in metadata.origin_weights), mass_unit=mass_unit,
-                    mass_ratio=(exact_mass.numerator, exact_mass.denominator),
-                    epochs=state["progress"]["best_epoch"],
-                    ownership=(audits if kind == "origin" else outcome_audits)[fold].to_json())
-                if kind == "origin":
-                    # With frozen epochs, an in-sample fitting score may choose
-                    # a grid, but never a calibration evaluation score. Explicit
-                    # stopping partitions provide an independent tuning score.
-                    selection_ids = model_stopping or model_ids
-                    require(set(selection_ids).isdisjoint(held),
-                            "calibration records entered grid selection")
-                    selection_inputs = _inputs(config, selection_ids)
+                # The classifier has its own stopping regime after target filtering.
+                model_ids = tuple(i for i in fitting if kind != "origin" or i in targets)
+                model_stopping = tuple(i for i in stopping if kind != "origin" or i in targets)
+                if fold == 3:
+                    grid = controller["selection"][kind]["grid"]
+                    epochs = controller["selection"][kind]["epochs"]
+                else:
+                    epochs = config.settings.max_epochs if model_stopping else config.frozen_epochs
+                initialization = CheckpointArtifact.from_json(controller["initializations"][fold])
+                bundle, encoder_state = _bundle(config, local, fitting, initialization, kind, config.grid[grid])
+                bundle["variant"] = variant
+                # SSL and the outcome nuisance use every labelled fitting row.
+                # Classification gradients, stopping and calibration use only T.
+                require(bool(model_ids), "empty target-distribution classifier fitting partition")
+                view = subset(all_view, model_ids)
+                if controller["active"] is None:
+                    controller["counts"]["nuisance_fits"] += 1
+                model, state, complete, reason = _train_transaction(config, bundle, encoder_state, view, model_stopping,
+                    epochs, identity.seed, budget, controller["active"])
+                controller["parameter_count"] = sum(p.numel() for p in model.parameters())
+                if not complete:
+                    controller["active"] = state
+                    return controller, False, reason
+                budget.phase = "evaluation"
+                reason = budget.reason()
+                if reason:
+                    controller["active"] = state
+                    return controller, False, reason
+                controller["active"] = None
+                if fold == 3:
                     with torch.no_grad():
-                        selection_logits = _predict(model, subset(all_view, selection_ids),
-                                                    selection_inputs, config.policy)
-                    result.update(selection_ids=selection_ids,
-                        selection_metrics=pair_metrics(selection_logits, selection_inputs.origin_weights))
-                controller["results"].append(result)
-        controller["position"] += 1
+                        _predict(model, view, _inputs(config, model_ids), config.policy,
+                                 outcome_mean=kind == "outcome")
+                    bundle["state"] = deepcopy(model.state_dict())
+                    controller["final"][kind] = bundle
+                else:
+                    metadata = _inputs(config, held)
+                    with torch.no_grad():
+                        predicted = _predict(model, subset(all_view, held), metadata, config.policy)
+                        metrics = ((float(_q_loss(config, predicted[:, 0], held, weighted=variant == "A0-SW", reduction="mean")),)
+                                   if kind == "outcome" else pair_metrics(predicted, metadata.origin_weights))
+                    require(all(math.isfinite(m) for m in metrics), "nonfinite held-out factual loss")
+                    loss_weights = metadata.origin_weights
+                    if variant == "A0-SW":
+                        loss_weights = tuple(w * m for w, m in zip(loss_weights, _q_weights(config, held)))
+                    mass_unit = _weight_unit(loss_weights)
+                    exact_mass = sum(map(Fraction, loss_weights), Fraction())
+                    result = dict(kind=kind, fold=fold, grid=grid, ids=held,
+                        predictions=predicted.tolist(), metrics=metrics,
+                        mass=sum(w / mass_unit for w in loss_weights), mass_unit=mass_unit,
+                        mass_ratio=(exact_mass.numerator, exact_mass.denominator),
+                        epochs=state["progress"]["best_epoch"],
+                        ownership=(audits if kind == "origin" else outcome_audits)[fold].to_json())
+                    if kind == "origin":
+                        # With frozen epochs, an in-sample fitting score may choose
+                        # a grid, but never a calibration evaluation score. Explicit
+                        # stopping partitions provide an independent tuning score.
+                        selection_ids = model_stopping or model_ids
+                        require(set(selection_ids).isdisjoint(held),
+                                "calibration records entered grid selection")
+                        selection_inputs = _inputs(config, selection_ids)
+                        with torch.no_grad():
+                            selection_logits = _predict(model, subset(all_view, selection_ids),
+                                                        selection_inputs, config.policy)
+                        result.update(selection_ids=selection_ids,
+                            selection_metrics=pair_metrics(selection_logits, selection_inputs.origin_weights))
+                    controller["results"].append(result)
+            controller["position"] += 1
+        finally:
+            if q_only:
+                times = controller["phase_seconds"]
+                times[phase_key] = times.get(phase_key, 0.) + time.monotonic() - phase_started
     budget.phase = "evaluation"
     reason = budget.reason()
     if reason:
         return controller, False, reason
+    if q_only:
+        controller["parameter_count"] = sum(p.numel() for p in _build(controller["final"]["outcome"]).parameters())
+        return controller, True, "max_epochs"
     calibration = AffineCalibration.from_json(controller["calibration"])
     model = _build(controller["final"]["origin"]).to(config.device).eval()
     metadata = _inputs(config, calibration.original_ids)
@@ -638,9 +704,13 @@ def _advance(config, outer, manifest, identity, controller, root, budget, varian
     return controller, True, "max_epochs"
 
 
-def run_fold(config, outer, seed, *, geography, variant="A0"):
+def run_fold(config, outer, seed, *, geography, variant="A0", q_only=False):
     """One resumable endpoint/outer-fold/seed; no mutable cache survives a call."""
-    require(variant in TRANSFORMER_VARIANTS, "variant needs a compatible resumable nuisance adapter")
+    require(type(q_only) is bool, "q_only must be boolean")
+    require(variant in (Q_VARIANTS if q_only else TRANSFORMER_VARIANTS),
+            "variant needs a compatible resumable nuisance adapter")
+    if q_only:
+        require(config.family == "identity", "Q-only requires an identity-link endpoint")
     manifest = config.data.manifest
     allowed = _validate_fitting(manifest.spec, outer, manifest, config, seed)
     groups = _check_fitting_minima(config, outer, geography)
@@ -651,11 +721,15 @@ def run_fold(config, outer, seed, *, geography, variant="A0"):
     with fitting._numerics(config.device):
         identity = fitting._science_identity(config, outer, manifest, seed, allowed)
         identity = replace(identity, config_hash=digest([identity.config_hash, variant, geography.content_hash]))
+        if q_only:
+            identity = replace(identity, config_hash=digest([identity.config_hash, "q_only"]))
         controller = dict(position=0, initializations={}, ssl_pending=None, active=None,
             results=[], final={}, selection=None, calibration=None,
             counts={"ssl_fits": 0, "nuisance_fits": 0, "batches": 0},
             compute={"wall_seconds": 0., "cpu_seconds": 0., "gpu_seconds": 0., "device": config.device,
                      "gpu_seconds_scope": "single_device_elapsed_not_kernel_utilization"})
+        if q_only:
+            controller.update(q_only=True, phase_seconds={})
         if config.predecessor is not None:
             require(not config.predecessor.complete, "fold is already complete")
             require(config.predecessor.fold == config.fold and config.predecessor.seed == seed,
@@ -669,7 +743,7 @@ def run_fold(config, outer, seed, *, geography, variant="A0"):
         cpu_started = time.process_time()
         with request.signals():
             controller, complete, reason = _advance(config, outer, manifest, identity,
-                controller, root, budget, variant, groups)
+                controller, root, budget, variant, groups, q_only=q_only)
         controller["counts"]["batches"] += budget.batches
         if torch.device(config.device).type == "cuda":
             torch.cuda.synchronize(config.device)
@@ -721,6 +795,22 @@ def predict(artifacts, view, policy, *, device=None):
         mu_a=tuple(mu[:, 0].double().tolist()), mu_d=tuple(mu[:, 1].double().tolist()),
         r_a=tuple(ratio[:, 0].double().tolist()), r_d=tuple(ratio[:, 1].double().tolist()),
         origin_weights=inputs.origin_weights, lineage=lineage)
+
+
+def predict_q(artifacts, view, policy, *, device=None):
+    """Predict only Q on the held-out targets, preserving the supplied view order."""
+    require(type(artifacts) is FoldArtifacts and artifacts.complete, "unfinished procedure cannot predict")
+    require(type(view) is CovariateView and view.use == "nuisance", "label-free nuisance view required")
+    artifacts.spec.assert_compatible(view.spec)
+    require(policy.policy_id == artifacts.spec.policy_id, "prediction policy mismatch")
+    require(set(view.original_ids) == set(artifacts.prediction_inputs.original_ids), "held-out IDs mismatch")
+    inputs = fitting._take_inputs(artifacts.prediction_inputs, view.original_ids)
+    controller = load_checkpoint(artifacts.checkpoint, artifacts.checkpoint.identity)["controller"]
+    require(controller.get("q_only") is True, "Q-only artifact required")
+    selected = fitting.resolve_device(device or dict(artifacts.checkpoint.identity.environment)["device"])
+    with fitting._numerics(selected), torch.no_grad():
+        mu = _predict(_build(controller["final"]["outcome"]).to(selected).eval(), view, inputs, policy, outcome_mean=True)
+    return dict(original_ids=list(view.original_ids), mu_a=mu[:, 0].double().tolist(), mu_d=mu[:, 1].double().tolist())
 
 
 def _components(controller):

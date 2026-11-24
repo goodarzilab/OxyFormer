@@ -648,3 +648,26 @@ def test_nuisance_slow_units_checkpoint_before_absolute_compute_deadline(tmp_pat
     assert timing.largest['nuisance'] >= 40.
     assert clock[0] + max(timing.largest.values()) < timing.deadline
     assert timing.margin_seconds >= 2 * max(timing.largest.values()) + timing.checkpoint_seconds
+
+
+def test_default_science_matches_launch_base(tmp_path, monkeypatch):
+    """T1: pinned at ea54759; excludes runtime/path/opaque lineage hashes."""
+    from oxyformer.training.checkpoint import model_state_hash
+    models = []
+    original = nested._train_transaction
+    def capture(*args, **kwargs):
+        result = original(*args, **kwargs)
+        models.append(model_state_hash({k: v for k, v in result[0].state_dict().items()
+                                        if isinstance(v, torch.Tensor)}))
+        return result
+    monkeypatch.setattr(nested, '_train_transaction', capture)
+    prepared, artifact = fitted(tmp_path / 'work')
+    prediction = predictions(prepared, artifact)
+    observed = dict(models=models,
+        ssl=[CheckpointArtifact.from_json(x).lineage.model_hash
+             for x in state(artifact)['initializations'].values()],
+        predictions={k: list(getattr(prediction, k)) for k in
+            ('original_ids', 'fold_ids', 'seed_ids', 'mu_a', 'mu_d', 'r_a', 'r_d', 'origin_weights')})
+    label = 'cuda' if torch.version.cuda else 'cpu'
+    expected = json.loads(Path(f'tests/fixtures/q_refit/baseline_{label}.json').read_text())
+    assert observed == expected
