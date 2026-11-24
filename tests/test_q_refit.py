@@ -203,7 +203,7 @@ def test_fit_slice_journal_resume(tmp_path, monkeypatch):
     complete = driver.fit(tmp_path/'uninterrupted', **args)
     assert second['parts'] == complete['parts']
     assert second['counts'] == complete['counts']
-    assert set(second['phase_seconds']) >= {'ssl/0/None', 'outcome/0/0', 'outcome/3/0', 'prediction'}
+    assert set(second['phase_seconds']) >= {'ssl/0/None', 'outcome/0/0', 'outcome/3/None', 'prediction'}
     # Once complete, another invocation performs no work.
     count = len(calls)
     assert driver.fit(tmp_path/'bound', **args) == second
@@ -233,7 +233,7 @@ def test_collect_exact_schema_and_order(tmp_path):
     for bad in [dict(good['parts'][0], fold=1), dict(good['parts'][0], r_a=[1.]*6),
                 dict(good['parts'][0], mu_a=[float('nan')]*6),
                 dict(good['parts'][0], original_ids=list(reversed(good['parts'][0]['original_ids'])))]:
-        driver.atomic_record(path, dict(good, parts=[bad]))
+        path.write_text(json.dumps(dict(good, parts=[bad])))
         with pytest.raises(ContractError):
             driver.collect(root)
 
