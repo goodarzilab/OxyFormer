@@ -61,7 +61,7 @@ def decision(truths, fitted, oracle):
             'D': num(psi-fit, 'mean truth - fitted'), 'paired': stats,
             'interval_note': 'paired t' if lo is not None else 'inconclusive: n < 2'}
 
-def replay(endpoint, parts, oracle, locations):
+def assemble(endpoint, parts):
     seeds = tuple(dict.fromkeys(seed for part in parts for seed in part.seed_ids))
     split = replace(endpoint.outer, seed_ids=seeds)
     lineage = replace(parts[0].lineage, unit_ids=split.original_ids, split_hash=split.content_hash,
@@ -70,11 +70,15 @@ def replay(endpoint, parts, oracle, locations):
     fitted = OOFNuisances(spec=endpoint.data.manifest.spec, lineage=lineage,
                          **{n: tuple(v for p in parts for v in getattr(p, n)) for n in FIELDS})
     weights = dict(zip(fitted.original_ids, fitted.origin_weights))
+    return split, fitted, weights
+
+def replay(endpoint, parts, oracle, locations, *, cells=CELLS):
+    split, fitted, weights = assemble(endpoint, parts)
     true = oracle.nuisances(fitted.original_ids)
     by_id = {r.original_id: r for r in endpoint.geography.rows}
     groups = {i: by_id[i].county for i in split.original_ids}
     results = {}
-    for cell in CELLS:
+    for cell in cells:
         changes = {}
         if cell in ('oracle', 'oracle_Q'):
             changes.update(mu_a=true.mu_a, mu_d=true.mu_d)
@@ -109,9 +113,12 @@ def replay(endpoint, parts, oracle, locations):
     return results
 
 def load(path):
+    return _load(path, ('diagnostic',))
+
+def _load(path, modes):
     path = Path(path)
     result = json.loads((path/'result.json').read_text())
-    require(result['terminal'] and result['campaign_mode'] == 'diagnostic', 'terminal diagnostic required')
+    require(result['terminal'] and result['campaign_mode'] in modes, 'terminal diagnostic required')
     with tarfile.open(path/'continuation.tar', 'r:') as archive:
         members = archive.getmembers()
         require(len({m.name for m in members}) == len(members) and all(m.isfile() for m in members), 'invalid tar members')
