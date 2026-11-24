@@ -91,3 +91,53 @@ rescaled per mover and per achieved mmHg. These are descriptive rescalings, not
 new estimands. Among movers it also reports Kish ESS of the scored `r_d`, the
 largest tract's share of its sum and its 99th percentile. With no movers these
 diagnostics are null; ESS and share are also null if all mover ratios are zero.
+
+## Outcome-only simulation refits
+
+`oxyformer.explore.q_refit` binds the simulated observations from one saved
+terminal diagnostic or pilot chain. It refits Q with the frozen policy and
+folds, and trains no density-ratio model or calibration. The chain's saved g is
+used later by the separate screening harness. These results are exploratory
+and certify nothing. This path does not fit real-data endpoints.
+
+Candidates are A0 (matched baseline), A0-SW (A0 with support-weighted loss),
+A3-Q (registered early-fusion outcome head), and A4-Q (registered
+varying-coefficient outcome head). Each network is capped at 1,000,000
+parameters. A0-SW multiplies factual loss by
+`1 + shift_mask(a) + shift_mask(a - delta)`, using the endpoint's active delta
+and frozen support. Empty support contributes one. The same weights govern
+held-out grid selection; no density ratio enters them. SSL and inner tuning
+remain fold-local. Cell d uses 60 nuisance epochs; cell e uses 30; both use
+reference cap 32, two grid points, one seed (1103), and 30 SSL epochs.
+
+Run binding and collection on CPU scheduler allocations. Each production fit
+invocation needs one GPU allocation; the driver submits no jobs.
+
+```sh
+python -m oxyformer.explore.q_refit bind /path/to/terminal-chain /path/to/q-A4
+python -m oxyformer.explore.q_refit fit /path/to/q-A4 --fold 0 \
+  --variant A4-Q --study cell-d --slice-seconds 10800 --run-logging wandb
+# Repeat fit for folds 0..4, resuming each fold until complete.
+python -m oxyformer.explore.q_refit collect /path/to/q-A4
+```
+
+Use a separate OUT for each chain, variant and study. Binding authenticates the
+archive blobs and endpoint/recipe dependencies and writes the bound endpoint,
+recipe and provenance without changing the chain. Fit preserves its predecessor
+and completed tasks between slices of at most three hours. Exit 75 means the
+slice checkpointed before completion; repeat the same command. Exit zero means
+the fold is complete. Each `fold-K/progress.json` records task counts, slices,
+checkpoint position, and cumulative wall seconds for each SSL fold, inner
+outcome grid fit, outer outcome fit and prediction. Resume requires the same
+clean commit, environment, device, inputs and logging mode. Keep slice files
+and bound inputs in place. Restore the original environment or use a new OUT
+if an identity check refuses. State locking prevents concurrent writers.
+W&B uses entity `goodarzilab`, project `oxyformer-v2`; config records chain,
+variant, study and fold. Logging `none` is accepted only for synthetic tests.
+
+Collection requires five complete ordered folds and writes `q_parts.json`.
+The `oxyformer.q_parts.v1` object has exactly `schema`, `chain_dir` (resolved
+terminal chain path), `frame_hash` (saved state binding), `variant`, `study`
+(the four RecipeStudy values), `code_commit`, and `parts`. Each part has exactly
+`fold`, `seed`, `original_ids`, `mu_a`, and `mu_d`; IDs and predictions retain the
+saved target order. The file contains no g predictions, truth or estimates.
