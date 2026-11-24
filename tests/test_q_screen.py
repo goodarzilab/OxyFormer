@@ -213,3 +213,24 @@ def test_cli_writes_exploratory_report(tmp_path, monkeypatch):
     assert report['summary']['cells']['candidate']['verdict']=='pass'
     assert report['summary']['thresholds']=={**screen.DEFAULTS,'iid_coverage_min':4}
     assert 'exploratory' in (output/'q_screen.md').read_text()
+
+
+@pytest.mark.parametrize('rmse', [0., None])
+def test_undefined_contrast_reduction_preserves_floor(rmse):
+    rows=table()
+    for row in rows:
+        for cell in row['cells'].values():
+            cell['estimates']['cv_tmle']['estimate']['value'] *= .1
+            cell['diagnostics']['contrast']['movers']['rmse']=rmse
+    result=screen.summarize(rows,iid_coverage_min=4)['cells']['candidate']
+    assert result['verdict']=='floor_not_met'
+    assert result['mover_rmse_reduction'] is None
+    assert 'contrast_reduction' in result['failing_criteria']
+    assert not result['gross_futility']
+
+
+def test_single_chain_has_undefined_paired_interval():
+    result=screen.summarize(table()[:1],iid_coverage_min=1)['cells']['candidate']
+    assert result['paired_interval']==[None,None]
+    assert result['empirical_sd'] is None
+    assert result['verdict']=='fail' and result['failing_criteria']==['paired_interval']

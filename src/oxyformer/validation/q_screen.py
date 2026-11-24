@@ -215,7 +215,7 @@ def summarize(rows, **options):
             and 0 <= thresholds['bias_ratio'] <= 1 and 0 <= thresholds['contrast_reduction'] <= 1,
             'invalid thresholds')
     require(type(thresholds['iid_coverage_min']) is int and thresholds['iid_coverage_min'] >= 0, 'invalid iid_coverage_min')
-    require(2 <= len(rows) <= 25, 'screen requires 2..25 chains')
+    require(1 <= len(rows) <= 25, 'screen requires 1..25 chains')
     require(len({r['chain_dir'] for r in rows}) == len(rows) and
             len({r['repetition_id'] for r in rows}) == len(rows), 'duplicate chain/repetition')
     names = set(rows[0]['cells'])
@@ -235,34 +235,37 @@ def summarize(rows, **options):
     base, est0 = series('baseline')
     psi = np.asarray([r['psi0'] for r in rows]); b0 = float(np.mean(est0-psi))
     s = float(np.sign(-b0))
-    rmse0 = float(np.mean([c['diagnostics']['contrast']['movers']['rmse'] for c in base]))
-    require(np.isfinite(rmse0) and rmse0 > 0, 'baseline mover RMSE must be positive')
+    def mover_rmse(cells):
+        values = [c['diagnostics']['contrast']['movers']['rmse'] for c in cells]
+        return float(np.mean(values)) if all(v is not None for v in values) else None
+    rmse0 = mover_rmse(base)
     summaries = {}
     for name in sorted(names):
         cells, est = series(name)
         bc = float(np.mean(est-psi)); differences = s*(est-est0)
         mean_d = float(differences.mean())
-        half = float(t.ppf((1+thresholds['interval_level']/100)/2, len(rows)-1)*differences.std(ddof=1)/np.sqrt(len(rows)))
-        reduction = 1-float(np.mean([c['diagnostics']['contrast']['movers']['rmse'] for c in cells]))/rmse0
+        half = float(t.ppf((1+thresholds['interval_level']/100)/2, len(rows)-1)*differences.std(ddof=1)/np.sqrt(len(rows))) if len(rows) > 1 else None
+        rmsec = mover_rmse(cells)
+        reduction = 1-rmsec/rmse0 if rmse0 and rmsec is not None else None
         coverage = {}
         for kind in ('iid', 'spatial'):
             k = sum(c['estimates']['cv_tmle']['coverage'][kind] for c in cells)
             coverage[kind] = dict(count=k, n=len(rows), interval=clopper_pearson(k, len(rows)))
         failed = []
         if abs(bc) > thresholds['bias_ratio']*abs(b0): failed.append('bias_ratio')
-        if mean_d-half <= 0: failed.append('paired_interval')
-        if reduction < thresholds['contrast_reduction']: failed.append('contrast_reduction')
+        if half is None or mean_d-half <= 0: failed.append('paired_interval')
+        if reduction is None or reduction < thresholds['contrast_reduction']: failed.append('contrast_reduction')
         if coverage['iid']['count'] < thresholds['iid_coverage_min']: failed.append('iid_coverage_min')
-        sd = float(est.std(ddof=1))
+        sd = float(est.std(ddof=1)) if len(rows) > 1 else None
         mean_ses = {key: float(np.mean([c['estimates']['cv_tmle']['se'][key]['value'] for c in cells]))
                     for key in cells[0]['estimates']['cv_tmle']['se']}
         summaries[name] = dict(B_c=bc, bias_ratio=abs(bc)/abs(b0) if b0 else None,
-            d=differences.tolist(), mean_d=mean_d, paired_interval=[mean_d-half, mean_d+half],
+            d=differences.tolist(), mean_d=mean_d, paired_interval=[mean_d-half, mean_d+half] if half is not None else [None, None],
             empirical_sd=sd, mean_se=mean_ses,
             mean_se_over_sd={k: v/sd if sd else None for k,v in mean_ses.items()}, coverage=coverage,
             mover_rmse_reduction=reduction, failing_criteria=failed,
             verdict='floor_not_met' if abs(b0) < thresholds['bias_floor'] else 'fail' if failed else 'pass',
-            gross_futility=bool(mean_d <= 0 and reduction < 0))
+            gross_futility=bool(mean_d <= 0 and rmse0 is not None and rmsec is not None and rmsec > rmse0))
     return dict(label='exploratory; certifies nothing', n=len(rows), B_0=b0, s=s,
                 thresholds=thresholds, cells=summaries)
 
@@ -275,7 +278,7 @@ def main(argv=None):
         parser.add_argument('--'+name.replace('_', '-'), type=type(value), default=value)
     args = parser.parse_args(argv)
     entries = json.loads(args.manifest.read_text())
-    require(isinstance(entries, list) and 2 <= len(entries) <= 25, 'manifest requires 2..25 chains')
+    require(isinstance(entries, list) and 1 <= len(entries) <= 25, 'manifest requires 1..25 chains')
     rows = [screen_chain(**entry) for entry in entries]
     summary = summarize(rows, **{k: getattr(args, k) for k in DEFAULTS})
     report = dict(label='exploratory; certifies nothing', chains=rows, summary=summary)

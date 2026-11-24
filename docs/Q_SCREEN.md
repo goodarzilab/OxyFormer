@@ -111,7 +111,10 @@ The defaults and their command flags are:
 
 `floor_not_met` takes precedence when there is insufficient baseline attenuation;
 otherwise `pass` requires every criterion above, and `fail` names every failed
-criterion. The baseline mover RMSE must be positive. The supplementary
+criterion. When the baseline mover RMSE is zero, or a mover subset is empty, the relative
+reduction is undefined (null) and cannot satisfy its passing criterion. The
+attenuation floor still takes precedence. A singleton screen has a null paired
+interval and empirical SD and cannot satisfy the paired-interval criterion. The supplementary
 `gross_futility` flag is true only when mean paired improvement is nonpositive
 and mover RMSE is worse. These flags do not initiate training or later campaigns.
 Use `--bias-floor 0.002 --interval-level 95 --iid-coverage-min 10` for a
