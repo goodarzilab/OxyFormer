@@ -60,7 +60,6 @@ def splice(path, chain_dir, frame_hash, endpoint, parts):
     check(payload['frame_hash'] == frame_hash, '*', 'frame_hash')
     for name, cls in (('variant', str), ('study', dict), ('code_commit', str), ('parts', list)):
         check(isinstance(payload[name], cls), '*', name)
-    check(bool(payload['variant']), '*', 'variant')
     saved = {part_key(p): p for p in parts}
     check(len(saved) == len(parts), '*', 'parts duplicate saved fold/seed')
     found = {}
@@ -175,20 +174,20 @@ def screen_chain(chain_dir, baseline, candidates):
     psi = generate_suite_a(obs.frame, oracle.config, base.policy, seed=record['draw']['seed'],
                            fixed_exposures=fixed_exposures(base, obs.frame)).structural_causal_truth.value
     locations = {k: tuple(v) for k, v in recipe['inference']['county_locations'].items()}
-    # The saved primary SE identifies the primary registered bandwidth, without a new SE rule.
-    saved = record['estimates']['cv_tmle']
-    matching = [float(b) for b, se in saved['spatial_se'].items() if se == saved['se']]
-    # Pilot records can use an iid gate SE; the inference recipe still names its primary bandwidth.
+    # The frozen inference recipe defines the primary bandwidth.
     bandwidth = recipe['inference']['primary_bandwidth_km']
     spatial_key = f'spatial_{float(bandwidth):g}_km'
-    require(not matching or float(bandwidth) in matching, 'primary spatial bandwidth mismatch')
     cells = {'fitted': evaluate(endpoint, parts, oracle, locations, psi, spatial_key)}
-    for method, saved_est in record['estimates'].items():
+    pilot = result['campaign_mode'] == 'm2_pilot_d'
+    reference_methods = ('cv_tmle',) if pilot else ('one_step', 'cv_tmle')
+    for method in reference_methods:
+        saved_est = record['estimates'][method]
         require(abs(cells['fitted']['estimates'][method]['estimate']['value']-saved_est['value']) <= SAVED_REPLAY_TOLERANCE,
                 f'{chain_dir}: saved {method} estimate mismatch')
-        for b, se in saved_est['spatial_se'].items():
-            require(abs(cells['fitted']['estimates'][method]['se'][f'spatial_{float(b):g}_km']['value']-se) <= SAVED_REPLAY_TOLERANCE,
-                    f'{chain_dir}: saved spatial SE mismatch')
+        if not pilot:
+            for b, se in saved_est['spatial_se'].items():
+                require(abs(cells['fitted']['estimates'][method]['se'][f'spatial_{float(b):g}_km']['value']-se) <= SAVED_REPLAY_TOLERANCE,
+                        f'{chain_dir}: saved spatial SE mismatch')
     oracle_parts = []
     for p in parts:
         true = oracle.nuisances(p.original_ids)
@@ -213,8 +212,8 @@ def summarize(rows, **options):
     thresholds = {**DEFAULTS, **options}
     require(set(thresholds) == set(DEFAULTS), 'unknown thresholds')
     require(all(type(v) in (int, float) and np.isfinite(v) for v in thresholds.values()), 'nonfinite thresholds')
-    require(0 < thresholds['interval_level'] < 100 and thresholds['bias_floor'] > 0
-            and 0 <= thresholds['bias_ratio'] <= 1 and 0 <= thresholds['contrast_reduction'] <= 1,
+    require(0 < thresholds['interval_level'] < 100 and thresholds['bias_floor'] >= 0
+            and thresholds['bias_ratio'] >= 0 and thresholds['contrast_reduction'] <= 1,
             'invalid thresholds')
     require(type(thresholds['iid_coverage_min']) is int and thresholds['iid_coverage_min'] >= 0, 'invalid iid_coverage_min')
     require(1 <= len(rows) <= 25, 'screen requires 1..25 chains')
@@ -223,12 +222,6 @@ def summarize(rows, **options):
     names = set(rows[0]['cells'])
     require(all(set(r['cells']) == names for r in rows) and {'fitted', 'oracle_Q', 'baseline'} <= names, 'unpaired cells')
     require(len({r['campaign_mode'] for r in rows}) == 1, 'do not pool primary and pilot chains')
-    for name in names - {'fitted', 'oracle_Q'}:
-        provenance = [r['cells'][name].get('provenance') for r in rows]
-        if any(p is not None for p in provenance):
-            require(all(p is not None for p in provenance), 'missing candidate provenance')
-            identities = {json.dumps({k: p[k] for k in ('variant', 'study', 'code_commit')}, sort_keys=True) for p in provenance}
-            require(len(identities) == 1, f'inconsistent candidate provenance: {name}')
     if all('policy_delta' in r for r in rows):
         require(len({r['policy_delta'] for r in rows}) == 1, 'mixed policy deltas')
     def series(name):

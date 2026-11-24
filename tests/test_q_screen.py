@@ -255,9 +255,15 @@ def test_saved_record_replay_tolerance(fixture, monkeypatch, mode, method, bandw
     states = [{**states[0], 'record': record}]
     monkeypatch.setattr(screen, 'load', lambda path: (result, states, base, recipe))
     path = write(chain, payload(chain, state, state['parts']))
-    if drift < 1e-9:
+    pilot_nonreference = mode == 'm2_pilot_d' and (method != 'cv_tmle' or bandwidth is not None)
+    if drift < 1e-9 or pilot_nonreference:
         row = screen.screen_chain(chain, path, {})
         assert row['cells']['baseline']['estimates'] == row['cells']['fitted']['estimates']
+        for name in ('one_step', 'cv_tmle'):
+            expected = fixture[-1]['fitted'][name]
+            actual = row['cells']['fitted']['estimates'][name]
+            assert actual['estimate']['value'] == pytest.approx(expected['estimate']['value'], abs=1e-12, rel=0)
+            assert actual['se'] == expected['se']
     else:
         with pytest.raises(ContractError, match='saved .* mismatch'):
             screen.screen_chain(chain, path, {})
@@ -289,3 +295,60 @@ def test_candidate_digest_binds_parsed_bytes(fixture, monkeypatch):
     assert replaced
     assert new[0].mu_a == tuple(candidate['parts'][0]['mu_a'])
     assert provenance['q_parts_sha256'] == sha256(original_bytes).hexdigest()
+
+
+@pytest.mark.parametrize('mode', ['diagnostic', 'm2_pilot_d'])
+def test_primary_spatial_comes_from_recipe(fixture, monkeypatch, mode):
+    chain, state, _, _, _, _ = fixture
+    result, states, base, recipe = screen.load(chain)
+    record = deepcopy(states[0]['record'])
+    saved = record['estimates']['cv_tmle']
+    saved['se'] = saved['spatial_se']['50.0']
+    saved['spatial_se']['100.0'] = saved['se'] + 1e-12
+    assert abs(saved['spatial_se']['100.0'] - fixture[-1]['fitted']['cv_tmle']['se']['spatial_100_km']['value']) < 1e-9
+    result = {**result, 'campaign_mode': mode, 'records': [record]}
+    monkeypatch.setattr(screen, 'load', lambda path: (result, [{**states[0], 'record': record}], base, recipe))
+    path = write(chain, payload(chain, state, state['parts']))
+    row = screen.screen_chain(chain, path, {})
+    assert row['primary_spatial_key'] == 'spatial_100_km'
+    assert row['cells']['fitted']['estimates']['cv_tmle']['se'] == fixture[-1]['fitted']['cv_tmle']['se']
+
+
+@pytest.mark.parametrize('field', ['variant', 'study', 'code_commit'])
+def test_per_chain_producer_metadata_is_retained_not_pooled(field):
+    rows = table()
+    expected = screen.summarize(rows, iid_coverage_min=4)
+    for i, row in enumerate(rows):
+        provenance = dict(variant='candidate', study={}, code_commit='a'*40)
+        provenance[field] = {'selected_epoch': i+1} if field == 'study' else str(i)
+        row['cells']['candidate']['provenance'] = provenance
+    assert screen.summarize(rows, iid_coverage_min=4) == expected
+    assert len({str(r['cells']['candidate']['provenance'][field]) for r in rows}) == 4
+
+
+def test_variant_string_metadata_accepts_empty(fixture):
+    chain, state, endpoint, _, _, _ = fixture
+    value = payload(chain, state, state['parts']); value['variant'] = ''
+    new, provenance = screen.splice(write(chain, value), chain, state['binding']['frame_hash'], endpoint, state['parts'])
+    assert provenance['variant'] == ''
+    assert new[0].mu_a == state['parts'][0].mu_a
+
+
+@pytest.mark.parametrize('options', [{'bias_floor': 0.}, {'bias_ratio': 1.25}, {'contrast_reduction': -.25}])
+def test_configurable_threshold_domains(options):
+    result = screen.summarize(table(), iid_coverage_min=4, **options)
+    assert result['cells']['candidate']['verdict'] == 'pass'
+    assert all(result['thresholds'][key] == value for key, value in options.items())
+
+
+def test_zero_attenuation_floor_cannot_pass_zero_direction():
+    rows = table()
+    for row in rows:
+        for name in ('baseline', 'candidate'):
+            row['cells'][name]['estimates']['cv_tmle']['estimate']['value'] = 0.
+    result = screen.summarize(rows, iid_coverage_min=4, bias_floor=0.)
+    assert result['B_0'] == result['s'] == 0.
+    candidate = result['cells']['candidate']
+    assert candidate['bias_ratio'] is None
+    assert candidate['verdict'] == 'fail'
+    assert candidate['failing_criteria'] == ['paired_interval']

@@ -29,7 +29,10 @@ These are exactly the permitted keys at each level. Each saved part needs exactl
 one candidate part; part order may differ, row order must match exactly. Fold and
 seed are integers. Prediction arrays must have the saved length and finite numeric
 values. Ratios cannot be supplied. Refusals identify the chain, fold and field.
-Variant, study and producer commit must agree across chains for each named cell.
+Variant is a string (including the empty string). Variant, study and producer
+commit are retained per chain as opaque provenance; they may differ across
+chains, for example when an inner selection chooses different epochs. The named
+cells in the manifest define the paired candidate groups.
 A SHA-256 binds the non-Q fields (including saved lineage/spec), policy, target
 split and bound data before and after each splice. Candidate file hashes and
 producer metadata are also recorded. The candidate digest binds the exact bytes
@@ -73,10 +76,12 @@ report. The destination should be a fresh directory for each invocation.
 Every cell reports one-step and CV-TMLE estimates and replay's spatial (50/100/200
 km), county, iid and residual frame-conditional SEs. Error and iid/primary-spatial
 95% normal-interval coverage use truth recomputed by the simulation generator.
-The primary bandwidth is taken from the saved inference recipe. Saved estimates
-and spatial SEs must replay within 1e-9 before candidate results are computed,
-as required for historical artifacts. Synthetic identity/oracle splice parity
-continues to use an absolute 1e-12 tolerance; the original attribution audit
+The primary bandwidth is taken from the saved inference recipe, independently
+of a historical scalar SE. Diagnostic saved estimates and spatial SEs must
+replay within 1e-9 before candidate results are computed. For pilot chains, the
+required historical reference is the saved CV-TMLE point estimate, within 1e-9.
+Both methods and all SEs are always recomputed for the report. Synthetic
+identity/oracle splice parity continues to use an absolute 1e-12 tolerance; the original attribution audit
 retains its existing saved-record check.
 
 Factual OOF R² and RMSE are computed on targets. The weighted factual MSE is
@@ -112,6 +117,12 @@ The defaults and their command flags are:
 | `--bias-ratio` | 0.5 | absolute candidate bias / absolute baseline bias at most ratio |
 | `--contrast-reduction` | 0.25 | `1 - mean(mover RMSE_c)/mean(mover RMSE_0)` at least threshold |
 | `--iid-coverage-min` | 16 | iid coverage count at least this explicit count |
+
+All thresholds must be finite. The interval level must lie strictly between 0
+and 100, the bias floor and bias ratio must be nonnegative, the minimum contrast
+reduction may be negative but cannot exceed 1, and the coverage minimum is a
+nonnegative integer. A zero bias floor still cannot pass a zero improvement
+direction because the paired interval must have a strictly positive lower bound.
 
 `floor_not_met` takes precedence when there is insufficient baseline attenuation;
 otherwise `pass` requires every criterion above, and `fail` names every failed
