@@ -1,16 +1,19 @@
 """Platform keys for tests that compare CPU numerics bit-exactly to recorded fixtures.
 
 A CUDA build of torch always selects the 'cuda' record, whose values the
-cluster verifier enforces exactly. A CPU build selects a key built from the
-factors measured to change a fixture (ARC-5117): the OpenBLAS kernel (core
-type) and version NumPy and SciPy load, the ATen CPU capability, and the MKL
-and oneDNN kernels torch dispatches to. MKL and oneDNN choose by CPU and
-report no choice, so the key carries the CPU model and any variable that
-overrides their dispatch. On a recorded platform the comparison is exact. On
+cluster verifier enforces exactly. A CPU build selects a key built from what
+the runtime reports for the factors measured to change a fixture (ARC-5117):
+the OpenBLAS kernel (core type) and version NumPy and SciPy load, the ATen
+CPU capability, and the CPU model, which stands in for the MKL and oneDNN
+kernels torch dispatches to (they choose by CPU and report no choice).
+Environment variables never enter the key; a run that overrides MKL or oneDNN
+dispatch keeps its platform's key and must match its values, and failure
+messages list such overrides. On a recorded platform the comparison is exact. On
 an unrecorded CPU platform a GitHub Actions run compares every value to each
 recorded CPU platform within a declared tolerance and names the key in a
 warning; anywhere else the test fails and names the missing key.
 """
+import json
 import math
 import os
 import platform
@@ -23,16 +26,16 @@ import torch
 # |observed - recorded| <= abs_tol + rel_tol * |recorded|
 FLOAT64 = dict(rel_tol=1e-9, abs_tol=1e-12)
 # float32 model outputs (one float32 ulp is 2**-23 ~ 1.2e-7 relative). Across five
-# recorded ci-cpu platform settings and an unrecorded SSE emulation the predictions differ
-# by at most 4.3e-6 relative (about 36 ulp) and 1.6e-6 absolute. Hosted CPUs that
-# cannot be reproduced on the cluster (for example MKL's paths on AMD) may spread
-# further, so the bound is about 24 times the measured spread. A change in training
+# ci-cpu platform settings (ATen, OpenBLAS, MKL and oneDNN AVX2 emulations) and an
+# SSE emulation the predictions differ by at most 4.3e-6 relative (about 36 ulp)
+# and 1.6e-6 absolute. Hosted CPUs that cannot be reproduced on the cluster (for
+# example MKL's paths on AMD) may spread further, so the bound is about 24 times
+# the measured spread. A change in training
 # moves them far more: a batch size of 8 instead of 256 moves them 0.63 relative.
 FLOAT32 = dict(rel_tol=1e-4, abs_tol=1e-6)
 DIGEST = re.compile(r'[0-9a-f]{64}')
-# Variables that override MKL or oneDNN kernel dispatch (no runtime query reports it).
-DISPATCH_VARIABLES = ('MKL_ENABLE_INSTRUCTIONS', 'MKL_CBWR', 'ONEDNN_MAX_CPU_ISA', 'DNNL_MAX_CPU_ISA',
-                      'ONEDNN_DEFAULT_FPMATH_MODE')
+# Prefixes of variables that can steer kernel selection; listed in failure messages only.
+OVERRIDE_PREFIXES = ('ATEN_', 'DNNL_', 'MKL_', 'NPY_', 'OMP_', 'ONEDNN_', 'OPENBLAS_')
 
 
 def blas_cores():
@@ -55,17 +58,21 @@ def cpu_model():
     return platform.processor() or 'unknown'
 
 
-FACTORS = ('cpu_model', 'aten', 'blas', 'dispatch')
+def kernel_overrides():
+    return sorted(f'{name}={value}' for name, value in os.environ.items() if name.startswith(OVERRIDE_PREFIXES))
+
+
+FACTORS = ('cpu_model', 'aten', 'blas')
 # Each fixture keys on the factors measured to change it (ARC-5117). The float64
 # estimators change with the OpenBLAS kernel and version, not with MKL or oneDNN
-# dispatch; the model changes with ATen, MKL and oneDNN dispatch, not with the
-# OpenBLAS kernel. The ATen capability and CPU model are kept in both.
+# dispatch; the model changes with ATen, MKL and oneDNN dispatch (the CPU model),
+# not with the OpenBLAS kernel. The ATen capability and CPU model are kept in both.
 ESTIMATES = ('cpu_model', 'aten', 'blas')
-MODEL = ('cpu_model', 'aten', 'dispatch')
+MODEL = ('cpu_model', 'aten')
 
 
 def platform_key(factors=FACTORS):
-    """'cuda' for a CUDA build, else 'cpu/<model>/aten=..[/blas=..][/env=..]' over ``factors``."""
+    """'cuda' for a CUDA build, else 'cpu/<model>/aten=..[/blas=..]' over ``factors``."""
     if torch.version.cuda:
         return 'cuda'
     unknown = set(factors) - set(FACTORS)
@@ -77,9 +84,6 @@ def platform_key(factors=FACTORS):
         parts.append(f'aten={torch.backends.cpu.get_cpu_capability()}')
     if 'blas' in factors:
         parts.append(f"blas={','.join(blas_cores())}")
-    overrides = [f'{name}={os.environ[name]}' for name in DISPATCH_VARIABLES if os.environ.get(name)]
-    if 'dispatch' in factors and overrides:
-        parts.append(f"env={','.join(overrides)}")
     return '/'.join(parts)
 
 
@@ -122,11 +126,15 @@ def check(label, *, factors, exact, records, values, references, tolerance, opaq
     Returns the platform key and the path taken ('exact' or 'tolerance').
     """
     key = platform_key(factors)
+    found = kernel_overrides()
+    overrides = f'; kernel overrides set: {found}' if found else ''
     if key in records:
-        assert exact == records[key], f'{label}: differs from the recorded fixture for platform {key!r}'
+        # JSON text, so an int recorded as 1103 does not match 1103.0, nor 0.0 match -0.0.
+        assert json.dumps(exact, sort_keys=True) == json.dumps(records[key], sort_keys=True), \
+            f'{label}: differs from the recorded fixture for platform {key!r}{overrides}'
         return key, 'exact'
     if os.environ.get('GITHUB_ACTIONS') != 'true':
-        pytest.fail(f'{label}: no recorded fixture for platform {key!r} '
+        pytest.fail(f'{label}: no recorded fixture for platform {key!r}{overrides} '
                     f'(recorded: {sorted(records)}); record its values before testing on this platform')
     assert references, f'{label}: no recorded CPU reference for unrecorded platform {key!r}'
     for name, reference in sorted(references.items()):

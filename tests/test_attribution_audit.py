@@ -1,6 +1,7 @@
 from dataclasses import replace
 from hashlib import sha256
 import json
+import os
 import re
 import tarfile
 from pathlib import Path
@@ -54,8 +55,9 @@ def cpu_platform(monkeypatch, *, aten='AVX2', blas=('openblas-0.3.31-Haswell',),
     monkeypatch.setattr(torch.backends.cpu, 'get_cpu_capability', lambda: aten)
     monkeypatch.setattr(platform_fixtures, 'blas_cores', lambda: sorted(blas))
     monkeypatch.setattr(platform_fixtures, 'cpu_model', lambda: model)
-    for name in platform_fixtures.DISPATCH_VARIABLES:
-        monkeypatch.delenv(name, raising=False)
+    for name in list(os.environ):
+        if name.startswith(platform_fixtures.OVERRIDE_PREFIXES):
+            monkeypatch.delenv(name)
     for name, value in env:
         monkeypatch.setenv(name, value)
     return platform_fixtures.platform_key(factors)
@@ -71,11 +73,8 @@ def test_platform_key_cpu_factors(monkeypatch):
     base = cpu_platform(monkeypatch)
     assert base == 'cpu/Test CPU/aten=AVX2/blas=openblas-0.3.31-Haswell'
     variants = [cpu_platform(monkeypatch, aten='AVX512'), cpu_platform(monkeypatch, blas=('openblas-0.3.31-SkylakeX',)),
-                cpu_platform(monkeypatch, blas=('openblas-0.3.34-Haswell',)), cpu_platform(monkeypatch, model='Other CPU'),
-                cpu_platform(monkeypatch, env=(('MKL_ENABLE_INSTRUCTIONS', 'AVX2'),)),
-                cpu_platform(monkeypatch, env=(('ONEDNN_MAX_CPU_ISA', 'AVX2'),))]
-    assert len({base, *variants}) == 7
-    assert variants[4] == base + '/env=MKL_ENABLE_INSTRUCTIONS=AVX2'
+                cpu_platform(monkeypatch, blas=('openblas-0.3.34-Haswell',)), cpu_platform(monkeypatch, model='Other CPU')]
+    assert len({base, *variants}) == 5
 
 
 def test_platform_key_uses_only_the_fixture_factors(monkeypatch):
@@ -87,7 +86,6 @@ def test_platform_key_uses_only_the_fixture_factors(monkeypatch):
     assert cpu_platform(monkeypatch, factors=estimates, aten='AVX512') != base
     base = cpu_platform(monkeypatch, factors=model)
     assert cpu_platform(monkeypatch, factors=model, blas=('openblas-0.3.31-SkylakeX',)) == base
-    assert cpu_platform(monkeypatch, factors=model, env=(('ONEDNN_MAX_CPU_ISA', 'AVX2'),)) != base
     assert cpu_platform(monkeypatch, factors=model, aten='AVX512') != base
     assert cpu_platform(monkeypatch, factors=model, model='Other CPU') != base
 
@@ -99,6 +97,25 @@ def test_tolerance_path_keeps_non_floats_exact(monkeypatch):
                      {'seed_ids': [1103, 2207], 'mu_a': [7]}):
         with pytest.raises(AssertionError):
             check_unrecorded(monkeypatch, observed, reference, platform_fixtures.FLOAT32)
+
+
+def test_dispatch_settings_do_not_change_the_key(monkeypatch):
+    # MKL/oneDNN choose kernels by CPU and report no choice; a variable naming their
+    # default must not move a run off its recorded platform.
+    for factors in (platform_fixtures.ESTIMATES, platform_fixtures.MODEL):
+        base = cpu_platform(monkeypatch, factors=factors)
+        for env in ((('ONEDNN_DEFAULT_FPMATH_MODE', 'STRICT'),), (('MKL_ENABLE_INSTRUCTIONS', 'AVX512'),),
+                    (('ONEDNN_CPU_ISA_HINTS', 'PREFER_YMM'),), (('ONEDNN_MAX_CPU_ISA', 'AVX2'),)):
+            assert cpu_platform(monkeypatch, factors=factors, env=env) == base
+
+
+def test_recorded_platform_exact_keeps_types(monkeypatch):
+    key = cpu_platform(monkeypatch)
+    records = {key: {'seed_ids': [1103, 2207], 'value': 0.0}}
+    for observed in ({'seed_ids': [1103.0, 2207], 'value': 0.0}, {'seed_ids': [1103, 2207], 'value': -0.0}):
+        with pytest.raises(AssertionError, match=re.escape(key)):
+            platform_fixtures.check('synthetic', factors=platform_fixtures.FACTORS, exact=observed, records=records,
+                values=observed, references=records, tolerance=platform_fixtures.FLOAT64)
 
 
 ESTIMATE = {'value': 1.1186392783393115, 'scores': [3.5815998261058586, -1.5021084664710358], 'method': 'cv_tmle'}
@@ -125,6 +142,17 @@ def test_recorded_platform_is_exact(monkeypatch):
     with pytest.raises(AssertionError, match=re.escape(key)):
         platform_fixtures.check('synthetic', factors=platform_fixtures.FACTORS, exact=nudged, records=records, values=nudged,
             references=records, tolerance=platform_fixtures.FLOAT64)
+
+
+def test_failures_list_kernel_overrides(monkeypatch):
+    key = cpu_platform(monkeypatch, env=(('MKL_ENABLE_INSTRUCTIONS', 'AVX2'),))
+    monkeypatch.delenv('GITHUB_ACTIONS', raising=False)
+    with pytest.raises(pytest.fail.Exception, match=re.escape("kernel overrides set: ['MKL_ENABLE_INSTRUCTIONS=AVX2']")):
+        platform_fixtures.check('synthetic', factors=platform_fixtures.FACTORS, exact=ESTIMATE, records={},
+            values=ESTIMATE, references={}, tolerance=platform_fixtures.FLOAT64)
+    with pytest.raises(AssertionError, match=re.escape("MKL_ENABLE_INSTRUCTIONS=AVX2")):
+        platform_fixtures.check('synthetic', factors=platform_fixtures.FACTORS, exact=dict(ESTIMATE, value=1.),
+            records={key: ESTIMATE}, values=None, references={}, tolerance=platform_fixtures.FLOAT64)
 
 
 @pytest.mark.parametrize('actions', [None, 'false', ''])
