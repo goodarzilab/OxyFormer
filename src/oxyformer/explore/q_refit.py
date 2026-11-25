@@ -14,6 +14,7 @@ import uuid
 import torch
 
 from oxyformer.contracts import OOFNuisances, StageRequest
+from oxyformer.explore import tabicl_q
 from oxyformer.explore.real_fit import (atomic_record, checkout_identity, logger_for,
     state_lock, write_directory)
 from oxyformer.provenance import ContractError, file_hash, read_artifact, require
@@ -27,6 +28,8 @@ from oxyformer.validation.generators import ObservedRecords
 STUDIES = {'cell-d': dict(reference_cap=32, frozen_epochs=60, grid_points=2, seed_count=1),
            'cell-e': dict(reference_cap=32, frozen_epochs=30, grid_points=2, seed_count=1)}
 PART_KEYS = {'fold', 'seed', 'original_ids', 'mu_a', 'mu_d'}
+# A6-Q is a frozen TabICLv2 adapter, not a nested_cv network variant.
+VARIANTS = nested_cv.Q_VARIANTS + tabicl_q.VARIANTS
 
 
 def load_chain(path):
@@ -119,11 +122,18 @@ def load_bound(out):
     return endpoint, recipe, binding
 
 
-def fit(out, fold, variant, study, slice_seconds, run_logging, *, device='cuda:0'):
+def fit(out, fold, variant, study, slice_seconds, run_logging, *, device='cuda:0', checkpoint=None,
+        context_rows=None):
+    entered = tabicl_q.clock()
     require(type(fold) is int and fold in range(5), 'unsupported fold')
-    require(variant in nested_cv.Q_VARIANTS and study in STUDIES, 'unsupported variant or study')
+    require(variant in VARIANTS and study in STUDIES, 'unsupported variant or study')
     require(math.isfinite(slice_seconds) and 0 < slice_seconds <= 10800, 'slice must be in (0, 10800] seconds')
     require(run_logging in ('wandb', 'none'), 'explicit run logging mode required')
+    tabicl = variant in tabicl_q.VARIANTS
+    if tabicl:
+        settings = tabicl_q.candidate_settings(tabicl_q.MAX_CONTEXT_ROWS if context_rows is None else context_rows)
+    else:
+        require(checkpoint is None and context_rows is None, '--checkpoint and --context-rows apply only to A6-Q')
     endpoint, recipe, binding = load_bound(out)
     synthetic = endpoint.data.manifest.spec.endpoint.startswith('synthetic')
     require(run_logging != 'none' or synthetic, 'W&B logging is required for real endpoints')
@@ -135,23 +145,47 @@ def fit(out, fold, variant, study, slice_seconds, run_logging, *, device='cuda:0
         recipe_hash=binding['recipe_hash'], variant=variant, study=STUDIES[study],
         code_commit=checkout_identity(), environment=dict(environment_identity(torch.device(device))),
         run_logging=run_logging)
+    if tabicl:
+        identity['tabicl'] = settings
+
+    def matches(saved):
+        # A complete A6-Q fold may be reread without --context-rows.
+        if tabicl and context_rows is None and isinstance(saved.get('tabicl'), dict):
+            return saved == dict(identity, tabicl=dict(settings, context_rows=saved['tabicl'].get('context_rows')))
+        return saved == identity
     # Serialize admissions and collect against all folds of this candidate.
     with state_lock(root):
         candidate = root / 'candidate.json'
-        if candidate.exists():
-            require(json.loads(candidate.read_text()) == identity, 'candidate identity differs')
-        else:
-            atomic_record(candidate, identity)
+        saved = json.loads(candidate.read_text()) if candidate.exists() else None
+        require(saved is None or matches(saved), 'candidate identity differs')
         directory = root / f'fold-{fold}'
         path = directory / 'progress.json'
         record = json.loads(path.read_text()) if path.exists() else dict(identity=identity,
             fold=fold, seed=1103, status='incomplete', predecessor=None, parts=[], slices=[])
-        require(record['identity'] == identity and record['fold'] == fold, 'journal identity differs')
+        require(matches(record['identity']) and record['fold'] == fold, 'journal identity differs')
+        # A complete fold returns its journal without loading weights or predicting.
         if record['status'] == 'complete':
+            if saved is None:
+                atomic_record(candidate, record['identity'])
             return record
+        require(saved in (None, identity), 'candidate identity differs')
+        require(record['identity'] == identity, 'journal identity differs')
+        if tabicl:
+            tabicl_q.check_checkpoint(checkpoint)
+        if saved is None:
+            atomic_record(candidate, identity)
         logger = logger_for(run_logging, dict(identity, fold=fold, exploratory=True), directory)
         try:
             atomic_record(path, record)
+            if tabicl:
+                request = CheckpointRequest()
+                with request.signals():
+                    event = tabicl_q.advance(record, endpoint, recipe, directory, settings=settings,
+                        checkpoint=checkpoint, slice_seconds=slice_seconds, device=device,
+                        save=lambda: atomic_record(path, record), request=request, started=entered)
+                if logger is not None:
+                    logger.log(event)
+                return record
             destination = directory / ('slice-' + uuid.uuid4().hex)
             request = CheckpointRequest()
             config = endpoint.configuration(fold, destination, **nested_cv._settings(recipe, endpoint),
@@ -230,10 +264,12 @@ def main(argv=None):
     p = commands.add_parser('fit')
     p.add_argument('out')
     p.add_argument('--fold', type=int, required=True)
-    p.add_argument('--variant', choices=nested_cv.Q_VARIANTS, required=True)
+    p.add_argument('--variant', choices=VARIANTS, required=True)
     p.add_argument('--study', choices=STUDIES, required=True)
     p.add_argument('--slice-seconds', type=float, required=True)
     p.add_argument('--run-logging', choices=('wandb', 'none'), required=True)
+    p.add_argument('--checkpoint', help='A6-Q only: local registered TabICLv2 regressor checkpoint')
+    p.add_argument('--context-rows', type=int, help='A6-Q only: context sample size, 2..30000 (default 30000)')
     p = commands.add_parser('collect')
     p.add_argument('out')
     args = vars(parser.parse_args(argv))

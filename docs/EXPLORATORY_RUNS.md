@@ -141,3 +141,39 @@ terminal chain path), `frame_hash` (saved state binding), `variant`, `study`
 (the four RecipeStudy values), `code_commit`, and `parts`. Each part has exactly
 `fold`, `seed`, `original_ids`, `mu_a`, and `mu_d`; IDs and predictions retain the
 saved target order. The file contains no g predictions, truth or estimates.
+
+### A6-Q: frozen TabICLv2 outcome-only candidate
+
+`--variant A6-Q` routes a fold to `oxyformer.explore.tabicl_q`: the pinned
+TabICLv2 regressor, never trained, is conditioned in context on fold K's
+training rows and predicts `mu_a` and `mu_d` for its held-out targets (owner,
+2026-11-24). Results are exploratory.
+
+Context: the rows `outer.training_ids(K)`, each with unit weight; above C
+(`--context-rows`, 2 to 30,000, default 30,000) the C smallest SHA-256 of
+`[salt, K, original_id]`, salt `oxyformer.explore.tabicl_q.context.v1`, in
+order. Columns: treatment (mmHg), then the numeric covariates (at most 500).
+
+`--checkpoint PATH` names a local `tabicl-regressor-v2-20260212.ckpt` with the
+registered SHA-256 (`0db9cb53…`); a private copy under `TMPDIR` is verified and
+passed with downloads disabled; any other file refuses. A complete fold
+returns its journal without it. tabicl 2.2.0 is required (not in CI).
+
+```sh
+python -m oxyformer.explore.q_refit fit /path/to/q-A6 --fold 0 \
+  --variant A6-Q --study cell-d --slice-seconds 10800 --run-logging wandb \
+  --checkpoint /path/to/tabicl-regressor-v2-20260212.ckpt
+```
+
+Exit 0: fold complete; 75: slice stopped (deadline, SIGTERM, SIGUSR1), repeat
+it; other: refusal. Batches of 32 targets are saved atomically. A slice is
+timed from the fit invocation's start. With margin
+min(60 s, slice/10), a batch starts only while this slice's longest batch fits
+before it; the fit needs room for the last recorded fit call, checked with the
+stop request before construction and right before `estimator.fit`. A resume
+refuses missing provenance or a changed digest or fingerprint. A slice too
+short for the recorded fit keeps exiting 75; use a longer slice.
+
+Accepted residual: `estimator.fit` is one synchronous call the stop flag
+cannot interrupt. A slice killed mid-fit leaves no partial batch or part and
+resumes, losing that fit, within the mandate's 4 GPU-hours per attempt.
