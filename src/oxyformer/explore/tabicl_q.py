@@ -286,16 +286,23 @@ def advance(record, endpoint, recipe, directory, *, settings, checkpoint, slice_
             require(batch['index'] == index and [batch['start'], batch['stop']] == list(plan[index])
                     and len(batch['mu_a']) == len(batch['mu_d']) == batch['stop'] - batch['start'],
                     'journal batches differ from the batch plan')
-        built = clock()
-        estimator = fit_estimator(backend, path, context, device)
-        fitted = clock()
+        built = fitted = clock()
         times = record.setdefault('phase_seconds', dict(checkpoint=0., context=0., fit=0., prediction=0.))
         times['checkpoint'] += verified - started
         times['context'] += built - verified
-        times['fit'] += fitted - built
         slice_index, reason = len(record['slices']), 'complete'
-        longest = max([b['wall_seconds'] for b in batches] + [0.])
-        for index in range(len(batches), len(plan)):
+        # A pending stop request skips conditioning; it may outlast the grace period.
+        if request.requested:
+            reason, plan_left = 'signal', []
+        else:
+            estimator = fit_estimator(backend, path, context, device)
+            fitted = clock()
+            times['fit'] += fitted - built
+            plan_left = range(len(batches), len(plan))
+        # Only this slice's batches predict the next one, so one past outlier
+        # cannot stop every later slice before its first batch.
+        longest = 0.
+        for index in plan_left:
             if request.requested or out_of_time(clock(), deadline, longest, margin):
                 reason = 'signal' if request.requested else 'deadline'
                 break

@@ -192,7 +192,10 @@ python -m oxyformer.explore.q_refit collect /path/to/q-A6
 of its values. Each fit needs one GPU allocation for a saved endpoint. Exit 75
 means the slice stopped at a query-batch boundary (deadline or SIGTERM/SIGUSR1)
 before the fold completed; repeat the same command. Exit 0 means the fold is
-complete. Any refusal exits non-zero with the reason. Predictions run in
+complete. A slice starts another batch only while the longest batch of this
+slice still fits before the deadline less min(60 s, slice/10); a signal that
+arrives before conditioning skips the fit. Any refusal exits non-zero with the
+reason. Predictions run in
 batches of 32 targets, each saved atomically in `fold-K/progress.json` with its
 wall seconds. The journal also records the context (candidate count, C,
 selected count, salt, columns, selected-ID and context digests), the runtime

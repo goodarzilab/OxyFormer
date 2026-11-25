@@ -435,6 +435,49 @@ def test_signal_stops_at_batch_boundary(tmp_path, weights, monkeypatch):
     assert record['slices'][-1]['stop_reason'] == 'signal'
 
 
+def test_pending_signal_skips_context_conditioning(tmp_path, weights, monkeypatch):
+    backend = use(monkeypatch, Backend())
+    out = bound(tmp_path / 'q', five_fold(tmp_path / 'e'))
+    request = CheckpointRequest()
+    monkeypatch.setattr(driver, 'CheckpointRequest', lambda: request)
+    real = adapter.verified_checkpoint
+
+    def signalled(path):
+        result = real(path)
+        request.request()
+        return result
+    monkeypatch.setattr(adapter, 'verified_checkpoint', signalled)
+    record = fit(out, 0, weights, 10)
+    assert record['status'] == 'incomplete' and record['slices'][-1]['stop_reason'] == 'signal'
+    assert backend.log['fits'] == 0 and backend.log['rows'] == 0 and record['slices'][-1]['fit_seconds'] == 0
+    monkeypatch.setattr(adapter, 'verified_checkpoint', real)
+    monkeypatch.setattr(driver, 'CheckpointRequest', CheckpointRequest)
+    assert fit(out, 0, weights, 10)['status'] == 'complete'
+
+
+def test_one_slow_batch_does_not_block_resume(tmp_path, weights, monkeypatch):
+    backend = use(monkeypatch, Backend())
+    monkeypatch.setattr(adapter, 'clock', lambda: backend.time)
+    monkeypatch.setattr(adapter, 'QUERY_BATCH', 2)
+    p = five_fold(tmp_path / 'e')
+    expected = fit(bound(tmp_path / 'whole', p), 0, weights, 10)['parts']
+    real, calls = adapter.predict_targets, []
+
+    def slow_once(*args):
+        result = real(*args)
+        if not calls:
+            backend.time += 10750.
+        calls.append(1)
+        return result
+    monkeypatch.setattr(adapter, 'predict_targets', slow_once)
+    out = bound(tmp_path / 'q', p)
+    first = fit(out, 0, weights, 10, slice_seconds=10800.)
+    assert first['status'] == 'incomplete' and len(first['batches']) == 1
+    assert first['batches'][0]['wall_seconds'] > 10800. - 60.
+    second = fit(out, 0, weights, 10, slice_seconds=10800.)
+    assert second['status'] == 'complete' and second['parts'] == expected
+
+
 def test_deadline_rule():
     assert not adapter.out_of_time(0., 100., 0., 10.)
     assert not adapter.out_of_time(80., 100., 10., 10.)
