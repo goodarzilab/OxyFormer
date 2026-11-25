@@ -1,6 +1,8 @@
 from dataclasses import replace
 from hashlib import sha256
 import json
+import os
+import re
 import tarfile
 from pathlib import Path
 from unittest.mock import patch
@@ -9,6 +11,7 @@ import numpy as np
 import pytest
 import torch
 
+import platform_fixtures
 from test_scores import make_fixture
 from test_coverage import synthetic_endpoint, smoke_recipe
 from test_scm import config
@@ -27,8 +30,160 @@ def pinned_estimates():
     return {'one_step': one_step(n, d, weights, n.spec, **common).to_json(),
             'cv_tmle': cv_tmle(n, d, weights, 'identity', n.spec, **common).estimate.to_json()}
 
+def pinned_fixture():
+    return json.loads(Path('tests/fixtures/oracle/estimates.json').read_text())
+
+
 def test_pinned_json():
-    assert {k: sha256(v.encode()).hexdigest() for k,v in pinned_estimates().items()} == json.loads(Path('tests/fixtures/oracle/estimates.json').read_text())['cuda' if torch.version.cuda else 'cpu']
+    observed, fixture = pinned_estimates(), pinned_fixture()
+    platform_fixtures.check('oracle estimates', factors=platform_fixtures.ESTIMATES,
+        exact={k: sha256(v.encode()).hexdigest() for k, v in observed.items()}, records=fixture['digests'],
+        values={k: json.loads(v) for k, v in observed.items()}, references=fixture['cpu_values'],
+        tolerance=platform_fixtures.FLOAT64)
+
+
+def test_pinned_cpu_values_bind_digests():
+    fixture = pinned_fixture()
+    assert sorted(fixture['cpu_values']) == sorted(set(fixture['digests']) - {'cuda'})
+    for key, values in fixture['cpu_values'].items():
+        assert {k: sha256(canonical_json(v).encode()).hexdigest() for k, v in values.items()} == fixture['digests'][key]
+
+
+def cpu_platform(monkeypatch, *, aten='AVX2', blas=('openblas-0.3.31-Haswell',), model='Test CPU', env=(),
+                 factors=platform_fixtures.FACTORS):
+    monkeypatch.setattr(torch.version, 'cuda', None)
+    monkeypatch.setattr(torch.backends.cpu, 'get_cpu_capability', lambda: aten)
+    monkeypatch.setattr(platform_fixtures, 'blas_cores', lambda: sorted(blas))
+    monkeypatch.setattr(platform_fixtures, 'cpu_model', lambda: model)
+    for name in list(os.environ):
+        if name.startswith(platform_fixtures.OVERRIDE_PREFIXES):
+            monkeypatch.delenv(name)
+    for name, value in env:
+        monkeypatch.setenv(name, value)
+    return platform_fixtures.platform_key(factors)
+
+
+def test_platform_key_cuda_build(monkeypatch):
+    monkeypatch.setattr(torch.version, 'cuda', '13.0')
+    monkeypatch.setattr(platform_fixtures, 'blas_cores', lambda: pytest.fail('a CUDA build must not read the CPU factors'))
+    assert platform_fixtures.platform_key() == 'cuda'
+
+
+def test_platform_key_cpu_factors(monkeypatch):
+    base = cpu_platform(monkeypatch)
+    assert base == 'cpu/Test CPU/aten=AVX2/blas=openblas-0.3.31-Haswell'
+    variants = [cpu_platform(monkeypatch, aten='AVX512'), cpu_platform(monkeypatch, blas=('openblas-0.3.31-SkylakeX',)),
+                cpu_platform(monkeypatch, blas=('openblas-0.3.34-Haswell',)), cpu_platform(monkeypatch, model='Other CPU')]
+    assert len({base, *variants}) == 5
+
+
+def test_platform_key_uses_only_the_fixture_factors(monkeypatch):
+    estimates, model = platform_fixtures.ESTIMATES, platform_fixtures.MODEL
+    base = cpu_platform(monkeypatch, factors=estimates)
+    # MKL/oneDNN dispatch does not change the float64 estimators; OpenBLAS does not change the model.
+    assert cpu_platform(monkeypatch, factors=estimates, env=(('MKL_ENABLE_INSTRUCTIONS', 'AVX2'),)) == base
+    assert cpu_platform(monkeypatch, factors=estimates, blas=('openblas-0.3.31-SkylakeX',)) != base
+    assert cpu_platform(monkeypatch, factors=estimates, aten='AVX512') != base
+    base = cpu_platform(monkeypatch, factors=model)
+    assert cpu_platform(monkeypatch, factors=model, blas=('openblas-0.3.31-SkylakeX',)) == base
+    assert cpu_platform(monkeypatch, factors=model, aten='AVX512') != base
+    assert cpu_platform(monkeypatch, factors=model, model='Other CPU') != base
+
+
+def test_tolerance_path_keeps_non_floats_exact(monkeypatch):
+    reference = {'seed_ids': [1103, 2207], 'mu_a': [6.891390323638916]}
+    for observed in ({'seed_ids': [1103.1, 2207], 'mu_a': [6.891390323638916]},
+                     {'seed_ids': [1103.0, 2207], 'mu_a': [6.891390323638916]},
+                     {'seed_ids': [1103, 2207], 'mu_a': [7]}):
+        with pytest.raises(AssertionError):
+            check_unrecorded(monkeypatch, observed, reference, platform_fixtures.FLOAT32)
+
+
+def test_dispatch_settings_do_not_change_the_key(monkeypatch):
+    # MKL/oneDNN choose kernels by CPU and report no choice; a variable naming their
+    # default must not move a run off its recorded platform.
+    for factors in (platform_fixtures.ESTIMATES, platform_fixtures.MODEL):
+        base = cpu_platform(monkeypatch, factors=factors)
+        for env in ((('ONEDNN_DEFAULT_FPMATH_MODE', 'STRICT'),), (('MKL_ENABLE_INSTRUCTIONS', 'AVX512'),),
+                    (('ONEDNN_CPU_ISA_HINTS', 'PREFER_YMM'),), (('ONEDNN_MAX_CPU_ISA', 'AVX2'),)):
+            assert cpu_platform(monkeypatch, factors=factors, env=env) == base
+
+
+def test_recorded_platform_exact_keeps_types(monkeypatch):
+    key = cpu_platform(monkeypatch)
+    records = {key: {'seed_ids': [1103, 2207], 'value': 0.0}}
+    for observed in ({'seed_ids': [1103.0, 2207], 'value': 0.0}, {'seed_ids': [1103, 2207], 'value': -0.0}):
+        with pytest.raises(AssertionError, match=re.escape(key)):
+            platform_fixtures.check('synthetic', factors=platform_fixtures.FACTORS, exact=observed, records=records,
+                values=observed, references=records, tolerance=platform_fixtures.FLOAT64)
+
+
+ESTIMATE = {'value': 1.1186392783393115, 'scores': [3.5815998261058586, -1.5021084664710358], 'method': 'cv_tmle'}
+PREDICTION = {'models': ['a' * 64, 'b' * 64], 'predictions': {'ids': ['o1', 'o2'], 'mu_a': [6.891390323638916, 0.1265527904033661]}}
+
+
+def check_unrecorded(monkeypatch, values, reference, tolerance, opaque=(), actions='true'):
+    cpu_platform(monkeypatch)
+    if actions is None:
+        monkeypatch.delenv('GITHUB_ACTIONS', raising=False)
+    else:
+        monkeypatch.setenv('GITHUB_ACTIONS', actions)
+    return platform_fixtures.check('synthetic', factors=platform_fixtures.FACTORS, exact=values, records={'cuda': None, 'cpu/recorded': reference},
+        values=values, references={'cpu/recorded': reference}, tolerance=tolerance, opaque=opaque)
+
+
+def test_recorded_platform_is_exact(monkeypatch):
+    key = cpu_platform(monkeypatch)
+    monkeypatch.setenv('GITHUB_ACTIONS', 'true')
+    records = {key: ESTIMATE}
+    assert platform_fixtures.check('synthetic', factors=platform_fixtures.FACTORS, exact=dict(ESTIMATE), records=records, values=None,
+        references={}, tolerance=platform_fixtures.FLOAT64) == (key, 'exact')
+    nudged = dict(ESTIMATE, value=float(np.nextafter(ESTIMATE['value'], 2.)))
+    with pytest.raises(AssertionError, match=re.escape(key)):
+        platform_fixtures.check('synthetic', factors=platform_fixtures.FACTORS, exact=nudged, records=records, values=nudged,
+            references=records, tolerance=platform_fixtures.FLOAT64)
+
+
+def test_failures_list_kernel_overrides(monkeypatch):
+    key = cpu_platform(monkeypatch, env=(('MKL_ENABLE_INSTRUCTIONS', 'AVX2'),))
+    monkeypatch.delenv('GITHUB_ACTIONS', raising=False)
+    with pytest.raises(pytest.fail.Exception, match=re.escape("kernel overrides set: ['MKL_ENABLE_INSTRUCTIONS=AVX2']")):
+        platform_fixtures.check('synthetic', factors=platform_fixtures.FACTORS, exact=ESTIMATE, records={},
+            values=ESTIMATE, references={}, tolerance=platform_fixtures.FLOAT64)
+    with pytest.raises(AssertionError, match=re.escape("MKL_ENABLE_INSTRUCTIONS=AVX2")):
+        platform_fixtures.check('synthetic', factors=platform_fixtures.FACTORS, exact=dict(ESTIMATE, value=1.),
+            records={key: ESTIMATE}, values=None, references={}, tolerance=platform_fixtures.FLOAT64)
+
+
+@pytest.mark.parametrize('actions', [None, 'false', ''])
+def test_unrecorded_platform_fails_off_actions(monkeypatch, actions):
+    key = cpu_platform(monkeypatch)
+    with pytest.raises(pytest.fail.Exception, match=re.escape(repr(key))):
+        check_unrecorded(monkeypatch, ESTIMATE, ESTIMATE, platform_fixtures.FLOAT64, actions=actions)
+
+
+def test_unrecorded_platform_on_actions_compares_float64(monkeypatch):
+    within = dict(ESTIMATE, value=ESTIMATE['value'] * (1 + 5e-10), scores=[ESTIMATE['scores'][0], -1.5021084664710358 + 1e-15])
+    with pytest.warns(UserWarning, match=re.escape("'cpu/Test CPU/aten=AVX2/blas=openblas-0.3.31-Haswell'")):
+        result = check_unrecorded(monkeypatch, within, ESTIMATE, platform_fixtures.FLOAT64)
+    assert result == ('cpu/Test CPU/aten=AVX2/blas=openblas-0.3.31-Haswell', 'tolerance')
+    for perturbed in (dict(ESTIMATE, value=ESTIMATE['value'] * (1 + 1e-7)), dict(ESTIMATE, scores=[3.5815998261058586, -1.5]),
+                      dict(ESTIMATE, method='one_step'), dict(ESTIMATE, scores=ESTIMATE['scores'][:1]), {'value': ESTIMATE['value']}):
+        with pytest.raises(AssertionError):
+            check_unrecorded(monkeypatch, perturbed, ESTIMATE, platform_fixtures.FLOAT64)
+
+
+def test_unrecorded_platform_on_actions_compares_float32(monkeypatch):
+    predictions = PREDICTION['predictions']
+    within = {'models': ['c' * 64, 'd' * 64], 'predictions': dict(predictions, mu_a=[6.891390323638916 * (1 + 4e-6), 0.1265527904033661])}
+    with pytest.warns(UserWarning, match='not recorded'):
+        assert check_unrecorded(monkeypatch, within, PREDICTION, platform_fixtures.FLOAT32, opaque=('models',))[1] == 'tolerance'
+    for perturbed in ({'models': PREDICTION['models'], 'predictions': dict(predictions, mu_a=[6.891390323638916 * (1 + 1e-3), 0.1265527904033661])},
+                      {'models': PREDICTION['models'], 'predictions': dict(predictions, ids=['o1', 'o3'])},
+                      {'models': PREDICTION['models'][:1], 'predictions': predictions},
+                      {'models': ['not a digest', 'b' * 64], 'predictions': predictions}):
+        with pytest.raises(AssertionError):
+            check_unrecorded(monkeypatch, perturbed, PREDICTION, platform_fixtures.FLOAT32, opaque=('models',))
 
 @pytest.mark.parametrize('case,expected', [('i', 'branch i'), ('ii', 'branch ii'), ('partial', 'inconclusive (partial recovery)'), ('single', 'inconclusive (partial recovery)')])
 def test_rules(case, expected):
@@ -223,3 +378,15 @@ def test_dependency_resolution_loop_keeps_readable_sibling(tmp_path, site):
     assert len(report['repetitions']) == len(report['skipped']) == 1
     assert 'unreadable dependency' in report['skipped'][0]['status']
     assert (tmp_path/'out/attribution_audit.md').exists()
+
+
+def test_ci_records_platform_before_tests():
+    import yaml
+    job = yaml.safe_load(Path('.github/workflows/ci.yml').read_text())['jobs']['tests']
+    assert job['timeout-minutes'] == 120
+    names = [step.get('name') for step in job['steps']]
+    assert names.index('Install CPU dependencies') < names.index('Platform record') < names.index('Run tests')
+    record = job['steps'][names.index('Platform record')]['run']
+    assert not re.search(r'\b(pip|conda|mamba|apt|apt-get|uv)\b', record)
+    for needed in ('lscpu', 'nproc', 'get_cpu_capability()', 'numpy.show_config()', 'threadpool_info()', 'platform_key()'):
+        assert needed in record

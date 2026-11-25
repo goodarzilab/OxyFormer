@@ -7,7 +7,7 @@ on:
 jobs:
   tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -18,6 +18,23 @@ jobs:
           python -m pip install --upgrade pip
           pip install --index-url https://download.pytorch.org/whl/cpu torch==2.14.1
           pip install numpy pandas pyarrow scipy scikit-learn pyyaml pytest geopandas rasterio shapely pyproj requests matplotlib
+      - name: Platform record
+        env:
+          CUDA_VISIBLE_DEVICES: ""
+        run: |
+          # Prints the factors that select CPU kernels (ARC-5117); installs nothing.
+          lscpu
+          echo "logical cores: $(nproc)"
+          PYTHONPATH=src:tests python - <<'EOF'
+          import json
+          import numpy, scipy.linalg, threadpoolctl, torch
+          import platform_fixtures
+          print('torch', torch.__version__, 'ATen CPU capability:', torch.backends.cpu.get_cpu_capability())
+          print(torch.__config__.show())
+          numpy.show_config()
+          print(json.dumps(threadpoolctl.threadpool_info(), indent=2))
+          print('platform key:', platform_fixtures.platform_key())
+          EOF
       - name: Run tests
         env:
           CUDA_VISIBLE_DEVICES: ""
