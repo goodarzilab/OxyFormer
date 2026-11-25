@@ -2,7 +2,7 @@
 
 A CUDA build of torch always selects the 'cuda' record, whose values the
 cluster verifier enforces exactly. A CPU build selects a key built from the
-factors measured to change these results (ARC-5117): the OpenBLAS kernel (core
+factors measured to change a fixture (ARC-5117): the OpenBLAS kernel (core
 type) and version NumPy and SciPy load, the ATen CPU capability, and the MKL
 and oneDNN kernels torch dispatches to. MKL and oneDNN choose by CPU and
 report no choice, so the key carries the CPU model and any variable that
@@ -22,8 +22,8 @@ import torch
 
 # |observed - recorded| <= abs_tol + rel_tol * |recorded|
 FLOAT64 = dict(rel_tol=1e-9, abs_tol=1e-12)
-# float32 model outputs (one float32 ulp is 2**-23 ~ 1.2e-7 relative). Across the
-# five recorded CPU platforms and an unrecorded SSE emulation the predictions differ
+# float32 model outputs (one float32 ulp is 2**-23 ~ 1.2e-7 relative). Across five
+# recorded ci-cpu platform settings and an unrecorded SSE emulation the predictions differ
 # by at most 4.3e-6 relative (about 36 ulp) and 1.6e-6 absolute. Hosted CPUs that
 # cannot be reproduced on the cluster (for example MKL's paths on AMD) may spread
 # further, so the bound is about 24 times the measured spread. A change in training
@@ -55,16 +55,36 @@ def cpu_model():
     return platform.processor() or 'unknown'
 
 
-def platform_key():
+FACTORS = ('cpu_model', 'aten', 'blas', 'dispatch')
+# Each fixture keys on the factors measured to change it (ARC-5117). The float64
+# estimators change with the OpenBLAS kernel and version, not with MKL or oneDNN
+# dispatch; the model changes with ATen, MKL and oneDNN dispatch, not with the
+# OpenBLAS kernel. The ATen capability and CPU model are kept in both.
+ESTIMATES = ('cpu_model', 'aten', 'blas')
+MODEL = ('cpu_model', 'aten', 'dispatch')
+
+
+def platform_key(factors=FACTORS):
+    """'cuda' for a CUDA build, else 'cpu/<model>/aten=..[/blas=..][/env=..]' over ``factors``."""
     if torch.version.cuda:
         return 'cuda'
-    key = f"cpu/{cpu_model()}/aten={torch.backends.cpu.get_cpu_capability()}/blas={','.join(blas_cores())}"
+    unknown = set(factors) - set(FACTORS)
+    assert not unknown, f'unknown platform factors {sorted(unknown)}'
+    parts = ['cpu']
+    if 'cpu_model' in factors:
+        parts.append(cpu_model())
+    if 'aten' in factors:
+        parts.append(f'aten={torch.backends.cpu.get_cpu_capability()}')
+    if 'blas' in factors:
+        parts.append(f"blas={','.join(blas_cores())}")
     overrides = [f'{name}={os.environ[name]}' for name in DISPATCH_VARIABLES if os.environ.get(name)]
-    return key + (f"/env={','.join(overrides)}" if overrides else '')
+    if 'dispatch' in factors and overrides:
+        parts.append(f"env={','.join(overrides)}")
+    return '/'.join(parts)
 
 
 def assert_close(observed, reference, *, rel_tol, abs_tol, opaque=(), where='value'):
-    """Compare floats within abs_tol + rel_tol * |reference|; everything else exactly.
+    """Compare recorded floats within abs_tol + rel_tol * |reference|; everything else exactly.
 
     Keys named in ``opaque`` hold digests of floating-point state, which no
     tolerance applies to: they are compared by count and digest form only.
@@ -84,8 +104,9 @@ def assert_close(observed, reference, *, rel_tol, abs_tol, opaque=(), where='val
             f'{where}: length {len(observed) if isinstance(observed, (list, tuple)) else observed!r} != {len(reference)}'
         for i, (a, b) in enumerate(zip(observed, reference)):
             assert_close(a, b, rel_tol=rel_tol, abs_tol=abs_tol, opaque=opaque, where=f'{where}[{i}]')
-    elif isinstance(reference, float) or isinstance(observed, float):
-        assert all(type(x) in (int, float) for x in (observed, reference)), f'{where}: {observed!r} != {reference!r}'
+    elif type(reference) is float:
+        # Only recorded floats get a tolerance; identifiers and counts stay exact.
+        assert type(observed) is float, f'{where}: {observed!r} is not a float like {reference!r}'
         assert math.isfinite(observed) and math.isfinite(reference), f'{where}: {observed!r} vs {reference!r}'
         assert math.fabs(observed - reference) <= abs_tol + rel_tol * math.fabs(reference), \
             f'{where}: {observed!r} differs from {reference!r} beyond rel_tol={rel_tol}, abs_tol={abs_tol}'
@@ -93,14 +114,14 @@ def assert_close(observed, reference, *, rel_tol, abs_tol, opaque=(), where='val
         assert type(observed) is type(reference) and observed == reference, f'{where}: {observed!r} != {reference!r}'
 
 
-def check(label, *, exact, records, values, references, tolerance, opaque=()):
-    """Exact against records[platform_key()], else the hosted tolerance path.
+def check(label, *, factors, exact, records, values, references, tolerance, opaque=()):
+    """Exact against records[platform_key(factors)], else the hosted tolerance path.
 
     ``records`` maps platform keys to the expected form of ``exact``;
     ``references`` maps recorded CPU keys to the expected form of ``values``.
     Returns the platform key and the path taken ('exact' or 'tolerance').
     """
-    key = platform_key()
+    key = platform_key(factors)
     if key in records:
         assert exact == records[key], f'{label}: differs from the recorded fixture for platform {key!r}'
         return key, 'exact'

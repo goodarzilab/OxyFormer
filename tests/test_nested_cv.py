@@ -680,7 +680,7 @@ def test_default_science_matches_launch_base(tmp_path, monkeypatch):
     observed = default_science(tmp_path / 'work', monkeypatch)
     cpu = json.loads(Path('tests/fixtures/q_refit/baseline_cpu.json').read_text())['platforms']
     records = dict(cpu, cuda=json.loads(Path('tests/fixtures/q_refit/baseline_cuda.json').read_text()))
-    platform_fixtures.check('q_refit baseline', exact=observed, records=records, values=observed,
+    platform_fixtures.check('q_refit baseline', factors=platform_fixtures.MODEL, exact=observed, records=records, values=observed,
         references=cpu, tolerance=platform_fixtures.FLOAT32, opaque=('models', 'ssl'))
 
 

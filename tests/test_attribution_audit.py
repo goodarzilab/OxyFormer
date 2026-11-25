@@ -35,7 +35,7 @@ def pinned_fixture():
 
 def test_pinned_json():
     observed, fixture = pinned_estimates(), pinned_fixture()
-    platform_fixtures.check('oracle estimates',
+    platform_fixtures.check('oracle estimates', factors=platform_fixtures.ESTIMATES,
         exact={k: sha256(v.encode()).hexdigest() for k, v in observed.items()}, records=fixture['digests'],
         values={k: json.loads(v) for k, v in observed.items()}, references=fixture['cpu_values'],
         tolerance=platform_fixtures.FLOAT64)
@@ -48,7 +48,8 @@ def test_pinned_cpu_values_bind_digests():
         assert {k: sha256(canonical_json(v).encode()).hexdigest() for k, v in values.items()} == fixture['digests'][key]
 
 
-def cpu_platform(monkeypatch, *, aten='AVX2', blas=('openblas-0.3.31-Haswell',), model='Test CPU', env=()):
+def cpu_platform(monkeypatch, *, aten='AVX2', blas=('openblas-0.3.31-Haswell',), model='Test CPU', env=(),
+                 factors=platform_fixtures.FACTORS):
     monkeypatch.setattr(torch.version, 'cuda', None)
     monkeypatch.setattr(torch.backends.cpu, 'get_cpu_capability', lambda: aten)
     monkeypatch.setattr(platform_fixtures, 'blas_cores', lambda: sorted(blas))
@@ -57,7 +58,7 @@ def cpu_platform(monkeypatch, *, aten='AVX2', blas=('openblas-0.3.31-Haswell',),
         monkeypatch.delenv(name, raising=False)
     for name, value in env:
         monkeypatch.setenv(name, value)
-    return platform_fixtures.platform_key()
+    return platform_fixtures.platform_key(factors)
 
 
 def test_platform_key_cuda_build(monkeypatch):
@@ -77,6 +78,29 @@ def test_platform_key_cpu_factors(monkeypatch):
     assert variants[4] == base + '/env=MKL_ENABLE_INSTRUCTIONS=AVX2'
 
 
+def test_platform_key_uses_only_the_fixture_factors(monkeypatch):
+    estimates, model = platform_fixtures.ESTIMATES, platform_fixtures.MODEL
+    base = cpu_platform(monkeypatch, factors=estimates)
+    # MKL/oneDNN dispatch does not change the float64 estimators; OpenBLAS does not change the model.
+    assert cpu_platform(monkeypatch, factors=estimates, env=(('MKL_ENABLE_INSTRUCTIONS', 'AVX2'),)) == base
+    assert cpu_platform(monkeypatch, factors=estimates, blas=('openblas-0.3.31-SkylakeX',)) != base
+    assert cpu_platform(monkeypatch, factors=estimates, aten='AVX512') != base
+    base = cpu_platform(monkeypatch, factors=model)
+    assert cpu_platform(monkeypatch, factors=model, blas=('openblas-0.3.31-SkylakeX',)) == base
+    assert cpu_platform(monkeypatch, factors=model, env=(('ONEDNN_MAX_CPU_ISA', 'AVX2'),)) != base
+    assert cpu_platform(monkeypatch, factors=model, aten='AVX512') != base
+    assert cpu_platform(monkeypatch, factors=model, model='Other CPU') != base
+
+
+def test_tolerance_path_keeps_non_floats_exact(monkeypatch):
+    reference = {'seed_ids': [1103, 2207], 'mu_a': [6.891390323638916]}
+    for observed in ({'seed_ids': [1103.1, 2207], 'mu_a': [6.891390323638916]},
+                     {'seed_ids': [1103.0, 2207], 'mu_a': [6.891390323638916]},
+                     {'seed_ids': [1103, 2207], 'mu_a': [7]}):
+        with pytest.raises(AssertionError):
+            check_unrecorded(monkeypatch, observed, reference, platform_fixtures.FLOAT32)
+
+
 ESTIMATE = {'value': 1.1186392783393115, 'scores': [3.5815998261058586, -1.5021084664710358], 'method': 'cv_tmle'}
 PREDICTION = {'models': ['a' * 64, 'b' * 64], 'predictions': {'ids': ['o1', 'o2'], 'mu_a': [6.891390323638916, 0.1265527904033661]}}
 
@@ -87,7 +111,7 @@ def check_unrecorded(monkeypatch, values, reference, tolerance, opaque=(), actio
         monkeypatch.delenv('GITHUB_ACTIONS', raising=False)
     else:
         monkeypatch.setenv('GITHUB_ACTIONS', actions)
-    return platform_fixtures.check('synthetic', exact=values, records={'cuda': None, 'cpu/recorded': reference},
+    return platform_fixtures.check('synthetic', factors=platform_fixtures.FACTORS, exact=values, records={'cuda': None, 'cpu/recorded': reference},
         values=values, references={'cpu/recorded': reference}, tolerance=tolerance, opaque=opaque)
 
 
@@ -95,11 +119,11 @@ def test_recorded_platform_is_exact(monkeypatch):
     key = cpu_platform(monkeypatch)
     monkeypatch.setenv('GITHUB_ACTIONS', 'true')
     records = {key: ESTIMATE}
-    assert platform_fixtures.check('synthetic', exact=dict(ESTIMATE), records=records, values=None,
+    assert platform_fixtures.check('synthetic', factors=platform_fixtures.FACTORS, exact=dict(ESTIMATE), records=records, values=None,
         references={}, tolerance=platform_fixtures.FLOAT64) == (key, 'exact')
     nudged = dict(ESTIMATE, value=float(np.nextafter(ESTIMATE['value'], 2.)))
     with pytest.raises(AssertionError, match=re.escape(key)):
-        platform_fixtures.check('synthetic', exact=nudged, records=records, values=nudged,
+        platform_fixtures.check('synthetic', factors=platform_fixtures.FACTORS, exact=nudged, records=records, values=nudged,
             references=records, tolerance=platform_fixtures.FLOAT64)
 
 

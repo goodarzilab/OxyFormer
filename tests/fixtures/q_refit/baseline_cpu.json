@@ -1,6 +1,6 @@
 {
   "platforms": {
-    "cpu/Intel(R) Xeon(R) Platinum 8480C/aten=AVX512/blas=openblas-0.3.30-SkylakeX,openblas-0.3.31.188.0-SkylakeX": {
+    "cpu/Intel(R) Xeon(R) Platinum 8480C/aten=AVX512": {
       "models": [
         "a2caa91d6aafec6d0915d4190dfe29e004849f8d3a16c21a053ad96deee8e221",
         "66b9fd673fd6cefa9cacb135c842f84255b13b6606b53cafb3c2cf6ee0232a14",
@@ -102,7 +102,7 @@
         ]
       }
     },
-    "cpu/Intel(R) Xeon(R) Platinum 8480C/aten=AVX2/blas=openblas-0.3.30-SkylakeX,openblas-0.3.31.188.0-SkylakeX": {
+    "cpu/Intel(R) Xeon(R) Platinum 8480C/aten=AVX2": {
       "models": [
         "f8d41cb62c2036aed47d487827470f50c8922eeda808f04371552f1ea280dd79",
         "9db2cd2e8efb270ed5d5275b50e923fe28b27cb9bfd5ec6421cf94e708337716",
@@ -204,211 +204,7 @@
         ]
       }
     },
-    "cpu/Intel(R) Xeon(R) Platinum 8480C/aten=AVX512/blas=openblas-0.3.30-Haswell,openblas-0.3.31.188.0-Haswell": {
-      "models": [
-        "a2caa91d6aafec6d0915d4190dfe29e004849f8d3a16c21a053ad96deee8e221",
-        "66b9fd673fd6cefa9cacb135c842f84255b13b6606b53cafb3c2cf6ee0232a14",
-        "f3c9cf9884cb3f316c7eac18379d82af20fe7b01f8d1346962158b288c3bd01a",
-        "aa953fee2547bb9a1a8ef4d41fe1e35c511b9555b334ba05e899050000cb918d",
-        "a6f2fee7782308bfa0fccb9a218a5fd742f85990d1fb94e71f242be081d04f99",
-        "78232e067c8f12f060e867f42fb2aa39c22dfe4013374636ca118172f4805124",
-        "e90846082079b3ddc918f8638d753bb3ba04e1be9bfddb9ea613aaf01b9b95fa",
-        "5b89b836c7c8ec42e39955db5bb3d315d25814322d0069c525e71a6fbc89ee7f",
-        "6b6de2c1d15fbb7001f8df2261e9e1e07d19ac98b650428bdc2fe7911772b17e",
-        "662a64a31c92c7e38ecf4ea5818122596208d4a833b5bafb33762272f1f76d5c",
-        "c3449e563f9413b4cb981a424d3eb6079b51429362da03a7f239aa70c6977486",
-        "1fcb3c7413b86a03cf0658c4fda5ddb3b2a671640980a751dd0dfedd16162e60",
-        "07e12646b14da1a2dd84dce732b3ad4eb2eb571eedc4ab5eb1a475e0cbcb25d1",
-        "e2788c833812c15dde9d8326eb8dc713e4f4d9599ec38fb09900f30258eb54c3",
-        "7be84780c3cc5a3dcdde93ce37a16e4cec3fedf9b381cb7dd4759fcc1e9b0bff",
-        "28718f7add2c153b007142a0f82b0841868b57a850e82c76a9efee23ce9a04d0",
-        "bbf88d0c21afe11932dcf228d1b336e07c766b3908ee9db820d1c8933b5e020b",
-        "120735729af6818636f4ead1fd0977aa290881a67af034b9fa1b3703f2979df6",
-        "c52096c02318344ec88af7d4c130be73e5510ee9337a707b3f22a52ad4f23506",
-        "91772fb21261b0d00fd1c64e0815d14e3c3991f5ebc018f950889831d2f31c38",
-        "751c529d49e398046e25e8e66710635c2e6907fb92bf8ba75ab9727f971c44bc",
-        "ece199fb309404d40a0a6a4174bbed20333c7731585559efb8099122152504b8",
-        "13dcb3fabaf6926df0db0be622451f49a12088018a33f3dcbbccb9179657c1f4",
-        "2ba296f5f3ef820b3e0e2745758717d0d150a0f157dcdece1273ae22e7c4b9c1",
-        "af14a08fad94635b3e283e2d68757baeb88137dc002e43478de87efa95603c4f",
-        "4ca20a8b15c8c97ce4afc0f79b74c56dd9466af13f291c5ceaa3ccf86d0689c7"
-      ],
-      "ssl": [
-        "67b6b371777a1bf2ff4e1259ce2a6c835bdecd68af24ff52e9e102ec45f00329",
-        "690491ecc1cefb36415aaf3262526dacdb790c3fbda65d04abd97dd9e28e01f7",
-        "c4315dff89f689a97c159926d97e3ce3c2a55c83d738ff5512ed444a6e3ba30b",
-        "d16bc61fb8081ba26a6560e08f8910f7ea6a5a66bda7a5482f925d7869ab216c"
-      ],
-      "predictions": {
-        "original_ids": [
-          "o00",
-          "o01",
-          "o02",
-          "o03",
-          "o04",
-          "o05"
-        ],
-        "fold_ids": [
-          0,
-          0,
-          0,
-          0,
-          0,
-          0
-        ],
-        "seed_ids": [
-          1103,
-          1103,
-          1103,
-          1103,
-          1103,
-          1103
-        ],
-        "mu_a": [
-          6.891390323638916,
-          6.88861083984375,
-          6.885503768920898,
-          6.8621039390563965,
-          6.8470869064331055,
-          6.842505931854248
-        ],
-        "mu_d": [
-          6.904700756072998,
-          6.901733875274658,
-          6.90420389175415,
-          6.880516052246094,
-          6.871392726898193,
-          6.867079734802246
-        ],
-        "r_a": [
-          0.1265527904033661,
-          0.14034563302993774,
-          0.17802102863788605,
-          0.17953622341156006,
-          0.23097680509090424,
-          0.26392266154289246
-        ],
-        "r_d": [
-          0.16921207308769226,
-          0.18809115886688232,
-          0.26731014251708984,
-          0.27805450558662415,
-          0.4647795855998993,
-          0.5693724155426025
-        ],
-        "origin_weights": [
-          1.0,
-          2.0,
-          3.0,
-          4.0,
-          1.0,
-          2.0
-        ]
-      }
-    },
-    "cpu/Intel(R) Xeon(R) Platinum 8480C/aten=AVX2/blas=openblas-0.3.30-Haswell,openblas-0.3.31.188.0-Haswell": {
-      "models": [
-        "f8d41cb62c2036aed47d487827470f50c8922eeda808f04371552f1ea280dd79",
-        "9db2cd2e8efb270ed5d5275b50e923fe28b27cb9bfd5ec6421cf94e708337716",
-        "0a0230cdbf5edaf641c76aa3c60b23382240fde6cd92c631abdc1181d2842c10",
-        "d3c6de7273951a80c68d1bd1c249843e09974b064d13a7b2ab64ea240ce1beea",
-        "61e0f01d950aa2573ddda4c8f3503768254d264bce890559e0afbca14bb4b7a7",
-        "472bca8ccec2cff21b82040f5984e143d3062b38e2a9a381dbb88105228d7bfc",
-        "f4a7e43eb82c7400765fa9ab514e0c47b5ccd7daddb3f256c3f442209a7a67ba",
-        "fce92d63b6ccd284235487c0297f4d8165104eaa385984e23fce0b82848fa3be",
-        "827cde391fa39faa592c8bcec3757b5605ddfdb8bf9e31ce60362cdf7b087eeb",
-        "99e92a87f261338d4299cc23c06c8550dc5d73537b32d1e1582ed7728dc7a3d0",
-        "d092377ba9a8b4f84f1d566ad9c08f8ceaa072105b45051eacedc4c4f3366fa4",
-        "16937546fe9516c55a0ac18f084b2f8b07c555cec5a956d690a41dbb97d22f90",
-        "52812073a464d74d82945939b663e510a1ef3a153e2de59f0d924e45e6ac293a",
-        "2b69c0b5981a5872072514423ac770a02329e769e20532c2095327762bb304e4",
-        "61222943cdd4d172f19b3765fe6ed051afac6fdaa423a54c4adaae1e80c31555",
-        "8626742a708029f6a184cee2c9c702944d9a0af18f7fbb2c7980d9c6d1c109f9",
-        "03ed57200b341883df3da6d79eb2e40e5ecbba7c7d387222d61d534717ad8497",
-        "4e220b9553170800177ef953cef2d2c49eb829ea5d2134f81aa1cf37524f9cf8",
-        "ecc78d890967c73d844e6b6f2abe906f4e9accac5fbd580f15a715db0277488f",
-        "2a66a5630dd35975c1b5cff869f408a0df2a570d699e73393aa6fac1e8c1f3f1",
-        "d3cd3e94ffee32baeb704fa4ec7596dbf1391d706d8a4b9b37dfc375f6ba57cd",
-        "5a3325756e1e2b4e202e27504a9fa86c77817fe3575e7f1e6023e11c738ac3a1",
-        "4f2b9da1c23391932d39e91b3c70883c1206467144361d0a1fc71515fa415a30",
-        "419058e8e35a4f02436f9501e04fc7d5f90ece991568f4b36de382375034faaa",
-        "af14a08fad94635b3e283e2d68757baeb88137dc002e43478de87efa95603c4f",
-        "4ca20a8b15c8c97ce4afc0f79b74c56dd9466af13f291c5ceaa3ccf86d0689c7"
-      ],
-      "ssl": [
-        "67b6b371777a1bf2ff4e1259ce2a6c835bdecd68af24ff52e9e102ec45f00329",
-        "690491ecc1cefb36415aaf3262526dacdb790c3fbda65d04abd97dd9e28e01f7",
-        "c4315dff89f689a97c159926d97e3ce3c2a55c83d738ff5512ed444a6e3ba30b",
-        "d16bc61fb8081ba26a6560e08f8910f7ea6a5a66bda7a5482f925d7869ab216c"
-      ],
-      "predictions": {
-        "original_ids": [
-          "o00",
-          "o01",
-          "o02",
-          "o03",
-          "o04",
-          "o05"
-        ],
-        "fold_ids": [
-          0,
-          0,
-          0,
-          0,
-          0,
-          0
-        ],
-        "seed_ids": [
-          1103,
-          1103,
-          1103,
-          1103,
-          1103,
-          1103
-        ],
-        "mu_a": [
-          6.891390323638916,
-          6.88861083984375,
-          6.885503768920898,
-          6.8621039390563965,
-          6.8470869064331055,
-          6.842505931854248
-        ],
-        "mu_d": [
-          6.904700756072998,
-          6.901733875274658,
-          6.90420389175415,
-          6.880516052246094,
-          6.871392726898193,
-          6.867079734802246
-        ],
-        "r_a": [
-          0.1265529990196228,
-          0.14034582674503326,
-          0.17802129685878754,
-          0.17953641712665558,
-          0.2309768795967102,
-          0.26392295956611633
-        ],
-        "r_d": [
-          0.16921226680278778,
-          0.18809151649475098,
-          0.2673104405403137,
-          0.2780546545982361,
-          0.4647800326347351,
-          0.5693730711936951
-        ],
-        "origin_weights": [
-          1.0,
-          2.0,
-          3.0,
-          4.0,
-          1.0,
-          2.0
-        ]
-      }
-    },
-    "cpu/Intel(R) Xeon(R) Platinum 8480C/aten=AVX2/blas=openblas-0.3.30-Haswell,openblas-0.3.31.188.0-Haswell/env=MKL_ENABLE_INSTRUCTIONS=AVX2,ONEDNN_MAX_CPU_ISA=AVX2": {
+    "cpu/Intel(R) Xeon(R) Platinum 8480C/aten=AVX2/env=MKL_ENABLE_INSTRUCTIONS=AVX2,ONEDNN_MAX_CPU_ISA=AVX2": {
       "models": [
         "40f5447839d00c4799b2481d860f630bce4f26cf2a9967069bd30fbfb14bcd6d",
         "6ea192c6e84c6394506e77611507259c283729e411ff7e267991b11942b2e56e",
