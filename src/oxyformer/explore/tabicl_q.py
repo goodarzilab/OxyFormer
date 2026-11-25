@@ -291,14 +291,22 @@ def advance(record, endpoint, recipe, directory, *, settings, checkpoint, slice_
         times['checkpoint'] += verified - started
         times['context'] += built - verified
         slice_index, reason = len(record['slices']), 'complete'
-        # A pending stop request skips conditioning; it may outlast the grace period.
-        if request.requested:
-            reason, plan_left = 'signal', []
+        # A pending stop request or a spent slice skips conditioning, which
+        # could otherwise outlast the grace period or the allocation.
+        if request.requested or out_of_time(built, deadline, 0., margin):
+            reason, plan_left = ('signal' if request.requested else 'deadline'), []
         else:
             estimator = fit_estimator(backend, path, context, device)
             fitted = clock()
             times['fit'] += fitted - built
             plan_left = range(len(batches), len(plan))
+        # Journal this slice's timings before any batch, so a killed slice keeps them.
+        event = dict(wall_seconds=fitted - started, complete=False, stop_reason='running',
+            checkpoint_seconds=verified - started, context_seconds=built - verified, fit_seconds=fitted - built,
+            batches_done=len(batches), batches_total=len(plan), context_rows=context.record['selected'],
+            device=str(device))
+        record['slices'].append(event)
+        save()
         # Only this slice's batches predict the next one, so one past outlier
         # cannot stop every later slice before its first batch.
         longest = 0.
@@ -322,10 +330,6 @@ def advance(record, endpoint, recipe, directory, *, settings, checkpoint, slice_
         record['parts'] = [dict(fold=record['fold'], seed=SEED, original_ids=list(context.targets),
             mu_a=[v for b in batches for v in b['mu_a']], mu_d=[v for b in batches for v in b['mu_d']])]
         record['status'] = 'complete'
-    event = dict(wall_seconds=clock() - started, complete=complete, stop_reason=reason,
-        checkpoint_seconds=verified - started, context_seconds=built - verified, fit_seconds=fitted - built,
-        batches_done=len(batches), batches_total=len(plan), context_rows=context.record['selected'],
-        device=str(device))
-    record['slices'].append(event)
+    event.update(wall_seconds=clock() - started, complete=complete, stop_reason=reason, batches_done=len(batches))
     save()
     return event
