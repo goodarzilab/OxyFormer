@@ -130,8 +130,7 @@ def fit(out, fold, variant, study, slice_seconds, run_logging, *, device='cuda:0
     require(run_logging in ('wandb', 'none'), 'explicit run logging mode required')
     tabicl = variant in tabicl_q.VARIANTS
     if tabicl:
-        settings = tabicl_q.candidate_settings(checkpoint, tabicl_q.MAX_CONTEXT_ROWS
-                                               if context_rows is None else context_rows)
+        settings = tabicl_q.candidate_settings(tabicl_q.MAX_CONTEXT_ROWS if context_rows is None else context_rows)
     else:
         require(checkpoint is None and context_rows is None, '--checkpoint and --context-rows apply only to A6-Q')
     endpoint, recipe, binding = load_bound(out)
@@ -147,20 +146,31 @@ def fit(out, fold, variant, study, slice_seconds, run_logging, *, device='cuda:0
         run_logging=run_logging)
     if tabicl:
         identity['tabicl'] = settings
+
+    def matches(saved):
+        # Rereading a complete A6-Q fold may omit --context-rows; an explicit value must match.
+        if tabicl and context_rows is None and isinstance(saved, dict) and isinstance(saved.get('tabicl'), dict):
+            return saved == dict(identity, tabicl=dict(settings, context_rows=saved['tabicl'].get('context_rows')))
+        return saved == identity
     # Serialize admissions and collect against all folds of this candidate.
     with state_lock(root):
         candidate = root / 'candidate.json'
-        if candidate.exists():
-            require(json.loads(candidate.read_text()) == identity, 'candidate identity differs')
-        else:
-            atomic_record(candidate, identity)
+        saved = json.loads(candidate.read_text()) if candidate.exists() else None
+        require(saved is None or matches(saved), 'candidate identity differs')
         directory = root / f'fold-{fold}'
         path = directory / 'progress.json'
         record = json.loads(path.read_text()) if path.exists() else dict(identity=identity,
             fold=fold, seed=1103, status='incomplete', predecessor=None, parts=[], slices=[])
-        require(record['identity'] == identity and record['fold'] == fold, 'journal identity differs')
+        require(matches(record['identity']) and record['fold'] == fold, 'journal identity differs')
+        # A complete fold returns its journal without loading weights or predicting.
         if record['status'] == 'complete':
             return record
+        require(saved is None or saved == identity, 'candidate identity differs')
+        require(record['identity'] == identity, 'journal identity differs')
+        if tabicl:
+            tabicl_q.check_checkpoint(checkpoint)
+        if saved is None:
+            atomic_record(candidate, identity)
         logger = logger_for(run_logging, dict(identity, fold=fold, exploratory=True), directory)
         try:
             atomic_record(path, record)

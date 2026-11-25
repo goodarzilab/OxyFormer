@@ -211,6 +211,28 @@ def test_selection_ignores_outcomes_treatments_and_covariates(tmp_path):
     assert context(p, tmp_path / 'f0', 0, 10).ids != context(p, tmp_path / 'f1', 1, 10).ids
 
 
+def with_weight(p, oid, value):
+    names = [c.name for c in p.data.manifest.schema]
+    rows = tuple(tuple(value if j == names.index('w') and row[names.index('id')] == oid else v
+                       for j, v in enumerate(row)) for row in p.data.rows)
+    return replace(p, data=replace(p.data, rows=rows))
+
+
+def test_unsampled_non_unit_weight_refuses(tmp_path, weights, monkeypatch):
+    backend = use(monkeypatch, Backend())
+    p = five_fold(tmp_path / 'e')
+    training = p.outer.training_ids(0)
+    chosen = adapter.select_context(training, 0, 10)
+    dropped = next(oid for oid in training if oid not in chosen)
+    assert context(p, tmp_path / 'unit', 0, 10).ids == chosen
+    heavy = with_weight(p, dropped, 2.)
+    with pytest.raises(ContractError, match='sample weights'):
+        context(heavy, tmp_path / 'heavy', 0, 10)
+    with pytest.raises(ContractError, match='sample weights'):
+        fit(bound(tmp_path / 'q', heavy), 0, weights, 10)
+    assert backend.log['fits'] == 0 and backend.log['rows'] == 0
+
+
 def test_column_limit(tmp_path, monkeypatch):
     p = five_fold(tmp_path / 'e')
     wide = replace(p, feature_kinds=tuple((f'x{i}', 'numeric') for i in range(500)))
@@ -352,6 +374,59 @@ def test_backend_gets_private_verified_copy_and_never_trains(tmp_path, weights, 
     assert str(weights.parent) not in (out / 'fold-0' / 'progress.json').read_text()
 
 
+def test_complete_fold_rerun_needs_no_checkpoint(tmp_path, weights, monkeypatch):
+    backend = use(monkeypatch, Backend())
+    out = bound(tmp_path / 'q', five_fold(tmp_path / 'e'))
+    done = fit(out, 0, weights, 10)
+    assert done['status'] == 'complete'
+    path = out / 'fold-0' / 'progress.json'
+    def counts():
+        return [backend.log[k] if k in ('calls', 'fits', 'rows') else len(backend.log[k]) for k in sorted(backend.log)]
+    saved, log = path.read_text(), counts()
+    assert fit(out, 0, None, 10) == done and fit(out, 0, None) == done
+    weights.unlink()
+    assert fit(out, 0, weights, 10) == done and fit(out, 0, weights) == done
+    assert path.read_text() == saved
+    assert counts() == log
+    with pytest.raises(ContractError, match='identity differs'):
+        fit(out, 0, None, 12)
+    # A fold with work left still admits only a present, named checkpoint.
+    with pytest.raises(ContractError, match='missing'):
+        fit(out, 1, weights, 10)
+    with pytest.raises(ContractError, match='A6-Q requires'):
+        fit(out, 1, None, 10)
+    weights.write_bytes(WEIGHTS + b'!')
+    with pytest.raises(ContractError, match='hash mismatch'):
+        fit(out, 1, weights, 10)
+    weights.write_bytes(WEIGHTS)
+    # Omitting --context-rows on a fold with work left keeps the default, 30,000.
+    with pytest.raises(ContractError, match='candidate identity differs'):
+        fit(out, 1, weights)
+    assert backend.log['fits'] == 1 and fit(out, 1, weights, 10)['status'] == 'complete'
+
+
+def test_incomplete_fold_still_verifies_the_checkpoint(tmp_path, weights, monkeypatch):
+    backend = use(monkeypatch, Backend())
+    monkeypatch.setattr(adapter, 'clock', lambda: backend.time)
+    monkeypatch.setattr(adapter, 'QUERY_BATCH', 2)
+    out = bound(tmp_path / 'q', five_fold(tmp_path / 'e'))
+    assert fit(out, 0, weights, 10, slice_seconds=6.)['status'] == 'incomplete'
+    path = out / 'fold-0' / 'progress.json'
+    saved, calls = json.loads(path.read_text()), backend.log['calls']
+    with pytest.raises(ContractError, match='A6-Q requires'):
+        fit(out, 0, None, 10)
+    bytes_ = weights.read_bytes()
+    weights.write_bytes(bytes_[::-1])
+    with pytest.raises(ContractError, match='hash mismatch'):
+        fit(out, 0, weights, 10)
+    weights.unlink()
+    with pytest.raises(ContractError, match='missing'):
+        fit(out, 0, weights, 10)
+    assert json.loads(path.read_text()) == saved and backend.log['calls'] == calls
+    weights.write_bytes(bytes_)
+    assert fit(out, 0, weights, 10)['status'] == 'complete'
+
+
 # T5: batch-boundary slices resume to the uninterrupted part.
 def test_resume_at_batch_boundary(tmp_path, weights, monkeypatch):
     backend = use(monkeypatch, Backend())
@@ -471,6 +546,95 @@ def test_deadline_before_conditioning_skips_the_fit(tmp_path, weights, monkeypat
     assert backend.log['fits'] == 0 and backend.log['rows'] == 0 and record['batches'] == []
     monkeypatch.setattr(adapter, 'build_context', real)
     assert fit(out, 0, weights, 10, slice_seconds=100.)['status'] == 'complete'
+
+
+@pytest.mark.parametrize('trigger', ['signal', 'deadline'])
+def test_stop_during_estimator_construction_skips_the_fit(tmp_path, weights, monkeypatch, trigger):
+    monkeypatch.setattr(adapter, 'QUERY_BATCH', 2)
+    use(monkeypatch, Backend())
+    reference = fit(bound(tmp_path / 'whole', five_fold(tmp_path / 'e0')), 0, weights, 10)['parts']
+    backend = use(monkeypatch, Backend())
+    monkeypatch.setattr(adapter, 'clock', lambda: backend.time)
+    request = CheckpointRequest()
+    monkeypatch.setattr(driver, 'CheckpointRequest', lambda: request)
+    real = backend.estimator
+
+    def construct(**kwargs):
+        estimator = real(**kwargs)
+        if trigger == 'signal':
+            request.request()
+        else:
+            backend.time += 1000.
+        return estimator
+    monkeypatch.setattr(backend, 'estimator', construct)
+    out = bound(tmp_path / 'q', five_fold(tmp_path / 'e'))
+    record = fit(out, 0, weights, 10)
+    event = record['slices'][-1]
+    assert record['status'] == 'incomplete' and record['batches'] == [] and event['stop_reason'] == trigger
+    assert len(backend.log['kwargs']) == 1 and backend.log['fits'] == 0 and backend.log['rows'] == 0
+    assert event['conditioned'] is False and event['fit_seconds'] == 0
+    assert event['estimator_seconds'] == (1000. if trigger == 'deadline' else 0.)
+    monkeypatch.setattr(driver, 'CheckpointRequest', CheckpointRequest)
+    monkeypatch.setattr(backend, 'estimator', real)
+    resumed = fit(out, 0, weights, 10)
+    assert resumed['status'] == 'complete' and resumed['parts'] == reference and backend.log['fits'] == 1
+
+
+def test_conditioning_needs_room_for_the_recorded_fit(tmp_path, weights, monkeypatch):
+    monkeypatch.setattr(adapter, 'QUERY_BATCH', 2)
+    use(monkeypatch, Backend())
+    reference = fit(bound(tmp_path / 'whole', five_fold(tmp_path / 'e0')), 0, weights, 10)['parts']
+    backend = use(monkeypatch, Backend())
+    monkeypatch.setattr(adapter, 'clock', lambda: backend.time)
+    real_fit = Estimator.fit
+
+    def slow_fit(self, X, y):
+        backend.time += 50.
+        return real_fit(self, X, y)
+    monkeypatch.setattr(Estimator, 'fit', slow_fit)
+    out = bound(tmp_path / 'q', five_fold(tmp_path / 'e'))
+    # Slice 1: a 50 s fit, then one batch before the deadline.
+    first = fit(out, 0, weights, 10, slice_seconds=56.)
+    assert first['status'] == 'incomplete' and len(first['batches']) == 1
+    assert first['slices'][0]['conditioned'] is True and first['slices'][0]['fit_seconds'] == 50.
+    assert first['slices'][0]['admission_seconds'] == 0.
+    # Slice 2: 49.5 s before the margin cannot hold the recorded 50 s fit.
+    second = fit(out, 0, weights, 10, slice_seconds=55.)
+    event = second['slices'][-1]
+    assert event['stop_reason'] == 'deadline' and event['admission_seconds'] == 50. and not event['conditioned']
+    assert backend.log['fits'] == 1 and len(backend.log['kwargs']) == 1
+    # Slice 3: room before construction, none after a 25 s construction.
+    real = backend.estimator
+
+    def slow_construction(**kwargs):
+        backend.time += 25.
+        return real(**kwargs)
+    monkeypatch.setattr(backend, 'estimator', slow_construction)
+    third = fit(out, 0, weights, 10, slice_seconds=80.)
+    event = third['slices'][-1]
+    assert event['stop_reason'] == 'deadline' and event['estimator_seconds'] == 25. and not event['conditioned']
+    assert backend.log['fits'] == 1 and len(backend.log['kwargs']) == 2
+    monkeypatch.setattr(backend, 'estimator', real)
+    last = fit(out, 0, weights, 10)
+    assert last['status'] == 'complete' and last['parts'] == reference and backend.log['fits'] == 2
+    assert [b['slice'] for b in last['batches']] == [0, 3, 3]
+
+
+@pytest.mark.parametrize('key', ['runtime', 'context'])
+def test_saved_batches_require_provenance(tmp_path, weights, monkeypatch, key):
+    backend = use(monkeypatch, Backend())
+    monkeypatch.setattr(adapter, 'clock', lambda: backend.time)
+    monkeypatch.setattr(adapter, 'QUERY_BATCH', 2)
+    out = bound(tmp_path / 'q', five_fold(tmp_path / 'e'))
+    assert len(fit(out, 0, weights, 10, slice_seconds=6.)['batches']) == 1
+    path = out / 'fold-0' / 'progress.json'
+    journal = json.loads(path.read_text())
+    del journal[key]
+    path.write_text(json.dumps(journal))
+    fits = backend.log['fits']
+    with pytest.raises(ContractError, match='provenance'):
+        fit(out, 0, weights, 10)
+    assert json.loads(path.read_text()) == journal and backend.log['fits'] == fits
 
 
 def test_slice_timings_are_journaled_before_batches(tmp_path, weights, monkeypatch):

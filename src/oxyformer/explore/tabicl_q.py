@@ -83,15 +83,19 @@ def registered_identity():
     return dict(REGRESSOR)
 
 
-def candidate_settings(checkpoint, rows):
+def candidate_settings(rows):
     """Candidate identity: checkpoint by registered fields and SHA-256, never by path."""
+    return dict(checkpoint=registered_identity(), context_rows=check_rows(rows), salt=SALT, seed=SEED,
+                query_batch=QUERY_BATCH, estimator=ESTIMATOR, numerics=NUMERICS)
+
+
+def check_checkpoint(checkpoint):
+    """Admission for a fold that still has work; advance() verifies the hash on a private copy."""
     require(checkpoint is not None, 'A6-Q requires --checkpoint PATH')
     identity = registered_identity()
     path = Path(checkpoint)
     require(path.name == identity['filename'], 'checkpoint filename differs from the registered regressor')
     require(path.is_file(), 'local checkpoint missing; automatic downloads are forbidden')
-    return dict(checkpoint=identity, context_rows=check_rows(rows), salt=SALT, seed=SEED,
-                query_batch=QUERY_BATCH, estimator=ESTIMATOR, numerics=NUMERICS)
 
 
 def verified_checkpoint(path):
@@ -156,11 +160,13 @@ def build_context(endpoint, recipe, fold, rows, directory, *, salt=SALT):
     _, candidates, targets = nested_cv._partition(config, endpoint.outer, fold)
     require(candidates == allowed == endpoint.outer.training_ids(fold), 'context candidates differ from outer training')
     require(targets == endpoint.outer.evaluation_ids(fold) and bool(targets), 'held-out targets differ')
+    # Every candidate, sampled or not, must carry a unit weight: the sample may not hide one.
+    pool = fitting._inputs(config, candidates)
+    _unit_weights(pool.origin_weights, len(candidates), 'unit')
     ids = select_context(candidates, fold, rows, salt)
     require(set(ids) <= set(candidates) and set(ids).isdisjoint(targets), 'held-out target in context')
     view = endpoint.data.covariates(names)
-    context = fitting._inputs(config, ids)
-    _unit_weights(context.origin_weights, len(ids), 'unit')
+    context = fitting._take_inputs(pool, ids)
     treatment = np.asarray(context.a_mmhg, dtype=float)
     labels = np.asarray(fitting._values(config, manifest.outcome_field, ids), dtype=float)
     require(np.isfinite(treatment).all() and np.isfinite(labels).all(), 'invalid context treatment or outcome')
@@ -225,14 +231,22 @@ def numerics(device):
         yield
 
 
-def fit_estimator(backend, checkpoint_path, context, device):
-    """In-context conditioning only; the estimator receives the private copy."""
+def build_estimator(backend, checkpoint_path, device):
+    """Construction only; the estimator receives the private copy."""
     settings = dict(ESTIMATOR, norm_methods=list(ESTIMATOR['norm_methods']))
-    estimator = backend.estimator(**settings, model_path=checkpoint_path, allow_auto_download=False,
-                                  checkpoint_version=REGRESSOR['filename'], device=str(device))
+    return backend.estimator(**settings, model_path=checkpoint_path, allow_auto_download=False,
+                             checkpoint_version=REGRESSOR['filename'], device=str(device))
+
+
+def condition(estimator, context, device):
+    """In-context conditioning only: one synchronous TabICL call, not interruptible mid-call."""
     with numerics(device):
         estimator.fit(context.matrix.copy(), context.labels.copy())
     return estimator
+
+
+def fit_estimator(backend, checkpoint_path, context, device):
+    return condition(build_estimator(backend, checkpoint_path, device), context, device)
 
 
 def predict_rows(estimator, rows, device):
@@ -264,6 +278,12 @@ def out_of_time(now, deadline, longest, margin):
     return now + longest > deadline - margin
 
 
+def recorded_fit_seconds(record):
+    """The last earlier slice's context-fit seconds, or 0 if no slice has conditioned yet."""
+    fits = [event['fit_seconds'] for event in record['slices'] if event.get('conditioned')]
+    return float(fits[-1]) if fits else 0.
+
+
 def advance(record, endpoint, recipe, directory, *, settings, checkpoint, slice_seconds, device, save,
             request, backend=None):
     """One slice of one fold; save() persists record atomically after every batch."""
@@ -275,6 +295,9 @@ def advance(record, endpoint, recipe, directory, *, settings, checkpoint, slice_
     try:
         verified = clock()
         runtime = runtime_fingerprint(backend, device)
+        # Saved batches are only resumable against the provenance they were predicted under.
+        require(not record.get('batches') or ('runtime' in record and 'context' in record),
+                'journal batches lack runtime or context provenance; resume refused')
         require(record.setdefault('runtime', runtime) == runtime, 'runtime fingerprint differs; resume refused')
         context = build_context(endpoint, recipe, record['fold'], settings['context_rows'], directory,
                                 salt=settings['salt'])
@@ -286,30 +309,40 @@ def advance(record, endpoint, recipe, directory, *, settings, checkpoint, slice_
             require(batch['index'] == index and [batch['start'], batch['stop']] == list(plan[index])
                     and len(batch['mu_a']) == len(batch['mu_d']) == batch['stop'] - batch['start'],
                     'journal batches differ from the batch plan')
-        built = fitted = clock()
+        built = constructed = fitted = clock()
         times = record.setdefault('phase_seconds', dict(checkpoint=0., context=0., fit=0., prediction=0.))
         times['checkpoint'] += verified - started
         times['context'] += built - verified
-        slice_index, reason = len(record['slices']), 'complete'
-        # A pending stop request or a spent slice skips conditioning, which
-        # could otherwise outlast the grace period or the allocation.
-        if request.requested or out_of_time(built, deadline, 0., margin):
-            reason, plan_left = ('signal' if request.requested else 'deadline'), []
+        slice_index, reason, conditioned = len(record['slices']), 'complete', False
+        # Only this slice's batches predict the next one, so one past outlier
+        # cannot stop every later slice before its first batch; before the
+        # first batch the estimate is zero.
+        longest = 0.
+        # Conditioning is admitted only with room for the last recorded fit
+        # plus the batch estimate. A pending stop request or a spent slice
+        # skips it, checked before and again after estimator construction,
+        # because the fit itself cannot be interrupted once it starts.
+        need = recorded_fit_seconds(record) + longest
+        if request.requested or out_of_time(built, deadline, need, margin):
+            reason = 'signal' if request.requested else 'deadline'
         else:
-            estimator = fit_estimator(backend, path, context, device)
-            fitted = clock()
-            times['fit'] += fitted - built
-            plan_left = range(len(batches), len(plan))
+            estimator = build_estimator(backend, path, device)
+            constructed = fitted = clock()
+            if request.requested or out_of_time(constructed, deadline, need, margin):
+                reason = 'signal' if request.requested else 'deadline'
+            else:
+                condition(estimator, context, device)
+                fitted, conditioned = clock(), True
+        times['fit'] += fitted - built
+        plan_left = range(len(batches), len(plan)) if conditioned else []
         # Journal this slice's timings before any batch, so a killed slice keeps them.
         event = dict(wall_seconds=fitted - started, complete=False, stop_reason='running',
-            checkpoint_seconds=verified - started, context_seconds=built - verified, fit_seconds=fitted - built,
-            batches_done=len(batches), batches_total=len(plan), context_rows=context.record['selected'],
-            device=str(device))
+            checkpoint_seconds=verified - started, context_seconds=built - verified,
+            estimator_seconds=constructed - built, fit_seconds=fitted - constructed, conditioned=conditioned,
+            admission_seconds=need, batches_done=len(batches), batches_total=len(plan),
+            context_rows=context.record['selected'], device=str(device))
         record['slices'].append(event)
         save()
-        # Only this slice's batches predict the next one, so one past outlier
-        # cannot stop every later slice before its first batch.
-        longest = 0.
         for index in plan_left:
             if request.requested or out_of_time(clock(), deadline, longest, margin):
                 reason = 'signal' if request.requested else 'deadline'

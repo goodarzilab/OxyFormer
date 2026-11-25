@@ -193,10 +193,35 @@ of its values. Each fit needs one GPU allocation for a saved endpoint. Exit 75
 means the slice stopped at a query-batch boundary (deadline or SIGTERM/SIGUSR1)
 before the fold completed; repeat the same command. Exit 0 means the fold is
 complete. A slice starts another batch only while the longest batch of this
-slice still fits before the deadline less min(60 s, slice/10); a signal, or a
-deadline already within that margin, before conditioning skips the fit. Each
-slice journals its checkpoint, context and fit seconds before its first batch
-(`stop_reason` `running` until the slice ends). The private checkpoint copy
+slice still fits before the deadline less min(60 s, slice/10). Conditioning is
+admitted only if the time left before that margin covers the last recorded
+context-fit seconds (0 before any slice has conditioned) plus the batch
+estimate, which is zero before this slice's first batch. The stop request and
+this admission rule are checked before the estimator is constructed and again
+after construction, immediately before `estimator.fit`; if either trips, the
+slice ends with `stop_reason` `signal` or `deadline` without conditioning.
+Each slice journals its checkpoint, context, estimator-construction and fit
+seconds, whether it conditioned, and the admission seconds it required, before
+its first batch (`stop_reason` `running` until the slice ends). If a resumed
+slice can never cover the recorded fit, it keeps ending with `deadline`; rerun
+with a longer `--slice-seconds` (up to 10,800).
+
+Accepted residual. `estimator.fit` is one synchronous TabICL call and cannot be
+interrupted mid-call by the cooperative stop flag. A signal that arrives during
+the fit takes effect at the next batch boundary; if Slurm kills the slice
+during the fit, no partial batch or part has been written, so the journal
+stays resumable and the next slice redoes the fit. The time lost is that
+slice's conditioning, bounded by the mandate's at most 4 GPU-hours lost per
+Slurm attempt.
+
+A complete fold returns its journaled record before `--checkpoint` is checked,
+so rerunning it without the checkpoint, or after the file is removed, loads no
+weights and predicts nothing; `--context-rows` may then be omitted, and an
+explicit value must match. A fold with work left always validates the
+checkpoint (explicit path, registered identity, SHA-256 of a private copy)
+before any backend call. Every candidate training row, sampled or not, must
+carry a unit weight, and a journal with saved batches must carry its runtime
+and context provenance, or the fit refuses. The private checkpoint copy
 (about 114 MB) is written under `TMPDIR`; point `TMPDIR` elsewhere if the
 system temporary directory is small. Any refusal exits non-zero with the
 reason. Predictions run in
