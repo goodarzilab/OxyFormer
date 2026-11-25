@@ -163,6 +163,24 @@ recorded in `configs/approvals.yaml` under `owner_decisions.exploratory_unsealed
   exploratory path only, and every readout reports the shift, the caliper, the shifted fraction and the achieved average shift.
   Bounded item 5 is satisfied for these two parameters, and only for them, in exploratory runs. Recorded in
   `configs/approvals.yaml` under `owner_decisions.exploratory_unsealed.policy_support_sensitivity`.
+- **Exploratory TabICL Q candidate (2026-11-24).** After the Q-lever planning committee routed whether a resumable
+  TabICLv2 outcome-only adapter is reserved owner work, the owner answered by card, verbatim: `"Allow TabICL
+  (Recommended)"`. Exploratory Q-lever screening may evaluate `A6-Q` (pinned `tabicl 2.2.0` regressor
+  `tabicl-regressor-v2-20260212.ckpt`, SHA-256 `0db9cb53...`, frozen in-context inference only with no foundation weight
+  updates, explicit deterministic outcome-blind context sample of at most 30,000 training-fold rows and 500 columns,
+  resumable within the 4 GPU-hour per-attempt loss cap, and a GPU feasibility spike passing before any efficacy result).
+  The 1,000,000-parameter cap applies to OxyFormer nuisance networks only; the registered comparator's science-plan rules
+  and `configs/models/foundations.yaml` remain unchanged. Results are exploratory and certify nothing. Recorded in
+  `configs/approvals.yaml` under `owner_decisions.exploratory_unsealed.tabicl_q_candidate`.
+- **Code author and orchestrator switch (2026-11-24, confirmed 2026-11-25).** On 2026-11-24 (about 23:05 UTC), the owner
+  directed verbatim: `"I want to do a handoff back to Neon, so opus 5.5 can be the coding agent instead"`, and confirmed
+  the mandate fresh on 2026-11-25 (02:01 UTC) by structured card for orchestrator `google/gemini-4-neon`. This amends
+  Bounded item 3 for new code attempts: the coding agent is `claude/claude-opus-5-5` (thinking `high`, Paseo mode `auto`,
+  using the owner's Claude subscription; declared author `anthropic/claude-opus-5-5`) under orchestrator
+  `google/gemini-4-neon`, with code review panel `--only luna,kimi-k2.7-code,sol --author anthropic/claude-opus-5-5
+  --author google/gemini-4-neon`. Authors, coauthors, and orchestrators remain excluded from review and committee panels
+  on their own work; prior attempt records are unchanged. Recorded in `configs/approvals.yaml` under
+  `owner_decisions.exploratory_unsealed.coding_agent_2026_11_24`.
 - Valid until 2026-12-31 or until the owner revokes it. Everything else in this mandate is unchanged.
 
 ## Concurrence party
