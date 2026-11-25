@@ -9,6 +9,7 @@ import pytest
 import torch
 import yaml
 
+import platform_fixtures
 from test_fit import make_case
 from oxyformer.contracts import StageRequest
 from oxyformer.design.eligibility import GeographyRow, GeographyTable
@@ -650,8 +651,8 @@ def test_nuisance_slow_units_checkpoint_before_absolute_compute_deadline(tmp_pat
     assert timing.margin_seconds >= 2 * max(timing.largest.values()) + timing.checkpoint_seconds
 
 
-def test_default_science_matches_launch_base(tmp_path, monkeypatch):
-    """T1: pinned at ea54759; excludes runtime/path/opaque lineage hashes."""
+def default_science(root, monkeypatch):
+    """Model state hashes, SSL lineage hashes and predictions of the default fit."""
     from oxyformer.training.checkpoint import model_state_hash
     models = []
     original = nested._train_transaction
@@ -661,16 +662,26 @@ def test_default_science_matches_launch_base(tmp_path, monkeypatch):
                                         if isinstance(v, torch.Tensor)}))
         return result
     monkeypatch.setattr(nested, '_train_transaction', capture)
-    prepared, artifact = fitted(tmp_path / 'work')
+    prepared, artifact = fitted(root)
     prediction = predictions(prepared, artifact)
-    observed = dict(models=models,
+    return dict(models=models,
         ssl=[CheckpointArtifact.from_json(x).lineage.model_hash
              for x in state(artifact)['initializations'].values()],
         predictions={k: list(getattr(prediction, k)) for k in
             ('original_ids', 'fold_ids', 'seed_ids', 'mu_a', 'mu_d', 'r_a', 'r_d', 'origin_weights')})
-    label = 'cuda' if torch.version.cuda else 'cpu'
-    expected = json.loads(Path(f'tests/fixtures/q_refit/baseline_{label}.json').read_text())
-    assert observed == expected
+
+
+def test_default_science_matches_launch_base(tmp_path, monkeypatch):
+    """T1: pinned at ea54759; excludes runtime/path/opaque lineage hashes.
+
+    Exact on recorded platforms; on an unrecorded hosted CPU platform the
+    predictions are compared within the float32 tolerance and the state
+    hashes, which no tolerance applies to, only by count and form."""
+    observed = default_science(tmp_path / 'work', monkeypatch)
+    cpu = json.loads(Path('tests/fixtures/q_refit/baseline_cpu.json').read_text())['platforms']
+    records = dict(cpu, cuda=json.loads(Path('tests/fixtures/q_refit/baseline_cuda.json').read_text()))
+    platform_fixtures.check('q_refit baseline', exact=observed, records=records, values=observed,
+        references=cpu, tolerance=platform_fixtures.FLOAT32, opaque=('models', 'ssl'))
 
 
 def test_default_cost_walk_keeps_full_mode_schedule():
