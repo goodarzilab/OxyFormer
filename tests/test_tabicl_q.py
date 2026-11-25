@@ -455,6 +455,45 @@ def test_pending_signal_skips_context_conditioning(tmp_path, weights, monkeypatc
     assert fit(out, 0, weights, 10)['status'] == 'complete'
 
 
+def test_deadline_before_conditioning_skips_the_fit(tmp_path, weights, monkeypatch):
+    backend = use(monkeypatch, Backend())
+    monkeypatch.setattr(adapter, 'clock', lambda: backend.time)
+    real = adapter.build_context
+
+    def slow_context(*args, **kwargs):
+        result = real(*args, **kwargs)
+        backend.time += 95.
+        return result
+    monkeypatch.setattr(adapter, 'build_context', slow_context)
+    out = bound(tmp_path / 'q', five_fold(tmp_path / 'e'))
+    record = fit(out, 0, weights, 10, slice_seconds=100.)
+    assert record['status'] == 'incomplete' and record['slices'][-1]['stop_reason'] == 'deadline'
+    assert backend.log['fits'] == 0 and backend.log['rows'] == 0 and record['batches'] == []
+    monkeypatch.setattr(adapter, 'build_context', real)
+    assert fit(out, 0, weights, 10, slice_seconds=100.)['status'] == 'complete'
+
+
+def test_slice_timings_are_journaled_before_batches(tmp_path, weights, monkeypatch):
+    use(monkeypatch, Backend())
+    monkeypatch.setattr(adapter, 'QUERY_BATCH', 2)
+    out = bound(tmp_path / 'q', five_fold(tmp_path / 'e'))
+    real, seen = adapter.predict_targets, []
+
+    def observe(*args):
+        seen.append(json.loads((out / 'fold-0' / 'progress.json').read_text()))
+        return real(*args)
+    monkeypatch.setattr(adapter, 'predict_targets', observe)
+    record = fit(out, 0, weights, 10)
+    assert len(seen) == 3
+    for journal, done in zip(seen, range(3)):
+        assert len(journal['batches']) == done and len(journal['slices']) == 1
+        event = journal['slices'][0]
+        assert event['stop_reason'] == 'running' and event['complete'] is False
+        assert {'checkpoint_seconds', 'context_seconds', 'fit_seconds'} <= set(event)
+    assert len(record['slices']) == 1 and record['slices'][0]['stop_reason'] == 'complete'
+    assert record['slices'][0]['batches_done'] == 3 and record['slices'][0]['complete'] is True
+
+
 def test_one_slow_batch_does_not_block_resume(tmp_path, weights, monkeypatch):
     backend = use(monkeypatch, Backend())
     monkeypatch.setattr(adapter, 'clock', lambda: backend.time)
