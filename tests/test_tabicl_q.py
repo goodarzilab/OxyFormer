@@ -22,11 +22,7 @@ WEIGHTS = b'synthetic regressor weights, not a model'
 
 
 def five_fold(root, *, outcome=None):
-    """The nested_cv fixture with five inner splits, unit weights and non-movers.
-
-    In every outer fold one assignment-geography pair has a = 9.5, above the
-    support's shift limit (10 - delta), so the policy leaves it unchanged.
-    """
+    """nested_cv fixture, five inner splits, unit weights; a = 9.5 rows are non-movers."""
     p = endpoint(root)
     manifest = p.data.manifest
     names = [c.name for c in manifest.schema]
@@ -128,7 +124,6 @@ def use(monkeypatch, backend):
 
 
 def paced(monkeypatch, batch=2):
-    """Fresh backend; the fake clock advances one second per predicted row."""
     backend = use(monkeypatch, Backend())
     monkeypatch.setattr(adapter, 'clock', lambda: backend.time)
     if batch:
@@ -258,15 +253,6 @@ def test_column_limit(tmp_path, monkeypatch):
         context(replace(p, feature_kinds=(('x', 'categorical'),)), tmp_path, 0, 10)
 
 
-def test_cli_context_rows_bounds(tmp_path, weights, monkeypatch):
-    use(monkeypatch, Backend())
-    out = bound(tmp_path / 'q', five_fold(tmp_path / 'e'))
-    for rows in (1, 30001):
-        with pytest.raises(ContractError, match='context rows'):
-            fit(out, 0, weights, rows)
-    assert not (out / 'candidate.json').exists()
-
-
 # T2: no held-out outcome reaches its own fold's predictions.
 def test_held_out_outcomes_do_not_leak(tmp_path, weights, monkeypatch):
     use(monkeypatch, Backend())
@@ -352,6 +338,8 @@ def test_weights_refuse_before_any_backend_call(tmp_path, weights, monkeypatch):
     weights.write_bytes(weights_copy[::-1])
     with pytest.raises(ContractError, match='hash mismatch'):
         fit(bound(tmp_path / 'q2', p), 0, weights)
+    with pytest.raises(ContractError, match='hash mismatch'):
+        adapter.verified_checkpoint(weights)
     weights.write_bytes(weights_copy)
     assert backend.log['calls'] == 0
     for field, value in (('revision', '0' * 40), ('sha256', '1' * 64), ('filename', 'tabicl-classifier-v2-20260212.ckpt')):
@@ -395,17 +383,17 @@ def test_complete_fold_rerun_needs_no_checkpoint(tmp_path, weights, monkeypatch)
     weights.unlink()
     assert fit(out, 0, weights, 10) == done == fit(out, 0, weights)
     assert path.read_text() == saved and repr(backend.log) == log
-    (out / 'candidate.json').unlink()
-    assert fit(out, 0, None) == done and json.loads((out / 'candidate.json').read_text()) == done['identity']
     with pytest.raises(ContractError, match='identity differs'):
         fit(out, 0, None, 12)
-    # A fold with work left admits only a verified checkpoint.
+    # A fold with work left admits only a verified checkpoint and writes nothing before it.
+    (out / 'candidate.json').unlink()
     weights.write_bytes(WEIGHTS + b'!')
     for checkpoint, error in ((weights, 'hash mismatch'), (None, 'A6-Q requires'),
                               (tmp_path / 'absent' / weights.name, 'missing')):
         with pytest.raises(ContractError, match=error):
-            fit(out, 1, checkpoint, 10)
-    assert (out / 'fold-1' / 'progress.json').exists() and repr(backend.log) == log
+            fit(out, 1, checkpoint)
+    assert not (out / 'fold-1').exists() and repr(backend.log) == log
+    assert fit(out, 0, None) == done and json.loads((out / 'candidate.json').read_text()) == done['identity']
     weights.write_bytes(WEIGHTS)
     # With work left, an omitted --context-rows means 30,000.
     with pytest.raises(ContractError, match='candidate identity differs'):
@@ -574,6 +562,25 @@ def test_conditioning_needs_room_for_the_recorded_fit(tmp_path, weights, monkeyp
     assert [b['slice'] for b in last['batches']] == [0, 3, 3]
 
 
+def test_fit_seconds_time_only_the_fit_call(tmp_path, weights, monkeypatch):
+    backend, real = paced(monkeypatch), adapter.numerics
+
+    def slow(device):
+        backend.time += 20.
+        return real(device)
+    monkeypatch.setattr(adapter, 'numerics', slow)
+    event = fit(bound(tmp_path / 'q', five_fold(tmp_path / 'e')), 0, weights, 10)['slices'][0]
+    assert event['conditioned'] and event['fit_seconds'] == 0. and event['wall_seconds'] >= 20.
+
+
+def test_saved_batches_finish_without_refitting(tmp_path, weights, monkeypatch):
+    backend = use(monkeypatch, Backend())
+    out = bound(tmp_path / 'q', five_fold(tmp_path / 'e'))
+    done, path = fit(out, 0, weights, 10), out / 'fold-0' / 'progress.json'
+    path.write_text(json.dumps(dict(json.loads(path.read_text()), status='incomplete', parts=[])))
+    assert fit(out, 0, weights, 10)['parts'] == done['parts'] and backend.log['fits'] == 1
+
+
 @pytest.mark.parametrize('key', ['runtime', 'context'])
 def test_saved_batches_require_provenance(tmp_path, weights, monkeypatch, key):
     backend = paced(monkeypatch)
@@ -683,6 +690,9 @@ def test_existing_variants_refuse_adapter_arguments(tmp_path, weights):
         driver.fit(out, 0, 'A0', 'cell-d', 600., 'none', device='cpu', checkpoint=str(weights))
     with pytest.raises(ContractError, match='apply only to A6-Q'):
         driver.fit(out, 0, 'A4-Q', 'cell-d', 600., 'none', device='cpu', context_rows=10)
+    for rows in (1, 30001):
+        with pytest.raises(ContractError, match='context rows'):
+            fit(out, 0, weights, rows)
     assert not (out / 'candidate.json').exists()
     assert driver.VARIANTS == ('A0', 'A0-SW', 'A3-Q', 'A4-Q', 'A6-Q')
     assert driver.nested_cv.Q_VARIANTS == ('A0', 'A0-SW', 'A3-Q', 'A4-Q')

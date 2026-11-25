@@ -162,15 +162,17 @@ def fit(out, fold, variant, study, slice_seconds, run_logging, *, device='cuda:0
         record = json.loads(path.read_text()) if path.exists() else dict(identity=identity,
             fold=fold, seed=1103, status='incomplete', predecessor=None, parts=[], slices=[])
         require(matches(record['identity']) and record['fold'] == fold, 'journal identity differs')
-        if saved is None:
-            atomic_record(candidate, record['identity'])
         # A complete fold returns its journal without loading weights or predicting.
         if record['status'] == 'complete':
+            if saved is None:
+                atomic_record(candidate, record['identity'])
             return record
         require(saved in (None, identity), 'candidate identity differs')
         require(record['identity'] == identity, 'journal identity differs')
         if tabicl:
             tabicl_q.check_checkpoint(checkpoint)
+        if saved is None:
+            atomic_record(candidate, identity)
         logger = logger_for(run_logging, dict(identity, fold=fold, exploratory=True), directory)
         try:
             atomic_record(path, record)

@@ -93,6 +93,7 @@ def check_checkpoint(checkpoint):
     path = Path(checkpoint)
     require(path.name == identity['filename'], 'checkpoint filename differs from the registered regressor')
     require(path.is_file(), 'local checkpoint missing; automatic downloads are forbidden')
+    require(file_hash(path) == identity['sha256'], 'checkpoint hash mismatch')
 
 
 def verified_checkpoint(path):
@@ -236,13 +237,14 @@ def build_estimator(backend, checkpoint_path, device):
 
 
 def condition(estimator, context, device, stop=lambda: False):
-    """In-context fit, one uninterruptible call; stop() is checked right before it."""
+    """One uninterruptible in-context fit after a last stop() check; its seconds or None."""
     with numerics(device):
         X, y = context.matrix.copy(), context.labels.copy()
         if stop():
-            return False
+            return None
+        start = clock()
         estimator.fit(X, y)
-    return True
+        return clock() - start
 
 
 def predict_rows(estimator, rows, device):
@@ -272,12 +274,6 @@ def bounds(count):
 
 def out_of_time(now, deadline, longest, margin):
     return now + longest > deadline - margin
-
-
-def recorded_fit_seconds(record):
-    """The last conditioned slice's fit seconds, else 0."""
-    fits = [event['fit_seconds'] for event in record['slices'] if event.get('conditioned')]
-    return float(fits[-1]) if fits else 0.
 
 
 def advance(record, endpoint, recipe, directory, *, settings, checkpoint, slice_seconds, device, save,
@@ -310,27 +306,27 @@ def advance(record, endpoint, recipe, directory, *, settings, checkpoint, slice_
         times['checkpoint'] += verified - started
         times['context'] += built - verified
         slice_index, reason, conditioned = len(record['slices']), 'complete', False
-        # Only this slice's batches estimate the next (zero before its first),
-        # so one past outlier cannot block later slices. The fit cannot be
-        # interrupted, so its admission is checked before and after construction.
-        longest = 0.
-        need = recorded_fit_seconds(record) + longest
+        # Batch estimate: this slice's only. No batch left: no fit.
+        longest, seconds, left = 0., 0., len(batches) < len(plan)
+        fits = [event['fit_seconds'] for event in record['slices'] if event.get('conditioned')]
+        need = (fits[-1] if fits else 0.) + longest
 
         def stop():
             return request.requested or out_of_time(clock(), deadline, need, margin)
-        if not stop():
+        if left and not stop():
             estimator = build_estimator(backend, path, device)
             constructed = clock()
-            conditioned = condition(estimator, context, device, stop)
+            seconds = condition(estimator, context, device, stop)
+            conditioned = seconds is not None
             fitted = clock() if conditioned else constructed
-        if not conditioned:
-            reason = 'signal' if request.requested else 'deadline'
+        if left and not conditioned:
+            reason, seconds = ('signal' if request.requested else 'deadline'), 0.
         times['fit'] += fitted - built
         plan_left = range(len(batches), len(plan)) if conditioned else []
         # Journal this slice's timings before any batch, so a killed slice keeps them.
         event = dict(wall_seconds=fitted - started, complete=False, stop_reason='running',
             checkpoint_seconds=verified - started, context_seconds=built - verified,
-            estimator_seconds=constructed - built, fit_seconds=fitted - constructed, conditioned=conditioned,
+            estimator_seconds=constructed - built, fit_seconds=seconds, conditioned=conditioned,
             admission_seconds=need, batches_done=len(batches), batches_total=len(plan),
             context_rows=context.record['selected'], device=str(device))
         record['slices'].append(event)
