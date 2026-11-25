@@ -160,8 +160,7 @@ Each target is queried alone at `action.a_mmhg` and `action.d_mmhg`.
 Checkpoint. `--checkpoint PATH` names a local copy of the registered
 `tabicl-regressor-v2-20260212.ckpt` (SHA-256 `0db9cb53…`). Each slice copies
 it under `TMPDIR` (114 MB), verifies the copy's SHA-256 and passes only the
-copy, with automatic download disabled; a missing file, another name, a wrong
-hash or an unregistered identity refuses before any prediction. A complete
+copy, with automatic download disabled; any other file refuses. A complete
 fold returns its journal before the checkpoint is checked (`--context-rows`
 may then be omitted). tabicl 2.2.0 is required; CI does not install it.
 
@@ -176,14 +175,13 @@ Bind and collect are as above; `--study` is unused. Exit 0: fold complete;
 Batches of 32 targets are saved atomically in `fold-K/progress.json`. With margin min(60 s, slice/10), a batch
 starts only while this slice's longest batch fits before the deadline less the
 margin; conditioning needs the time left to cover the last recorded fit plus
-that estimate, checked with the stop request before and after estimator
-construction. The journal records context digests, the runtime fingerprint
-and slice timings. A resume refuses missing provenance or a changed digest or
-fingerprint and skips saved batches. A slice too short for the recorded fit
+that estimate, checked with the stop request before estimator construction
+and again right before `estimator.fit`. The journal records context digests,
+the runtime fingerprint and slice timings. A resume refuses missing provenance
+or a changed digest or fingerprint and skips saved batches. A slice too short for the recorded fit
 keeps exiting 75; use a longer slice.
 
-Accepted residual: `estimator.fit` is one synchronous TabICL call that the
-stop flag cannot interrupt. If Slurm kills a slice mid-fit, no partial batch
-or part exists and the journal resumes; the loss is that slice's fit, within
-the mandate's 4 GPU-hours per attempt. W&B config adds C, the salt and the
+Accepted residual: `estimator.fit` is one synchronous TabICL call the stop
+flag cannot interrupt. A slice killed mid-fit leaves no partial batch or part
+and resumes; it loses that fit, within the mandate's 4 GPU-hours per attempt. W&B config adds C, the salt and the
 checkpoint SHA-256.

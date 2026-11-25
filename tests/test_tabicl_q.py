@@ -311,7 +311,8 @@ def test_one_context_and_query_composition(tmp_path, weights, monkeypatch):
     backend = use(monkeypatch, Backend('transductive'))
     p = five_fold(tmp_path / 'e')
     c = context(p, tmp_path, 2, 10)
-    estimator = adapter.fit_estimator(backend, str(weights), c, 'cpu')
+    estimator = adapter.build_estimator(backend, str(weights), 'cpu')
+    assert adapter.condition(estimator, c, 'cpu')
     together = adapter.predict_targets(estimator, c, range(len(c.targets)), 'cpu')
     for i in range(len(c.targets)):
         alone = adapter.predict_targets(estimator, c, [i], 'cpu')
@@ -394,6 +395,8 @@ def test_complete_fold_rerun_needs_no_checkpoint(tmp_path, weights, monkeypatch)
     weights.unlink()
     assert fit(out, 0, weights, 10) == done == fit(out, 0, weights)
     assert path.read_text() == saved and repr(backend.log) == log
+    (out / 'candidate.json').unlink()
+    assert fit(out, 0, None) == done and json.loads((out / 'candidate.json').read_text()) == done['identity']
     with pytest.raises(ContractError, match='identity differs'):
         fit(out, 0, None, 12)
     # A fold with work left admits only a verified checkpoint.
@@ -511,27 +514,29 @@ def test_deadline_before_conditioning_skips_the_fit(tmp_path, weights, monkeypat
     assert fit(out, 0, weights, 10, slice_seconds=100.)['status'] == 'complete'
 
 
+@pytest.mark.parametrize('stage', ['estimator', 'numerics'])
 @pytest.mark.parametrize('trigger', ['signal', 'deadline'])
-def test_stop_during_estimator_construction_skips_the_fit(tmp_path, weights, monkeypatch, trigger):
+def test_stop_before_the_fit_call_skips_the_fit(tmp_path, weights, monkeypatch, trigger, stage):
     reference = uninterrupted(tmp_path, weights, monkeypatch)
     backend, request = paced(monkeypatch), pinned_request(monkeypatch)
-    real = backend.estimator
+    owner = backend if stage == 'estimator' else adapter
+    real = getattr(owner, stage)
 
-    def construct(**kwargs):
+    def late(*args, **kwargs):
         if trigger == 'signal':
             request.request()
         else:
             backend.time += 1000.
-        return real(**kwargs)
-    monkeypatch.setattr(backend, 'estimator', construct)
+        return real(*args, **kwargs)
+    monkeypatch.setattr(owner, stage, late)
     out = bound(tmp_path / 'q', five_fold(tmp_path / 'e'))
     record = fit(out, 0, weights, 10)
     event = record['slices'][-1]
     assert record['batches'] == [] and event['stop_reason'] == trigger and event['conditioned'] is False
     assert len(backend.log['kwargs']) == 1 and backend.log['fits'] == backend.log['rows'] == 0
-    assert event['fit_seconds'] == 0 and event['estimator_seconds'] == (1000. if trigger == 'deadline' else 0.)
+    assert event['fit_seconds'] == 0 and event['estimator_seconds'] == (1000. if (trigger, stage) == ('deadline', 'estimator') else 0.)
     monkeypatch.setattr(driver, 'CheckpointRequest', CheckpointRequest)
-    monkeypatch.setattr(backend, 'estimator', real)
+    monkeypatch.setattr(owner, stage, real)
     assert fit(out, 0, weights, 10)['parts'] == reference and backend.log['fits'] == 1
 
 

@@ -235,15 +235,14 @@ def build_estimator(backend, checkpoint_path, device):
                              checkpoint_version=REGRESSOR['filename'], device=str(device))
 
 
-def condition(estimator, context, device):
-    """In-context conditioning only: one synchronous TabICL call, not interruptible mid-call."""
+def condition(estimator, context, device, stop=lambda: False):
+    """In-context fit, one uninterruptible call; stop() is checked right before it."""
     with numerics(device):
-        estimator.fit(context.matrix.copy(), context.labels.copy())
-    return estimator
-
-
-def fit_estimator(backend, checkpoint_path, context, device):
-    return condition(build_estimator(backend, checkpoint_path, device), context, device)
+        X, y = context.matrix.copy(), context.labels.copy()
+        if stop():
+            return False
+        estimator.fit(X, y)
+    return True
 
 
 def predict_rows(estimator, rows, device):
@@ -276,7 +275,7 @@ def out_of_time(now, deadline, longest, margin):
 
 
 def recorded_fit_seconds(record):
-    """The last earlier slice's context-fit seconds, or 0 if no slice has conditioned yet."""
+    """The last conditioned slice's fit seconds, else 0."""
     fits = [event['fit_seconds'] for event in record['slices'] if event.get('conditioned')]
     return float(fits[-1]) if fits else 0.
 
@@ -316,16 +315,16 @@ def advance(record, endpoint, recipe, directory, *, settings, checkpoint, slice_
         # interrupted, so its admission is checked before and after construction.
         longest = 0.
         need = recorded_fit_seconds(record) + longest
-        if request.requested or out_of_time(built, deadline, need, margin):
-            reason = 'signal' if request.requested else 'deadline'
-        else:
+
+        def stop():
+            return request.requested or out_of_time(clock(), deadline, need, margin)
+        if not stop():
             estimator = build_estimator(backend, path, device)
-            constructed = fitted = clock()
-            if request.requested or out_of_time(constructed, deadline, need, margin):
-                reason = 'signal' if request.requested else 'deadline'
-            else:
-                condition(estimator, context, device)
-                fitted, conditioned = clock(), True
+            constructed = clock()
+            conditioned = condition(estimator, context, device, stop)
+            fitted = clock() if conditioned else constructed
+        if not conditioned:
+            reason = 'signal' if request.requested else 'deadline'
         times['fit'] += fitted - built
         plan_left = range(len(batches), len(plan)) if conditioned else []
         # Journal this slice's timings before any batch, so a killed slice keeps them.
