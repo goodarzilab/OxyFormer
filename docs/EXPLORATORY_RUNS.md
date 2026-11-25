@@ -144,94 +144,46 @@ saved target order. The file contains no g predictions, truth or estimates.
 
 ### A6-Q: frozen TabICLv2 outcome-only candidate
 
-`--variant A6-Q` routes a fold to `oxyformer.explore.tabicl_q` instead of the
-nested fitting controller. It fits no network and updates no weight: the pinned
-TabICLv2 regressor is conditioned in context on fold K's training rows and
-predicts `mu_a` and `mu_d` for that fold's held-out targets. The owner allowed
-it as a Q candidate on 2026-11-24. The registered science-plan comparator
-(`models/tabicl_comparator.py`) is separate and unchanged; its CPU and
-no-subsampling rules govern the plan comparison, not this candidate. Results
-are exploratory and certify nothing.
+`--variant A6-Q` routes a fold to `oxyformer.explore.tabicl_q`. No weight
+changes: the pinned TabICLv2 regressor is conditioned in context on fold K's
+training rows and predicts `mu_a` and `mu_d` for its held-out targets (owner,
+2026-11-24). Results are exploratory.
 
-Context rule. The candidate rows are exactly the rows the Q-only outer outcome
-fit of fold K trains on (`outer.training_ids(K)`, derived through the same
-partition). With at most C rows (`--context-rows`, 2 to 30,000, default
-30,000), all are used in their order. Otherwise exactly C are kept: those with
-the smallest SHA-256 of `[salt, K, original_id]`, in their original order. The
-salt `oxyformer.explore.tabicl_q.context.v1` is fixed and recorded. Selection
-reads IDs only, never an outcome, treatment, covariate or prediction, so it
-drops 9% to 25% of each real fold's rows without outcome-selected bias. No
-held-out target enters its own fold's context. Columns are the treatment in
-mmHg followed by the endpoint's numeric nuisance covariates in
-`feature_kinds` order; more than 500 columns, categorical covariates or
-non-unit weights refuse. One fitted context serves both query sets. Each
-target is queried alone at `action.a_mmhg` and `action.d_mmhg` from
-`policy.apply`; a non-mover's `mu_d` is its `mu_a`.
+Context. Candidates are the rows the Q-only outer outcome fit of fold K trains
+on (`outer.training_ids(K)`), each with unit weight. Up to C rows
+(`--context-rows`, 2 to 30,000, default 30,000) are all used; otherwise the C
+with the smallest SHA-256 of `[salt, K, original_id]` (salt
+`oxyformer.explore.tabicl_q.context.v1`), in order; selection reads IDs only.
+Columns: treatment (mmHg), then the numeric covariates; over 500 refuses.
+Each target is queried alone at `action.a_mmhg` and `action.d_mmhg`.
 
-Checkpoint. `--checkpoint PATH` names a local copy of the registered regressor
-`tabicl-regressor-v2-20260212.ckpt` (repository `jingang/TabICL`, revision
-`4dcd344e…`, SHA-256 `0db9cb53…`). Each slice copies it to a private
-directory, verifies the copy's SHA-256 and passes only the copy to TabICL with
-automatic download disabled. A missing file, another filename, a wrong hash
-or an unregistered identity refuses before any prediction. The candidate
-identity records the checkpoint's registered fields and SHA-256, C, the salt,
-the estimator settings (8 estimators, `random_state` 1103, KV cache, no AMP or
-FlashAttention 3) and the numerics (deterministic kernels, IEEE FP32), never
-the path. tabicl 2.2.0 must be installed; CI does not install it.
+Checkpoint. `--checkpoint PATH` names a local copy of the registered
+`tabicl-regressor-v2-20260212.ckpt` (SHA-256 `0db9cb53…`). Each slice copies
+it under `TMPDIR` (114 MB), verifies the copy's SHA-256 and passes only the
+copy, with automatic download disabled; a missing file, another name, a wrong
+hash or an unregistered identity refuses before any prediction. A complete
+fold returns its journal before the checkpoint is checked (`--context-rows`
+may then be omitted). tabicl 2.2.0 is required; CI does not install it.
 
 ```sh
-python -m oxyformer.explore.q_refit bind /path/to/terminal-chain /path/to/q-A6
 python -m oxyformer.explore.q_refit fit /path/to/q-A6 --fold 0 \
   --variant A6-Q --study cell-d --slice-seconds 10800 --run-logging wandb \
   --checkpoint /path/to/tabicl-regressor-v2-20260212.ckpt
-# Repeat fit for folds 0..4 until each exits 0.
-python -m oxyformer.explore.q_refit collect /path/to/q-A6
 ```
 
-`--study` is required and recorded as for the other variants; A6-Q uses none
-of its values. Each fit needs one GPU allocation for a saved endpoint. Exit 75
-means the slice stopped at a query-batch boundary (deadline or SIGTERM/SIGUSR1)
-before the fold completed; repeat the same command. Exit 0 means the fold is
-complete. A slice starts another batch only while the longest batch of this
-slice still fits before the deadline less min(60 s, slice/10). Conditioning is
-admitted only if the time left before that margin covers the last recorded
-context-fit seconds (0 before any slice has conditioned) plus the batch
-estimate, which is zero before this slice's first batch. The stop request and
-this admission rule are checked before the estimator is constructed and again
-after construction, immediately before `estimator.fit`; if either trips, the
-slice ends with `stop_reason` `signal` or `deadline` without conditioning.
-Each slice journals its checkpoint, context, estimator-construction and fit
-seconds, whether it conditioned, and the admission seconds it required, before
-its first batch (`stop_reason` `running` until the slice ends). If a resumed
-slice can never cover the recorded fit, it keeps ending with `deadline`; rerun
-with a longer `--slice-seconds` (up to 10,800).
+Bind and collect are as above; `--study` is unused. Exit 0: fold complete;
+75: slice stopped (deadline, SIGTERM, SIGUSR1), repeat it; other: refusal.
+Batches of 32 targets are saved atomically in `fold-K/progress.json`. With margin min(60 s, slice/10), a batch
+starts only while this slice's longest batch fits before the deadline less the
+margin; conditioning needs the time left to cover the last recorded fit plus
+that estimate, checked with the stop request before and after estimator
+construction. The journal records context digests, the runtime fingerprint
+and slice timings. A resume refuses missing provenance or a changed digest or
+fingerprint and skips saved batches. A slice too short for the recorded fit
+keeps exiting 75; use a longer slice.
 
-Accepted residual. `estimator.fit` is one synchronous TabICL call and cannot be
-interrupted mid-call by the cooperative stop flag. A signal that arrives during
-the fit takes effect at the next batch boundary; if Slurm kills the slice
-during the fit, no partial batch or part has been written, so the journal
-stays resumable and the next slice redoes the fit. The time lost is that
-slice's conditioning, bounded by the mandate's at most 4 GPU-hours lost per
-Slurm attempt.
-
-A complete fold returns its journaled record before `--checkpoint` is checked,
-so rerunning it without the checkpoint, or after the file is removed, loads no
-weights and predicts nothing; `--context-rows` may then be omitted, and an
-explicit value must match. A fold with work left always validates the
-checkpoint (explicit path, registered identity, SHA-256 of a private copy)
-before any backend call. Every candidate training row, sampled or not, must
-carry a unit weight, and a journal with saved batches must carry its runtime
-and context provenance, or the fit refuses. The private checkpoint copy
-(about 114 MB) is written under `TMPDIR`; point `TMPDIR` elsewhere if the
-system temporary directory is small. Any refusal exits non-zero with the
-reason. Predictions run in
-batches of 32 targets, each saved atomically in `fold-K/progress.json` with its
-wall seconds. The journal also records the context (candidate count, C,
-selected count, salt, columns, selected-ID and context digests), the runtime
-fingerprint from the first slice (Python, torch, numpy, scipy, scikit-learn,
-tabicl, device), and per-slice checkpoint, context and fit seconds. A resumed
-slice rebuilds and refits the context, refuses a changed digest or
-fingerprint, and skips completed batches, so the completed part equals an
-uninterrupted run's on the same device and environment. W&B config records
-chain, variant, study, fold, C, the salt and the checkpoint SHA-256. Collect
-needs no A6-Q case: `q_parts.json` has the same exact keys.
+Accepted residual: `estimator.fit` is one synchronous TabICL call that the
+stop flag cannot interrupt. If Slurm kills a slice mid-fit, no partial batch
+or part exists and the journal resumes; the loss is that slice's fit, within
+the mandate's 4 GPU-hours per attempt. W&B config adds C, the salt and the
+checkpoint SHA-256.

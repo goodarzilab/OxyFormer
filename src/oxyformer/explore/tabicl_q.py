@@ -1,12 +1,9 @@
 """Exploratory A6-Q: frozen TabICLv2 outcome-only Q for saved simulation chains.
 
-No network is fitted and no foundation weight changes. For one outer fold the
-pinned regressor is conditioned in context on an explicit, outcome-blind
-sample of the rows the Q-only outer outcome fit trains on, then queried once
-per held-out target at the factual and the policy dose. Predictions run in
-query batches journaled by the caller, so a slice can stop at a batch boundary
-and resume. The registered science-plan comparator (tabicl_comparator) is not
-used or changed; only its registered checkpoint identities are read.
+No weight changes: per outer fold the pinned regressor is conditioned in context
+on an outcome-blind sample of the Q-only outer fit's training rows and queried
+per held-out target at the factual and policy dose, in resumable batches. Only
+the registered comparator's checkpoint identities are read.
 """
 from __future__ import annotations
 
@@ -160,7 +157,7 @@ def build_context(endpoint, recipe, fold, rows, directory, *, salt=SALT):
     _, candidates, targets = nested_cv._partition(config, endpoint.outer, fold)
     require(candidates == allowed == endpoint.outer.training_ids(fold), 'context candidates differ from outer training')
     require(targets == endpoint.outer.evaluation_ids(fold) and bool(targets), 'held-out targets differ')
-    # Every candidate, sampled or not, must carry a unit weight: the sample may not hide one.
+    # Every candidate needs a unit weight, sampled or not.
     pool = fitting._inputs(config, candidates)
     _unit_weights(pool.origin_weights, len(candidates), 'unit')
     ids = select_context(candidates, fold, rows, salt)
@@ -295,7 +292,7 @@ def advance(record, endpoint, recipe, directory, *, settings, checkpoint, slice_
     try:
         verified = clock()
         runtime = runtime_fingerprint(backend, device)
-        # Saved batches are only resumable against the provenance they were predicted under.
+        # Saved batches resume only against the provenance they were predicted under.
         require(not record.get('batches') or ('runtime' in record and 'context' in record),
                 'journal batches lack runtime or context provenance; resume refused')
         require(record.setdefault('runtime', runtime) == runtime, 'runtime fingerprint differs; resume refused')
@@ -314,14 +311,10 @@ def advance(record, endpoint, recipe, directory, *, settings, checkpoint, slice_
         times['checkpoint'] += verified - started
         times['context'] += built - verified
         slice_index, reason, conditioned = len(record['slices']), 'complete', False
-        # Only this slice's batches predict the next one, so one past outlier
-        # cannot stop every later slice before its first batch; before the
-        # first batch the estimate is zero.
+        # Only this slice's batches estimate the next (zero before its first),
+        # so one past outlier cannot block later slices. The fit cannot be
+        # interrupted, so its admission is checked before and after construction.
         longest = 0.
-        # Conditioning is admitted only with room for the last recorded fit
-        # plus the batch estimate. A pending stop request or a spent slice
-        # skips it, checked before and again after estimator construction,
-        # because the fit itself cannot be interrupted once it starts.
         need = recorded_fit_seconds(record) + longest
         if request.requested or out_of_time(built, deadline, need, margin):
             reason = 'signal' if request.requested else 'deadline'

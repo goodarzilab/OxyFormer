@@ -148,8 +148,8 @@ def fit(out, fold, variant, study, slice_seconds, run_logging, *, device='cuda:0
         identity['tabicl'] = settings
 
     def matches(saved):
-        # Rereading a complete A6-Q fold may omit --context-rows; an explicit value must match.
-        if tabicl and context_rows is None and isinstance(saved, dict) and isinstance(saved.get('tabicl'), dict):
+        # A complete A6-Q fold may be reread without --context-rows.
+        if tabicl and context_rows is None and isinstance(saved.get('tabicl'), dict):
             return saved == dict(identity, tabicl=dict(settings, context_rows=saved['tabicl'].get('context_rows')))
         return saved == identity
     # Serialize admissions and collect against all folds of this candidate.
