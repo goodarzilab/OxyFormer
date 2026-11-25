@@ -166,7 +166,8 @@ python -m oxyformer.explore.q_refit fit /path/to/q-A6 --fold 0 \
 ```
 
 Exit 0: fold complete; 75: slice stopped (deadline, SIGTERM, SIGUSR1), repeat
-it; other: refusal. Batches of 32 targets are saved atomically. With margin
+it; other: refusal. Batches of 32 targets are saved atomically. A slice is
+timed from the fit invocation's start. With margin
 min(60 s, slice/10), a batch starts only while this slice's longest batch fits
 before it; the fit needs room for the last recorded fit call, checked with the
 stop request before construction and right before `estimator.fit`. A resume

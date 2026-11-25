@@ -124,6 +124,7 @@ def load_bound(out):
 
 def fit(out, fold, variant, study, slice_seconds, run_logging, *, device='cuda:0', checkpoint=None,
         context_rows=None):
+    entered = tabicl_q.clock()
     require(type(fold) is int and fold in range(5), 'unsupported fold')
     require(variant in VARIANTS and study in STUDIES, 'unsupported variant or study')
     require(math.isfinite(slice_seconds) and 0 < slice_seconds <= 10800, 'slice must be in (0, 10800] seconds')
@@ -181,7 +182,7 @@ def fit(out, fold, variant, study, slice_seconds, run_logging, *, device='cuda:0
                 with request.signals():
                     event = tabicl_q.advance(record, endpoint, recipe, directory, settings=settings,
                         checkpoint=checkpoint, slice_seconds=slice_seconds, device=device,
-                        save=lambda: atomic_record(path, record), request=request)
+                        save=lambda: atomic_record(path, record), request=request, started=entered)
                 if logger is not None:
                     logger.log(event)
                 return record

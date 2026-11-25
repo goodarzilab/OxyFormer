@@ -93,7 +93,6 @@ def check_checkpoint(checkpoint):
     path = Path(checkpoint)
     require(path.name == identity['filename'], 'checkpoint filename differs from the registered regressor')
     require(path.is_file(), 'local checkpoint missing; automatic downloads are forbidden')
-    require(file_hash(path) == identity['sha256'], 'checkpoint hash mismatch')
 
 
 def verified_checkpoint(path):
@@ -277,10 +276,10 @@ def out_of_time(now, deadline, longest, margin):
 
 
 def advance(record, endpoint, recipe, directory, *, settings, checkpoint, slice_seconds, device, save,
-            request, backend=None):
-    """One slice of one fold; save() persists record atomically after every batch."""
+            request, backend=None, started=None):
+    """One slice of one fold, timed from started (the invocation's start); save() persists record."""
     backend = BACKEND if backend is None else backend
-    started = clock()
+    started = clock() if started is None else started
     deadline, margin = started + slice_seconds, min(60., slice_seconds / 10)
     # The verified private copy exists before the backend is consulted at all.
     storage, path = verified_checkpoint(checkpoint)

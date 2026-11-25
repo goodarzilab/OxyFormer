@@ -1,4 +1,5 @@
 """Offline synthetic A6-Q tests; the TabICL backend is injected (no tabicl, no checkpoint)."""
+from contextlib import contextmanager
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -385,15 +386,17 @@ def test_complete_fold_rerun_needs_no_checkpoint(tmp_path, weights, monkeypatch)
     assert path.read_text() == saved and repr(backend.log) == log
     with pytest.raises(ContractError, match='identity differs'):
         fit(out, 0, None, 12)
-    # A fold with work left admits only a verified checkpoint and writes nothing before it.
+    # A fold with work left admits only a verified checkpoint; refused calls write nothing.
     (out / 'candidate.json').unlink()
-    weights.write_bytes(WEIGHTS + b'!')
-    for checkpoint, error in ((weights, 'hash mismatch'), (None, 'A6-Q requires'),
-                              (tmp_path / 'absent' / weights.name, 'missing')):
+    for checkpoint, error in ((None, 'A6-Q requires'), (tmp_path / 'absent' / weights.name, 'missing')):
         with pytest.raises(ContractError, match=error):
             fit(out, 1, checkpoint)
-    assert not (out / 'fold-1').exists() and repr(backend.log) == log
+    assert not (out / 'fold-1').exists()
     assert fit(out, 0, None) == done and json.loads((out / 'candidate.json').read_text()) == done['identity']
+    weights.write_bytes(WEIGHTS + b'!')
+    with pytest.raises(ContractError, match='hash mismatch'):
+        fit(out, 1, weights, 10)
+    assert repr(backend.log) == log
     weights.write_bytes(WEIGHTS)
     # With work left, an omitted --context-rows means 30,000.
     with pytest.raises(ContractError, match='candidate identity differs'):
@@ -557,9 +560,36 @@ def test_conditioning_needs_room_for_the_recorded_fit(tmp_path, weights, monkeyp
     assert event['stop_reason'] == 'deadline' and event['estimator_seconds'] == 25. and not event['conditioned']
     assert backend.log['fits'] == 1 and len(backend.log['kwargs']) == 2
     monkeypatch.setattr(backend, 'estimator', real)
+    # Slice 4: time spent before advance (a slow checkpoint check) counts against the slice.
+    check = adapter.check_checkpoint
+
+    def slow_check(path):
+        backend.time += 20.
+        return check(path)
+    monkeypatch.setattr(adapter, 'check_checkpoint', slow_check)
+    event = fit(out, 0, weights, 10, slice_seconds=76.)['slices'][-1]
+    assert event['stop_reason'] == 'deadline' and not event['conditioned'] and backend.log['fits'] == 1
+    assert event['checkpoint_seconds'] >= 20.
+    monkeypatch.setattr(adapter, 'check_checkpoint', check)
     last = fit(out, 0, weights, 10)
     assert last['parts'] == reference and backend.log['fits'] == 2
-    assert [b['slice'] for b in last['batches']] == [0, 3, 3]
+    assert [b['slice'] for b in last['batches']] == [0, 4, 4]
+
+
+def test_checkpoint_is_hashed_only_under_signal_handlers(tmp_path, weights, monkeypatch):
+    use(monkeypatch, Backend())
+    request, active, hashed = pinned_request(monkeypatch), [], []
+    handlers, real_hash = request.signals, adapter.file_hash
+
+    @contextmanager
+    def signals():
+        active.append(1)
+        with handlers():
+            yield
+    monkeypatch.setattr(request, 'signals', signals)
+    monkeypatch.setattr(adapter, 'file_hash', lambda path: (hashed.append(bool(active)), real_hash(path))[1])
+    assert fit(bound(tmp_path / 'q', five_fold(tmp_path / 'e')), 0, weights, 10)['status'] == 'complete'
+    assert hashed == [True]
 
 
 def test_fit_seconds_time_only_the_fit_call(tmp_path, weights, monkeypatch):
