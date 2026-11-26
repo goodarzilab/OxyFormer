@@ -373,6 +373,36 @@ owner_decisions:
       unchanged_support_settings: {bin_width_mmhg: 1.0, min_bin_tracts: 2}
       primary_policy_unchanged: true       # the plan's 2 mmHg policy on the approved support remains the primary
       readout_must_report: [shifted_fraction, achieved_mean_shift_mmhg, delta_mmhg, raw_x_radius_iqr]
+    # Owner decision of 2026-11-24 (orchestrating session), card answered "Allow TabICL (Recommended)" after the q-lever
+    # planning committee routed whether a resumable TabICLv2 outcome-only adapter is reserved owner work. Exploratory only.
+    tabicl_q_candidate:
+      decided_on: "2026-11-24"
+      variant: "A6-Q"
+      package: "tabicl"
+      package_version: "2.2.0"
+      checkpoint_filename: "tabicl-regressor-v2-20260212.ckpt"
+      checkpoint_sha256: "0db9cb538f114e79026bf08f45f41ad8dd7ad2de2aaca9a5ca8cd3bd9748ae7a"
+      frozen_inference_only: true          # no foundation weights trained or updated; verified on a private copy, allow_auto_download=False
+      max_context_rows: 30000              # deterministic outcome-blind hash-ranked sample from fold outer-training rows
+      max_columns: 500
+      feasibility_spike_before_efficacy: true
+      oxyformer_1m_param_cap_applies: false
+      registered_comparator_unchanged: true
+      certifies_release_criteria: false
+    # Owner direction of 2026-11-24 (~23:05 UTC): "I want to do a handoff back to Neon, so opus 5.5 can be the coding
+    # agent instead"; confirmed fresh on 2026-11-25 02:01 UTC by card for orchestrator google/gemini-4-neon. Amends
+    # Bounded item 3 for new code attempts without rewriting prior attempt records.
+    coding_agent_2026_11_24:
+      decided_on: "2026-11-24"
+      confirmed_on: "2026-11-25"
+      orchestrator: "google/gemini-4-neon"
+      code_author: "anthropic/claude-opus-5-5"
+      provider_model: "claude/claude-opus-5-5"
+      thinking: "high"
+      permission_mode: "auto"
+      auth_mode: "claude_subscription"
+      review_panel_for_opus_code: [luna, kimi-k2.7-code, sol]
+      supersedes_bounded_item_3_for_new_attempts: true
 
 # Not yet approved. A unit that needs one of these must stop and report; the orchestrator brings it to the owner.
 pending_owner_approval:
