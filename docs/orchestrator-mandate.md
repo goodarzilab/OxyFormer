@@ -183,15 +183,17 @@ recorded in `configs/approvals.yaml` under `owner_decisions.exploratory_unsealed
   `owner_decisions.exploratory_unsealed.coding_agent_2026_11_24`.
 - **Indefinite validity and rollover (2026-11-25, confirmed 2026-11-26).** On 2026-11-25 (~17:15 PT, relayed via Omni
   message `f2de28e5-efc7-589b-a183-50e05b52e934`), the owner directed verbatim: `"Make the mandates indefinite for these
-  projects."` Asked directly by structured card (`fc0102fa-e638-5176-ac36-57fe11f3ce6b`) on 2026-11-26 01:25 UTC, the owner
-  confirmed verbatim: `"Yes — indefinite until revoked (Recommended)"`. **Expiry: none (until revoked by owner; Hani
-  2026-11-25).** On the same scope, Granted / Bounded by / Always-stop-and-ask rules, and budgets, this overrides the
-  prior 2026-12-31 UTC expiry and `hanig-orchestrate`'s 24-hour lease / session-rollover re-confirmation requirement:
-  successor or compacted orchestrator sessions inherit this mandate without re-asking on expiry or session rollover, and
-  automatic lease renewal is pre-authorized where tooling enforces a shorter lease window. Successor sessions still
-  re-read `docs/orchestrator-mandate.md` at start and still stop and ask if the mandate's content or scope changes,
-  widens, or becomes ambiguous.
-- Expiry: none (until revoked by owner; Hani 2026-11-25). Everything else in this mandate is unchanged.
+  projects."` Asked directly on 2026-11-26 01:25 UTC by structured card (`fc0102fa-e638-5176-ac36-57fe11f3ce6b`:
+  `"Confirm: OxyFormer v2 orchestrator mandate (oxyformer-v2-m1, dev, Linear Arc; same scope/bounds/budgets) is
+  indefinite until revoked by owner, overriding 2026-12-31 expiry and 24h/session rollover re-confirmation (re-confirm
+  only on content/scope change)?"`), the owner answered verbatim: `"Yes — indefinite until revoked (Recommended)"`.
+  **Expiry: none (until revoked by owner; Hani 2026-11-25).** On the same scope, Granted / Bounded by /
+  Always-stop-and-ask rules, and budgets, this overrides the prior 2026-12-31 UTC expiry and `hanig-orchestrate`'s
+  24-hour lease / session-rollover re-confirmation requirement: successor or compacted orchestrator sessions inherit
+  this mandate without re-asking on expiry or session rollover, and automatic lease renewal is pre-authorized where
+  tooling enforces a shorter lease window. Successor sessions still re-read `docs/orchestrator-mandate.md` at start and
+  still stop and ask if the mandate's content or scope changes, widens, or becomes ambiguous. Everything else in this
+  mandate is unchanged.
 
 ## Concurrence party
 The step-back committee of hanig-review-gate: two members on contrasting providers, the author excluded. Hani Goodarzi
