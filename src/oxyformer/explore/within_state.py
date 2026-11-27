@@ -18,9 +18,14 @@ module packages the cross-fitted one-step runner for that estimand:
 * nuisances: pluggable ``Q`` regressors and ``g`` origin classifiers
   (:func:`fit_cross_fitted_within_state`). ``A6-Q`` is the frozen TabICLv2
   regressor; ``A7-g`` is the frozen TabICLv2 origin classifier with
-  county-grouped inner out-of-fold Platt calibration. ``A7-g`` ratios are an
-  exploratory sensitivity: the amendment's ``density_ratio_benchmark_gate``
-  (G-SIM) has not completed, so no ratio estimator is selected here;
+  county-grouped inner out-of-fold Platt calibration. The amendment's
+  ``density_ratio_benchmark_gate`` (G-SIM) completed on 2026-11-27 (Slurm
+  175340 G1_within_county, 175341 G2_within_state; W&B fbod6ooi, c8dkdzvr):
+  ``A7_tabicl_origin`` passed the prespecified G2_within_state gate (9/10 wins
+  vs A0, RMSE 0.8455 vs 0.9992, calibration slope 0.847, null RMSE 0.0242);
+  ``A5_riesz_nn`` failed (0/10) and is dropped. ``B0_gbm_origin`` also passed
+  G2 and stays the ``g`` sensitivity comparator, per the gate's rule that a
+  ratio estimator is never chosen on max ``r_a``, ESS or sign alone;
 * inference and reporting: one-step and Hajek estimates, iid, county-clustered
   and spatial Conley standard errors, influence concentration, and the
   permanent reporting invariants (per-fold plug-in versus EIF correction,
@@ -107,9 +112,11 @@ class WithinStateSupport:
     """Outcome-blind within-state support; every array is aligned with the input rows."""
     supported: np.ndarray       # query rows whose own exposure bin is an occupied interior bin
     moved: np.ndarray           # supported rows whose whole shift path stays on occupied interior bins
-    scales: np.ndarray          # per-covariate IQR used for the caliper
+    scales: np.ndarray          # per-covariate IQR used for the caliper (1.0 where the IQR is zero)
+    zero_iqr_columns: np.ndarray  # covariates whose pool IQR is zero
     delta: float
     caliper: float
+    zero_iqr_mode: str = 'unit_scale'
 
     @property
     def n_targets(self) -> int:
@@ -126,20 +133,24 @@ class WithinStateSupport:
         return float(self.delta * self.n_movers / self.n_targets)
 
 
-def covariate_scales(X: np.ndarray) -> np.ndarray:
-    """Per-column observed IQR; a degenerate column falls back to scale 1.0.
+ZERO_IQR_MODES = ('unit_scale', 'exact')
 
-    The fallback follows the verified exploratory census code. ``design/support.py``
-    instead demands exact equality on a zero-scale column.
-    """
-    q25 = np.nanpercentile(X, 25, axis=0)
-    q75 = np.nanpercentile(X, 75, axis=0)
-    return np.where((q75 - q25) > 1e-12, q75 - q25, 1.0)
+
+def covariate_iqr(X: np.ndarray) -> np.ndarray:
+    """Per-column observed interquartile range."""
+    return np.nanpercentile(X, 75, axis=0) - np.nanpercentile(X, 25, axis=0)
+
+
+def covariate_scales(X: np.ndarray) -> np.ndarray:
+    """Per-column observed IQR; a zero-IQR column gets scale 1.0 (see ``zero_iqr_mode``)."""
+    iqr = covariate_iqr(X)
+    return np.where(iqr > 1e-12, iqr, 1.0)
 
 
 def compute_within_state_support(
     a: np.ndarray, X: np.ndarray, states: np.ndarray, query: np.ndarray | None = None, *,
     delta: float = 2.0, caliper: float = 2.0, bin_width: float = 1.0, min_bin_tracts: int = 2,
+    zero_iqr_mode: Literal['unit_scale', 'exact'] = 'unit_scale',
 ) -> WithinStateSupport:
     """Interior-bin support inside each state; reads exposure and covariates only.
 
@@ -155,6 +166,11 @@ def compute_within_state_support(
     ``query`` marks the rows to classify (default: all). Only rows with a finite
     exposure form the pool: they alone are neighbours and set the IQR scales. A row
     without exposure is outside the atlas; it can never stand in for a tail bin.
+
+    ``zero_iqr_mode`` sets the rule for a covariate whose pool IQR is zero:
+    ``'unit_scale'`` (default, the verified exploratory census code) uses scale 1.0,
+    so the caliper is ``caliper`` raw units; ``'exact'`` requires exact equality,
+    as ``design/support.py`` ``neighbors`` does for ``scale == 0``.
     """
     a = np.asarray(a, dtype=np.float64)
     X = np.asarray(X, dtype=np.float64)
@@ -169,9 +185,13 @@ def compute_within_state_support(
     require(np.isfinite(delta) and delta >= 0, 'delta must be finite and nonnegative')
     require(np.isfinite(caliper) and caliper > 0 and bin_width > 0 and min_bin_tracts >= 2,
             'invalid support recipe')
+    require(zero_iqr_mode in ZERO_IQR_MODES, f'zero_iqr_mode must be one of {ZERO_IQR_MODES}')
 
-    scales = covariate_scales(X[pool])
+    zero_iqr = ~(covariate_iqr(X[pool]) > 1e-12)
+    scales = np.where(zero_iqr, 1.0, covariate_iqr(X[pool]))
     X_iqr = X / scales
+    # Per-column L-infinity tolerance in scale units; 0 means exact equality.
+    tolerance = np.where(zero_iqr & (zero_iqr_mode == 'exact'), 0.0, caliper)
     missing = np.isnan(X)
     _, pattern = np.unique(missing, axis=0, return_inverse=True)
     pattern = pattern.reshape(-1)
@@ -187,7 +207,8 @@ def compute_within_state_support(
             if len(candidates) == 0:
                 continue
             observed = ~missing[q]
-            near = (np.abs(X_iqr[np.ix_(candidates, observed)] - X_iqr[q, observed]) <= caliper).all(axis=1)
+            diff = np.abs(X_iqr[np.ix_(candidates, observed)] - X_iqr[q, observed])
+            near = (diff <= tolerance[observed]).all(axis=1)
             neighbour_bins = bins[candidates[near]]
             if len(neighbour_bins) == 0:
                 continue
@@ -201,8 +222,8 @@ def compute_within_state_support(
             destination = int(floor((a[q] + delta) / bin_width))
             moved[q] = all(b in occupied for b in range(origin, destination + 1))
 
-    return WithinStateSupport(supported=supported, moved=moved, scales=scales,
-                              delta=float(delta), caliper=float(caliper))
+    return WithinStateSupport(supported=supported, moved=moved, scales=scales, zero_iqr_columns=zero_iqr,
+                              delta=float(delta), caliper=float(caliper), zero_iqr_mode=zero_iqr_mode)
 
 
 # ---------------------------------------------------------------------------
@@ -896,7 +917,9 @@ def check_support_settings(amendment: Mapping[str, Any], approvals: Mapping[str,
 def _readout(payload: dict, wall_seconds: float) -> str:
     lines = [f'# Exploratory readout: `{ESTIMAND_ID}`', '',
              f'**Exploratory; certifies no release criterion.** Owner decision `{OWNER_DECISION_ID}`.',
-             'A7-g ratios are exploratory sensitivity pending the G-SIM density-ratio benchmark.', '',
+             'G-SIM passed A7_tabicl_origin on G2_within_state (Slurm 175341); B0_gbm_origin, which also '
+             'passed, is the g sensitivity comparator.',
+             f'Support zero-IQR mode: `{payload["config"]["zero_iqr_mode"]}`.', '',
              f'Identification: {payload["identification_disclosure"]}', '',
              f'Support: `{payload["n_targets"]:,}` targets, `{payload["n_movers"]:,}` movers; nominal shift '
              f'`{payload["delta"]}` mmHg, **delivered shift `{payload["delivered_shift_mmhg"]:.4f}` mmHg** '
@@ -945,6 +968,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument('--out-dir', type=Path, required=True)
     parser.add_argument('--delta', type=float, default=2.0, help='nominal shift in mmHg')
     parser.add_argument('--caliper', type=float, default=2.0, help='raw-X caliper in IQR units')
+    parser.add_argument('--zero-iqr-mode', choices=ZERO_IQR_MODES, default='unit_scale',
+                        help="zero-IQR covariates: 'unit_scale' (scale 1.0) or 'exact' (design/support.py equality)")
     parser.add_argument('--wandb', action='store_true', help='log the run to W&B (goodarzilab/oxyformer-v2)')
     parser.add_argument('--device', default=None, help='torch device (default: cuda:0 when available)')
     parser.add_argument('--regressor-checkpoint', type=Path, default=default_checkpoint(TABICL_REGRESSOR_FILE))
@@ -976,11 +1001,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     frame = endpoint_frame(endpoint)
     support = compute_within_state_support(frame.a, frame.X, frame.states, frame.eligible, delta=args.delta,
                                            caliper=args.caliper, bin_width=float(recipe['bin_width_mmhg']),
-                                           min_bin_tracts=int(recipe['min_bin_tracts']))
+                                           min_bin_tracts=int(recipe['min_bin_tracts']),
+                                           zero_iqr_mode=args.zero_iqr_mode)
     target = support.supported & frame.eligible
     approved = amendment['outcome_blind_census']
     census = dict(targets=support.n_targets, movers=support.n_movers, delivered_shift_mmhg=support.delivered_shift,
                   approved_targets=approved['target_tracts'], approved_movers=approved['mover_tracts'],
+                  zero_iqr_mode=args.zero_iqr_mode,
+                  zero_iqr_columns=[n for n, z in zip(frame.feature_names, support.zero_iqr_columns) if z],
                   approved_recipe=(args.delta, args.caliper) == (float(recipe['delta_mmhg']),
                                                                  float(recipe['raw_x_radius_iqr'])))
     census['matches_approval'] = census['approved_recipe'] and (support.n_targets, support.n_movers) == (
@@ -1000,7 +1028,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     device = args.device or ('cuda:0' if torch.cuda.is_available() else 'cpu')
     reg = verify_checkpoint(args.regressor_checkpoint, TABICL_REGRESSOR_FILE)
     cls = verify_checkpoint(args.classifier_checkpoint, TABICL_CLASSIFIER_FILE)
-    config = dict(LABELS, delta=args.delta, caliper=args.caliper, n_splits=args.n_splits, census=census,
+    config = dict(LABELS, delta=args.delta, caliper=args.caliper, zero_iqr_mode=args.zero_iqr_mode,
+                  n_splits=args.n_splits, census=census,
                   n_targets=support.n_targets, n_movers=support.n_movers, delivered_shift_mmhg=support.delivered_shift,
                   prepared_hash=audit['prepared_hash'], checkout=real_fit.checkout_identity(), device=device,
                   regressor=TABICL_REGRESSOR_FILE, classifier=TABICL_CLASSIFIER_FILE, revision=TABICL_REVISION)

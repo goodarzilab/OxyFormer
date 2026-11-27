@@ -19,9 +19,14 @@ from oxyformer.provenance import ContractError
 # helpers
 # ---------------------------------------------------------------------------
 
-def oracle_support(a, X, states, *, delta, caliper, bin_width=1.0, min_bin_tracts=2):
-    """Independent reference built on design.support.connected_components."""
-    scales = ws.covariate_scales(X)
+def oracle_support(a, X, states, *, delta, caliper, bin_width=1.0, min_bin_tracts=2, zero_iqr_mode='unit_scale'):
+    """Independent reference built on design.support.connected_components.
+
+    ``'exact'`` copies design/support.py ``neighbors``: ``a == b if scale == 0`` on the raw IQR.
+    """
+    scales = ws.covariate_iqr(X)
+    if zero_iqr_mode == 'unit_scale':
+        scales = np.where(scales == 0, 1.0, scales)
     recipe = SupportRecipe(bin_width_mmhg=bin_width, min_bin_tracts=min_bin_tracts, raw_x_radius=caliper)
     missing = np.isnan(X)
     supported = np.zeros(len(a), dtype=bool)
@@ -29,7 +34,8 @@ def oracle_support(a, X, states, *, delta, caliper, bin_width=1.0, min_bin_tract
     for q in range(len(a)):
         nbrs = [r for r in range(len(a)) if r != q and states[r] == states[q]
                 and (missing[r] == missing[q]).all()
-                and all(abs(X[r, j] - X[q, j]) <= caliper * scales[j] for j in np.flatnonzero(~missing[q]))]
+                and all((X[r, j] == X[q, j]) if scales[j] == 0 else abs(X[r, j] - X[q, j]) <= caliper * scales[j]
+                        for j in np.flatnonzero(~missing[q]))]
         components = connected_components([a[r] for r in nbrs], nbrs, recipe)
         for lo, hi in components:
             if lo <= a[q] < hi:
@@ -164,6 +170,52 @@ def test_support_matches_design_support_oracle():
 # ---------------------------------------------------------------------------
 # (b) balanced county folds
 # ---------------------------------------------------------------------------
+
+def zero_iqr_frame(value):
+    """line_frame plus a zero-IQR third column; bin 3's second replicate (a = 3.6) carries ``value``."""
+    a, X, states = line_frame(extra_a=[3.6], extra_x=[[0.5, 0.5]], extra_states=['01'])
+    keep = a != 3.5
+    a, X, states = a[keep], X[keep], states[keep]
+    zero = np.zeros(len(a))
+    zero[a == 3.6] = value
+    return a, np.column_stack([X, zero]), states, int(np.flatnonzero(a == 1.0)[0])
+
+
+def test_zero_iqr_mode_unit_scale_versus_exact_design_support_rule():
+    a, X, states, q = zero_iqr_frame(0.3)
+    unit = ws.compute_within_state_support(a, X, states, delta=2.0, caliper=3.0)
+    exact = ws.compute_within_state_support(a, X, states, delta=2.0, caliper=3.0, zero_iqr_mode='exact')
+    assert unit.zero_iqr_mode == 'unit_scale' and exact.zero_iqr_mode == 'exact'
+    np.testing.assert_array_equal(unit.zero_iqr_columns, [False, False, True])
+    assert unit.scales[2] == 1.0
+    assert unit.supported[q] and unit.moved[q]          # |0.3 - 0| <= 3 * 1.0: the 3.6 replicate counts
+    assert exact.supported[q] and not exact.moved[q]    # 0.3 != 0: excluded, bin 3 unreplicated
+    a, X, states, q = zero_iqr_frame(0.0)
+    assert ws.compute_within_state_support(a, X, states, delta=2.0, caliper=3.0, zero_iqr_mode='exact').moved[q]
+    with pytest.raises(ContractError, match='zero_iqr_mode'):
+        ws.compute_within_state_support(a, X, states, zero_iqr_mode='nearest')
+
+
+def test_zero_iqr_modes_match_design_support_oracle():
+    rng = np.random.default_rng(9)
+    n = 240
+    states = np.asarray(['01', '02'])[rng.integers(0, 2, n)]
+    a = rng.normal(5.0, 1.4, n)
+    X = np.column_stack([rng.normal(size=n), rng.normal(size=n),
+                         np.where(rng.random(n) < 0.15, rng.choice([0.1, 0.2], n), 0.0)])
+    assert ws.covariate_iqr(X)[2] == 0.0
+    found = {}
+    for mode in ('unit_scale', 'exact'):
+        s = ws.compute_within_state_support(a, X, states, delta=2.0, caliper=2.0, zero_iqr_mode=mode)
+        sup, mv = oracle_support(a, X, states, delta=2.0, caliper=2.0, zero_iqr_mode=mode)
+        np.testing.assert_array_equal(s.supported, sup)
+        np.testing.assert_array_equal(s.moved, mv)
+        found[mode] = s
+    # Exact equality only removes neighbours, so its support is a subset of the unit-scale support.
+    assert (found['exact'].supported <= found['unit_scale'].supported).all()
+    assert (found['exact'].moved <= found['unit_scale'].moved).all()
+    assert found['exact'].n_targets < found['unit_scale'].n_targets
+
 
 def test_balanced_county_folds_are_disjoint_and_elevation_balanced():
     rng = np.random.default_rng(11)
@@ -444,7 +496,8 @@ def test_run_within_state_end_to_end_with_injected_learners():
     assert primary['delivered_shift_mmhg'] == out['delivered_shift']
     assert set(primary['flag_stratified_descriptive']) == {'flag_1', 'flag_3'}
     assert abs(out['results'][ws.NULL_LABEL]['one_step']['per_mmhg']) < 0.3
-    payload = dict(ws.LABELS, config=dict(census=dict(targets=out['n_targets'])), delta=2.0,
+    payload = dict(ws.LABELS, config=dict(census=dict(targets=out['n_targets']), zero_iqr_mode='unit_scale'),
+                   delta=2.0,
                    n_targets=out['n_targets'], n_movers=out['n_movers'], delivered_shift_mmhg=out['delivered_shift'],
                    identification_disclosure='state FE only', results=out['results'], folds=out['folds'],
                    platt=out['platt'], null_platt=out['null'].platt)
@@ -457,6 +510,8 @@ def test_run_within_state_end_to_end_with_injected_learners():
 def test_cli_defaults():
     args = ws.parse_args(['--prepared-dir', 'p', '--geography-json', 'g.json', '--out-dir', 'o'])
     assert (args.delta, args.caliper, args.wandb, args.n_splits) == (2.0, 2.0, False, 5)
-    assert not args.allow_census_drift and not args.skip_null
+    assert not args.allow_census_drift and not args.skip_null and args.zero_iqr_mode == 'unit_scale'
+    assert ws.parse_args(['--prepared-dir', 'p', '--geography-json', 'g', '--out-dir', 'o',
+                          '--zero-iqr-mode', 'exact']).zero_iqr_mode == 'exact'
     assert args.regressor_checkpoint.name == ws.TABICL_REGRESSOR_FILE
     assert ws.TABICL_REVISION in str(args.classifier_checkpoint)
