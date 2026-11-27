@@ -335,9 +335,10 @@ def test_permuted_null_is_near_zero_despite_cross_state_confounding():
     a_null, moved_null = ws.permute_within_state(data.a, data.moved, data.states, seed=5)
     a_again, _ = ws.permute_within_state(data.a, data.moved, data.states, seed=5)
     np.testing.assert_array_equal(a_null, a_again)
+    np.testing.assert_array_equal(moved_null, data.moved)
     for s in np.unique(data.states):
         m = data.states == s
-        assert sorted(a_null[m]) == sorted(data.a[m]) and moved_null[m].sum() == data.moved[m].sum()
+        assert sorted(a_null[m]) == sorted(data.a[m])
     null = ws.WithinStateInputs(ids=data.ids, a=a_null, y=data.y, X=data.X, counties=data.counties,
                                 states=data.states, target=data.target, moved=moved_null)
     delivered = 2.0 * moved_null.mean()
@@ -542,26 +543,38 @@ def test_outer_fold_without_targets_is_skipped():
     assert set(res['per_fold']) == {'0', '1', '2', '3'}
 
 
-def test_null_permutation_keeps_target_movers_and_delivered_shift():
+def test_null_permutation_is_independent_of_target_and_keeps_target_movers():
+    # terra's counterexample: target exposures interior (1-4), non-target tails (0, 6), y = target.
+    a = np.tile([1., 2., 3., 4., 0., 6., 6., 6.], 20)
+    target = np.tile([True] * 4 + [False] * 4, 20)
+    y = target.astype(float)
+    states = np.full(len(a), '01')
+    moved = target & np.tile([True, True, False, True, False, False, False, False], 20)
+    a_null, moved_null = ws.permute_within_state(a, moved, states, seed=3)
+    assert sorted(a_null) == sorted(a)
+    assert y[a == 1].mean() == 1.0 and y[a == 6].mean() == 0.0        # confounded before permutation
+    assert abs(y[a_null == 1].mean() - 0.5) < 0.25 and abs(y[a_null == 6].mean() - 0.5) < 0.15
+    assert abs(np.corrcoef(a_null, y)[0, 1]) < 0.15
+    np.testing.assert_array_equal(moved_null, moved)
+    assert moved_null[target].sum() == moved[target].sum()
+
     base = synthetic_inputs(n_states=4, counties_per_state=10, tracts=8)
     rng = np.random.default_rng(13)
     target = rng.random(len(base.ids)) < 0.6
     data = ws.WithinStateInputs(ids=base.ids, a=base.a, y=base.y, X=base.X, counties=base.counties,
                                 states=base.states, target=target, moved=base.moved & target)
-    a_null, moved_null = ws.permute_within_state(data.a, data.moved, data.states, seed=3, target=target)
+    a_null, moved_null = ws.permute_within_state(data.a, data.moved, data.states, seed=3)
     for s in np.unique(data.states):
-        for stratum in (False, True):
-            m = (data.states == s) & (target == stratum)
-            assert sorted(a_null[m]) == sorted(data.a[m]) and moved_null[m].sum() == data.moved[m].sum()
-    _, pooled = ws.permute_within_state(data.a, data.moved, data.states, seed=3)
-    assert pooled[target].sum() != data.moved[target].sum()      # the old pooled permutation drifts
+        m = data.states == s
+        assert sorted(a_null[m]) == sorted(data.a[m])
+        assert moved_null[m & target].sum() == data.moved[m & target].sum()
     out = ws.run_within_state(data, delta=2.0, county_locs={}, q_learners=[linear_q('A6-Q')],
                               g_learners=[logistic_g('A7-g')], combos=[(ws.PRIMARY_LABEL, 'A6-Q', 'A7-g')],
                               null_learners=([linear_q('A6-Q')], [logistic_g('A7-g')]))
     expected = 2.0 * data.moved[target].mean()
     assert out['delivered_shift'] == pytest.approx(expected)
-    assert out['null_delivered_shift'] == pytest.approx(expected)
-    assert out['results'][ws.NULL_LABEL]['delivered_shift_mmhg'] == pytest.approx(expected)
+    assert out['null_delivered_shift'] == out['delivered_shift']
+    assert out['results'][ws.NULL_LABEL]['delivered_shift_mmhg'] == out['delivered_shift']
 
 
 def iqr_1e13_frame(value):

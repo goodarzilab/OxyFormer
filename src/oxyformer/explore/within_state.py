@@ -338,27 +338,23 @@ def deterministic_subsample_idx(ids: np.ndarray, cap: int, salt: str) -> np.ndar
     return np.sort(np.argsort(hashes, kind='stable')[:cap])
 
 
-def permute_within_state(a: np.ndarray, moved: np.ndarray, states: np.ndarray, seed: int = NULL_SEED,
-                         target: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
-    """Falsification null: permute (A, moved) jointly within each state, Y and X fixed.
+def permute_within_state(a: np.ndarray, moved: np.ndarray, states: np.ndarray,
+                         seed: int = NULL_SEED) -> tuple[np.ndarray, np.ndarray]:
+    """Falsification null: permute A across all rows of each state; Y, X, target and moved stay fixed.
 
-    The permuted exposure is independent of (X, Y) given state, so the true effect is zero.
-    With ``target``, target and non-target rows are permuted separately inside each state,
-    so every state keeps its target mover count and the null's delivered shift is the
-    original's.
+    ``a_null`` is then independent of (Y, X, target, moved) given state, so the true effect
+    is zero; stratifying by target would let ``a_null`` carry the target/non-target
+    exposure contrast into a pooled Q. ``moved`` is returned unchanged, so every state
+    keeps its target mover count and the null's delivered shift is the original's.
     """
     a, moved, states = np.asarray(a, dtype=np.float64), np.asarray(moved, dtype=bool), np.asarray(states)
-    target = np.zeros(len(a), dtype=bool) if target is None else np.asarray(target, dtype=bool)
-    require(moved.shape == states.shape == target.shape == a.shape, 'permutation inputs are misaligned')
+    require(moved.shape == states.shape == a.shape, 'permutation inputs are misaligned')
     rng = np.random.default_rng(seed)
-    a_null, moved_null = a.copy(), moved.copy()
+    a_null = a.copy()
     for s in sorted(np.unique(states).tolist()):
-        for stratum in (False, True):
-            rows = np.flatnonzero((states == s) & (target == stratum))
-            if len(rows):
-                perm = rng.permutation(rows)
-                a_null[rows], moved_null[rows] = a[perm], moved[perm]
-    return a_null, moved_null
+        rows = np.flatnonzero(states == s)
+        a_null[rows] = a[rng.permutation(rows)]
+    return a_null, moved.copy()
 
 
 # ---------------------------------------------------------------------------
@@ -819,7 +815,7 @@ def run_within_state(
 ) -> dict:
     """Cross-fit every learner on shared folds, then score each (Q, g) combination and the null.
 
-    ``flags`` aligns with the target rows. The null permutes (A, moved) within state,
+    ``flags`` aligns with the target rows. The null permutes A within state (moved fixed),
     reuses the outer folds and scores its first Q with its first g.
     """
     require(n_splits >= 2, 'at least two outer folds required')
@@ -842,7 +838,7 @@ def run_within_state(
     if null_learners is not None:
         nq, ng = null_learners
         require(bool(nq) and bool(ng), 'null requires a Q and a g learner')
-        a_null, moved_null = permute_within_state(data.a, data.moved, data.states, null_seed, target=target)
+        a_null, moved_null = permute_within_state(data.a, data.moved, data.states, null_seed)
         null_delivered = float(delta * moved_null[target].mean())
         null_data = WithinStateInputs(ids=data.ids, a=a_null, y=data.y, X=data.X, counties=data.counties,
                                       states=data.states, target=data.target, moved=moved_null)
