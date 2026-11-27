@@ -428,14 +428,20 @@ owner_decisions:
       support_pool: "all_allocation_qualified_frame_tracts"
     secondary_estimand_retained: "within_county_d1_c2 (2,387 targets, 546 movers, 0.229 mmHg delivered shift, G_eff 17.3, A6-Q SE 0.0893 y/mmHg, 95% CI [-0.165, +0.185])"
     outcome_blind_census:
-      source: "Calibrated Diagnostic E (Slurm 175063, exact design/support.py interior-bin connected components)"
+      source: "Packaged oxyformer.explore.within_state (PR #108, dev e84fd34; erratum to Calibrated Diagnostic E Slurm 175063 removing 18 missing-exposure NaN rows that cast floor(NaN)->INT64_MIN)"
+      erratum_decided_on: "2026-11-27"
+      erratum_owner_input_request_id: "50386c29-4341-5098-80bc-3f13588f9956"
       outcomes_read: false
       new_policy_psi_hat_computed_before_approval: false
-      target_tracts: 37226
-      mover_tracts: 26428
-      mover_fraction: 0.710
-      delivered_mean_shift_mmhg: 1.420
-      moved_counties: 2110
+      zero_iqr_mode: "unit_scale"
+      zero_iqr_columns: [nh_nhpi_share, nh_other_race_share]
+      target_tracts: 36384
+      mover_tracts: 25597
+      mover_fraction: 0.7035
+      delivered_mean_shift_mmhg: 1.407
+      moved_counties: 2093
+      prior_uncorrected_census: {target_tracts: 37226, mover_tracts: 26428, delivered_mean_shift_mmhg: 1.420, moved_counties: 2110, note: "inflated by 842 tail tracts from 18 non-eligible NaN-exposure rows cast to INT64_MIN"}
+      exact_zero_iqr_sensitivity: {zero_iqr_mode: "exact", target_tracts: 25471, mover_tracts: 17338, delivered_mean_shift_mmhg: 1.361, note: "strict design/support.py:74 exact equality on zero-IQR columns"}
       top5_county_share: 0.100
       effective_counties_g_eff: 206.8
       mean_abs_smd: 0.068
