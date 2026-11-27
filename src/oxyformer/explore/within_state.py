@@ -142,9 +142,9 @@ def covariate_iqr(X: np.ndarray) -> np.ndarray:
 
 
 def covariate_scales(X: np.ndarray) -> np.ndarray:
-    """Per-column observed IQR; a zero-IQR column gets scale 1.0 (see ``zero_iqr_mode``)."""
+    """Per-column observed IQR; a column whose IQR is exactly 0 gets scale 1.0 (see ``zero_iqr_mode``)."""
     iqr = covariate_iqr(X)
-    return np.where(iqr > 1e-12, iqr, 1.0)
+    return np.where(iqr > 0.0, iqr, 1.0)
 
 
 def compute_within_state_support(
@@ -187,11 +187,11 @@ def compute_within_state_support(
             'invalid support recipe')
     require(zero_iqr_mode in ZERO_IQR_MODES, f'zero_iqr_mode must be one of {ZERO_IQR_MODES}')
 
-    zero_iqr = ~(covariate_iqr(X[pool]) > 1e-12)
-    scales = np.where(zero_iqr, 1.0, covariate_iqr(X[pool]))
-    X_iqr = X / scales
-    # Per-column L-infinity tolerance in scale units; 0 means exact equality.
-    tolerance = np.where(zero_iqr & (zero_iqr_mode == 'exact'), 0.0, caliper)
+    iqr = covariate_iqr(X[pool])
+    zero_iqr = ~(iqr > 0.0)       # exactly zero (or no observed values), as support.py's scale == 0
+    scales = np.where(zero_iqr, 1.0, iqr)
+    # Per-column L-infinity tolerance in raw units (never divided by a tiny IQR); 0 means exact equality.
+    tolerance = caliper * np.where(zero_iqr, 0.0 if zero_iqr_mode == 'exact' else 1.0, iqr)
     missing = np.isnan(X)
     _, pattern = np.unique(missing, axis=0, return_inverse=True)
     pattern = pattern.reshape(-1)
@@ -207,7 +207,7 @@ def compute_within_state_support(
             if len(candidates) == 0:
                 continue
             observed = ~missing[q]
-            diff = np.abs(X_iqr[np.ix_(candidates, observed)] - X_iqr[q, observed])
+            diff = np.abs(X[np.ix_(candidates, observed)] - X[q, observed])
             near = (diff <= tolerance[observed]).all(axis=1)
             neighbour_bins = bins[candidates[near]]
             if len(neighbour_bins) == 0:
@@ -338,19 +338,26 @@ def deterministic_subsample_idx(ids: np.ndarray, cap: int, salt: str) -> np.ndar
     return np.sort(np.argsort(hashes, kind='stable')[:cap])
 
 
-def permute_within_state(a: np.ndarray, moved: np.ndarray, states: np.ndarray,
-                         seed: int = NULL_SEED) -> tuple[np.ndarray, np.ndarray]:
+def permute_within_state(a: np.ndarray, moved: np.ndarray, states: np.ndarray, seed: int = NULL_SEED,
+                         target: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
     """Falsification null: permute (A, moved) jointly within each state, Y and X fixed.
 
     The permuted exposure is independent of (X, Y) given state, so the true effect is zero.
+    With ``target``, target and non-target rows are permuted separately inside each state,
+    so every state keeps its target mover count and the null's delivered shift is the
+    original's.
     """
     a, moved, states = np.asarray(a, dtype=np.float64), np.asarray(moved, dtype=bool), np.asarray(states)
+    target = np.zeros(len(a), dtype=bool) if target is None else np.asarray(target, dtype=bool)
+    require(moved.shape == states.shape == target.shape == a.shape, 'permutation inputs are misaligned')
     rng = np.random.default_rng(seed)
     a_null, moved_null = a.copy(), moved.copy()
     for s in sorted(np.unique(states).tolist()):
-        rows = np.flatnonzero(states == s)
-        perm = rng.permutation(rows)
-        a_null[rows], moved_null[rows] = a[perm], moved[perm]
+        for stratum in (False, True):
+            rows = np.flatnonzero((states == s) & (target == stratum))
+            if len(rows):
+                perm = rng.permutation(rows)
+                a_null[rows], moved_null[rows] = a[perm], moved[perm]
     return a_null, moved_null
 
 
@@ -596,10 +603,18 @@ def fit_cross_fitted_within_state(
         slots = t_pos[ev_t]
         result.fold_ids[slots] = fold
         moved_ev = data.moved[ev_t]
+        record: dict[str, Any] = dict(fold=fold, n_train=int(len(tr)), n_train_targets=int(len(tr_t)),
+                                      n_eval_targets=int(len(ev_t)), shared_counties=0, q_context_rows={},
+                                      skipped=len(ev_t) == 0)
+        if record['skipped']:
+            # Nothing to predict: no nuisance is fitted, so the fold costs nothing and changes no target.
+            record['seconds'] = time.monotonic() - started
+            result.folds.append(record)
+            if log is not None:
+                log(f'[fold {fold}] skipped: no evaluation targets')
+            continue
         imputer = SimpleImputer(strategy='median').fit(data.X[tr])
         X_tr, X_tr_t, X_ev_t = (imputer.transform(data.X[rows]) for rows in (tr, tr_t, ev_t))
-        record: dict[str, Any] = dict(fold=fold, n_train=int(len(tr)), n_train_targets=int(len(tr_t)),
-                                      n_eval_targets=int(len(ev_t)), shared_counties=0, q_context_rows={})
 
         stats = fit_state_stats(data.a[tr], data.states[tr])
         Fq_tr = encode_features_onehot(data.a[tr], X_tr, data.states[tr], stats, all_states)
@@ -729,10 +744,14 @@ def score_within_state_estimate(
     eif = plugin + correction
     psi = float(np.mean(eif))
     inf = compute_conley_inference(eif - psi, counties, county_locs)
+    # Hajek: psi = mean(plugin) + mean(r e) / mean(r) - mean(e), e = y - mu_a. Its influence
+    # function includes the delta-method term for estimating mean(r): (r / r_bar)(e - c).
     mean_r = float(np.mean(r_a))
-    eif_hajek = plugin + (r_a / mean_r - 1.0) * (y - mu_a)
-    psi_hajek = float(np.mean(eif_hajek))
-    inf_hajek = compute_conley_inference(eif_hajek - psi_hajek, counties, county_locs)
+    residual = y - mu_a
+    c_hajek = float(np.mean(r_a * residual)) / mean_r
+    psi_hajek = float(np.mean(plugin)) + c_hajek - float(np.mean(residual))
+    eif_hajek = plugin + (r_a / mean_r) * (residual - c_hajek) - residual
+    inf_hajek = compute_conley_inference(eif_hajek - np.mean(eif_hajek), counties, county_locs)
     residual_sq = (y - mu_a) ** 2
     ess, ess_pct = _landing_ess(r_a)
     per_mmhg = lambda v: v / delivered_shift  # noqa: E731
@@ -823,15 +842,17 @@ def run_within_state(
     if null_learners is not None:
         nq, ng = null_learners
         require(bool(nq) and bool(ng), 'null requires a Q and a g learner')
-        a_null, moved_null = permute_within_state(data.a, data.moved, data.states, null_seed)
+        a_null, moved_null = permute_within_state(data.a, data.moved, data.states, null_seed, target=target)
+        null_delivered = float(delta * moved_null[target].mean())
         null_data = WithinStateInputs(ids=data.ids, a=a_null, y=data.y, X=data.X, counties=data.counties,
                                       states=data.states, target=data.target, moved=moved_null)
         null = fit_cross_fitted_within_state(null_data, splits, delta=delta, q_learners=nq, g_learners=ng,
                                              all_states=all_states, log=log)
         results[NULL_LABEL] = score_within_state_estimate(
             NULL_LABEL, y_t, null.mu_a[nq[0].name], null.mu_d[nq[0].name], null.r_a[ng[0].name],
-            null.fold_ids, c_t, county_locs, delivered, flags)
+            null.fold_ids, c_t, county_locs, null_delivered, flags)
     return dict(results=results, fits=fits, null=null, n_targets=n_t, n_movers=n_m, delivered_shift=delivered,
+                null_delivered_shift=null_delivered if null is not None else None,
                 folds=fits.folds, platt=fits.platt)
 
 

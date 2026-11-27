@@ -515,3 +515,102 @@ def test_cli_defaults():
                           '--zero-iqr-mode', 'exact']).zero_iqr_mode == 'exact'
     assert args.regressor_checkpoint.name == ws.TABICL_REGRESSOR_FILE
     assert ws.TABICL_REVISION in str(args.classifier_checkpoint)
+
+
+# ---------------------------------------------------------------------------
+# review-gate round 1 regressions (terra)
+# ---------------------------------------------------------------------------
+
+def test_outer_fold_without_targets_is_skipped():
+    counties = np.repeat([f'01{c:03d}' for c in range(20)], 2)
+    states = np.full(40, '01')
+    rng = np.random.default_rng(2)
+    a = np.repeat(np.arange(20, dtype=float), 2) + rng.normal(0.0, 0.1, 40)
+    folds = ws.balanced_county_fold_ids(counties, states, a, 5)
+    target = folds != 4                                   # targets in only 4 of the 5 folds
+    data = ws.WithinStateInputs(ids=np.asarray([f'id{i}' for i in range(40)], dtype=object), a=a,
+                                y=0.3 * a + rng.normal(size=40), X=rng.normal(size=(40, 2)), counties=counties,
+                                states=states, target=target, moved=target & (rng.random(40) < 0.7))
+    splits = ws.make_balanced_county_folds(counties, states, a, 5)
+    fit = ws.fit_cross_fitted_within_state(data, splits, delta=2.0, q_learners=[linear_q()], g_learners=[logistic_g()])
+    assert [f['skipped'] for f in fit.folds] == [False, False, False, False, True]
+    assert fit.folds[4]['n_eval_targets'] == 0 and 4 not in set(fit.fold_ids)
+    assert len(fit.fold_ids) == target.sum() and np.isfinite(fit.mu_a['lin']).all()
+    assert np.isfinite(fit.r_a['logit']).all() and len(fit.platt['logit']) == 4
+    res = ws.score_within_state_estimate('x', data.y[target], fit.mu_a['lin'], fit.mu_d['lin'], fit.r_a['logit'],
+                                         fit.fold_ids, counties[target], {}, 2.0 * data.moved[target].mean())
+    assert set(res['per_fold']) == {'0', '1', '2', '3'}
+
+
+def test_null_permutation_keeps_target_movers_and_delivered_shift():
+    base = synthetic_inputs(n_states=4, counties_per_state=10, tracts=8)
+    rng = np.random.default_rng(13)
+    target = rng.random(len(base.ids)) < 0.6
+    data = ws.WithinStateInputs(ids=base.ids, a=base.a, y=base.y, X=base.X, counties=base.counties,
+                                states=base.states, target=target, moved=base.moved & target)
+    a_null, moved_null = ws.permute_within_state(data.a, data.moved, data.states, seed=3, target=target)
+    for s in np.unique(data.states):
+        for stratum in (False, True):
+            m = (data.states == s) & (target == stratum)
+            assert sorted(a_null[m]) == sorted(data.a[m]) and moved_null[m].sum() == data.moved[m].sum()
+    _, pooled = ws.permute_within_state(data.a, data.moved, data.states, seed=3)
+    assert pooled[target].sum() != data.moved[target].sum()      # the old pooled permutation drifts
+    out = ws.run_within_state(data, delta=2.0, county_locs={}, q_learners=[linear_q('A6-Q')],
+                              g_learners=[logistic_g('A7-g')], combos=[(ws.PRIMARY_LABEL, 'A6-Q', 'A7-g')],
+                              null_learners=([linear_q('A6-Q')], [logistic_g('A7-g')]))
+    expected = 2.0 * data.moved[target].mean()
+    assert out['delivered_shift'] == pytest.approx(expected)
+    assert out['null_delivered_shift'] == pytest.approx(expected)
+    assert out['results'][ws.NULL_LABEL]['delivered_shift_mmhg'] == pytest.approx(expected)
+
+
+def iqr_1e13_frame(value):
+    """Third column with IQR exactly 1e-13 (not zero); the bin-3 replicate (a = 3.6) carries ``value``."""
+    a, X, states, q = zero_iqr_frame(0.0)
+    col = np.zeros(len(a))
+    col[np.isin(a, [1.2, 2.2, 2.5, 4.5])] = 1e-13
+    col[a == 3.6] = value
+    return a, np.column_stack([X[:, :2], col]), states, q
+
+
+def test_tiny_positive_iqr_is_a_caliper_not_a_zero_iqr_column():
+    for value, expect_moved in ((1e-13, True), (0.5, False)):
+        a, X, states, q = iqr_1e13_frame(value)
+        assert ws.covariate_iqr(X)[2] == 1e-13
+        for mode in ws.ZERO_IQR_MODES:
+            s = ws.compute_within_state_support(a, X, states, delta=2.0, caliper=3.0, zero_iqr_mode=mode)
+            assert not s.zero_iqr_columns[2] and s.scales[2] == 1e-13
+            assert s.supported[q] and s.moved[q] == expect_moved, (value, mode)
+            sup, mv = oracle_support(a, X, states, delta=2.0, caliper=3.0, zero_iqr_mode=mode)
+            np.testing.assert_array_equal(s.supported, sup)
+            np.testing.assert_array_equal(s.moved, mv)
+
+
+def test_hajek_influence_accounts_for_estimated_mean_ratio():
+    n = 40
+    counties = np.asarray([f'01{i % 8:03d}' for i in range(n)])
+    locs = {f'01{i:03d}': (35.0, -100.0 + 0.3 * i) for i in range(8)}
+    r_a = np.where(np.arange(n) % 2, 1.5, 0.5)
+    res = ws.score_within_state_estimate('x', np.ones(n), np.zeros(n), np.zeros(n), r_a, np.arange(n) % 5,
+                                         counties, locs, 1.0)
+    hj = res['hajek_one_step']
+    assert hj['psi'] == 0.0
+    for key in ('se_iid', 'se_cluster', 'se_spatial_50km', 'se_spatial_100km', 'se_spatial_250km'):
+        assert hj['inference'][key] == 0.0, key
+    assert res['one_step']['inference']['se_iid'] > 0      # the unnormalised one-step still varies
+
+    # Generic data: the iid SE matches the jackknife SE of the Hajek estimator (nuisances fixed).
+    rng = np.random.default_rng(8)
+    n = 400
+    y, mu_a = rng.normal(size=n), rng.normal(0.0, 0.5, n)
+    mu_d, r = mu_a + rng.normal(0.2, 0.1, n), np.exp(rng.normal(0.0, 0.5, n))
+    counties = np.asarray([f'01{i:03d}' for i in range(n)])
+    res = ws.score_within_state_estimate('x', y, mu_a, mu_d, r, np.arange(n) % 5, counties, {}, 1.0)
+
+    def hajek(m):
+        e = y[m] - mu_a[m]
+        return np.mean(mu_d[m] - mu_a[m]) + np.mean(r[m] * e) / np.mean(r[m]) - np.mean(e)
+    assert res['hajek_one_step']['psi'] == pytest.approx(hajek(np.ones(n, dtype=bool)))
+    loo = np.asarray([hajek(np.arange(n) != i) for i in range(n)])
+    jackknife = np.sqrt((n - 1) / n * np.sum((loo - loo.mean()) ** 2))
+    assert res['hajek_one_step']['inference']['se_iid'] == pytest.approx(jackknife, rel=0.03)
