@@ -1,6 +1,6 @@
 # OxyFormer v2 causal AI implementation plan
 
-> Frozen science plan for the OxyFormer v2 run. Drafted by gpt-6-astra from 26 research subagent reports and reviewed by Claude; adopted by Hani Goodarzi on 2026-10-04. PI decisions recorded after drafting: the `src/oxyformer/` package is approved, and TabPFN (all versions) is admitted alongside TabICLv2 because Arc is a nonprofit (section 8.4 amended to match). Owner approvals of fixed parameters live in `configs/approvals.yaml`. Changes to this file require the owner (see `docs/orchestrator-mandate.md`).
+> Frozen science plan for the OxyFormer v2 run. Drafted by gpt-6-astra from 26 research subagent reports and reviewed by Claude; adopted by Hani Goodarzi on 2026-10-04. PI decisions recorded after drafting: the `src/oxyformer/` package is approved, and TabPFN (all versions) is admitted alongside TabICLv2 because Arc is a nonprofit (section 8.4 amended to match). Owner approvals of fixed parameters live in `configs/approvals.yaml`. Changes to this file require the owner (see `docs/orchestrator-mandate.md`). **Amended 2026-11-27 by direct owner decision (`a0d288a4-fedc-5d64-ab91-817f99584f5e`): see Section 12 for the redefined within-state `d2 c2` primary USALEEP estimand (with within-county `d1` retained as secondary) and adoption of `A6-Q` (`TabICLv2`) as exploratory primary Q alongside the `G-SIM` density-ratio benchmark.**
 
 
 **Decision date: October 4, 2026**
@@ -1001,3 +1001,28 @@ Finally, the following remain substantive identification limits:
 - Hb genetics, HIF-PHI assignment, and residential pressure are different interventions.
 
 **OxyFormer v2 is therefore a transformer-based causal estimation system with explicit identification conditions—not a machine that turns geographic prediction into an oxygen-specific causal claim.** The implementation succeeds when it delivers reproducible, calibrated, supported estimates and correctly identifies where the data cannot support the desired conclusion.
+
+---
+
+## 12. Owner Amendment (2026-11-27): Within-State `d2 c2` Primary USALEEP Estimand, `A6-Q` Primary Q, and `G-SIM` Ratio Benchmark
+
+**Authority:** Direct owner decision on 2026-11-27 (`04:09:28Z`, Lor structured card `a0d288a4-fedc-5d64-ab91-817f99584f5e`; see `configs/approvals.yaml#owner_decisions.within_state_primary_amendment`). All exploratory outputs remain labelled exploratory and certify no confirmatory release criterion.
+
+### 12.1 Redefinition of Primary USALEEP Estimand (`usaleep_within_state_d2_c2`)
+
+Empirical evaluation of the within-county exploratory endpoint (`within_county_d1_c2`: `2,387` targets, `546` movers, `0.229 mmHg` delivered shift, `G_eff = 17.3`, `49.1%` top-5 county share) showed that even after replacing the outcome learner with `A6-Q` (`TabICLv2`, `-56.3%` weighted MSE vs `A0`, `R² = 0.5534`), the within-county estimator's standard error remained `0.0893 y/mmHg` (`95% CI [-0.165, +0.185] y/mmHg`; perfect-$Q$ floor `0.060 y/mmHg`), structurally underpowered for a `0.05 y/mmHg` effect.
+
+Per Section 10's stop rule (*"Any revised policy receives a new estimand ID and a new locked analysis"*), and strictly **before computing any real-data $\hat\psi$ under any cross-county policy**, the owner approved redefining the primary USALEEP exploratory estimand to **`usaleep_within_state_d2_c2`**:
+
+- **Policy & support geometry (outcome-blind exact interior-bin `design/support.py` census, Slurm `175063`):**
+  - Comparison stratum: **`state_fips`** (drops the 25 km within-county local radius; keeps exact `bin_width_mmhg = 1.0`, `min_bin_tracts = 2`, interior-bin trimming `first < b < last`, exact missingness match, and `raw_x_radius_iqr = 2.0` on all 30 approved ACS covariates `X`).
+  - Nominal shift: **`delta_mmhg = 2.0`**; delivered mean shift **`1.420 mmHg`** across **`37,226` targets** (`26,428` movers, `71.0%`), **`2,110` moved counties**, top-5 county share **`10.0%`**, **`G_eff = 206.8`**, covariate balance **`Mean / Max |SMD| = 0.068 / 0.169`** (tighter than within-county `d1`'s `0.095 / 0.282`), and calibrated projected `A6-Q` SE **`0.0183–0.0203 y/mmHg`** across spatial design effects `1.25–4.0`.
+- **Secondary estimand retained:** Within-county `within_county_d1_c2` is retained and reported alongside `usaleep_within_state_d2_c2` as a secondary county-fixed-effect diagnostic.
+- **Explicit identification tradeoff disclosure:** Moving from within-county to within-state comparison preserves state fixed effects and adjustment on the 30 approved ACS covariates `X`, but **drops county fixed effects**. Unmeasured county-level confounders (such as healthcare access, smoking prevalence, or local industrial/urban environment) are no longer absorbed by within-county differencing; causal interpretation remains conditional on state + observed `X` exchangeability and the Section 11 limitations.
+- **Forking history & anti-shopping record:** Sequence of USALEEP estimands examined prior to this amendment: (1) frozen Section 4.1 within-county `d2` flag-1 (`0` tracts, infeasible, 2026-10-10); (2) `tract_design_amendment` within-county `d2 c2` (`3.5%` moved, `0.070 mmHg` delivered shift); (3) exploratory within-county `d1 c2` (`0.229 mmHg`, `A0` SE `0.1305`, `A6-Q` SE `0.0893`) and `d2 c3` (`0.166 mmHg`, `G_eff = 5.1`); (4) outcome-blind cross-county geometry sweep (Calibrated Diagnostic E, `0` new-policy $\hat\psi$ computed) leading to owner approval of `usaleep_within_state_d2_c2`.
+
+### 12.2 Exploratory Primary Outcome Learner (`A6-Q`, `TabICLv2`) and `G-SIM` Density-Ratio Benchmark
+
+- **Primary exploratory Q learner:** Frozen `TabICLv2` regressor (`A6-Q`, `tabicl 2.2.0`, `tabicl-regressor-v2-20260212.ckpt`, `<= 30,000` deterministic outcome-blind context rows, zero foundation weight updates) is adopted as the exploratory primary outcome nuisance learner. It satisfies the standing transformer-based model preference natively and beat `A0` and every classical `B0` baseline on real `d1` (Diagnostic A: `R² = 0.5534`, `wMSE = 1.8250`, `-56.3%` vs `A0`, beating `HistGBM` `1.9992`), swept `3/3` realistic `R² ≈ 0.50` `P15-DT` interaction/contamination regimes (`DT1`, `DT2`, `DT3`), and passed `20/20` Trimmed `P15C` repeatability (`94.2%` mover RMSE reduction, `20/20` iid and spatial coverage).
+- **Density-ratio / Riesz benchmark (`G-SIM`):** Triggered by Diagnostic C2 (`>2×` ratio-estimator disagreement on `d1`), `A5` (direct neural Riesz) and `A7` (frozen `TabICLv2` origin classifier) are benchmarked against `A0` and classical origin baselines on synthetic regimes with known analytical truth $r_0(A, X)$ (`G1_within_county`, `G2_within_state`) before any density-ratio adapter PR or real-data ratio replacement. Ratio estimators are never selected solely for smaller `max r_a`, larger ESS, or a changed sign of $\hat\psi$.
+- **Permanent reporting invariant:** Every causal readout reports per-fold plug-in vs EIF correction separately, landing ESS and max density ratio, and delivered (not nominal) shift.

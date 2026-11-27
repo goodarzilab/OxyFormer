@@ -14,7 +14,7 @@ plan_fixed:
   primary_outcome_flags: [1]             # sections 4.1 and 5.3: flag-1 USALEEP tracts; no flag-2/3 labels in primary training. AMENDED by owner_decisions.outcome_flags (2026-10-10)
   min_flag1_tracts_per_county: 4         # section 4.1
   min_inhabited_relief_m: 300            # section 4.1: inhabited P90-P10 tract-elevation contrast. AMENDED by owner_decisions.tract_design_amendment (2026-10-10): reported diagnostic, no longer a screen
-  max_local_comparison_km: 25            # section 4.1
+  max_local_comparison_km: 25            # section 4.1. AMENDED for within-state primary by owner_decisions.within_state_primary_amendment (2026-11-27)
   min_outer_training_tracts_per_county: 8   # section 5.1
   min_inner_partition_tracts_per_county: 4  # section 5.1
   outer_folds: 5                         # section 5.1
@@ -22,7 +22,7 @@ plan_fixed:
   seeds: [1103, 2207, 3301]              # section 5.2
   transform_before_aggregate: true       # section 3.1
   location_terrain_satellite_inputs_in_nuisances: forbidden   # sections 2, 3.1 and 11
-  county_membership: coarse_comparison_stratum                # section 3.1
+  county_membership: coarse_comparison_stratum                # section 3.1. AMENDED for primary estimand to state_membership by owner_decisions.within_state_primary_amendment (2026-11-27); county retained for secondary within-county diagnostic
 
 # Decisions the owner made in the orchestrating session on 2026-10-04.
 owner_decisions:
@@ -403,6 +403,55 @@ owner_decisions:
       auth_mode: "claude_subscription"
       review_panel_for_opus_code: [luna, kimi-k2.7-code, sol]
       supersedes_bounded_item_3_for_new_attempts: true
+
+  # Owner decision of 2026-11-27 04:09 UTC (direct Lor structured card a0d288a4-fedc-5d64-ab91-817f99584f5e, also relayed by
+  # Omni ee01a16f). Answered Option 1 on both questions:
+  #   1) primary_estimand = "redefine_within_state" ("Redefine primary to within-state d2 c2 (Recommended)")
+  #   2) q_and_g_path = "a6_primary_plus_gsim" ("Adopt A6-Q (TabICLv2) primary Q + run G-SIM ratio benchmark (Recommended)")
+  # Decided strictly BEFORE computing any real-data estimate psi_hat under any cross-county policy (zero new-policy psi_hat
+  # computed; outcome-blind exact interior-bin geometry and calibrated precision projections from Calibrated Diagnostic E,
+  # Slurm 175063). Follows Plan §10 stop-rule: revised policy receives a new estimand ID and explicit identification disclosure.
+  within_state_primary_amendment:
+    decided_on: "2026-11-27"
+    owner_input_request_id: "a0d288a4-fedc-5d64-ab91-817f99584f5e"
+    new_estimand_id: "usaleep_within_state_d2_c2"
+    supersedes_as_primary: "within_county_d1_c2 (and tract_design_amendment within-county d2 c2); prior within-county d1 is retained as secondary county-FE diagnostic"
+    comparison_stratum: "state_fips"
+    support_recipe:
+      delta_mmhg: 2.0
+      bin_width_mmhg: 1.0
+      min_bin_tracts: 2
+      raw_x_radius_iqr: 2.0
+      interior_bins_only: true
+      max_local_comparison_km: null       # within-state comparison drops the 25 km within-county local radius
+      exact_missingness_match: true
+      support_pool: "all_allocation_qualified_frame_tracts"
+    secondary_estimand_retained: "within_county_d1_c2 (2,387 targets, 546 movers, 0.229 mmHg delivered shift, G_eff 17.3, A6-Q SE 0.0893 y/mmHg, 95% CI [-0.165, +0.185])"
+    outcome_blind_census:
+      source: "Calibrated Diagnostic E (Slurm 175063, exact design/support.py interior-bin connected components)"
+      outcomes_read: false
+      new_policy_psi_hat_computed_before_approval: false
+      target_tracts: 37226
+      mover_tracts: 26428
+      mover_fraction: 0.710
+      delivered_mean_shift_mmhg: 1.420
+      moved_counties: 2110
+      top5_county_share: 0.100
+      effective_counties_g_eff: 206.8
+      mean_abs_smd: 0.068
+      max_abs_smd: 0.169
+      projected_a6_se_y_per_mmhg: [0.0183, 0.0203]   # across spatial design effects 1.25-4.0
+    identification_disclosure: "Redefining the primary comparison stratum from county to state keeps state fixed effects and the 30 approved ACS covariates X, but drops county fixed effects: unmeasured county-level confounding (such as healthcare access, smoking, or local environmental/urban factors) is no longer absorbed by within-county differencing. Within-county d1 remains reported as a secondary county-FE diagnostic alongside within-state d2 c2."
+    exploratory_primary_q:
+      variant: "A6-Q"
+      model: "frozen TabICLv2 regressor (tabicl 2.2.0, tabicl-regressor-v2-20260212.ckpt)"
+      satisfies_transformer_preference: true
+      basis: "Beat A0 (-56.3% wMSE, R^2 0.5534) and every classical B0 including HistGBM on real d1 (Diagnostic A, Slurm 174939); swept 3/3 realistic R^2~0.50 P15-DT interaction/contamination regimes (Slurm 175064-175066); passed 20/20 Trimmed P15C mechanics repeatability (Slurm 175304)."
+    density_ratio_benchmark_gate:
+      spec: "G-SIM prespecified simulation-truth comparison (A5 neural Riesz & A7 TabICLv2 origin classifier vs A0 and classical baselines against known analytical truth r_0)"
+      rule: "No g/ratio adapter PR or real-data ratio replacement before G-SIM completes; never select a ratio estimator solely for smaller max r_a, higher ESS, or sign change."
+    permanent_reporting_invariant: "Every causal readout reports per-fold plug-in vs EIF correction separately, landing ESS / max ratio, and delivered (not nominal) shift."
+    certifies_release_criteria: false
 
 # Not yet approved. A unit that needs one of these must stop and report; the orchestrator brings it to the owner.
 pending_owner_approval:
