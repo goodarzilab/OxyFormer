@@ -721,13 +721,16 @@ def _wmse(r_a: np.ndarray, residual_sq: np.ndarray) -> float:
 def score_within_state_estimate(
     label: str, y: np.ndarray, mu_a: np.ndarray, mu_d: np.ndarray, r_a: np.ndarray, fold_ids: np.ndarray,
     counties: np.ndarray, county_locs: Mapping[str, tuple[float, float]], delivered_shift: float,
-    flags: np.ndarray | None = None,
+    flags: np.ndarray | None = None, *, moved: np.ndarray | None = None, delta: float | None = None,
 ) -> dict:
     """One-step and Hajek estimates with every permanent reporting invariant.
 
     ``psi = mean(mu_d - mu_a + (r_a - 1)(y - mu_a))``; per-mmHg values divide by the
     delivered shift. Flag strata (USALEEP abridged life-table flag 1 vs 3) are post-hoc
-    descriptive only; the flag is never a model feature.
+    descriptive only; the flag is never a model feature. Each stratum is normalised by
+    the shift delivered within it, ``delta * mean(moved[stratum])``, when ``moved`` and
+    ``delta`` are given (``None`` per-mmHg values when nothing in the stratum moves);
+    without them every row is taken to receive ``delivered_shift``.
     """
     y, mu_a, mu_d, r_a = (np.asarray(v, dtype=np.float64) for v in (y, mu_a, mu_d, r_a))
     fold_ids, counties = np.asarray(fold_ids), np.asarray(counties)
@@ -735,6 +738,15 @@ def score_within_state_estimate(
     require(all(len(v) == n for v in (mu_a, mu_d, r_a, fold_ids, counties)), 'scoring inputs are misaligned')
     require(np.isfinite(delivered_shift) and delivered_shift > 0, 'delivered shift must be positive')
     require(np.isfinite(r_a).all() and (r_a > 0).all(), 'density ratio must be positive and finite')
+    require((moved is None) == (delta is None), 'moved and delta are supplied together')
+    if moved is None:
+        shift_per_row = np.full(n, float(delivered_shift))
+    else:
+        moved = np.asarray(moved, dtype=bool)
+        require(moved.shape == (n,) and np.isfinite(delta) and delta > 0, 'moved or delta is invalid')
+        shift_per_row = np.where(moved, float(delta), 0.0)
+        require(abs(float(shift_per_row.mean()) - delivered_shift) <= 1e-9 * max(1.0, delivered_shift),
+                'delivered shift differs from delta * mean(moved)')
     plugin = mu_d - mu_a
     correction = (r_a - 1.0) * (y - mu_a)
     eif = plugin + correction
@@ -770,10 +782,12 @@ def score_within_state_estimate(
             if m.sum() >= MIN_STRATUM_ROWS:
                 est = float(np.mean(eif[m]))
                 inf_f = compute_conley_inference(eif[m] - est, counties[m], county_locs)
-                strata[f'flag_{flag}'] = dict(n=int(m.sum()), plugin=float(np.mean(plugin[m])),
-                    correction=float(np.mean(correction[m])), one_step=est, per_mmhg=per_mmhg(est),
-                    se_cluster_per_mmhg=per_mmhg(inf_f['se_cluster']),
-                    se_sp100_per_mmhg=per_mmhg(inf_f['se_spatial_100km']))
+                stratum_shift = float(shift_per_row[m].mean())
+                per_stratum = (lambda v: v / stratum_shift) if stratum_shift > 0 else (lambda v: None)
+                strata[f'flag_{flag}'] = dict(n=int(m.sum()), delivered_shift_mmhg=stratum_shift,
+                    plugin=float(np.mean(plugin[m])), correction=float(np.mean(correction[m])), one_step=est,
+                    per_mmhg=per_stratum(est), se_cluster_per_mmhg=per_stratum(inf_f['se_cluster']),
+                    se_sp100_per_mmhg=per_stratum(inf_f['se_spatial_100km']))
 
     sp100 = inf['se_spatial_100km']
     return dict(
@@ -833,7 +847,8 @@ def run_within_state(
     for label, q, g in combos:
         require(q in fits.mu_a and g in fits.r_a, f'{label}: unknown learner {q} or {g}')
         results[label] = score_within_state_estimate(label, y_t, fits.mu_a[q], fits.mu_d[q], fits.r_a[g],
-                                                     fits.fold_ids, c_t, county_locs, delivered, flags)
+                                                     fits.fold_ids, c_t, county_locs, delivered, flags,
+                                                     moved=data.moved[target], delta=delta)
     null = None
     if null_learners is not None:
         nq, ng = null_learners
@@ -846,7 +861,7 @@ def run_within_state(
                                              all_states=all_states, log=log)
         results[NULL_LABEL] = score_within_state_estimate(
             NULL_LABEL, y_t, null.mu_a[nq[0].name], null.mu_d[nq[0].name], null.r_a[ng[0].name],
-            null.fold_ids, c_t, county_locs, null_delivered, flags)
+            null.fold_ids, c_t, county_locs, null_delivered, flags, moved=moved_null[target], delta=delta)
     return dict(results=results, fits=fits, null=null, n_targets=n_t, n_movers=n_m, delivered_shift=delivered,
                 null_delivered_shift=null_delivered if null is not None else None,
                 folds=fits.folds, platt=fits.platt)
@@ -931,6 +946,10 @@ def check_support_settings(amendment: Mapping[str, Any], approvals: Mapping[str,
         real_fit.validate_support_settings(design, approvals, delta, caliper)
 
 
+def _fmt(value: float | None, spec: str = '.4f') -> str:
+    return 'n/a' if value is None else format(value, spec)
+
+
 def _readout(payload: dict, wall_seconds: float) -> str:
     lines = [f'# Exploratory readout: `{ESTIMAND_ID}`', '',
              f'**Exploratory; certifies no release criterion.** Owner decision `{OWNER_DECISION_ID}`.',
@@ -967,9 +986,10 @@ def _readout(payload: dict, wall_seconds: float) -> str:
         if res['flag_stratified_descriptive']:
             lines += ['', 'Post-hoc flag strata (descriptive; flag never in X):', '']
             for k, v in res['flag_stratified_descriptive'].items():
-                lines.append(f'- `{k}`: n={v["n"]:,}, plug-in {v["plugin"]:+.4f}, correction {v["correction"]:+.4f}, '
-                             f'one-step {v["per_mmhg"]:+.4f} y/mmHg (cluster SE {v["se_cluster_per_mmhg"]:.4f}, '
-                             f'Sp-100 SE {v["se_sp100_per_mmhg"]:.4f})')
+                lines.append(f'- `{k}`: n={v["n"]:,}, delivered shift {v["delivered_shift_mmhg"]:.4f} mmHg, '
+                             f'plug-in {v["plugin"]:+.4f}, correction {v["correction"]:+.4f}, one-step '
+                             f'{_fmt(v["per_mmhg"], "+.4f")} y/mmHg (cluster SE {_fmt(v["se_cluster_per_mmhg"])}, '
+                             f'Sp-100 SE {_fmt(v["se_sp100_per_mmhg"])})')
     lines += ['', '## Hajek-normalised ratio sensitivity (`r_a / mean(r_a)`)', '']
     for label, res in payload['results'].items():
         h = res['hajek_one_step']

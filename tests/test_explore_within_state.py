@@ -496,6 +496,9 @@ def test_run_within_state_end_to_end_with_injected_learners():
     primary = out['results'][ws.PRIMARY_LABEL]
     assert primary['delivered_shift_mmhg'] == out['delivered_shift']
     assert set(primary['flag_stratified_descriptive']) == {'flag_1', 'flag_3'}
+    for flag, stratum in primary['flag_stratified_descriptive'].items():
+        m = flags == int(flag[-1])
+        assert stratum['delivered_shift_mmhg'] == pytest.approx(2.0 * data.moved[m].mean())
     assert abs(out['results'][ws.NULL_LABEL]['one_step']['per_mmhg']) < 0.3
     payload = dict(ws.LABELS, config=dict(census=dict(targets=out['n_targets']), zero_iqr_mode='unit_scale'),
                    delta=2.0,
@@ -627,3 +630,28 @@ def test_hajek_influence_accounts_for_estimated_mean_ratio():
     loo = np.asarray([hajek(np.arange(n) != i) for i in range(n)])
     jackknife = np.sqrt((n - 1) / n * np.sum((loo - loo.mean()) ** 2))
     assert res['hajek_one_step']['inference']['se_iid'] == pytest.approx(jackknife, rel=0.03)
+
+
+def test_flag_strata_divide_by_the_shift_delivered_within_each_stratum():
+    # terra's counterexample: 20 flag-1 rows move 2 mmHg with mu_d = 2; 20 flag-3 rows stay.
+    n = 40
+    flags = np.repeat([1, 3], 20)
+    moved = flags == 1
+    mu_d = np.where(moved, 2.0, 0.0)
+    counties = np.asarray([f'01{i % 10:03d}' for i in range(n)])
+    args = (np.zeros(n), np.zeros(n), mu_d, np.ones(n), np.arange(n) % 5, counties, {}, 1.0, flags)
+    res = ws.score_within_state_estimate('x', *args, moved=moved, delta=2.0)
+    assert res['delivered_shift_mmhg'] == 1.0 and res['one_step']['per_mmhg'] == 1.0
+    flag1, flag3 = res['flag_stratified_descriptive']['flag_1'], res['flag_stratified_descriptive']['flag_3']
+    assert flag1['delivered_shift_mmhg'] == 2.0 and flag1['one_step'] == 2.0 and flag1['per_mmhg'] == 1.0
+    assert flag3['delivered_shift_mmhg'] == 0.0 and flag3['one_step'] == 0.0
+    assert flag3['per_mmhg'] is None and flag3['se_cluster_per_mmhg'] is None and flag3['se_sp100_per_mmhg'] is None
+    uniform = ws.score_within_state_estimate('x', *args)['flag_stratified_descriptive']['flag_1']
+    assert uniform['delivered_shift_mmhg'] == 1.0 and uniform['per_mmhg'] == 2.0   # without moved: overall shift
+    with pytest.raises(ContractError, match='delta \\* mean\\(moved\\)'):
+        ws.score_within_state_estimate('x', *args, moved=moved, delta=3.0)
+    with pytest.raises(ContractError, match='together'):
+        ws.score_within_state_estimate('x', *args, moved=moved)
+    payload = dict(ws.LABELS, config=dict(census={}, zero_iqr_mode='unit_scale'), delta=2.0, n_targets=n,
+                   n_movers=20, delivered_shift_mmhg=1.0, identification_disclosure='-', results={'x': res})
+    assert 'one-step n/a y/mmHg (cluster SE n/a, Sp-100 SE n/a)' in ws._readout(payload, 0.0)
