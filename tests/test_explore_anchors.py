@@ -575,8 +575,8 @@ def test_outcome_kind_must_match_outcome_coding():
     d = cluster_design(seed=2, n_strata=2, clusters_per_stratum=6, rows=3)
     common = dict(ids=d['ids'], a=d['a'], X=d['X'], clusters=d['clusters'], strata=d['strata'],
                   target=np.ones(len(d['a']), bool), moved=np.zeros(len(d['a']), bool))
-    with pytest.raises(ValueError, match='0/1 outcome declared continuous'):
-        an.AnchorInputs(y=binary_outcome(d), outcome_kind='continuous', **common)
+    explicit = an.AnchorInputs(y=binary_outcome(d), outcome_kind='continuous', **common)   # caller's choice
+    assert explicit.outcome_kind == 'continuous'
     with pytest.raises(ValueError, match='coded 0/1'):
         an.AnchorInputs(y=continuous_outcome(d), outcome_kind='binary', **common)
     with pytest.raises(ValueError, match='outcome_kind'):
@@ -783,7 +783,7 @@ def test_end_to_end_continuous_anchor_with_payload_and_markdown(tmp_path):
     assert abs(run['results']['equal_cluster'][an.ANCHOR_NULL_LABEL]['one_step']['per_mmhg']) < 0.1
     assert run['n_targets'] == support.n_targets and run['n_movers'] == support.n_movers
     assert run['delivered_shift_mmhg'] == pytest.approx(support.delivered_shift)
-    assert all(p['slope'] > 0 for p in run['platt']['A7-g'])
+    assert all(p['slope'] > 0 for scheme in run['platt'].values() for p in scheme['A7-g'])
 
     payload = an.anchor_payload('synthetic_continuous', 'y', 'units', run, config=dict(delta=2.0),
                                 audit=dict(n=len(y)))
@@ -1521,3 +1521,140 @@ def test_ecuador_canton_aliases_apply_to_births_and_exposure_alike():
                          'oxygen_deficit_mmhg': [1.0, 1.2]})                 # one canton listed twice
     with pytest.raises(ValueError, match='unmatched or ambiguous'):
         an.load_ecuador_inec_frame(births, both)
+
+
+# ---------------------------------------------------------------------------
+# cycle-4 round 2 regressions: scheme-specific target-weighted g; explicit continuous 0/1
+# ---------------------------------------------------------------------------
+
+class ZeroRegressor:
+    def fit(self, X, y):
+        return self
+
+    def predict(self, X):
+        return np.zeros(len(X))
+
+
+class NoWeightLogit:
+    """A classifier whose fit takes no sample_weight (as TabICL's): forces the weighted resample path."""
+
+    def __init__(self):
+        self.model = LogisticRegression(C=100.0, max_iter=2000)
+
+    def fit(self, X, y):
+        self.model.fit(X, y)
+        self.classes_ = self.model.classes_
+        return self
+
+    def predict_proba(self, X):
+        return self.model.predict_proba(X)
+
+
+def two_level_design():
+    """20 low clusters (a = 0) x 50 rows, half moved; 10 high clusters (a = 1) x 1 row, unmoved; y = a."""
+    ids, clusters, a, moved = [], [], [], []
+    for c in range(20):
+        for t in range(50):
+            ids.append(f'L{c:02d}R{t:02d}')
+            clusters.append(f'L{c:02d}')
+            a.append(0.0)
+            moved.append(c % 2 == 0)
+    for c in range(10):
+        ids.append(f'H{c}')
+        clusters.append(f'H{c}')
+        a.append(1.0)
+        moved.append(False)
+    n = len(ids)
+    a = np.asarray(a)
+    return an.AnchorInputs(ids=np.asarray(ids, dtype=object), a=a, y=a.copy(), X=np.zeros((n, 1)),
+                           clusters=np.asarray(clusters), strata=np.asarray(['S'] * n),
+                           target=np.ones(n, dtype=bool), moved=np.asarray(moved), outcome_kind='continuous')
+
+
+def test_density_ratio_is_fitted_under_each_schemes_target_law():
+    """Review counterexample: equal-cluster r at high exposure is ~2 (not 51) and its effect ~1/mmHg (not 50).
+
+    The weighted classifier recovers odds 2.0 / 51 exactly here; the cluster-grouped inner Platt step shrinks
+    both towards 1 on this tiny design (one-row clusters pack into one GroupKFold fold), so the bounds test the
+    order of magnitude and the exact values are pinned by the equal-size survey-weighted design below.
+    """
+    data = two_level_design()
+    run = an.run_anchor(data, delta=1.0, q_learners=[ws.QLearner('zero', lambda s: ZeroRegressor(), 0)],
+                        g_learners=[ws.GLearner('logit', lambda s: LogisticRegression(C=100.0, max_iter=2000), 0)],
+                        combos=[('zero + logit', 'zero', 'logit')])
+    high = data.a == 1.0
+    r_cluster = run['r_a']['equal_cluster']['logit']
+    r_unit = run['r_a']['equal_unit']['logit']
+    assert 1.3 < np.mean(r_cluster[high]) < 3.0 and np.mean(r_unit[high]) > 15.0
+    assert np.mean(r_unit[high]) / np.mean(r_cluster[high]) > 10.0
+    for scheme in ('equal_cluster', 'equal_unit'):
+        assert 0.4 < run['results'][scheme]['zero + logit']['one_step']['per_mmhg'] < 1.6
+    assert {p['weighting'] for p in run['platt']['equal_cluster']['logit']} == {'sample_weight'}
+    assert {p['weighting'] for p in run['platt']['equal_unit']['logit']} == {'uniform'}
+    # The defect: reusing the equal-unit ratio under equal-cluster weights inflates the effect ~50-fold.
+    w_cluster = an.anchor_weights('equal_cluster', data.clusters)
+    zeros = np.zeros(len(data.a))
+    shared = an.score_anchor_estimate('shared', data.y, zeros, zeros, r_unit, run['fits'].fold_ids, data.clusters,
+                                      data.moved, 1.0, w_cluster)
+    assert shared['one_step']['per_mmhg'] > 15.0
+
+
+def test_density_ratio_recovers_each_target_law_exactly_with_equal_size_clusters():
+    """The same law with one-row clusters and survey weights 50 / 1: r = 2 (uniform) and 51 (survey), 1/mmHg each."""
+    n_low, n_high = 200, 100
+    ids = np.asarray([f'L{c:03d}' for c in range(n_low)] + [f'H{c:03d}' for c in range(n_high)], dtype=object)
+    a = np.r_[np.zeros(n_low), np.ones(n_high)]
+    data = an.AnchorInputs(ids=ids, a=a, y=a.copy(), X=np.zeros((len(a), 1)), clusters=ids.astype(str),
+                           strata=np.asarray(['S'] * len(a)), target=np.ones(len(a), bool),
+                           moved=np.r_[np.arange(n_low) % 2 == 0, np.zeros(n_high, bool)], outcome_kind='continuous')
+    survey = np.r_[np.full(n_low, 50.0), np.ones(n_high)]
+    schemes = dict(unit=an.anchor_weights('equal_unit', ids.astype(str)),
+                   survey=an.anchor_weights('survey', ids.astype(str), survey_weights=survey))
+    run = an.run_anchor(data, delta=1.0, q_learners=[ws.QLearner('zero', lambda s: ZeroRegressor(), 0)],
+                        g_learners=[ws.GLearner('logit', lambda s: LogisticRegression(C=100.0, max_iter=2000), 0)],
+                        combos=[('z', 'zero', 'logit')], weight_schemes=schemes)
+    assert np.mean(run['r_a']['unit']['logit'][a == 1]) == pytest.approx(2.0, rel=0.03)
+    assert np.mean(run['r_a']['survey']['logit'][a == 1]) == pytest.approx(51.0, rel=0.03)
+    assert np.mean(run['r_a']['survey']['logit'][a == 0]) == pytest.approx(0.5, rel=0.03)
+    for scheme in schemes:
+        assert run['results'][scheme]['z']['one_step']['per_mmhg'] == pytest.approx(1.0, abs=0.03)
+    zeros = np.zeros(len(a))
+    shared = an.score_anchor_estimate('shared', a, zeros, zeros, run['r_a']['unit']['logit'], run['fits'].fold_ids,
+                                      ids.astype(str), data.moved, 1.0, schemes['survey'])
+    assert shared['one_step']['per_mmhg'] < 0.1                          # the uniform ratio under survey weights
+
+
+def test_weighted_resample_path_for_classifiers_without_sample_weight():
+    data = two_level_design()
+    kwargs = dict(delta=1.0, q_learners=[ws.QLearner('zero', lambda s: ZeroRegressor(), 0)],
+                  g_learners=[ws.GLearner('nw', lambda s: NoWeightLogit(), 0)], combos=[('zero + nw', 'zero', 'nw')])
+    run = an.run_anchor(data, **kwargs)
+    assert {p['weighting'] for p in run['platt']['equal_cluster']['nw']} == {'weighted_resample'}
+    assert 1.3 < np.mean(run['r_a']['equal_cluster']['nw'][data.a == 1.0]) < 3.0
+    assert 0.4 < run['results']['equal_cluster']['zero + nw']['one_step']['per_mmhg'] < 1.6
+    again = an.run_anchor(data, **kwargs)
+    np.testing.assert_array_equal(again['r_a']['equal_cluster']['nw'], run['r_a']['equal_cluster']['nw'])
+
+
+def test_schemes_with_identical_normalised_weights_share_one_g_fit():
+    d = cluster_design(seed=11, n_strata=3, clusters_per_stratum=24, rows=5, vary_rows=False)
+    data, _ = anchor_inputs(d, continuous_outcome(d), 'continuous')
+    run = an.run_anchor(data, delta=2.0, q_learners=[linear_q('lin')], g_learners=[logistic_g('logit')],
+                        combos=[('lin + logit', 'lin', 'logit')])
+    assert run['r_a']['equal_cluster'] is run['r_a']['equal_unit']         # equal cluster sizes: one fit
+    res = run['results']
+    assert res['equal_cluster']['lin + logit']['one_step']['psi'] == pytest.approx(
+        res['equal_unit']['lin + logit']['one_step']['psi'])
+
+
+def test_explicit_continuous_outcome_may_take_zero_one_values():
+    d = cluster_design(seed=2, n_strata=2, clusters_per_stratum=6, rows=3)
+    common = dict(ids=d['ids'], a=d['a'], X=d['X'], clusters=d['clusters'], strata=d['strata'],
+                  target=np.ones(len(d['a']), bool), moved=np.zeros(len(d['a']), bool))
+    y01 = binary_outcome(d)
+    assert an.AnchorInputs(y=y01, outcome_kind='continuous', **common).outcome_kind == 'continuous'
+    with pytest.raises(ValueError, match='coded 0/1'):
+        an.AnchorInputs(y=np.where(y01 == 1, 2.0, 0.0), outcome_kind='binary', **common)
+    binary = an.AnchorInputs(y=y01, outcome_kind='binary', **common)
+    with pytest.raises(ValueError, match='continuous Q learner cannot model a binary outcome'):
+        an.route_q_learners(binary.outcome_kind, [linear_q('lin')])

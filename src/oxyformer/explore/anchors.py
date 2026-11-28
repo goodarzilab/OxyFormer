@@ -36,8 +36,8 @@ estimator. It reuses the reviewed primitives of
 (b) whole-cluster atomic 5-fold outer CV balanced along each stratum's exposure
     gradient (``make_balanced_county_folds`` with clusters as the atoms);
 (c) cluster-grouped inner 3-fold out-of-fold Platt calibration of the origin
-    classifiers ``A7-g`` (TabICLv2) and ``B0_gbm_origin``
-    (``fit_platt_calibrated_origin``);
+    classifiers ``A7-g`` (TabICLv2) and ``B0_gbm_origin``, fitted per weighting scheme
+    under that scheme's target law (:func:`fit_weighted_platt_calibrated_origin`);
 (d) a cluster-level within-stratum permuted-``A`` falsification null
     (:func:`permute_cluster_within_stratum`). Exposure is assigned per cluster, so it
     is permuted across clusters, never across rows; ``Y``, ``X``, target and moved
@@ -75,6 +75,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, fields, replace
 from importlib import import_module
+import inspect
 import json
 from pathlib import Path
 import re
@@ -83,10 +84,16 @@ import unicodedata
 
 import numpy as np
 import pandas as pd
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import GroupKFold
 
 from oxyformer.explore.within_state import (
     MAX_G_ORIGINAL_ROWS,
     MAX_Q_CONTEXT_ROWS,
+    ODDS_LOG_CLIP,
+    PLATT_C,
+    PLATT_LOGIT_CLIP,
     TABICL_CLASSIFIER_FILE,
     TABICL_REGRESSOR_FILE,
     Z95,
@@ -98,10 +105,14 @@ from oxyformer.explore.within_state import (
     WithinStateInputs,
     WithinStateSupport,
     _landing_ess,
+    _raw_logits,
     compute_within_state_support,
     default_checkpoint,
     deterministic_subsample_idx,
+    encode_features_onehot,
     fit_cross_fitted_within_state,
+    fit_platt_calibrated_origin,
+    fit_state_stats,
     gbm_classifier_factory,
     gbm_regressor_factory,
     make_balanced_county_folds,
@@ -1172,11 +1183,9 @@ class AnchorInputs:
     def __post_init__(self) -> None:
         _check(self.outcome_kind in OUTCOME_KINDS, f'outcome_kind must be one of {OUTCOME_KINDS}')
         y = np.asarray(self.y, dtype=np.float64)
-        binary = bool(np.isfinite(y).all() and np.isin(y, (0.0, 1.0)).all())
-        if self.outcome_kind == 'binary':
-            _check(binary, 'a binary anchor outcome must be coded 0/1')
-        else:
-            _check(not binary, '0/1 outcome declared continuous; binary outcomes use classifier predict_proba')
+        if self.outcome_kind == 'binary':           # binary is strict; an explicit continuous kind may take any values
+            _check(bool(np.isfinite(y).all() and np.isin(y, (0.0, 1.0)).all()),
+                   'a binary anchor outcome must be coded 0/1')
         cluster_table(self.a, self.clusters, self.strata)
         _check(not (np.asarray(self.moved, bool) & ~np.asarray(self.target, bool)).any(),
                'moved rows must be targets')
@@ -1383,6 +1392,144 @@ def score_anchor_estimate(label: str, y: Any, mu_a: Any, mu_d: Any, r_a: Any, fo
 # Orchestration
 # ---------------------------------------------------------------------------
 
+def _accepts_sample_weight(model: Any) -> bool:
+    fit = getattr(model, 'fit', None)
+    return callable(fit) and 'sample_weight' in inspect.signature(fit).parameters
+
+
+def _fit_classifier(model: Any, X: np.ndarray, y: np.ndarray, w: np.ndarray, weighted: bool) -> None:
+    if weighted:
+        model.fit(X, y, sample_weight=w)
+    else:
+        model.fit(X, y)
+
+
+def fit_weighted_platt_calibrated_origin(
+    F0: np.ndarray, F1: np.ndarray, F_eval: np.ndarray, clusters: np.ndarray, weights: np.ndarray,
+    make_classifier: ClassifierFactory, *, seed: int, ids: np.ndarray | None = None, cap: int | None = None,
+    salt: str = 'a7-v2', inner_splits: int = 3, score: Literal['proba', 'decision'] = 'proba',
+) -> tuple[np.ndarray, dict]:
+    """Target-weighted density ratio ``r_w = dP_w(A_d, X) / dP_w(A, X)`` at eval rows by origin classification.
+
+    ``weights`` are the training targets' target-law weights (any positive scale). Uniform
+    weights reuse ``within_state.fit_platt_calibrated_origin`` unchanged. Otherwise each
+    original row's factual (label 0) and shifted (label 1) pair carries its weight:
+
+    * a classifier whose ``fit`` takes ``sample_weight`` is trained, in the cluster-grouped
+      inner folds and the final fit, on weighted pairs (rows capped by the outcome-blind
+      hash rank when ``cap`` is set), and Platt scaling is weighted the same way;
+    * any other classifier (e.g. TabICL) is trained on a deterministic
+      probability-proportional-to-weight resample of original rows (``cap`` rows, else as
+      many as there are), which represents ``P_w``; clusters travel with the resampled rows,
+      so inner folds stay cluster-grouped, and Platt scaling is unweighted.
+    """
+    clusters, w = np.asarray(clusters), np.asarray(weights, dtype=np.float64)
+    _check(len(F0) == len(F1) == len(clusters) == len(w) and F0.shape[1] == F1.shape[1] == F_eval.shape[1],
+           'origin-classifier inputs are misaligned')
+    _check(bool(np.isfinite(w).all() and (w >= 0).all() and w.sum() > 0), 'g weights must be finite, >= 0, not all 0')
+    w = w / w.mean()
+    if np.allclose(w, 1.0, rtol=0.0, atol=1e-12):
+        ratio, diag = fit_platt_calibrated_origin(F0, F1, F_eval, clusters, make_classifier, seed=seed, ids=ids,
+                                                  cap=cap, salt=salt, inner_splits=inner_splits, score=score)
+        return ratio, dict(diag, weighting='uniform')
+    first = make_classifier(seed)                  # also the first inner model (seed + 0)
+    weighted = _accepts_sample_weight(first)
+    if weighted:
+        keep = np.arange(len(F0))
+        if cap is not None:
+            _check(ids is not None and len(ids) == len(F0), 'capped origin fits require row ids')
+            keep = deterministic_subsample_idx(np.asarray(ids), cap=cap, salt=f'{salt}-{seed}')
+        w_keep = w[keep] / w[keep].mean()
+    else:
+        size = len(F0) if cap is None else min(cap, len(F0))
+        keep = np.sort(np.random.default_rng(seed).choice(len(F0), size=size, replace=True, p=w / w.sum()))
+        w_keep = np.ones(size)
+    X_pair = np.vstack([F0[keep], F1[keep]])
+    y_pair = np.concatenate([np.zeros(len(keep), dtype=int), np.ones(len(keep), dtype=int)])
+    c_pair = np.concatenate([clusters[keep], clusters[keep]])
+    w_pair = np.concatenate([w_keep, w_keep])
+    _check(len(np.unique(c_pair)) >= inner_splits, 'fewer clusters than inner folds')
+    oof = np.zeros(len(y_pair), dtype=np.float64)
+    inner = []
+    for i, (tr, va) in enumerate(GroupKFold(n_splits=inner_splits).split(X_pair, y_pair, groups=c_pair)):
+        _check(not set(c_pair[tr].tolist()) & set(c_pair[va].tolist()), f'inner fold {i} shares clusters')
+        model = first if i == 0 else make_classifier(seed + i)
+        _fit_classifier(model, X_pair[tr], y_pair[tr], w_pair[tr], weighted)
+        oof[va] = _raw_logits(model, X_pair[va], score)
+        inner.append(dict(n_train=int(len(tr)), n_val=int(len(va))))
+    final = make_classifier(seed + 99)
+    _fit_classifier(final, X_pair, y_pair, w_pair, weighted)
+    clip = PLATT_LOGIT_CLIP
+    platt = LogisticRegression(C=PLATT_C, solver='lbfgs')
+    platt.fit(np.clip(oof, -clip, clip).reshape(-1, 1), y_pair, sample_weight=w_pair)
+    calibrated = platt.decision_function(np.clip(_raw_logits(final, F_eval, score), -clip, clip).reshape(-1, 1))
+    ratio = np.exp(np.clip(calibrated, *ODDS_LOG_CLIP))
+    return ratio, dict(slope=float(platt.coef_[0, 0]), intercept=float(platt.intercept_[0]),
+                       n_originals=int(len(keep)), n_pairs=int(len(y_pair)), inner_folds=inner,
+                       weighting='sample_weight' if weighted else 'weighted_resample')
+
+
+def fit_weighted_g_cross_fit(
+    data: WithinStateInputs, splits: Sequence[tuple[np.ndarray, np.ndarray]], *, delta: float,
+    g_learners: Sequence[GLearner], target_weights: np.ndarray, all_states: Sequence[Any],
+) -> tuple[dict[str, np.ndarray], dict[str, list[dict]]]:
+    """Out-of-fold ``r_w`` at every target for each g, under one scheme's target weights.
+
+    Same folds and features as ``fit_cross_fitted_within_state`` (training-partition
+    imputation, training-target state statistics, one-hot strata, no raw A). In fold ``k``
+    the training targets' weights are normalised to mean 1.
+    """
+    target = np.asarray(data.target, dtype=bool)
+    n_t = int(target.sum())
+    w_t = np.asarray(target_weights, dtype=np.float64)
+    _check(w_t.shape == (n_t,), 'target weights must give one weight per target')
+    t_pos = np.full(len(data.ids), -1, dtype=int)
+    t_pos[target] = np.arange(n_t)
+    a_d = data.shifted(delta)
+    ratios = {g.name: np.zeros(n_t) for g in g_learners}
+    platt: dict[str, list[dict]] = {g.name: [] for g in g_learners}
+    covered = np.zeros(n_t, dtype=bool)
+    for fold, (tr, ev) in enumerate(splits):
+        ev_t, tr_t = ev[target[ev]], tr[target[tr]]
+        if not len(ev_t):
+            continue
+        slots = t_pos[ev_t]
+        imputer = SimpleImputer(strategy='median').fit(data.X[tr])
+        X_tr_t, X_ev_t = imputer.transform(data.X[tr_t]), imputer.transform(data.X[ev_t])
+        stats = fit_state_stats(data.a[tr_t], data.states[tr_t])
+        F0 = encode_features_onehot(data.a[tr_t], X_tr_t, data.states[tr_t], stats, all_states)
+        F1 = encode_features_onehot(a_d[tr_t], X_tr_t, data.states[tr_t], stats, all_states)
+        F_ev = encode_features_onehot(data.a[ev_t], X_ev_t, data.states[ev_t], stats, all_states)
+        w_fold = w_t[t_pos[tr_t]]
+        _check(w_fold.sum() > 0, f'fold {fold}: training targets carry no weight')
+        for g in g_learners:
+            ratio, diag = fit_weighted_platt_calibrated_origin(
+                F0, F1, F_ev, data.counties[tr_t], w_fold / w_fold.mean(), g.factory, seed=g.seed + 10 * fold,
+                ids=data.ids[tr_t], cap=g.original_cap, salt=g.salt, inner_splits=g.inner_splits, score=g.score)
+            _check(bool(np.isfinite(ratio).all() and (ratio > 0).all()), f'{g.name}: invalid density ratio')
+            ratios[g.name][slots] = ratio
+            platt[g.name].append(dict(diag, fold=fold))
+        covered[slots] = True
+    _check(bool(covered.all()), 'a target was never evaluated')
+    return ratios, platt
+
+
+def _scheme_g_fits(data: WithinStateInputs, splits: Sequence[tuple[np.ndarray, np.ndarray]], delta: float,
+                   g_learners: Sequence[GLearner], schemes: Mapping[str, Any],
+                   all_states: Sequence[Any]) -> tuple[dict[str, dict], dict[str, dict]]:
+    """One weighted g cross-fit per distinct normalised target-weight vector, keyed back to every scheme."""
+    cache: dict[bytes, tuple[dict, dict]] = {}
+    ratios, platt = {}, {}
+    for name, w in schemes.items():
+        w = np.asarray(w, dtype=np.float64)
+        key = np.round(w / w.mean(), 12).tobytes()
+        if key not in cache:
+            cache[key] = fit_weighted_g_cross_fit(data, splits, delta=delta, g_learners=g_learners,
+                                                  target_weights=w, all_states=all_states)
+        ratios[name], platt[name] = cache[key]
+    return ratios, platt
+
+
 ANCHOR_PRIMARY_LABEL = 'A6-Q + A7-g (primary TabICLv2)'
 ANCHOR_NULL_LABEL = 'NULL cluster-permuted A within stratum'
 ANCHOR_COMBOS = (
@@ -1402,8 +1549,12 @@ def run_anchor(
     """Cross-fit every learner on shared whole-cluster folds; score each (Q, g) under each weight scheme.
 
     ``weight_schemes`` maps a name to target-row weights (default: ``equal_cluster``
-    and unweighted ``equal_unit``). The null permutes cluster exposures within strata
-    (``moved`` fixed), reuses the outer folds and scores its first Q with its first g.
+    and unweighted ``equal_unit``). Q is fitted once (``E[Y | A, X]`` does not depend on
+    the target weights). Each scheme defines its own target law ``P_w(A, X)``, so g is
+    cross-fitted per scheme under that scheme's weights (:func:`fit_weighted_g_cross_fit`;
+    schemes with identical normalised weights share one fit) and every estimate uses its
+    own scheme's ``r_w``. The null permutes cluster exposures within strata (``moved``
+    fixed), reuses the outer folds and scores its first Q with its first g.
     """
     _check(n_splits >= 2, 'at least two outer folds are required')
     q_routed = route_q_learners(data.outcome_kind, q_learners)
@@ -1420,31 +1571,36 @@ def run_anchor(
     for name, w in schemes.items():
         _check(np.asarray(w).shape == (n_t,), f'weight scheme {name} must give one weight per target')
 
-    fits = fit_cross_fitted_within_state(ws_data, splits, delta=delta, q_learners=q_routed, g_learners=g_learners,
+    _check(len({g.name for g in g_learners}) == len(g_learners), 'duplicate g learner names')
+    fits = fit_cross_fitted_within_state(ws_data, splits, delta=delta, q_learners=q_routed, g_learners=[],
                                          all_states=all_strata, log=log)
+    r_w, platt = _scheme_g_fits(ws_data, splits, delta, g_learners, schemes, all_strata)
     results: dict[str, dict[str, dict]] = {name: {} for name in schemes}
     for label, q, g in combos:
-        _check(q in fits.mu_a and g in fits.r_a, f'{label}: unknown learner {q} or {g}')
+        _check(q in fits.mu_a and g in {x.name for x in g_learners}, f'{label}: unknown learner {q} or {g}')
         for name, w in schemes.items():
-            results[name][label] = score_anchor_estimate(label, y_t, fits.mu_a[q], fits.mu_d[q], fits.r_a[g],
+            results[name][label] = score_anchor_estimate(label, y_t, fits.mu_a[q], fits.mu_d[q], r_w[name][g],
                                                          fits.fold_ids, c_t, moved_t, delta, w)
     null: CrossFitResult | None = None
+    null_r_w = null_platt = None
     if null_learners is not None:
         nq, ng = null_learners
         _check(bool(nq) and bool(ng), 'the null requires a Q and a g learner')
         nq = route_q_learners(data.outcome_kind, nq)
         a_null, moved_null = permute_cluster_within_stratum(ws_data.a, ws_data.moved, ws_data.counties,
                                                             ws_data.states, null_seed)
-        null = fit_cross_fitted_within_state(replace(ws_data, a=a_null, moved=moved_null), splits, delta=delta,
-                                             q_learners=nq, g_learners=ng, all_states=all_strata, log=log)
+        null_data = replace(ws_data, a=a_null, moved=moved_null)
+        null = fit_cross_fitted_within_state(null_data, splits, delta=delta, q_learners=nq, g_learners=[],
+                                             all_states=all_strata, log=log)
+        null_r_w, null_platt = _scheme_g_fits(null_data, splits, delta, ng[:1], schemes, all_strata)
         for name, w in schemes.items():
             results[name][ANCHOR_NULL_LABEL] = score_anchor_estimate(
-                ANCHOR_NULL_LABEL, y_t, null.mu_a[nq[0].name], null.mu_d[nq[0].name], null.r_a[ng[0].name],
+                ANCHOR_NULL_LABEL, y_t, null.mu_a[nq[0].name], null.mu_d[nq[0].name], null_r_w[name][ng[0].name],
                 null.fold_ids, c_t, moved_null[target], delta, w)
     return dict(LABELS, outcome_kind=data.outcome_kind, delta=float(delta), n_targets=n_t, n_movers=n_m,
                 n_clusters=int(len(np.unique(c_t))), n_strata=len(all_strata),
                 delivered_shift_mmhg=float(delta * n_m / n_t), results=results, folds=fits.folds,
-                platt=fits.platt, null_platt=null.platt if null is not None else None, fits=fits, null=null,
+                platt=platt, null_platt=null_platt, r_a=r_w, null_r_a=null_r_w, fits=fits, null=null,
                 null_seed=int(null_seed) if null is not None else None)
 
 
