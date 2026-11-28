@@ -1363,11 +1363,13 @@ def test_ecuador_exposure_lookups_are_validated_up_front():
     repeated = pd.DataFrame({'dpa_canton': [1701, 1701.0], 'oxygen_deficit_mmhg': [42.0, 40.0]})
     with pytest.raises(ValueError, match='unmatched or ambiguous'):
         an.load_ecuador_inec_frame(births, repeated)
-    frame = an.load_ecuador_inec_frame(pd.concat([births, quito_births(['Pichincha'] * 2, ['Quito'] * 2)],
-                                                 ignore_index=True),
-                                       repeated.assign(shapeName=[np.nan, 'Quito'], province=[np.nan, 'Pichincha']),
-                                       on_unmatched='drop')
-    assert frame.audit['ambiguous_exposure_names'] == ['DPA:1701'] and list(frame.a) == [40.0, 40.0]
+    # The ambiguous DPA code also taints its row's name key: neither lookup may use either row.
+    named_repeat = pd.concat([repeated.assign(shapeName=[np.nan, 'Quito'], province=[np.nan, 'Pichincha']),
+                              pd.DataFrame({'dpa_canton': [1702], 'oxygen_deficit_mmhg': [41.0]})], ignore_index=True)
+    frame = an.load_ecuador_inec_frame(pd.concat([births, quito_births(['Pichincha'] * 2, ['Quito'] * 2),
+                                                  quito_births(['Pichincha'] * 2, [1702, 1702])], ignore_index=True),
+                                       named_repeat, on_unmatched='drop')
+    assert frame.audit['ambiguous_exposure_names'] == ['DPA:1701', 'PICHINCHA::QUITO'] and list(frame.a) == [41.0] * 2
     with pytest.raises(ValueError, match='non-integral'):
         an.load_ecuador_inec_frame(quito_births(['Pichincha'] * 2, [1701.5, 1701]),
                                    pd.DataFrame({'dpa_canton': [1701], 'oxygen_deficit_mmhg': [42.0]}))
@@ -1471,3 +1473,32 @@ def test_ecuador_unrecognized_dpa_province_code_raises():
         an.load_ecuador_inec_frame(quito_births([99, 99], ['Quito', 'Quito']),
                                    pd.DataFrame({'province': ['Pichincha'], 'shapeName': ['Quito'],
                                                  'oxygen_deficit_mmhg': [42.0]}))
+
+
+# ---------------------------------------------------------------------------
+# cycle-3 round 3 regression: an ambiguous DPA code taints its row's name key
+# ---------------------------------------------------------------------------
+
+def test_ecuador_conflicting_dpa_rows_cannot_leak_through_the_name_lookup():
+    """Review counterexample: DPA 1701 at 42.0 (named Quito) and 40.0 (unnamed) must not match Quito by name."""
+    exposure = pd.DataFrame([
+        {'dpa_canton': 1701, 'province': 'Pichincha', 'shapeName': 'Quito', 'oxygen_deficit_mmhg': 42.0},
+        {'dpa_canton': 1701, 'province': 'Pichincha', 'shapeName': None, 'oxygen_deficit_mmhg': 40.0}])
+    with pytest.raises(ValueError, match='unmatched or ambiguous'):
+        an.load_ecuador_inec_frame(quito_births(['Pichincha', 'Pichincha'], ['Quito', 'Quito']), exposure)
+    # Symmetric: a repeated name key taints the DPA codes of its rows, and the taint propagates transitively.
+    chained = pd.DataFrame([
+        {'dpa_canton': 1701, 'province': 'Pichincha', 'shapeName': 'Quito', 'oxygen_deficit_mmhg': 42.0},
+        {'dpa_canton': 1702, 'province': 'Pichincha', 'shapeName': 'Quito', 'oxygen_deficit_mmhg': 40.0},
+        {'dpa_canton': 1702, 'province': 'Pichincha', 'shapeName': 'Cayambe', 'oxygen_deficit_mmhg': 44.0},
+        {'dpa_canton': 1703, 'province': 'Pichincha', 'shapeName': 'Cayambe', 'oxygen_deficit_mmhg': 45.0},
+        {'dpa_canton': 1704, 'province': 'Pichincha', 'shapeName': 'Mejia', 'oxygen_deficit_mmhg': 39.0}])
+    births = quito_births(['Pichincha'] * 2, [1701, 'Cayambe'])
+    with pytest.raises(ValueError, match='unmatched or ambiguous'):
+        an.load_ecuador_inec_frame(births, chained)
+    with pytest.raises(ValueError, match='unmatched or ambiguous'):
+        an.load_ecuador_inec_frame(quito_births(['Pichincha'] * 2, [1703, 1703]), chained)
+    clean = an.load_ecuador_inec_frame(quito_births(['Pichincha'] * 2, [1704, 'Mejia']), chained)
+    assert list(clean.a) == [39.0, 39.0]
+    assert clean.audit['ambiguous_exposure_names'] == ['DPA:1701', 'DPA:1702', 'DPA:1703', 'PICHINCHA::CAYAMBE',
+                                                       'PICHINCHA::QUITO']

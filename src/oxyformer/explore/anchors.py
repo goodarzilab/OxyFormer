@@ -745,8 +745,7 @@ def load_ecuador_inec_frame(births: pd.DataFrame, canton_exposure: pd.DataFrame,
     # Exposure lookups, parsed row by row up front. Every province (exposure and births, code or name) goes
     # through _canonical_ecuador_province; a DPA row's stratum is always the official province of its code.
     # Cluster labels are stratum::DPA code, else stratum::canton name.
-    dpa_rows: dict[str, list[dict]] = {}
-    name_rows: dict[str, list[dict]] = {}
+    rows: list[tuple[str | None, str | None, dict]] = []      # (DPA code, name key, record) per usable exposure row
     exposure_unusable = 0
     for i in range(len(exposure)):
         raw_province = exposure.at[i, province_col] if province_col else None
@@ -772,14 +771,19 @@ def load_ecuador_inec_frame(births: pd.DataFrame, canton_exposure: pd.DataFrame,
             continue
         record = dict(deficit=float(deficits[i]), stratum=exp_province,
                       cluster=f'{exp_province}::{dpa if dpa is not None else cant_key}')
-        if dpa is not None:
-            dpa_rows.setdefault(dpa, []).append(record)
-        if named:
-            name_rows.setdefault(f'{exp_province}::{cant_key}', []).append(record)
-    ambiguous = sorted([f'DPA:{k}' for k, v in dpa_rows.items() if len(v) > 1]
-                       + [k for k, v in name_rows.items() if len(v) > 1])
-    dpa_lookup = {k: v[0] for k, v in dpa_rows.items() if len(v) == 1} if dpa_col is not None else None
-    name_lookup = {k: v[0] for k, v in name_rows.items() if len(v) == 1} if has_names else None
+        rows.append((dpa, f'{exp_province}::{cant_key}' if named else None, record))
+    # A repeated DPA code or (province, canton) key is ambiguous, and so is every key of any row carrying an
+    # ambiguous key (to a fixed point), so no lookup can pick one side of a conflicting exposure.
+    dpa_counts = pd.Series([d for d, _, _ in rows if d], dtype=object).value_counts()
+    name_counts = pd.Series([n for _, n, _ in rows if n], dtype=object).value_counts()
+    bad_dpa, bad_name = set(dpa_counts.index[dpa_counts > 1]), set(name_counts.index[name_counts > 1])
+    while tainted := [(d, n) for d, n, _ in rows if (d in bad_dpa or n in bad_name)
+                      and ((d and d not in bad_dpa) or (n and n not in bad_name))]:
+        bad_dpa |= {d for d, _ in tainted if d}
+        bad_name |= {n for _, n in tainted if n}
+    ambiguous = sorted([f'DPA:{d}' for d in bad_dpa] + list(bad_name))
+    dpa_lookup = {d: r for d, _, r in rows if d and d not in bad_dpa} if dpa_col is not None else None
+    name_lookup = {n: r for _, n, r in rows if n and n not in bad_name} if has_names else None
 
     # Births, one row at a time.
     records: list[dict | None] = []
