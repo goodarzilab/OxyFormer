@@ -305,7 +305,7 @@ def test_peru_loader_pools_years_with_distinct_panel_clusters_and_rejects_bad_re
         an.load_peru_endes_frame({2023: modules})
 
 
-def ecuador_tables(with_province=False):
+def ecuador_tables(province_column='province'):
     births = pd.DataFrame({
         'prov_res': ['Pichincha', 'Pichincha', 'Guayas', 'Guayas', 'Manabí', 'Pichincha', 'Guayas'],
         'cant_res': ['Quito', 'Quito', 'El Empalme', 'Guayaquil', 'Bolívar', 'Cayambe', 'Guayaquil'],
@@ -318,17 +318,20 @@ def ecuador_tables(with_province=False):
         'sem_gest': ['39', '30', '40', '38', '39', '25', '37'], 'talla': ['50'] * 7})
     exposure = pd.DataFrame({'shapeName': ['Quito', 'Empalme', 'Guayaquil', 'Bolivar', 'Bolivar', 'Cayambe'],
                              'oxygen_deficit_mmhg': [42.0, 1.0, 0.5, 30.0, 5.0, 44.0]})
-    if with_province:
-        exposure['province'] = ['Pichincha', 'Guayas', 'Guayas', 'Carchi', 'Manabi', 'Pichincha']
+    if province_column is not None:
+        exposure[province_column] = ['Pichincha', 'Guayas', 'Guayas', 'Carchi', 'Manabi', 'Pichincha']
     return births, exposure
 
 
 def test_ecuador_loader_places_exposure_at_maternal_residence_and_stops_on_ambiguity():
     births, exposure = ecuador_tables()
+    repeated = pd.DataFrame({'shapeName': ['Bolivar'], 'oxygen_deficit_mmhg': [6.0], 'province': ['Manabi']})
+    exposure = pd.concat([exposure, repeated], ignore_index=True)     # Manabi BOLIVAR listed twice
     with pytest.raises(ValueError, match='unmatched or ambiguous'):
         an.load_ecuador_inec_frame(births, exposure)
     frame = an.load_ecuador_inec_frame(births, exposure, on_unmatched='drop')
-    assert frame.audit['ambiguous_exposure_names'] == ['BOLIVAR']
+    assert frame.audit['ambiguous_exposure_names'] == ['MANABI::BOLIVAR']
+    assert frame.audit['matching'] == 'province_name:province'
     assert frame.audit['excluded_unmatched_cantons'] == {'Bolívar': 1}
     # residence cantons Quito, Quito, El Empalme (alias), Guayaquil, Guayaquil; cant_nac never used
     np.testing.assert_allclose(frame.a, [42.0, 42.0, 1.0, 0.5, 0.5])
@@ -348,7 +351,7 @@ def test_ecuador_loader_places_exposure_at_maternal_residence_and_stops_on_ambig
 
 
 def test_ecuador_loader_disambiguates_repeated_canton_names_by_province():
-    births, exposure = ecuador_tables(with_province=True)
+    births, exposure = ecuador_tables()
     frame = an.load_ecuador_inec_frame(births, exposure)
     bolivar = frame.clusters == 'MANABI::BOLIVAR'
     assert bolivar.sum() == 1 and frame.a[bolivar][0] == 5.0
@@ -971,3 +974,89 @@ def test_per_mmhg_influence_is_the_exact_derivative_of_the_ratio(hajek):
     U = np.bincount(np.repeat(np.arange(20), 3), weights=u)
     assert res[key]['se_cluster_per_mmhg'] == pytest.approx(np.sqrt(np.sum(U ** 2)))
     assert res['delivered_shift_mmhg'] == pytest.approx(2.0 * np.sum(w * moved))
+
+
+# ---------------------------------------------------------------------------
+# review round 2 regressions: ENDES HHID joins, Ecuador province-qualified matching
+# ---------------------------------------------------------------------------
+
+def test_normalize_hhid_canonicalises_integral_numbers_and_keeps_dhs_text_ids():
+    for value, expected in ((1, '1'), (1.0, '1'), ('1.0', '1'), (' 0001 ', '1'), ('000101 02', '000101 02'),
+                            (' 12AB ', '12AB'), (np.int64(7), '7')):
+        assert an._normalize_hhid(pd.Series([value], dtype=object), 'x').tolist() == [expected]
+    same = an._normalize_hhid(pd.Series([1, 1.0, '1.0', '2', ' 000101 02 '], dtype=object), 'x')
+    assert same.tolist() == ['1', '1', '1', '2', '000101 02']        # one household spelled three ways
+    for bad, match in (([None], 'missing HHID'), ([''], 'missing HHID'), ([1.5], 'non-integral'),
+                       (['0101', '101'], 'merge distinct households')):
+        with pytest.raises(ValueError, match=match):
+            an._normalize_hhid(pd.Series(bad, dtype=object), 'x')
+
+
+def test_peru_float_hhid_in_one_module_still_joins_text_hhid_in_another():
+    """Review counterexample: RECH0 HHID as float (1.0) and RECH6 HHID as text ('1') must still join."""
+    text = an.load_peru_endes_frame({2023: peru_modules()})
+    modules = peru_modules()
+    r0_hhid = '\ufeffHHID'                                                   # the fixture's BOM header
+    modules['RECH0'][r0_hhid] = pd.to_numeric(modules['RECH0'][r0_hhid]).astype(float)
+    assert modules['RECH0'][r0_hhid].dtype.kind == 'f' and pd.api.types.is_string_dtype(modules['RECH6']['HHID'])
+    mixed = an.load_peru_endes_frame({2023: modules})
+    assert len(mixed.ids) == 4 and list(mixed.ids) == list(text.ids)
+    np.testing.assert_allclose(mixed.a, text.a)
+    np.testing.assert_allclose(mixed.survey_weights, text.survey_weights)
+    modules['RECH23']['HHID'] = ['1.0', '2.0', '3.0', '4.0', '5.0']           # assets still merge
+    assets = an.load_peru_endes_frame({2023: modules})
+    np.testing.assert_array_equal(np.nan_to_num(assets.X), np.nan_to_num(text.X))
+    dhs = peru_modules()
+    for name, col in (('RECH0', r0_hhid), ('RECH23', 'HHID'), ('RECH6', 'HHID')):
+        dhs[name][col] = dhs[name][col].str.strip().map(lambda h: f'  0001{h} 02 ')
+    spaced = an.load_peru_endes_frame({2023: dhs})
+    assert list(spaced.ids) == ['2023:00011 02:1', '2023:00012 02:1', '2023:00013 02:1', '2023:00015 02:2']
+
+
+def test_ecuador_manabi_bolivar_never_matches_carchi_bolivar():
+    """Review counterexample: a province-less exposure table must not place Manabi BOLIVAR at Carchi's deficit."""
+    births, _ = ecuador_tables()
+    manabi = births.iloc[[4]].reset_index(drop=True)
+    assert (manabi.loc[0, 'prov_res'], manabi.loc[0, 'cant_res']) == ('Manabí', 'Bolívar')
+    carchi_only = pd.DataFrame({'shapeName': ['Bolivar'], 'oxygen_deficit_mmhg': [30.0]})
+    for on_unmatched in ('raise', 'drop'):
+        with pytest.raises(ValueError, match='needs a province column'):
+            an.load_ecuador_inec_frame(manabi, carchi_only, on_unmatched=on_unmatched)
+    labelled = carchi_only.assign(ADM1=['Carchi'])
+    with pytest.raises(ValueError, match='unmatched or ambiguous'):
+        an.load_ecuador_inec_frame(manabi, labelled)
+    dropped = an.load_ecuador_inec_frame(pd.concat([manabi, births.iloc[[0]]], ignore_index=True),
+                                         pd.concat([labelled, pd.DataFrame({'shapeName': ['Quito'], 'ADM1': [
+                                             'Pichincha'], 'oxygen_deficit_mmhg': [42.0]})], ignore_index=True),
+                                         on_unmatched='drop')
+    assert list(dropped.a) == [42.0] and dropped.audit['excluded_unmatched_cantons'] == {'Bolívar': 1}
+    births_all, exposure = ecuador_tables(province_column=None)
+    with pytest.raises(ValueError, match='needs a province column'):
+        an.load_ecuador_inec_frame(births_all, exposure, on_unmatched='drop')
+
+
+@pytest.mark.parametrize('column', ['province', 'prov_res', 'prov_key', 'provincia', 'ADM1'])
+def test_ecuador_accepts_each_province_column_name(column):
+    assert column in an.ECUADOR_EXPOSURE_PROVINCE_COLUMNS
+    births, exposure = ecuador_tables(province_column=column)
+    frame = an.load_ecuador_inec_frame(births, exposure)
+    assert frame.a[frame.clusters == 'MANABI::BOLIVAR'].tolist() == [5.0]
+    assert frame.audit['matching'] == f'province_name:{column}'
+
+
+def test_ecuador_dpa_canton_codes_place_births_without_names():
+    births, _ = ecuador_tables()
+    births = births.iloc[[0, 1, 4]].reset_index(drop=True)       # Quito, Quito, Manabi Bolivar
+    births['prov_res'] = ['17', '17', '13']
+    births['cant_res'] = ['1701', '1701', 1302.0]
+    exposure = pd.DataFrame({'dpa_canton': ['1701', '0402', '1302'], 'oxygen_deficit_mmhg': [42.0, 30.0, 5.0]})
+    frame = an.load_ecuador_inec_frame(births, exposure)
+    assert frame.audit['matching'] == 'dpa_code'
+    np.testing.assert_allclose(frame.a, [42.0, 42.0, 5.0])
+    assert list(frame.clusters) == ['17::1701', '17::1701', '13::1302'] and list(frame.strata) == ['17', '17', '13']
+    clash = births.assign(prov_res=['17', '17', '04'])           # code 1302 is Manabi, not Carchi
+    with pytest.raises(ValueError, match='outside their prov_res province'):
+        an.load_ecuador_inec_frame(clash, exposure)
+    names, _ = ecuador_tables()
+    with pytest.raises(ValueError, match='cant_res holds names'):
+        an.load_ecuador_inec_frame(names, exposure)

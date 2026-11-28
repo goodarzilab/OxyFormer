@@ -77,6 +77,7 @@ from dataclasses import dataclass, fields, replace
 from importlib import import_module
 import json
 from pathlib import Path
+import re
 from typing import Any, Literal
 import unicodedata
 
@@ -223,6 +224,10 @@ ECUADOR_FORBIDDEN_FIELDS = frozenset({
     'prov_nac', 'cant_nac', 'parr_nac', 'prov_insc', 'cant_insc', 'parr_insc'})
 ECUADOR_OUTCOMES = {'peso_g': 'continuous', 'lbw': 'binary'}
 ECUADOR_BIRTHWEIGHT_RANGE_G = (500.0, 5500.0)
+# Exposure-table columns that place a canton in its province; canton names alone are never matched
+# (BOLIVAR and OLMEDO each name cantons in two provinces).
+ECUADOR_EXPOSURE_PROVINCE_COLUMNS = ('province', 'prov_res', 'prov_key', 'provincia', 'ADM1')
+ECUADOR_EXPOSURE_DPA_COLUMNS = ('cant_code', 'dpa_canton')     # 4-digit DPA canton code (province + canton)
 ECUADOR_MATERNAL_AGE_RANGE = (10.0, 60.0)
 # Reviewed INEC -> geoBoundaries ADM2 canton name concordance (normalised names).
 CANTON_ALIASES = {
@@ -434,6 +439,44 @@ def integer_codes(series: pd.Series, field: str) -> pd.Series:
     return pd.Series(out, index=series.index, dtype=object)
 
 
+_INTEGRAL_TEXT = re.compile(r'^[+-]?\d+(?:\.0*)?$')
+
+
+def _normalize_hhid(series: pd.Series, what: str) -> pd.Series:
+    """ENDES household ids comparable across modules read as text or as numbers.
+
+    Values are stripped; an integral number (``1``, ``1.0``, ``'1.0'``, ``'0001'``) becomes
+    its integer string (``'1'``) so a float-typed module still joins a text-typed one.
+    Genuine DHS text ids such as ``'000101 02'`` are kept exactly as stripped. Missing or
+    non-integral numeric ids, and a normalisation that would merge distinct households,
+    raise ``ValueError``.
+    """
+    def one(value: Any) -> Any:
+        if value is None or value is pd.NA or (isinstance(value, (float, np.floating)) and np.isnan(value)):
+            return None
+        if isinstance(value, (bool, np.bool_)):
+            raise ValueError(f'{what}: boolean HHID')
+        if isinstance(value, (int, np.integer)):
+            return str(int(value))
+        if isinstance(value, (float, np.floating)):
+            _check(float(value).is_integer(), f'{what}: non-integral numeric HHID {value!r}')
+            return str(int(value))
+        text = str(value).strip()
+        if not text:
+            return None
+        return str(int(text.split('.')[0])) if _INTEGRAL_TEXT.match(text) else text
+    def spelling(value: Any) -> str:                # the id as written, minus a numeric '.0' suffix
+        text = str(value).strip()
+        return text.split('.')[0] if _INTEGRAL_TEXT.match(text) else text
+    values = series.astype(object)
+    out = values.map(one).astype(object)
+    _check(bool(out.notna().all()), f'{what}: missing HHID')
+    spellings = pd.DataFrame({'id': out, 'raw': values.map(spelling)}).groupby('id')['raw'].nunique()
+    _check(bool((spellings == 1).all()), f'{what}: HHID normalisation would merge distinct households '
+                                         f'{sorted(spellings.index[spellings > 1].tolist())[:5]}')
+    return out
+
+
 def _zfill(codes: pd.Series, width: int) -> pd.Series:
     """Zero-pad normalised codes; missing codes stay missing (safe on all-missing columns)."""
     return codes.map(lambda v: v.zfill(width) if isinstance(v, str) else np.nan).astype(object)
@@ -468,8 +511,8 @@ def load_peru_endes_frame(modules_by_year: Mapping[int, Mapping[str, pd.DataFram
         keep6 = list(dict.fromkeys(base6 + [c for c in child_cols if c in r6.columns]))
         keep0 = base0 + [c for c in hh0_cols if c in r0.columns]
         keep23 = ['HHID'] + [c for c in hh23_cols if c in r23.columns]
-        for frame in (r0, r23, r6):
-            frame['HHID'] = frame['HHID'].astype(str).str.strip()
+        for name, frame in (('RECH0', r0), ('RECH23', r23), ('RECH6', r6)):
+            frame['HHID'] = _normalize_hhid(frame['HHID'], f'peru_endes {year} {name}')
         merged = r6[keep6].merge(r0[keep0].drop_duplicates('HHID'), on='HHID', how='inner')
         merged = merged.merge(r23[keep23].drop_duplicates('HHID'), on='HHID', how='left')
         status, raw_hb = _numeric(merged[spec.status_field]), _numeric(merged[spec.outcome_field])
@@ -546,10 +589,14 @@ def load_ecuador_inec_frame(births: pd.DataFrame, canton_exposure: pd.DataFrame,
                             on_unmatched: Literal['raise', 'drop'] = 'raise') -> AnchorFrame:
     """INEC births placed at the maternal residence canton; only approved columns are read.
 
-    ``canton_exposure`` carries ``shapeName`` and the transform-before-aggregate
-    ``oxygen_deficit_mmhg`` (optionally ``province`` to disambiguate repeated canton
-    names). Repeated names without a province, and unmatched cantons, stop the run
-    unless ``on_unmatched='drop'``, which excludes and audits them.
+    ``canton_exposure`` carries the transform-before-aggregate ``oxygen_deficit_mmhg``
+    and must place every canton in its province, because canton names repeat across
+    provinces. Either ``cant_res`` holds 4-digit DPA canton codes matched against an
+    exposure ``cant_code`` / ``dpa_canton`` column, or births match on (province, canton
+    name) against ``shapeName`` plus a province column (``province``, ``prov_res``,
+    ``prov_key``, ``provincia`` or ``ADM1``). An exposure table with neither raises
+    ``ValueError``: canton-only matching is never used. Repeated keys and unmatched
+    cantons stop the run unless ``on_unmatched='drop'``, which excludes and audits them.
     """
     spec = validate_ecuador_inec_spec(spec)
     _check(stratum in ('province', 'national'), "stratum must be 'province' or 'national'")
@@ -563,22 +610,52 @@ def load_ecuador_inec_frame(births: pd.DataFrame, canton_exposure: pd.DataFrame,
     n_valid = len(df)
 
     exposure = _clean_columns(canton_exposure)
-    _require_columns(exposure, ['shapeName', 'oxygen_deficit_mmhg'], 'ecuador_inec canton exposure')
+    _require_columns(exposure, ['oxygen_deficit_mmhg'], 'ecuador_inec canton exposure')
     exposure = exposure.loc[exposure['oxygen_deficit_mmhg'].notna()].copy()
-    by_province = 'province' in exposure.columns
-    canton_key = exposure['shapeName'].map(normalise_area_name)
-    if by_province:
-        canton_key = exposure['province'].map(normalise_area_name) + '::' + canton_key
-    exposure['_key'] = canton_key
+    province_col = next((c for c in ECUADOR_EXPOSURE_PROVINCE_COLUMNS if c in exposure.columns), None)
+    dpa_col = next((c for c in ECUADOR_EXPOSURE_DPA_COLUMNS if c in exposure.columns), None)
+    try:
+        birth_codes = integer_codes(df[spec.residence_canton_field], 'ecuador_inec cant_res')
+    except ValueError:
+        birth_codes = None                         # canton names, not DPA codes
+    _check(dpa_col is not None or province_col is not None,
+           'ecuador_inec: the canton exposure table needs a province column '
+           f'{ECUADOR_EXPOSURE_PROVINCE_COLUMNS} or a 4-digit DPA canton code {ECUADOR_EXPOSURE_DPA_COLUMNS}; '
+           'canton names repeat across provinces, so canton-only matching is never used')
+    use_dpa = dpa_col is not None and birth_codes is not None
+    _check(use_dpa or province_col is not None,
+           f'ecuador_inec: exposure {dpa_col} holds DPA codes but cant_res holds names; supply a province column')
+    if use_dpa:
+        codes = integer_codes(exposure[dpa_col], f'ecuador_inec exposure {dpa_col}')
+        _check(bool(codes.notna().all()), f'ecuador_inec: missing DPA codes in exposure {dpa_col}')
+        exposure['_key'] = _zfill(codes, 4)
+        canton = _zfill(birth_codes, 4)
+        _check(bool(exposure['_key'].str.len().eq(4).all() and canton.dropna().str.len().eq(4).all()),
+               'ecuador_inec: DPA canton codes have 4 digits')
+        province = canton.map(lambda c: c[:2] if isinstance(c, str) else np.nan).astype(object)
+        try:
+            stated = integer_codes(df[spec.residence_province_field], 'ecuador_inec prov_res')
+        except ValueError:
+            stated = None                          # province names: the DPA code alone places the canton
+        if stated is not None:
+            stated = _zfill(stated, 2)
+            clash = stated.notna() & province.notna() & (stated != province)
+            _check(not bool(clash.any()), f'ecuador_inec: {int(clash.sum())} births have a cant_res DPA code '
+                                          'outside their prov_res province')
+        key = canton
+    else:
+        _require_columns(exposure, ['shapeName'], 'ecuador_inec canton exposure')
+        exposure['_key'] = (exposure[province_col].map(normalise_area_name) + '::'
+                            + exposure['shapeName'].map(normalise_area_name))
+        province = df[spec.residence_province_field].map(normalise_area_name)
+        canton = df[spec.residence_canton_field].map(normalise_area_name).map(lambda k: CANTON_ALIASES.get(k, k))
+        key = province + '::' + canton
     counts = exposure['_key'].value_counts()
     ambiguous = set(counts.index[counts > 1].tolist())
     exposure = exposure.loc[~exposure['_key'].isin(ambiguous)]
     deficit = dict(zip(exposure['_key'], exposure['oxygen_deficit_mmhg'].astype(float)))
 
-    province = df[spec.residence_province_field].map(normalise_area_name)
-    canton = df[spec.residence_canton_field].map(normalise_area_name).map(lambda k: CANTON_ALIASES.get(k, k))
-    key = (province + '::' + canton) if by_province else canton
-    matched = key.isin(set(deficit))
+    matched = key.isin(set(deficit)).to_numpy(dtype=bool)
     bad = df.loc[~matched, spec.residence_canton_field].astype(str).value_counts().to_dict()
     _resolve_unmatched(bad, on_unmatched, 'ecuador_inec')
     df, province, canton, key = (v.loc[matched].reset_index(drop=True) for v in (df, province, canton, key))
@@ -602,6 +679,7 @@ def load_ecuador_inec_frame(births: pd.DataFrame, canton_exposure: pd.DataFrame,
     audit = dict(n_raw=n_raw, n_valid_birthweight=n_valid, n_matched_residence=int(len(df)),
                  match_rate=float(len(df) / n_valid) if n_valid else 0.0, n_cantons=int(df['_cluster'].nunique()),
                  n_provinces=int(province.nunique()), ambiguous_exposure_names=sorted(ambiguous),
+                 matching='dpa_code' if use_dpa else f'province_name:{province_col}',
                  excluded_unmatched_cantons={str(k): int(v) for k, v in bad.items()}, stratum=stratum,
                  interpretation=INTERPRETATION)
     return AnchorFrame(anchor='ecuador_inec', ids=np.asarray([f'ecu2024:{i}' for i in range(len(df))], dtype=object),
