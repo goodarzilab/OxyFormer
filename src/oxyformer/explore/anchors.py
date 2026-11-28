@@ -1012,7 +1012,9 @@ def cluster_capped_subsample(ids: Any, clusters: Any, per_cluster_cap: int,
     """Outcome-blind hash-ranked subsample of at most ``per_cluster_cap`` rows per cluster.
 
     Every cluster is kept. Returns the sorted kept row positions and each cluster's full
-    row count, for Horvitz-Thompson equal-unit weights ``N_g / n_g``.
+    row count ``N_g``, for Horvitz-Thompson weights ``N_g / n_sampled_g`` (when target
+    membership varies within a cluster, pass each cluster's total sampled count as
+    ``sampled_counts`` to :func:`anchor_weights`).
     """
     ids, clusters = np.asarray(ids), np.asarray(clusters)
     _check(ids.shape == clusters.shape, 'ids and clusters are misaligned')
@@ -1219,14 +1221,19 @@ WEIGHT_SCHEMES = ('equal_cluster', 'equal_unit', 'survey')
 
 
 def anchor_weights(scheme: str, clusters: Any, *, survey_weights: Any = None,
-                   population_counts: Mapping[Any, int] | None = None) -> np.ndarray:
+                   population_counts: Mapping[Any, int] | None = None,
+                   sampled_counts: Mapping[Any, int] | None = None) -> np.ndarray:
     """Row weights over target rows.
 
     ``equal_cluster``: ``1 / n_g`` (every PSU, canton or municipality counts once);
-    ``equal_unit``: 1 per row, or the Horvitz-Thompson expansion ``N_g / n_g`` when
-    ``population_counts`` gives each subsampled cluster's full count;
+    ``equal_unit``: 1 per row, or the Horvitz-Thompson expansion ``N_g / n_sampled_g`` when
+    ``population_counts`` gives each subsampled cluster's full count ``N_g`` (pass
+    ``sampled_counts`` when the cap sampled all rows of a cluster and target membership varies
+    within a cluster; when ``sampled_counts`` is omitted, ``n_sampled_g`` defaults to the
+    sampled target count ``n_g``, which is exact when target membership is constant per cluster
+    or ``population_counts`` are full target counts);
     ``survey``: the supplied design weights (e.g. ENDES ``HV005 / 1e6``), multiplied by
-    the same expansion ``N_g / n_g`` when ``population_counts`` is given.
+    the same expansion ``N_g / n_sampled_g`` when ``population_counts`` is given.
     """
     clusters = np.asarray(clusters)
     _check(scheme in WEIGHT_SCHEMES, f'weight scheme must be one of {WEIGHT_SCHEMES}')
@@ -1240,8 +1247,15 @@ def anchor_weights(scheme: str, clusters: Any, *, survey_weights: Any = None,
         missing = [c for c in labels.tolist() if c not in population_counts]
         _check(not missing, f'population counts are missing clusters {missing[:5]}')
         full = np.asarray([population_counts[c] for c in labels.tolist()], dtype=np.float64)
-        _check(bool((full >= n_g).all()), 'a population count is below its sampled count')
-        expansion = (full / n_g)[inverse]
+        if sampled_counts is not None:
+            missing_s = [c for c in labels.tolist() if c not in sampled_counts]
+            _check(not missing_s, f'sampled counts are missing clusters {missing_s[:5]}')
+            denom = np.asarray([sampled_counts[c] for c in labels.tolist()], dtype=np.float64)
+            _check(bool((denom >= n_g).all()), 'a sampled count is below its sampled target count')
+        else:
+            denom = n_g.astype(np.float64)
+        _check(bool((full >= denom).all()), 'a population count is below its sampled count')
+        expansion = (full / denom)[inverse]
     if scheme == 'equal_unit':
         return expansion
     w = np.asarray(survey_weights, dtype=np.float64) if survey_weights is not None else None

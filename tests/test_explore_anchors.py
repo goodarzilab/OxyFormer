@@ -1750,3 +1750,19 @@ def test_capped_weighted_origin_excludes_zero_weight_rows_before_capping():
     )
     assert np.isfinite(ratio2).all() and (ratio2 > 0).all()
     assert diag2['n_originals'] == cap
+
+
+def test_horvitz_thompson_sampled_counts_denominator_when_target_varies_within_cluster():
+    """Review counterexample: 100 full rows / 10 sampled per cluster (1 A target, 10 B targets) -> totals A=10, B=100."""
+    target_clusters = np.array(['A'] + ['B'] * 10)
+    pop = {'A': 100, 'B': 100}
+    sampled = {'A': 10, 'B': 10}
+    w_unit = an.anchor_weights('equal_unit', target_clusters, population_counts=pop, sampled_counts=sampled)
+    assert float(w_unit[target_clusters == 'A'].sum()) == pytest.approx(10.0)
+    assert float(w_unit[target_clusters == 'B'].sum()) == pytest.approx(100.0)
+    w_surv = an.anchor_weights('survey', target_clusters, survey_weights=np.ones(11),
+                               population_counts=pop, sampled_counts=sampled)
+    assert float(w_surv[target_clusters == 'A'].sum()) == pytest.approx(10.0)
+    assert float(w_surv[target_clusters == 'B'].sum()) == pytest.approx(100.0)
+    with pytest.raises(ValueError, match='below its sampled target count'):
+        an.anchor_weights('equal_unit', target_clusters, population_counts=pop, sampled_counts={'A': 10, 'B': 5})
