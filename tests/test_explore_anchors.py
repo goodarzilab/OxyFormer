@@ -1376,3 +1376,39 @@ def test_anchors_module_has_no_value_error_fallbacks():
     import inspect
     source = inspect.getsource(an)
     assert 'except ValueError' not in source and 'try:' not in source
+
+
+# ---------------------------------------------------------------------------
+# cycle-3 round 1 regression: textual prov_res verified against the official DPA province
+# ---------------------------------------------------------------------------
+
+def test_ecuador_textual_province_checked_against_dpa_province_without_exposure_names():
+    """Review counterexample: prov_res 'Manabi' with cant_res 1701 (Pichincha) against a DPA-only table raises."""
+    dpa_only = pd.DataFrame({'dpa_canton': [1701], 'oxygen_deficit_mmhg': [42.0]})
+    with pytest.raises(ValueError, match="DPA province 'PICHINCHA'"):
+        an.load_ecuador_inec_frame(quito_births(['Manabi', 'Manabi'], [1701, 1701]), dpa_only)
+    frame = an.load_ecuador_inec_frame(quito_births(['Pichincha', 'Pichincha'], [1701, 1701]), dpa_only)
+    assert list(frame.a) == [42.0, 42.0] and list(frame.clusters) == ['17::1701', '17::1701']
+    accented = an.load_ecuador_inec_frame(quito_births(['Manabí', 'manabi'], [1302, '1302']),
+                                          pd.DataFrame({'dpa_canton': ['1302'], 'oxygen_deficit_mmhg': [5.0]}))
+    assert list(accented.a) == [5.0, 5.0]
+    # Unmatched rows are checked too, and a name that nothing can verify is an error, not a pass.
+    with pytest.raises(ValueError, match="DPA province 'PICHINCHA'"):
+        an.load_ecuador_inec_frame(quito_births(['Manabi', 'Pichincha'], [1799, 1701]), dpa_only,
+                                   on_unmatched='drop')
+    with pytest.raises(ValueError, match='cannot be verified'):
+        an.load_ecuador_inec_frame(quito_births(['Pichincha', 'Pichincha'], [9901, 1701]),
+                                   pd.DataFrame({'dpa_canton': [9901, 1701], 'oxygen_deficit_mmhg': [3.0, 42.0]}))
+    assert an.ECUADOR_DPA_PROVINCES['13'] == an.normalise_area_name('Manabí')
+    assert an.ECUADOR_DPA_PROVINCES['23'] == an.normalise_area_name('Santo Domingo de los Tsáchilas')
+    assert len(an.ECUADOR_DPA_PROVINCES) == 25
+
+
+def test_ecuador_exposure_province_name_must_agree_with_its_dpa_code():
+    births = quito_births(['Pichincha', 'Pichincha'], [1701, 1701])
+    with pytest.raises(ValueError, match="DPA province 'PICHINCHA'"):
+        an.load_ecuador_inec_frame(births, pd.DataFrame({'dpa_canton': [1701], 'province': ['Manabi'],
+                                                         'oxygen_deficit_mmhg': [42.0]}))
+    frame = an.load_ecuador_inec_frame(births, pd.DataFrame({'dpa_canton': [1701], 'province': ['Pichincha'],
+                                                             'oxygen_deficit_mmhg': [42.0]}))
+    assert list(frame.clusters) == ['PICHINCHA::1701'] * 2

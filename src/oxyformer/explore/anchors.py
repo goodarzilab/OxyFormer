@@ -228,6 +228,14 @@ ECUADOR_BIRTHWEIGHT_RANGE_G = (500.0, 5500.0)
 # (BOLIVAR and OLMEDO each name cantons in two provinces).
 ECUADOR_EXPOSURE_PROVINCE_COLUMNS = ('province', 'prov_res', 'prov_key', 'provincia', 'ADM1')
 ECUADOR_EXPOSURE_DPA_COLUMNS = ('cant_code', 'dpa_canton')     # 4-digit DPA canton code (province + canton)
+# INEC DPA province codes -> province names as normalise_area_name writes them (24 provinces + zone 90).
+ECUADOR_DPA_PROVINCES = {
+    '01': 'AZUAY', '02': 'BOLIVAR', '03': 'CANAR', '04': 'CARCHI', '05': 'COTOPAXI', '06': 'CHIMBORAZO',
+    '07': 'EL ORO', '08': 'ESMERALDAS', '09': 'GUAYAS', '10': 'IMBABURA', '11': 'LOJA', '12': 'LOS RIOS',
+    '13': 'MANABI', '14': 'MORONA SANTIAGO', '15': 'NAPO', '16': 'PASTAZA', '17': 'PICHINCHA',
+    '18': 'TUNGURAHUA', '19': 'ZAMORA CHINCHIPE', '20': 'GALAPAGOS', '21': 'SUCUMBIOS', '22': 'ORELLANA',
+    '23': 'SANTO DOMINGO DE LOS TSACHILAS', '24': 'SANTA ELENA', '90': 'ZONAS NO DELIMITADAS',
+}
 ECUADOR_MATERNAL_AGE_RANGE = (10.0, 60.0)
 # Reviewed INEC -> geoBoundaries ADM2 canton name concordance (normalised names).
 CANTON_ALIASES = {
@@ -732,6 +740,10 @@ def load_ecuador_inec_frame(births: pd.DataFrame, canton_exposure: pd.DataFrame,
             if dpa is not None and isinstance(prov_key, str) and prov_key.isdigit():
                 _check(int(prov_key) == int(dpa[:2]),
                        f'ecuador_inec: exposure DPA code {dpa} lies outside its own province {prov_key}')
+            elif dpa is not None and isinstance(prov_key, str) and dpa[:2] in ECUADOR_DPA_PROVINCES:
+                _check(prov_key == ECUADOR_DPA_PROVINCES[dpa[:2]],
+                       f'ecuador_inec: exposure DPA code {dpa} lies outside its own province {prov_key!r} '
+                       f'(DPA province {ECUADOR_DPA_PROVINCES[dpa[:2]]!r})')
         cant_key = _area_key(exposure.at[i, name_col]) if has_names else np.nan
         named = isinstance(prov_key, str) and isinstance(cant_key, str)
         if dpa is None and not named:
@@ -764,12 +776,21 @@ def load_ecuador_inec_frame(births: pd.DataFrame, canton_exposure: pd.DataFrame,
             if prov_code is not None:
                 if int(prov_code) != int(dpa[:2]):
                     conflicts.append(f'prov_res {prov_value!r} vs cant_res {cant_value!r}')
-            elif record is not None:
-                prov_name, exposure_prov = _area_key(prov_value), record['prov_key']
-                if (isinstance(prov_name, str) and isinstance(exposure_prov, str) and not exposure_prov.isdigit()
-                        and prov_name != exposure_prov):
+            elif not _is_missing_value(prov_value):
+                # A textual province must be verified against the exposure row's province name and the official
+                # DPA province of the code; a name nothing can verify is an error, never a silent pass.
+                prov_name = _area_key(prov_value)
+                exposure_prov = record['prov_key'] if record is not None else np.nan
+                official = ECUADOR_DPA_PROVINCES.get(dpa[:2])
+                textual_exposure = isinstance(exposure_prov, str) and not exposure_prov.isdigit()
+                if textual_exposure and prov_name != exposure_prov:
                     conflicts.append(f'prov_res {prov_value!r} vs exposure province {exposure_prov!r} '
                                      f'of cant_res {cant_value!r}')
+                elif official is not None and prov_name != official:
+                    conflicts.append(f'prov_res {prov_value!r} vs DPA province {official!r} of cant_res {cant_value!r}')
+                elif official is None and not textual_exposure:
+                    conflicts.append(f'prov_res {prov_value!r} cannot be verified against cant_res {cant_value!r} '
+                                     '(unknown DPA province, no exposure province name)')
         elif name_lookup is not None:
             prov_name, cant_name = _area_key(prov_value), _area_key(cant_value)
             if isinstance(cant_name, str):
