@@ -1727,3 +1727,26 @@ def test_score_anchor_estimate_allows_zero_weight_outer_fold():
     )
     md = an.render_anchor_markdown(payload)
     assert '| 1 | 2 | 0.000 | n/a | n/a | n/a | n/a | n/a |' in md
+
+
+def test_capped_weighted_origin_excludes_zero_weight_rows_before_capping():
+    """Review counterexample: zeroing the cap-selected rows must not leave zero total capped weight."""
+    F0, F1 = np.zeros((36, 1)), np.ones((36, 1))
+    clusters = np.repeat(np.arange(6), 6)
+    ids = np.array([str(i) for i in range(36)])
+    seed, cap, salt = 7, 6, 'a7-v2'
+    keep = ws.deterministic_subsample_idx(ids, cap=cap, salt=f'{salt}-{seed}')
+    w = np.ones(36, dtype=np.float64)
+    w[keep] = 0.0
+    ratio, diag = an.fit_weighted_platt_calibrated_origin(
+        F0, F1, F0[:1], clusters, w, lambda s: LogisticRegression(), seed=seed, ids=ids, cap=cap, salt=salt
+    )
+    assert np.isfinite(ratio).all() and (ratio > 0).all()
+    assert diag['n_originals'] == cap
+    # Also verify non-uniform positive weights after excluding zero-weight rows
+    w_nonunif = np.where(w > 0, np.linspace(1.0, 3.0, 36), 0.0)
+    ratio2, diag2 = an.fit_weighted_platt_calibrated_origin(
+        F0, F1, F0[:1], clusters, w_nonunif, lambda s: LogisticRegression(), seed=seed, ids=ids, cap=cap, salt=salt
+    )
+    assert np.isfinite(ratio2).all() and (ratio2 > 0).all()
+    assert diag2['n_originals'] == cap

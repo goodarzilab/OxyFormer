@@ -1466,15 +1466,18 @@ def fit_weighted_platt_calibrated_origin(
     _check(len(F0) == len(F1) == len(clusters) == len(w) and F0.shape[1] == F1.shape[1] == F_eval.shape[1],
            'origin-classifier inputs are misaligned')
     _check(bool(np.isfinite(w).all() and (w >= 0).all() and w.sum() > 0), 'g weights must be finite, >= 0, not all 0')
+    pos = w > 0
+    F0, F1, clusters, w = F0[pos], F1[pos], clusters[pos], w[pos]
+    ids_pos = np.asarray(ids)[pos] if ids is not None else None
     w = w / w.mean()
     if np.allclose(w, 1.0, rtol=0.0, atol=1e-12):
-        ratio, diag = fit_platt_calibrated_origin(F0, F1, F_eval, clusters, make_classifier, seed=seed, ids=ids,
+        ratio, diag = fit_platt_calibrated_origin(F0, F1, F_eval, clusters, make_classifier, seed=seed, ids=ids_pos,
                                                   cap=cap, salt=salt, inner_splits=inner_splits, score=score)
         return ratio, dict(diag, weighting='uniform')
     keep = np.arange(len(F0))
-    if cap is not None:                             # outcome-blind hash cap on originals, as within_state
-        _check(ids is not None and len(ids) == len(F0), 'capped origin fits require row ids')
-        keep = deterministic_subsample_idx(np.asarray(ids), cap=cap, salt=f'{salt}-{seed}')
+    if cap is not None:                             # outcome-blind hash cap on positive-weight originals
+        _check(ids_pos is not None and len(ids_pos) == len(F0), 'capped origin fits require row ids')
+        keep = deterministic_subsample_idx(ids_pos, cap=cap, salt=f'{salt}-{seed}')
     F0, F1, clusters, w = F0[keep], F1[keep], clusters[keep], w[keep] / w[keep].mean()
     _check(len(np.unique(clusters)) >= inner_splits, 'fewer clusters than inner folds')
     first = make_classifier(seed)                  # also the first inner model (seed + 0)
