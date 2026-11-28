@@ -1155,3 +1155,76 @@ def test_markdown_states_the_permutation_null_only_when_it_ran():
         data, null_learners=([linear_q('lin', 7)], [logistic_g('logit', 9)]), **kwargs)))
     assert 'cluster-level within-stratum permuted-A null' in with_null and an.ANCHOR_NULL_LABEL in with_null
     assert f'seed `{an.NULL_SEED}`' in with_null and 'no permutation null was run' not in with_null
+
+
+# ---------------------------------------------------------------------------
+# fresh-cycle round 1 regressions
+# ---------------------------------------------------------------------------
+
+def test_peru_exact_child_repeat_with_respelled_hc0_is_deduplicated():
+    """Review counterexample: the first RECH6 row repeated with HC0 '01' is the same child, not a conflict."""
+    base = an.load_peru_endes_frame({2023: peru_modules()})
+    modules = peru_modules()
+    repeat = modules['RECH6'].iloc[[0]].copy()
+    repeat['HC0'] = '01'
+    modules['RECH6'] = pd.concat([modules['RECH6'], repeat], ignore_index=True)
+    frame = an.load_peru_endes_frame({2023: modules})
+    assert list(frame.ids) == list(base.ids) == ['2023:1:1', '2023:2:1', '2023:3:1', '2023:5:2']
+    np.testing.assert_allclose(frame.y, base.y)
+    respelled = peru_modules()
+    repeat = respelled['RECH6'].iloc[[0]].copy()
+    repeat['HHID'], repeat['HC0'] = '0001', '01'
+    respelled['RECH6'] = pd.concat([respelled['RECH6'], repeat], ignore_index=True)
+    assert list(an.load_peru_endes_frame({2023: respelled}).ids) == list(base.ids)
+    conflict = peru_modules()
+    repeat = conflict['RECH6'].iloc[[0]].copy()
+    repeat['HC0'], repeat['HC53'] = '01', '115'                  # same child, different haemoglobin
+    conflict['RECH6'] = pd.concat([conflict['RECH6'], repeat], ignore_index=True)
+    with pytest.raises(ValueError, match='RECH6 children'):
+        an.load_peru_endes_frame({2023: conflict})
+
+
+def test_clean_category_normalises_mixed_object_codes_per_element():
+    """Review counterexample: an object column mixing '1' and 1.0 is one category, not two."""
+    out = an._clean_category(pd.Series(['1', 1.0], dtype=object), {}, 'niv_inst')
+    assert out.tolist() == ['1', '1']
+    parts, names = an._onehot(pd.DataFrame({'niv_inst': out}), ['niv_inst'])
+    assert names == ['niv_inst_1'] and parts[0].shape == (2, 1)
+    mixed = pd.Series([1, 1.0, '1.0', ' 01 ', 'Primaria', ' Superior ', None, np.nan, '', 'Ignorado', 2],
+                      dtype=object)
+    cleaned = an._clean_category(mixed, {'Ignorado': 'MISSING', '': 'MISSING'}, 'niv_inst')
+    assert cleaned.tolist() == ['1', '1', '1', '1', 'Primaria', 'Superior', 'MISSING', 'MISSING', 'MISSING',
+                                'MISSING', '2']
+    with pytest.raises(ValueError, match='non-integral numeric category'):
+        an._clean_category(pd.Series([1.5], dtype=object), {}, 'niv_inst')
+    births, exposure = ecuador_tables()
+    births['niv_inst'] = pd.Series(['1', 1.0, '2', 2.0, 3.0, '9', '01'], dtype=object)   # row 5 (450 g) drops
+    frame = an.load_ecuador_inec_frame(births, exposure)
+    assert sorted(n for n in frame.feature_names if n.startswith('niv_inst')) == ['niv_inst_1', 'niv_inst_2',
+                                                                                 'niv_inst_3']
+
+
+def test_markdown_null_claim_follows_null_estimates_present_in_results():
+    d = cluster_design(seed=11, n_strata=3, clusters_per_stratum=24, rows=5)
+    data, _ = anchor_inputs(d, continuous_outcome(d), 'continuous')
+    run = an.run_anchor(data, delta=2.0, q_learners=[linear_q('lin')], g_learners=[logistic_g('logit')],
+                        combos=[('lin + logit', 'lin', 'logit')],
+                        null_learners=([linear_q('lin', 7)], [logistic_g('logit', 9)]))
+    payload = an.anchor_payload('s', 'y', 'u', run)
+    full = an.render_anchor_markdown(payload)
+    assert 'permuted-A null' in full and 'under weights `equal_cluster`, `equal_unit`.' in full
+    # A stored seed alone never implies a null: only the null estimate in results does.
+    stripped = json.loads(json.dumps(payload))
+    for models in stripped['results'].values():
+        models.pop(an.ANCHOR_NULL_LABEL)
+    assert stripped['null_seed'] == an.NULL_SEED
+    none = an.render_anchor_markdown(stripped)
+    assert 'no permutation null was run' in none and 'permuted-A null' not in none
+    partial = json.loads(json.dumps(payload))
+    partial['results']['equal_unit'].pop(an.ANCHOR_NULL_LABEL)
+    some = an.render_anchor_markdown(partial)
+    assert 'under weights `equal_cluster`.' in some
+    assert 'No permutation null estimate is present under weights `equal_unit`.' in some
+    unseeded = json.loads(json.dumps(payload))
+    unseeded['null_seed'] = None
+    assert 'seed `' not in an.render_anchor_markdown(unseeded)

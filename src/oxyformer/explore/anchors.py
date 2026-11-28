@@ -521,7 +521,10 @@ def load_peru_endes_frame(modules_by_year: Mapping[int, Mapping[str, pd.DataFram
         r6['_hc0'] = integer_codes(r6['HC0'], f'peru_endes {year} HC0')
         house0 = _require_unique_rows(r0[keep0], ['HHID'], f'peru_endes {year} RECH0 households')
         house23 = _require_unique_rows(r23[keep23], ['HHID'], f'peru_endes {year} RECH23 households')
-        children = _require_unique_rows(r6[keep6 + ['_hc0']], ['HHID', '_hc0'], f'peru_endes {year} RECH6 children')
+        # Rows are compared on normalised keys only (HHID is already normalised; raw HC0 '1' vs '01' is dropped),
+        # so an exact repeat spelled differently is deduplicated and only conflicting values raise.
+        child_cols = [c for c in keep6 if c != 'HC0'] + ['_hc0']
+        children = _require_unique_rows(r6[child_cols], ['HHID', '_hc0'], f'peru_endes {year} RECH6 children')
         merged = children.merge(house0, on='HHID', how='inner').merge(house23, on='HHID', how='left')
         status, raw_hb = _numeric(merged[spec.status_field]), _numeric(merged[spec.outcome_field])
         age, altitude = _numeric(merged[spec.age_field]), _numeric(merged[spec.exposure_field])
@@ -586,12 +589,25 @@ def normalise_area_name(value: Any) -> str:
 
 
 def _clean_category(series: pd.Series, missing: Mapping[str, str], field: str) -> pd.Series:
-    """Text labels stripped; a numeric code column is integer-normalised (``3.0`` -> ``'3'``)."""
-    if pd.api.types.is_numeric_dtype(series):
-        values = integer_codes(series, field).fillna('MISSING')
-    else:
-        values = series.fillna('MISSING').astype(str).str.strip()
-    return values.replace(dict(missing))
+    """Per-element category labels: integral codes in any spelling become one label, text is kept.
+
+    ``'1'``, ``1``, ``1.0``, ``'1.0'`` and ``' 01 '`` all become ``'1'`` whatever the column
+    dtype (object columns can mix them); text such as ``'Primaria'`` is kept as stripped;
+    missing values become ``'MISSING'``. A non-integral number raises ``ValueError``.
+    """
+    def one(value: Any) -> str:
+        if value is None or value is pd.NA or (isinstance(value, (float, np.floating)) and np.isnan(value)):
+            return 'MISSING'
+        if isinstance(value, (bool, np.bool_)):
+            return str(bool(value))
+        if isinstance(value, (int, np.integer)):
+            return str(int(value))
+        if isinstance(value, (float, np.floating)):
+            _check(float(value).is_integer(), f'{field}: non-integral numeric category {value!r}')
+            return str(int(value))
+        text = str(value).strip()
+        return str(int(text.split('.')[0])) if _INTEGRAL_TEXT.match(text) else text
+    return series.astype(object).map(one).astype(object).replace(dict(missing))
 
 
 def _onehot(frame: pd.DataFrame, columns: Sequence[str]) -> tuple[list[np.ndarray], list[str]]:
@@ -1347,10 +1363,18 @@ def _fmt(value: Any, spec: str = '+.4f') -> str:
 
 def render_anchor_markdown(payload: Mapping[str, Any]) -> str:
     """Markdown readout carrying the exploratory notice and every permanent reporting invariant."""
-    has_null = any(ANCHOR_NULL_LABEL in models for models in payload['results'].values())
-    null_text = (f'Falsification: cluster-level within-stratum permuted-A null (seed `{payload.get("null_seed")}`, '
-                 f'`{ANCHOR_NULL_LABEL}` rows).' if has_null else
-                 'Falsification: no permutation null was run for this readout (null_learners=None).')
+    with_null = [scheme for scheme, models in payload['results'].items() if ANCHOR_NULL_LABEL in models]
+    without_null = [scheme for scheme in payload['results'] if scheme not in with_null]
+    if with_null:
+        seed = payload.get('null_seed')
+        null_text = ('Falsification: cluster-level within-stratum permuted-A null'
+                     + (f' (seed `{seed}`)' if seed is not None else '')
+                     + f', reported as `{ANCHOR_NULL_LABEL}` under weights {", ".join(f"`{s}`" for s in with_null)}.')
+        if without_null:
+            null_text += (' No permutation null estimate is present under weights '
+                          + ', '.join(f'`{s}`' for s in without_null) + '.')
+    else:
+        null_text = 'Falsification: no permutation null was run for this readout (no null estimate in the results).'
     lines = [f'# Exploratory external anchor: `{payload["anchor"]}` ({payload["outcome"]})', '',
              f'**{EXPLORATORY_NOTICE}**', '',
              f'Outcome `{payload["outcome"]}` ({payload["outcome_kind"]}, {payload["outcome_units"]}); estimates are '
