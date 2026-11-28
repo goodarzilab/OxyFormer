@@ -1061,15 +1061,25 @@ class ProbabilityQ:
         _check(not type(classifier).__name__.endswith('Regressor'),
                f'{type(classifier).__name__} is a regressor; binary outcomes need a classifier')
         self.classifier = classifier
+        self._constant_prob: float | None = None
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> 'ProbabilityQ':
+        X = np.asarray(X)
         y = np.asarray(y, dtype=np.float64)
+        _check(len(y) > 0 and len(X) == len(y), 'binary Q training rows are empty or misaligned')
         _check(bool(np.isin(y, (0.0, 1.0)).all()), 'binary Q requires 0/1 outcomes')
-        _check(len(np.unique(y)) == 2, 'binary Q training rows hold a single class')
+        unique = np.unique(y)
+        if len(unique) == 1:
+            self._constant_prob = float(unique[0])
+            return self
+        self._constant_prob = None
         self.classifier.fit(X, y.astype(int))
         return self
 
     def predict(self, X: np.ndarray) -> np.ndarray:
+        X = np.asarray(X)
+        if self._constant_prob is not None:
+            return np.full(len(X), self._constant_prob, dtype=np.float64)
         proba = np.asarray(self.classifier.predict_proba(X), dtype=np.float64)
         classes = [int(c) for c in getattr(self.classifier, 'classes_', (0, 1))]
         _check(1 in classes and proba.ndim == 2 and proba.shape[1] == len(classes), 'classifier lacks class 1')

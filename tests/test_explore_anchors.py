@@ -581,11 +581,14 @@ def test_outcome_kind_must_match_outcome_coding():
         an.AnchorInputs(y=continuous_outcome(d), outcome_kind='binary', **common)
     with pytest.raises(ValueError, match='outcome_kind'):
         an.AnchorInputs(y=continuous_outcome(d), outcome_kind='count', **common)
-    q = an.ProbabilityQ(LogisticRegression())
-    with pytest.raises(ValueError, match='single class'):
-        q.fit(np.zeros((4, 1)), np.ones(4))
+    q_zero = an.ProbabilityQ(ws.gbm_classifier_factory(0))
+    q_zero.fit(np.zeros((4, 1)), np.zeros(4))
+    np.testing.assert_array_equal(q_zero.predict(np.zeros((3, 1))), np.zeros(3))
+    q_one = an.ProbabilityQ(LogisticRegression())
+    q_one.fit(np.zeros((4, 1)), np.ones(4))
+    np.testing.assert_array_equal(q_one.predict(np.zeros((3, 1))), np.ones(3))
     with pytest.raises(ValueError, match='0/1'):
-        q.fit(np.zeros((4, 1)), np.array([0.0, 1.0, 2.0, 1.0]))
+        q_one.fit(np.zeros((4, 1)), np.array([0.0, 1.0, 2.0, 1.0]))
 
 
 # ---------------------------------------------------------------------------
