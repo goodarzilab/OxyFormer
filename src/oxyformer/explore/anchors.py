@@ -1386,10 +1386,16 @@ def score_anchor_estimate(label: str, y: Any, mu_a: Any, mu_d: Any, r_a: Any, fo
     for f in sorted(np.unique(fold_ids).tolist()):
         m = fold_ids == f
         share = float(w[m].sum())
-        _check(share > 0, f'fold {f} has zero target weight')
-        wf = w[m] / share
         ess_f, ess_pct_f = _weighted_landing_ess(r_a[m], w[m])
         ratio_ess_f, ratio_ess_pct_f = _weighted_ratio_ess(r_a[m], w[m])
+        if share <= 0.0:
+            per_fold[str(f)] = dict(n=int(m.sum()), weight_share=0.0, plugin=None, correction=None,
+                                    one_step=None, delivered_shift_mmhg=None, r2=None,
+                                    mean_r_a=float(np.mean(r_a[m])), max_r_a=float(np.max(r_a[m])),
+                                    landing_ess=0.0, landing_ess_pct=0.0,
+                                    weighted_ratio_ess=0.0, weighted_ratio_ess_pct=0.0)
+            continue
+        wf = w[m] / share
         per_fold[str(f)] = dict(n=int(m.sum()), weight_share=share, plugin=float(np.sum(wf * plugin[m])),
                                 correction=float(np.sum(wf * correction[m])),
                                 one_step=float(np.sum(wf * (plugin[m] + correction[m]))),
@@ -1727,8 +1733,10 @@ def render_anchor_markdown(payload: Mapping[str, Any]) -> str:
                       'Mean r_a | Max r_a | Landing ESS (%) |',
                       '|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|']
             for f, v in res['per_fold'].items():
-                lines.append(f'| {f} | {v["n"]:,} | {v["weight_share"]:.3f} | {v["delivered_shift_mmhg"]:.4f} | '
-                             f'{v["plugin"]:+.5f} | {v["correction"]:+.5f} | {v["one_step"]:+.5f} | '
+                lines.append(f'| {f} | {v["n"]:,} | {v["weight_share"]:.3f} | '
+                             f'{_fmt(v["delivered_shift_mmhg"], ".4f")} | '
+                             f'{_fmt(v["plugin"], "+.5f")} | {_fmt(v["correction"], "+.5f")} | '
+                             f'{_fmt(v["one_step"], "+.5f")} | '
                              f'{_fmt(v["r2"], ".4f")} | {v["mean_r_a"]:.3f} | {v["max_r_a"]:.1f} | '
                              f'{v["landing_ess"]:.0f} ({v["landing_ess_pct"]:.1f}%) |')
     skipped = [str(f['fold']) for f in payload.get('folds', []) if f.get('skipped')]

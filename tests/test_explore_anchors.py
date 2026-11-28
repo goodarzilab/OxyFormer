@@ -702,8 +702,9 @@ def test_score_guards_empty_folds_zero_weight_and_no_movers():
         an.score_anchor_estimate('x', *args, np.where(folds == 3, -1, folds), clusters, moved, 2.0, np.ones(20))
     with pytest.raises(ValueError, match='sum to zero'):
         an.score_anchor_estimate('x', *args, folds, clusters, moved, 2.0, np.zeros(20))
-    with pytest.raises(ValueError, match='zero target weight'):
-        an.score_anchor_estimate('x', *args, folds, clusters, moved, 2.0, np.where(folds == 2, 0.0, 1.0))
+    zero_fold = an.score_anchor_estimate('ok', *args, folds, clusters, moved, 2.0, np.where(folds == 2, 0.0, 1.0))
+    assert zero_fold['per_fold']['2']['weight_share'] == 0.0
+    assert zero_fold['per_fold']['2']['plugin'] is None
     with pytest.raises(ValueError, match='delivered shift is zero'):
         an.score_anchor_estimate('x', *args, folds, clusters, np.zeros(20, bool), 2.0, np.ones(20))
     with pytest.raises(ValueError, match='density ratio'):
@@ -1704,3 +1705,25 @@ def test_landing_ess_uses_target_weights():
     assert flat['per_fold']['0']['weighted_ratio_ess'] == pytest.approx(expected)
     r = np.random.default_rng(0).lognormal(0.0, 0.7, 3)
     assert score(r, np.ones(3))['landing_ess'] == pytest.approx(ws._landing_ess(r)[0])   # uniform: unchanged
+
+
+def test_score_anchor_estimate_allows_zero_weight_outer_fold():
+    """Review counterexample: weights [1, 1, 0, 0] across 2 folds keep overall beta=0.5 and mark fold 1 n/a."""
+    res = an.score_anchor_estimate(
+        'x', np.array([0.0, 1.0, 0.0, 1.0]), np.zeros(4), np.ones(4), np.ones(4),
+        np.array([0, 0, 1, 1]), np.array(['a', 'b', 'c', 'd']),
+        np.ones(4, dtype=bool), 2.0, np.array([1.0, 1.0, 0.0, 0.0]),
+    )
+    assert res['one_step']['per_mmhg'] == pytest.approx(0.5)
+    assert res['per_fold']['0']['weight_share'] == pytest.approx(1.0)
+    assert res['per_fold']['1']['weight_share'] == 0.0
+    assert res['per_fold']['1']['plugin'] is None
+    assert res['per_fold']['1']['one_step'] is None
+    assert res['per_fold']['1']['delivered_shift_mmhg'] is None
+    payload = an.anchor_payload(
+        anchor='test', outcome='y', outcome_units='u',
+        run=dict(outcome_kind='continuous', delta=2.0, n_targets=4, n_movers=4, n_clusters=4, n_strata=1,
+                 delivered_shift_mmhg=2.0, results={'survey': {'x': res}}, folds=[]),
+    )
+    md = an.render_anchor_markdown(payload)
+    assert '| 1 | 2 | 0.000 | n/a | n/a | n/a | n/a | n/a |' in md
