@@ -50,9 +50,12 @@ TabICLv2 *classifier* through ``predict_proba[:, 1]`` with a
 is never fitted to a 0/1 outcome. Estimates are reported per delivered (not nominal)
 mmHg. They are given under equal-cluster weights and equal-unit weights
 (Horvitz-Thompson expansion when clusters were subsampled), plus survey weights
-where a design supplies them. Standard errors aggregate the influence function by
-cluster; the Hajek variant includes the delta-method term for the estimated ratio
-mean. Each estimate carries the permanent reporting invariants: per-fold plug-in
+where a design supplies them. The per-mmHg estimand is the ratio
+``beta = psi / s_bar`` of the effect to the delivered shift
+``s_bar = sum w delta moved``, and ``s_bar`` varies with the sample, so standard
+errors aggregate the ratio's delta-method influence function by cluster
+(:func:`per_mmhg_influence`); the Hajek numerator also carries the delta-method
+term for the estimated density-ratio mean. Each estimate carries the permanent reporting invariants: per-fold plug-in
 and EIF correction, landing ESS, maximum ``r_a``, ``s_max`` and ``G_eff``, and the
 delivered shift.
 
@@ -232,9 +235,15 @@ CANTON_ALIASES = {
 }
 
 COLOMBIA_PRIMARY_COVARIATES = ('EDAD_MADRE', 'NIV_EDUM')
-# birth_anchor_recipe.covariates.sensitivity lists EST_CIVM; SEXO (infant sex, recorded at birth and not
-# post-exposure) is admitted as a sensitivity-only covariate, as the standalone Colombia run used it.
-COLOMBIA_SENSITIVITY_COVARIATES = ('EST_CIVM', 'SEXO')
+# Verbatim birth_anchor_recipe.covariates.sensitivity.COL; nothing else (e.g. SEXO) is an approved covariate.
+COLOMBIA_SENSITIVITY_COVARIATES = ('EST_CIVM',)
+# Per-column DANE "sin informacion" codes after integer normalisation; blank and NaN are always missing.
+# NIV_EDUM 9 is a valid level (profesional), so only 99 is missing there.
+COLOMBIA_MISSING_CODES = {
+    'EDAD_MADRE': frozenset({'9', '99', ''}),
+    'NIV_EDUM': frozenset({'99', ''}),
+    'EST_CIVM': frozenset({'9', '99', ''}),
+}
 COLOMBIA_FORBIDDEN_FIELDS = frozenset({
     'T_GES', 'T_GES_AGRU_CIE', 'NUMCONSUL', 'TIPO_PARTO', 'MUL_PARTO', 'APGAR1', 'APGAR2', 'TALLA_NAC',
     'IDPERTET', 'COD_DPTO', 'COD_MUNIC', 'SIT_PARTO', 'ATEN_PAR', 'N_HIJOSV', 'N_EMB'})
@@ -354,7 +363,7 @@ class ColombiaDaneSpec:
 
 def validate_colombia_dane_spec(spec: ColombiaDaneSpec | Mapping[str, Any] | None = None,
                                 **overrides: Any) -> ColombiaDaneSpec:
-    """Residence ``CODPTORE + CODMUNRE`` only; ``EDAD_MADRE``, ``NIV_EDUM`` (+ ``EST_CIVM``, ``SEXO``)."""
+    """Residence ``CODPTORE + CODMUNRE`` only; ``EDAD_MADRE``, ``NIV_EDUM`` (+ sensitivity ``EST_CIVM``)."""
     spec = _coerce_spec(spec, ColombiaDaneSpec, overrides)
     named = [spec.birthweight_field, spec.residence_department_field, spec.residence_municipality_field]
     hits = _forbidden_hits(named, COLOMBIA_FORBIDDEN_FIELDS)
@@ -405,6 +414,31 @@ def _numeric(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors='coerce')
 
 
+def integer_codes(series: pd.Series, field: str) -> pd.Series:
+    """Integer survey codes as canonical decimal strings; missing values stay ``NaN``.
+
+    ``3``, ``'3'``, ``' 03 '`` and ``3.0`` (a float column produced by a missing cell)
+    all become ``'3'``; ``None``, ``NaN`` and blank strings are missing. A present value
+    that is not an integer (``3.5``, ``'abc'``, ``inf``) raises ``ValueError`` rather
+    than silently becoming a new code. Callers zero-pad where a code has a fixed width.
+    """
+    text = series.astype('string').str.strip()
+    missing = (text.isna() | (text == '')).to_numpy(dtype=bool)
+    numbers = pd.to_numeric(text.fillna('nan').astype(object).where(~missing, 'nan'),
+                            errors='coerce').to_numpy(dtype=np.float64)
+    with np.errstate(invalid='ignore'):
+        invalid = ~missing & ~(np.isfinite(numbers) & (numbers == np.round(numbers)))
+    _check(not invalid.any(), f'{field}: non-integer codes {sorted(set(text[invalid].tolist()))[:5]}')
+    out = np.full(len(text), np.nan, dtype=object)
+    out[~missing] = [str(v) for v in numbers[~missing].astype(np.int64).tolist()]
+    return pd.Series(out, index=series.index, dtype=object)
+
+
+def _zfill(codes: pd.Series, width: int) -> pd.Series:
+    """Zero-pad normalised codes; missing codes stay missing (safe on all-missing columns)."""
+    return codes.map(lambda v: v.zfill(width) if isinstance(v, str) else np.nan).astype(object)
+
+
 def load_peru_endes_frame(modules_by_year: Mapping[int, Mapping[str, pd.DataFrame]],
                           spec: PeruEndesSpec | Mapping[str, Any] | None = None) -> AnchorFrame:
     """Pooled ENDES child biomarker rows from ``{year: {'RECH0', 'RECH23', 'RECH6'}}`` DataFrames.
@@ -449,9 +483,14 @@ def load_peru_endes_frame(modules_by_year: Mapping[int, Mapping[str, pd.DataFram
         merged['_y'] = _numeric(merged[spec.outcome_field]) / spec.hb_divisor
         merged['_a'] = elevation_m_to_pio2_deficit_mmhg(_numeric(merged[spec.exposure_field]).to_numpy(np.float64))
         merged['_w'] = _numeric(merged[spec.weight_field]) / spec.weight_divisor
-        merged['_stratum'] = merged[spec.stratum_field].astype(str).str.strip().str.zfill(2)
-        merged['_cluster'] = f'{year}:' + merged[spec.cluster_field].astype(str).str.strip()
-        merged['_id'] = f'{year}:' + merged['HHID'] + ':' + merged['HC0'].astype(str).str.strip()
+        stratum = integer_codes(merged[spec.stratum_field], f'peru_endes {year} {spec.stratum_field}')
+        cluster = integer_codes(merged[spec.cluster_field], f'peru_endes {year} {spec.cluster_field}')
+        line = integer_codes(merged['HC0'], f'peru_endes {year} HC0')
+        _check(not (stratum.isna() | cluster.isna() | line.isna()).any(),
+               f'peru_endes {year}: missing {spec.stratum_field}, {spec.cluster_field} or HC0 codes')
+        merged['_stratum'] = _zfill(stratum, 2)
+        merged['_cluster'] = f'{year}:' + cluster
+        merged['_id'] = f'{year}:' + merged['HHID'] + ':' + line
         audit['years'][int(year)] = dict(n_rech6=int(len(r6)), n_eligible=int(len(merged)))
         frames.append(merged)
     df = pd.concat(frames, ignore_index=True)
@@ -476,8 +515,12 @@ def normalise_area_name(value: Any) -> str:
     return ' '.join(text.replace('-', ' ').replace('.', ' ').split())
 
 
-def _clean_category(series: pd.Series, missing: Mapping[str, str]) -> pd.Series:
-    values = series.fillna('MISSING').astype(str).str.strip()
+def _clean_category(series: pd.Series, missing: Mapping[str, str], field: str) -> pd.Series:
+    """Text labels stripped; a numeric code column is integer-normalised (``3.0`` -> ``'3'``)."""
+    if pd.api.types.is_numeric_dtype(series):
+        values = integer_codes(series, field).fillna('MISSING')
+    else:
+        values = series.fillna('MISSING').astype(str).str.strip()
     return values.replace(dict(missing))
 
 
@@ -548,7 +591,7 @@ def load_ecuador_inec_frame(births: pd.DataFrame, canton_exposure: pd.DataFrame,
     missing = {'Sin información': 'MISSING', 'Ignorado': 'MISSING', '': 'MISSING'}
     categorical = [c for c in spec.covariates if c != 'edad_mad']
     for col in categorical:
-        df[col] = _clean_category(df[col], missing)
+        df[col] = _clean_category(df[col], missing, f'ecuador_inec {col}')
     parts, names = _onehot(df, categorical)
     X = np.hstack([df[['edad_mad']].to_numpy(dtype=np.float64)] + parts)
     names = ['edad_mad'] + names
@@ -585,21 +628,23 @@ def load_colombia_dane_frame(births: pd.DataFrame, muni_exposure: pd.DataFrame,
     _require_columns(births, read, 'colombia_dane births')
     df = births[read].copy()                       # never touches occurrence geography or post-outcome fields
     n_raw = len(df)
-    df['_band'] = df[spec.birthweight_field].astype(str).str.strip().str.lstrip('0')
+    df['_band'] = integer_codes(df[spec.birthweight_field], f'colombia_dane {spec.birthweight_field}')
     df = df.loc[df['_band'].isin(set(COLOMBIA_BAND_MIDPOINTS_G))].reset_index(drop=True)
     n_valid = len(df)
 
     exposure = _clean_columns(muni_exposure)
     _require_columns(exposure, ['cod_mpio', 'oxygen_deficit_mmhg'], 'colombia_dane municipality exposure')
     exposure = exposure.loc[exposure['oxygen_deficit_mmhg'].notna()]
-    codes = exposure['cod_mpio'].astype(str).str.strip().str.zfill(5)
+    codes = integer_codes(exposure['cod_mpio'], 'colombia_dane exposure cod_mpio')
+    _check(not codes.isna().any(), 'colombia_dane: missing municipality codes in the exposure table')
+    codes = _zfill(codes, 5)
     _check(codes.is_unique, 'colombia_dane: repeated municipality codes in the exposure table')
     deficit = dict(zip(codes, exposure['oxygen_deficit_mmhg'].astype(float)))
 
-    dept = df[spec.residence_department_field].astype(str).str.strip().str.zfill(2)
-    muni = dept + df[spec.residence_municipality_field].astype(str).str.strip().str.zfill(3)
-    matched = muni.isin(set(deficit))
-    bad = muni.loc[~matched].value_counts().to_dict()
+    dept = _zfill(integer_codes(df[spec.residence_department_field], 'colombia_dane CODPTORE'), 2)
+    muni = dept + _zfill(integer_codes(df[spec.residence_municipality_field], 'colombia_dane CODMUNRE'), 3)
+    matched = muni.isin(set(deficit)).to_numpy(dtype=bool)
+    bad = muni.loc[~matched].fillna('<missing>').value_counts().to_dict()
     _resolve_unmatched(bad, on_unmatched, 'colombia_dane')
     df, dept, muni = (v.loc[matched].reset_index(drop=True) for v in (df, dept, muni))
     _check(len(df) > 0, 'colombia_dane: no matched births')
@@ -608,11 +653,12 @@ def load_colombia_dane_frame(births: pd.DataFrame, muni_exposure: pd.DataFrame,
                'vlbw': df['_band'].isin(COLOMBIA_VLBW_BANDS).astype(np.float64),
                'bw_mid_g': df['_band'].map(COLOMBIA_BAND_MIDPOINTS_G).astype(np.float64)}[spec.outcome]
     for col in maternal:
-        values = df[col].fillna('99').astype(str).str.strip().str.lstrip('0')
-        df[col] = values.replace({'': '0', '99': 'MISSING', '9': 'MISSING'})
+        codes = integer_codes(df[col], f'colombia_dane {col}')
+        df[col] = codes.where(codes.notna() & ~codes.isin(COLOMBIA_MISSING_CODES[col]), 'MISSING')
     parts, names = _onehot(df, maternal)
     if YEAR_TERM in spec.covariates:
-        parts.insert(0, (_numeric(df[year_col]).to_numpy(np.float64) - 2024.0).reshape(-1, 1))
+        year = _numeric(integer_codes(df[year_col], f'colombia_dane {year_col}')).to_numpy(np.float64)
+        parts.insert(0, (year - 2024.0).reshape(-1, 1))
         names.insert(0, 'year_c')
     X = np.hstack(parts)
     a = muni.map(deficit).to_numpy(np.float64)
@@ -965,11 +1011,12 @@ def hajek_influence(y: np.ndarray, mu_a: np.ndarray, mu_d: np.ndarray, r_a: np.n
     return psi, w * (phi - float(np.sum(w * phi)))
 
 
-def cluster_influence(u: Any, clusters: Any, top: int = 5) -> dict:
+def cluster_influence(u: Any, clusters: Any, top: int = 5, *, allow_zero: bool = False) -> dict:
     """Cluster aggregation ``U_g = sum_{i in g} u_i``: SEs, ``s_max = max s_g`` and ``G_eff = 1 / sum s_g^2``.
 
     ``s_g = U_g^2 / D`` with ``D = sum U_g^2`` (the influence-concentration gate's
-    definitions); ``D`` must be positive.
+    definitions). ``D`` must be positive unless ``allow_zero``: an estimate with no
+    sampling variability then reports zero SEs and undefined (``None``) concentration.
     """
     u, clusters = np.asarray(u, dtype=np.float64), np.asarray(clusters)
     _check(u.shape == clusters.shape and len(u) > 0, 'influence inputs are misaligned')
@@ -977,12 +1024,39 @@ def cluster_influence(u: Any, clusters: Any, top: int = 5) -> dict:
     labels, inverse = np.unique(clusters, return_inverse=True)
     U = np.bincount(inverse.reshape(-1), weights=u, minlength=len(labels))
     D = float(np.sum(U ** 2))
-    _check(D > 0, 'cluster influence sums to zero (D = 0)')
+    _check(D > 0 or allow_zero, 'cluster influence sums to zero (D = 0)')
+    if D == 0:
+        return dict(se_iid=float(np.sqrt(np.sum(u ** 2))), se_cluster=0.0, n_clusters=int(len(labels)),
+                    s_max=None, g_eff=None, top_clusters=[])
     shares = U ** 2 / D
     order = np.argsort(shares, kind='stable')[::-1][:top]
     return dict(se_iid=float(np.sqrt(np.sum(u ** 2))), se_cluster=float(np.sqrt(D)), n_clusters=int(len(labels)),
                 s_max=float(shares.max()), g_eff=float(1.0 / np.sum(shares ** 2)),
                 top_clusters=[dict(cluster=str(labels[i]), U_g=float(U[i]), s_g=float(shares[i])) for i in order])
+
+
+def per_mmhg_influence(y: Any, mu_a: Any, mu_d: Any, r_a: Any, moved: Any, delta: float, weights: Any, *,
+                       hajek: bool = False) -> tuple[float, float, float, np.ndarray, np.ndarray]:
+    """Per-delivered-mmHg ratio ``beta = psi / s_bar`` and its delta-method row influence.
+
+    ``s_i = delta * moved_i`` and ``s_bar = sum w s`` (normalised weights). With ``u``
+    the centred numerator influence (one-step, or Hajek with ``hajek=True``) the ratio
+    influence is ``[u_i - beta * w_i * (s_i - s_bar)] / s_bar``; for the one-step this is
+    ``w_i (phi_i - beta s_i) / s_bar``. Both influences sum to zero.
+
+    Returns ``(beta, psi, s_bar, u_ratio, u_numerator)``.
+    """
+    y, mu_a, mu_d, r_a = (np.asarray(v, dtype=np.float64) for v in (y, mu_a, mu_d, r_a))
+    moved = np.asarray(moved, dtype=bool)
+    _check(moved.shape == y.shape, 'moved is misaligned')
+    _check(np.isfinite(delta) and delta > 0, 'delta must be positive')
+    w = _normalised(weights, len(y))
+    s = float(delta) * moved.astype(np.float64)
+    s_bar = float(np.sum(w * s))
+    _check(s_bar > 0, 'no weighted movers: the delivered shift is zero')
+    psi, u_num = (hajek_influence if hajek else one_step_influence)(y, mu_a, mu_d, r_a, w)
+    beta = psi / s_bar
+    return beta, psi, s_bar, (u_num - beta * w * (s - s_bar)) / s_bar, u_num
 
 
 def _weighted_r2(y: np.ndarray, mu: np.ndarray, w: np.ndarray) -> float:
@@ -1003,13 +1077,15 @@ def score_anchor_estimate(label: str, y: Any, mu_a: Any, mu_d: Any, r_a: Any, fo
     _check(bool(np.isfinite(r_a).all() and (r_a > 0).all()), 'density ratio must be positive and finite')
     _check(np.isfinite(delta) and delta > 0, 'delta must be positive')
     w = _normalised(weights, n)
-    delivered = float(delta * np.sum(w * moved))
-    _check(delivered > 0, 'no weighted movers: the delivered shift is zero')
     plugin, correction = mu_d - mu_a, (r_a - 1.0) * (y - mu_a)
-    psi, u = one_step_influence(y, mu_a, mu_d, r_a, w)
-    inf = cluster_influence(u, clusters)
-    psi_h, u_h = hajek_influence(y, mu_a, mu_d, r_a, w)
-    inf_h = cluster_influence(u_h, clusters)
+    # Per-mmHg inference uses the ratio influence (delivered shift estimated); the fixed-shift
+    # numerator SE divided by the delivered shift is kept as a diagnostic only.
+    beta, psi, delivered, u_ratio, u = per_mmhg_influence(y, mu_a, mu_d, r_a, moved, delta, w)
+    inf, inf_fixed = cluster_influence(u_ratio, clusters, allow_zero=True), cluster_influence(u, clusters,
+                                                                                              allow_zero=True)
+    beta_h, psi_h, _, u_ratio_h, u_h = per_mmhg_influence(y, mu_a, mu_d, r_a, moved, delta, w, hajek=True)
+    inf_h, inf_h_fixed = (cluster_influence(u_ratio_h, clusters, allow_zero=True),
+                          cluster_influence(u_h, clusters, allow_zero=True))
     r2 = _weighted_r2(y, mu_a, w)
     ess, ess_pct = _landing_ess(r_a)
 
@@ -1027,8 +1103,7 @@ def score_anchor_estimate(label: str, y: Any, mu_a: Any, mu_d: Any, r_a: Any, fo
                                 r2=_weighted_r2(y[m], mu_a[m], wf),
                                 mean_r_a=float(np.mean(r_a[m])), max_r_a=float(np.max(r_a[m])),
                                 landing_ess=ess_f, landing_ess_pct=ess_pct_f)
-    per = lambda v: float(v / delivered)  # noqa: E731
-    se = inf['se_cluster']
+    se, se_h = inf['se_cluster'], inf_h['se_cluster']
     return dict(
         label=label, n_targets=n, n_movers=int(moved.sum()), n_clusters=inf['n_clusters'],
         delivered_shift_mmhg=delivered, nominal_shift_mmhg=float(delta), r2=r2,
@@ -1036,12 +1111,15 @@ def score_anchor_estimate(label: str, y: Any, mu_a: Any, mu_d: Any, r_a: Any, fo
         p99_r_a=float(np.percentile(r_a, 99)), max_r_a=float(np.max(r_a)), landing_ess=ess, landing_ess_pct=ess_pct,
         plugin=float(np.sum(w * plugin)), correction=float(np.sum(w * correction)),
         s_max=inf['s_max'], g_eff=inf['g_eff'],
-        one_step=dict(psi=psi, per_mmhg=per(psi), se_iid_per_mmhg=per(inf['se_iid']), se_cluster_per_mmhg=per(se),
-                      ci95_cluster_per_mmhg=[per(psi - Z95 * se), per(psi + Z95 * se)], inference=inf),
-        hajek_one_step=dict(psi=psi_h, per_mmhg=per(psi_h), se_cluster_per_mmhg=per(inf_h['se_cluster']),
-                            ci95_cluster_per_mmhg=[per(psi_h - Z95 * inf_h['se_cluster']),
-                                                   per(psi_h + Z95 * inf_h['se_cluster'])],
-                            s_max=inf_h['s_max'], g_eff=inf_h['g_eff'], inference=inf_h),
+        one_step=dict(psi=psi, per_mmhg=beta, se_iid_per_mmhg=inf['se_iid'], se_cluster_per_mmhg=se,
+                      ci95_cluster_per_mmhg=[beta - Z95 * se, beta + Z95 * se], inference=inf,
+                      se_fixed_shift_per_mmhg=inf_fixed['se_cluster'] / delivered,
+                      inference_fixed_shift=inf_fixed),
+        hajek_one_step=dict(psi=psi_h, per_mmhg=beta_h, se_cluster_per_mmhg=se_h,
+                            ci95_cluster_per_mmhg=[beta_h - Z95 * se_h, beta_h + Z95 * se_h],
+                            s_max=inf_h['s_max'], g_eff=inf_h['g_eff'], inference=inf_h,
+                            se_fixed_shift_per_mmhg=inf_h_fixed['se_cluster'] / delivered,
+                            inference_fixed_shift=inf_h_fixed),
         per_fold=per_fold)
 
 
@@ -1174,7 +1252,7 @@ def render_anchor_markdown(payload: Mapping[str, Any]) -> str:
                 f'{res["plugin"]:+.5f} | {res["correction"]:+.5f} | **{o["per_mmhg"]:+.5f}** | '
                 f'{o["se_cluster_per_mmhg"]:.5f} | [{lo:+.5f}, {hi:+.5f}] | {h["per_mmhg"]:+.5f} | '
                 f'{res["mean_r_a"]:.3f} / {res["max_r_a"]:.1f} | {res["landing_ess"]:.0f} '
-                f'({res["landing_ess_pct"]:.1f}%) | {res["s_max"]:.3f} / {res["g_eff"]:.1f} |')
+                f'({res["landing_ess_pct"]:.1f}%) | {_fmt(res["s_max"], ".3f")} / {_fmt(res["g_eff"], ".1f")} |')
     for scheme, models in payload['results'].items():
         for label, res in models.items():
             lines += ['', f'## Per-fold decomposition: `{scheme}` / `{label}`', '',

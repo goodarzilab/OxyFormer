@@ -224,6 +224,8 @@ def test_ecuador_spec_accepts_primary_and_est_civil_sensitivity():
     dict(covariates=('EDAD_MADRE', 'NIV_EDUM', 'idpertet')),
     dict(covariates=('year', 'EDAD_MADRE')), dict(covariates=('EDAD_MADRE', 'NIV_EDUM', 'FECHA_NAC')),
     dict(outcome='APGAR2'), dict(birthweight_field='TALLA_NAC'),
+    dict(covariates=('year', 'EDAD_MADRE', 'NIV_EDUM', 'SEXO')),
+    dict(covariates=('year', 'EDAD_MADRE', 'NIV_EDUM', 'EST_CIVM', 'SEXO')),
 ])
 def test_colombia_spec_rejects_occurrence_geography_post_outcome_and_unapproved(override):
     with pytest.raises(ValueError):
@@ -231,9 +233,21 @@ def test_colombia_spec_rejects_occurrence_geography_post_outcome_and_unapproved(
 
 
 def test_colombia_spec_accepts_primary_and_sensitivity():
-    spec = an.validate_colombia_dane_spec(covariates=('year', 'EDAD_MADRE', 'NIV_EDUM', 'EST_CIVM', 'SEXO'))
+    spec = an.validate_colombia_dane_spec(covariates=('year', 'EDAD_MADRE', 'NIV_EDUM', 'EST_CIVM'))
     assert spec.residence_department_field == 'CODPTORE' and spec.residence_municipality_field == 'CODMUNRE'
     assert an.validate_colombia_dane_spec(covariates=('EDAD_MADRE', 'NIV_EDUM')).outcome == 'lbw'
+
+
+def test_birth_covariate_lists_match_approvals_verbatim():
+    """Review round 1: SEXO was admitted beyond birth_anchor_recipe; the approved lists are copied verbatim."""
+    recipe = yaml.safe_load((REPO / 'configs' / 'approvals.yaml').read_text())['owner_decisions'][
+        'birth_anchor_recipe']['covariates']
+    assert list(an.COLOMBIA_PRIMARY_COVARIATES) == recipe['primary']['COL']
+    assert list(an.COLOMBIA_SENSITIVITY_COVARIATES) == recipe['sensitivity']['COL'] == ['EST_CIVM']
+    assert list(an.ECUADOR_PRIMARY_COVARIATES) == recipe['primary']['ECU']
+    assert list(an.ECUADOR_SENSITIVITY_COVARIATES) == recipe['sensitivity']['ECU']
+    with pytest.raises(ValueError, match="'SEXO'"):
+        an.validate_colombia_dane_spec(covariates=('year', 'EDAD_MADRE', 'NIV_EDUM', 'SEXO'))
 
 
 # ---------------------------------------------------------------------------
@@ -347,7 +361,8 @@ def colombia_tables():
         'COD_DPTO': ['11'] * 6, 'COD_MUNIC': ['001'] * 6,
         'PESO_NAC': ['3', '6', '01', '7', '5', '9'], 'ANO': ['2023', '2024', '2025', '2025', '2023', '2024'],
         'EDAD_MADRE': ['3', '4', '9', '2', '3', '3'], 'NIV_EDUM': ['04', '06', '99', '13', '4', '4'],
-        'SEXO': ['1', '2', '1', '2', '1', '1'], 'T_GES': ['4'] * 6, 'IDPERTET': ['6'] * 6})
+        'EST_CIVM': ['1', '9', '2', '99', '1', '1'], 'SEXO': ['1', '2', '1', '2', '1', '1'],
+        'T_GES': ['4'] * 6, 'IDPERTET': ['6'] * 6})
     exposure = pd.DataFrame({'cod_mpio': ['05001', '11001', '5002'], 'oxygen_deficit_mmhg': [28.18, 41.0, 36.1]})
     return births, exposure
 
@@ -373,10 +388,13 @@ def test_colombia_loader_places_exposure_at_maternal_residence_divipola():
     assert mid.outcome_kind == 'continuous'
     vlbw = an.load_colombia_dane_frame(births, exposure, {'outcome': 'vlbw'}, on_unmatched='drop')
     np.testing.assert_array_equal(vlbw.y, [0.0, 0.0, 1.0, 0.0])
-    sens = an.load_colombia_dane_frame(births, exposure, {'covariates': ('year', 'EDAD_MADRE', 'NIV_EDUM', 'SEXO')},
+    sens = an.load_colombia_dane_frame(births, exposure,
+                                       {'covariates': ('year', 'EDAD_MADRE', 'NIV_EDUM', 'EST_CIVM')},
                                        on_unmatched='drop')
-    assert any(n.startswith('SEXO_') for n in sens.feature_names)
-    for bad in ({'residence_municipality_field': 'COD_MUNIC'}, {'covariates': ('EDAD_MADRE', 'NIV_EDUM', 'T_GES')}):
+    assert {'EST_CIVM_1', 'EST_CIVM_2', 'EST_CIVM_MISSING'} <= set(sens.feature_names)
+    assert not any(n.startswith('SEXO') for n in sens.feature_names)
+    for bad in ({'residence_municipality_field': 'COD_MUNIC'}, {'covariates': ('EDAD_MADRE', 'NIV_EDUM', 'T_GES')},
+                {'covariates': ('year', 'EDAD_MADRE', 'NIV_EDUM', 'SEXO')}):
         with pytest.raises(ValueError):
             an.load_colombia_dane_frame(births, exposure, bad, on_unmatched='drop')
 
@@ -812,3 +830,144 @@ def test_frame_to_inputs_round_trip():
     inputs = an.anchor_inputs_from_frame(frame, support)
     assert inputs.outcome_kind == 'binary' and len(inputs.ids) == len(frame.ids)
     np.testing.assert_array_equal(inputs.target, support.supported)
+
+
+# ---------------------------------------------------------------------------
+# review round 1 regressions: integer codes, DANE missing codes
+# ---------------------------------------------------------------------------
+
+def test_integer_codes_normalise_integral_floats_and_reject_non_integers():
+    out = an.integer_codes(pd.Series([3, ' 03 ', 3.0, '3.0', None, np.nan, '', 99, '0']), 'f')
+    assert out.tolist()[:4] == ['3', '3', '3', '3'] and out.tolist()[-2:] == ['99', '0']
+    assert out.iloc[4:7].isna().all()
+    np.testing.assert_array_equal(an.integer_codes(pd.Series([5.0, np.nan]), 'f').isna(), [False, True])
+    for bad in ([3.5], ['abc'], [np.inf], ['3.5']):
+        with pytest.raises(ValueError, match='non-integer codes'):
+            an.integer_codes(pd.Series(bad, dtype=object), 'f')
+
+
+def test_colombia_float_peso_nac_with_missing_keeps_valid_band_three_birth():
+    """Review counterexample: PESO_NAC [3, None] is read as float [3.0, NaN]; '3.0' must not drop the birth."""
+    births = pd.DataFrame({'CODPTORE': ['05', '05'], 'CODMUNRE': ['001', '001'], 'PESO_NAC': [3, None],
+                           'ANO': ['2023', '2023'], 'EDAD_MADRE': ['3', '3'], 'NIV_EDUM': ['4', '4']})
+    assert births['PESO_NAC'].dtype.kind == 'f'
+    _, exposure = colombia_tables()
+    frame = an.load_colombia_dane_frame(births, exposure)
+    assert list(frame.clusters) == ['05001'] and list(frame.y) == [1.0]
+    assert frame.audit['n_valid_birthweight'] == 1 and frame.audit['excluded_unmatched_municipalities'] == {}
+
+
+def test_colombia_float_codes_everywhere_match_string_codes():
+    births, exposure = colombia_tables()
+    keep = ['CODPTORE', 'CODMUNRE', 'PESO_NAC', 'ANO', 'EDAD_MADRE', 'NIV_EDUM', 'EST_CIVM']
+    floats = births[keep].apply(lambda c: pd.to_numeric(c).astype(float))
+    floats.loc[len(floats)] = [5.0, 1.0, 4.0, np.nan, np.nan, np.nan, np.nan]   # a sparse row forces float dtype
+    spec = {'covariates': ('year', 'EDAD_MADRE', 'NIV_EDUM', 'EST_CIVM')}
+    as_text = an.load_colombia_dane_frame(births, exposure, spec, on_unmatched='drop')
+    as_float = an.load_colombia_dane_frame(floats, exposure.assign(cod_mpio=[5001.0, 11001.0, 5002.0]), spec,
+                                           on_unmatched='drop')
+    assert list(as_float.clusters) == list(as_text.clusters) + ['05001']
+    np.testing.assert_array_equal(as_float.y, list(as_text.y) + [1.0])
+    assert set(as_float.feature_names) == set(as_text.feature_names)
+    last = dict(zip(as_float.feature_names, as_float.X[-1]))
+    assert np.isnan(last['year_c']) and last['EDAD_MADRE_MISSING'] == last['NIV_EDUM_MISSING'] == 1.0
+    assert last['EST_CIVM_MISSING'] == 1.0
+    bad = births.copy()
+    bad.loc[0, 'PESO_NAC'] = '3.5'
+    with pytest.raises(ValueError, match='non-integer codes'):
+        an.load_colombia_dane_frame(bad, exposure, on_unmatched='drop')
+    blank = births.copy()
+    blank.loc[1, 'CODMUNRE'] = None
+    with pytest.raises(ValueError, match='<missing>'):
+        an.load_colombia_dane_frame(blank, exposure)
+
+
+def test_colombia_niv_edum_nine_is_profesional_not_missing():
+    """Review counterexample: NIV_EDUM '09' is a valid level (profesional); only '99'/blank/NaN are missing."""
+    births, exposure = colombia_tables()
+    births['NIV_EDUM'] = ['09', '09', '04', '13', '4', '4']
+    frame = an.load_colombia_dane_frame(births, exposure, on_unmatched='drop')
+    names = list(frame.feature_names)
+    assert 'NIV_EDUM_9' in names and 'NIV_EDUM_MISSING' not in names
+    np.testing.assert_array_equal(frame.X[:, names.index('NIV_EDUM_9')], [1.0, 1.0, 0.0, 0.0])
+    births = births.iloc[:4].copy()
+    births['NIV_EDUM'] = ['99', None, '9', '']
+    births['EDAD_MADRE'] = ['9', '99', '3', None]
+    births['EST_CIVM'] = ['9', '99', '2', '1']
+    frame = an.load_colombia_dane_frame(births, exposure, {'covariates': ('year', 'EDAD_MADRE', 'NIV_EDUM',
+                                                                          'EST_CIVM')})
+    col = dict(zip(frame.feature_names, frame.X.T))
+    np.testing.assert_array_equal(col['NIV_EDUM_MISSING'], [1.0, 1.0, 0.0, 1.0])
+    np.testing.assert_array_equal(col['NIV_EDUM_9'], [0.0, 0.0, 1.0, 0.0])
+    np.testing.assert_array_equal(col['EDAD_MADRE_MISSING'], [1.0, 1.0, 0.0, 1.0])
+    np.testing.assert_array_equal(col['EST_CIVM_MISSING'], [1.0, 1.0, 0.0, 0.0])
+    assert an.COLOMBIA_MISSING_CODES == {'EDAD_MADRE': {'9', '99', ''}, 'NIV_EDUM': {'99', ''},
+                                         'EST_CIVM': {'9', '99', ''}}
+
+
+def test_peru_and_ecuador_float_codes_match_string_codes():
+    text = peru_modules()
+    floats = {k: v.copy() for k, v in text.items()}
+    for col in ('HV001', 'HV024'):
+        floats['RECH0'][col] = pd.to_numeric(floats['RECH0'][col]).astype(float)
+    floats['RECH6']['HC0'] = pd.to_numeric(floats['RECH6']['HC0']).astype(float)
+    a, b = an.load_peru_endes_frame({2023: text}), an.load_peru_endes_frame({2023: floats})
+    assert list(b.ids) == list(a.ids) == ['2023:1:1', '2023:2:1', '2023:3:1', '2023:5:2']
+    assert list(b.clusters) == list(a.clusters) and list(b.strata) == list(a.strata) == ['01', '01', '02', '02']
+    births, exposure = ecuador_tables()
+    births['niv_inst'] = [1.0, np.nan, 2.0, 3.0, 1.0, 2.0, 3.0]
+    frame = an.load_ecuador_inec_frame(births, exposure, on_unmatched='drop')
+    assert {'niv_inst_1', 'niv_inst_2', 'niv_inst_3', 'niv_inst_MISSING'} <= set(frame.feature_names)
+    assert not any(n.endswith('.0') for n in frame.feature_names)
+
+
+# ---------------------------------------------------------------------------
+# review round 1 regression: per-delivered-mmHg ratio delta method
+# ---------------------------------------------------------------------------
+
+def test_per_mmhg_se_uses_ratio_delta_method():
+    """Review counterexample: phi_i == s_i exactly, so beta = 1 in every resample and its SE is 0."""
+    zeros, ones = np.zeros(4), np.ones(4)
+    mu_d = np.array([2.0, 2.0, 0.0, 0.0])
+    moved = np.array([True, True, False, False])
+    clusters = np.array(['g1', 'g2', 'g3', 'g4'])
+    res = an.score_anchor_estimate('ratio', zeros, zeros, mu_d, ones, np.array([0, 1, 0, 1]), clusters, moved,
+                                   2.0, ones)
+    assert res['one_step']['per_mmhg'] == pytest.approx(1.0, abs=1e-12)
+    assert res['one_step']['se_cluster_per_mmhg'] == pytest.approx(0.0, abs=1e-12)
+    assert res['hajek_one_step']['per_mmhg'] == pytest.approx(1.0, abs=1e-12)
+    assert res['hajek_one_step']['se_cluster_per_mmhg'] == pytest.approx(0.0, abs=1e-12)
+    assert res['one_step']['ci95_cluster_per_mmhg'] == pytest.approx([1.0, 1.0], abs=1e-12)
+    assert res['s_max'] is None and res['g_eff'] is None              # concentration undefined when D = 0
+    assert res['one_step']['se_fixed_shift_per_mmhg'] == pytest.approx(0.5)   # the old, wrong fixed-shift SE
+    run = dict(outcome_kind='continuous', delta=2.0, n_targets=4, n_movers=2, n_clusters=4, n_strata=1,
+               delivered_shift_mmhg=1.0, results={'equal_unit': {'ratio': res}}, folds=[])
+    md = an.render_anchor_markdown(an.anchor_payload('degenerate', 'y', 'units', run))
+    assert 'n/a / n/a' in md
+
+
+@pytest.mark.parametrize('hajek', [False, True])
+def test_per_mmhg_influence_is_the_exact_derivative_of_the_ratio(hajek):
+    """``u_j = W_j * d beta / d W_j`` with ``beta = psi(W) / s_bar(W)`` and a varying delivered shift."""
+    v = nuisance_draw(seed=12)
+    moved = np.random.default_rng(3).random(60) < 0.6
+
+    def beta(W):
+        return an.per_mmhg_influence(v['y'], v['mu_a'], v['mu_d'], v['r_a'], moved, 2.0, W, hajek=hajek)[0]
+    b, psi, s_bar, u, u_num = an.per_mmhg_influence(v['y'], v['mu_a'], v['mu_d'], v['r_a'], moved, 2.0, v['W'],
+                                                    hajek=hajek)
+    assert b == pytest.approx(psi / s_bar) and u.sum() == pytest.approx(0.0, abs=1e-12)
+    assert not np.allclose(u, u_num / s_bar)                          # the shift's own variability matters
+    eps = 1e-6
+    for j in range(0, 60, 7):
+        up, down = v['W'].copy(), v['W'].copy()
+        up[j] += eps
+        down[j] -= eps
+        assert u[j] == pytest.approx(v['W'][j] * (beta(up) - beta(down)) / (2 * eps), rel=1e-5, abs=1e-10)
+    w = v['W'] / v['W'].sum()
+    res = an.score_anchor_estimate('x', v['y'], v['mu_a'], v['mu_d'], v['r_a'], np.arange(60) % 5,
+                                   np.repeat(np.arange(20), 3), moved, 2.0, v['W'])
+    key = 'hajek_one_step' if hajek else 'one_step'
+    U = np.bincount(np.repeat(np.arange(20), 3), weights=u)
+    assert res[key]['se_cluster_per_mmhg'] == pytest.approx(np.sqrt(np.sum(U ** 2)))
+    assert res['delivered_shift_mmhg'] == pytest.approx(2.0 * np.sum(w * moved))
