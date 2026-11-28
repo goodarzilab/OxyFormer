@@ -104,7 +104,6 @@ from oxyformer.explore.within_state import (
     RegressorFactory,
     WithinStateInputs,
     WithinStateSupport,
-    _landing_ess,
     _raw_logits,
     compute_within_state_support,
     default_checkpoint,
@@ -1324,6 +1323,24 @@ def per_mmhg_influence(y: Any, mu_a: Any, mu_d: Any, r_a: Any, moved: Any, delta
     return beta, psi, s_bar, (u_num - beta * w * (s - s_bar)) / s_bar, u_num
 
 
+def _weighted_landing_ess(r_a: np.ndarray, weights: np.ndarray) -> tuple[float, float]:
+    """Kish ESS of the target-weighted landing mass ``w * max(r_a - 1, 0)`` over its positive entries, and its
+    percentage of their count; uniform weights give ``within_state._landing_ess(r_a)`` exactly."""
+    land = np.asarray(weights, dtype=np.float64) * np.maximum(np.asarray(r_a, dtype=np.float64) - 1.0, 0.0)
+    positive = land[land > 0]
+    if not len(positive):
+        return 0.0, 0.0
+    ess = float(positive.sum() ** 2 / np.sum(positive ** 2))
+    return ess, float(100.0 * ess / len(positive))
+
+
+def _weighted_ratio_ess(r_a: np.ndarray, weights: np.ndarray) -> tuple[float, float]:
+    """Kish ESS of the full weighted ratio ``w * r_a`` over all rows, and its percentage of the row count."""
+    v = np.asarray(weights, dtype=np.float64) * np.asarray(r_a, dtype=np.float64)
+    ess = float(v.sum() ** 2 / np.sum(v ** 2)) if np.sum(v ** 2) > 0 else 0.0
+    return ess, float(100.0 * ess / len(v)) if len(v) else 0.0
+
+
 def _weighted_r2(y: np.ndarray, mu: np.ndarray, w: np.ndarray) -> float:
     total = float(np.sum(w * (y - np.sum(w * y) / np.sum(w)) ** 2))
     return float(1.0 - np.sum(w * (y - mu) ** 2) / total) if total > 0 else float('nan')
@@ -1352,7 +1369,8 @@ def score_anchor_estimate(label: str, y: Any, mu_a: Any, mu_d: Any, r_a: Any, fo
     inf_h, inf_h_fixed = (cluster_influence(u_ratio_h, clusters, allow_zero=True),
                           cluster_influence(u_h, clusters, allow_zero=True))
     r2 = _weighted_r2(y, mu_a, w)
-    ess, ess_pct = _landing_ess(r_a)
+    ess, ess_pct = _weighted_landing_ess(r_a, w)
+    ratio_ess, ratio_ess_pct = _weighted_ratio_ess(r_a, w)
 
     per_fold = {}
     for f in sorted(np.unique(fold_ids).tolist()):
@@ -1360,20 +1378,23 @@ def score_anchor_estimate(label: str, y: Any, mu_a: Any, mu_d: Any, r_a: Any, fo
         share = float(w[m].sum())
         _check(share > 0, f'fold {f} has zero target weight')
         wf = w[m] / share
-        ess_f, ess_pct_f = _landing_ess(r_a[m])
+        ess_f, ess_pct_f = _weighted_landing_ess(r_a[m], w[m])
+        ratio_ess_f, ratio_ess_pct_f = _weighted_ratio_ess(r_a[m], w[m])
         per_fold[str(f)] = dict(n=int(m.sum()), weight_share=share, plugin=float(np.sum(wf * plugin[m])),
                                 correction=float(np.sum(wf * correction[m])),
                                 one_step=float(np.sum(wf * (plugin[m] + correction[m]))),
                                 delivered_shift_mmhg=float(delta * np.sum(wf * moved[m])),
                                 r2=_weighted_r2(y[m], mu_a[m], wf),
                                 mean_r_a=float(np.mean(r_a[m])), max_r_a=float(np.max(r_a[m])),
-                                landing_ess=ess_f, landing_ess_pct=ess_pct_f)
+                                landing_ess=ess_f, landing_ess_pct=ess_pct_f,
+                                weighted_ratio_ess=ratio_ess_f, weighted_ratio_ess_pct=ratio_ess_pct_f)
     se, se_h = inf['se_cluster'], inf_h['se_cluster']
     return dict(
         label=label, n_targets=n, n_movers=int(moved.sum()), n_clusters=inf['n_clusters'],
         delivered_shift_mmhg=delivered, nominal_shift_mmhg=float(delta), r2=r2,
         mean_r_a=float(np.mean(r_a)), weighted_mean_r_a=float(np.sum(w * r_a)),
         p99_r_a=float(np.percentile(r_a, 99)), max_r_a=float(np.max(r_a)), landing_ess=ess, landing_ess_pct=ess_pct,
+        weighted_ratio_ess=ratio_ess, weighted_ratio_ess_pct=ratio_ess_pct,
         plugin=float(np.sum(w * plugin)), correction=float(np.sum(w * correction)),
         s_max=inf['s_max'], g_eff=inf['g_eff'],
         one_step=dict(psi=psi, per_mmhg=beta, se_iid_per_mmhg=inf['se_iid'], se_cluster_per_mmhg=se,
@@ -1415,13 +1436,15 @@ def fit_weighted_platt_calibrated_origin(
     weights reuse ``within_state.fit_platt_calibrated_origin`` unchanged. Otherwise each
     original row's factual (label 0) and shifted (label 1) pair carries its weight:
 
-    * a classifier whose ``fit`` takes ``sample_weight`` is trained, in the cluster-grouped
-      inner folds and the final fit, on weighted pairs (rows capped by the outcome-blind
-      hash rank when ``cap`` is set), and Platt scaling is weighted the same way;
+    Rows are first capped by the outcome-blind hash rank when ``cap`` is set. The inner
+    folds then split the original rows by cluster, before any resampling, and out-of-fold
+    logits are taken on the original validation pairs; Platt scaling is fitted on them with
+    the pair weights. Training (inner and final) depends on the classifier:
+
+    * a classifier whose ``fit`` takes ``sample_weight`` is trained on weighted pairs;
     * any other classifier (e.g. TabICL) is trained on a deterministic
-      probability-proportional-to-weight resample of original rows (``cap`` rows, else as
-      many as there are), which represents ``P_w``; clusters travel with the resampled rows,
-      so inner folds stay cluster-grouped, and Platt scaling is unweighted.
+      probability-proportional-to-weight resample drawn only from the training rows, which
+      represents ``P_w`` restricted to them.
     """
     clusters, w = np.asarray(clusters), np.asarray(weights, dtype=np.float64)
     _check(len(F0) == len(F1) == len(clusters) == len(w) and F0.shape[1] == F1.shape[1] == F_eval.shape[1],
@@ -1432,40 +1455,50 @@ def fit_weighted_platt_calibrated_origin(
         ratio, diag = fit_platt_calibrated_origin(F0, F1, F_eval, clusters, make_classifier, seed=seed, ids=ids,
                                                   cap=cap, salt=salt, inner_splits=inner_splits, score=score)
         return ratio, dict(diag, weighting='uniform')
+    keep = np.arange(len(F0))
+    if cap is not None:                             # outcome-blind hash cap on originals, as within_state
+        _check(ids is not None and len(ids) == len(F0), 'capped origin fits require row ids')
+        keep = deterministic_subsample_idx(np.asarray(ids), cap=cap, salt=f'{salt}-{seed}')
+    F0, F1, clusters, w = F0[keep], F1[keep], clusters[keep], w[keep] / w[keep].mean()
+    _check(len(np.unique(clusters)) >= inner_splits, 'fewer clusters than inner folds')
     first = make_classifier(seed)                  # also the first inner model (seed + 0)
     weighted = _accepts_sample_weight(first)
-    if weighted:
-        keep = np.arange(len(F0))
-        if cap is not None:
-            _check(ids is not None and len(ids) == len(F0), 'capped origin fits require row ids')
-            keep = deterministic_subsample_idx(np.asarray(ids), cap=cap, salt=f'{salt}-{seed}')
-        w_keep = w[keep] / w[keep].mean()
-    else:
-        size = len(F0) if cap is None else min(cap, len(F0))
-        keep = np.sort(np.random.default_rng(seed).choice(len(F0), size=size, replace=True, p=w / w.sum()))
-        w_keep = np.ones(size)
-    X_pair = np.vstack([F0[keep], F1[keep]])
-    y_pair = np.concatenate([np.zeros(len(keep), dtype=int), np.ones(len(keep), dtype=int)])
-    c_pair = np.concatenate([clusters[keep], clusters[keep]])
-    w_pair = np.concatenate([w_keep, w_keep])
-    _check(len(np.unique(c_pair)) >= inner_splits, 'fewer clusters than inner folds')
-    oof = np.zeros(len(y_pair), dtype=np.float64)
+
+    def pairs(rows: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        return (np.vstack([F0[rows], F1[rows]]),
+                np.concatenate([np.zeros(len(rows), dtype=int), np.ones(len(rows), dtype=int)]))
+
+    def fit_on(model: Any, rows: np.ndarray, draw_seed: list[int]) -> None:
+        if weighted:                                # weighted pairs
+            X, y = pairs(rows)
+            model.fit(X, y, sample_weight=np.concatenate([w[rows], w[rows]]))
+        else:                                       # P_w by a deterministic weight-proportional resample of rows
+            p = w[rows] / w[rows].sum()
+            drawn = np.sort(np.random.default_rng(draw_seed).choice(rows, size=len(rows), replace=True, p=p))
+            model.fit(*pairs(drawn))
+
+    # Inner folds split the ORIGINAL rows by cluster before any resampling, so extreme weights can never
+    # collapse the cluster groups; out-of-fold logits are taken on the original validation pairs.
+    oof = np.zeros(2 * len(F0), dtype=np.float64)
     inner = []
-    for i, (tr, va) in enumerate(GroupKFold(n_splits=inner_splits).split(X_pair, y_pair, groups=c_pair)):
-        _check(not set(c_pair[tr].tolist()) & set(c_pair[va].tolist()), f'inner fold {i} shares clusters')
+    for i, (tr, va) in enumerate(GroupKFold(n_splits=inner_splits).split(F0, groups=clusters)):
+        _check(not set(clusters[tr].tolist()) & set(clusters[va].tolist()), f'inner fold {i} shares clusters')
         model = first if i == 0 else make_classifier(seed + i)
-        _fit_classifier(model, X_pair[tr], y_pair[tr], w_pair[tr], weighted)
-        oof[va] = _raw_logits(model, X_pair[va], score)
+        fit_on(model, tr, [seed, i])
+        X_va, _ = pairs(va)
+        logits = _raw_logits(model, X_va, score)
+        oof[va], oof[len(F0) + va] = logits[:len(va)], logits[len(va):]
         inner.append(dict(n_train=int(len(tr)), n_val=int(len(va))))
     final = make_classifier(seed + 99)
-    _fit_classifier(final, X_pair, y_pair, w_pair, weighted)
+    fit_on(final, np.arange(len(F0)), [seed, 99])
+    y_pair = np.concatenate([np.zeros(len(F0), dtype=int), np.ones(len(F0), dtype=int)])
     clip = PLATT_LOGIT_CLIP
     platt = LogisticRegression(C=PLATT_C, solver='lbfgs')
-    platt.fit(np.clip(oof, -clip, clip).reshape(-1, 1), y_pair, sample_weight=w_pair)
+    platt.fit(np.clip(oof, -clip, clip).reshape(-1, 1), y_pair, sample_weight=np.concatenate([w, w]))
     calibrated = platt.decision_function(np.clip(_raw_logits(final, F_eval, score), -clip, clip).reshape(-1, 1))
     ratio = np.exp(np.clip(calibrated, *ODDS_LOG_CLIP))
     return ratio, dict(slope=float(platt.coef_[0, 0]), intercept=float(platt.intercept_[0]),
-                       n_originals=int(len(keep)), n_pairs=int(len(y_pair)), inner_folds=inner,
+                       n_originals=int(len(F0)), n_pairs=int(2 * len(F0)), inner_folds=inner,
                        weighting='sample_weight' if weighted else 'weighted_resample')
 
 

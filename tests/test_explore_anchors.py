@@ -1658,3 +1658,46 @@ def test_explicit_continuous_outcome_may_take_zero_one_values():
     binary = an.AnchorInputs(y=y01, outcome_kind='binary', **common)
     with pytest.raises(ValueError, match='continuous Q learner cannot model a binary outcome'):
         an.route_q_learners(binary.outcome_kind, [linear_q('lin')])
+
+
+# ---------------------------------------------------------------------------
+# cycle-4 round 3 regressions: inner folds before resampling; weighted landing ESS
+# ---------------------------------------------------------------------------
+
+def test_weighted_origin_fit_splits_original_clusters_before_resampling():
+    """Review counterexample: weights [1e20, 1, 1, 1] over 4 clusters must not collapse the inner cluster groups."""
+    args = (np.zeros((4, 1)), np.ones((4, 1)), np.zeros((1, 1)), np.asarray(['a', 'b', 'c', 'd']),
+            np.asarray([1e20, 1.0, 1.0, 1.0]))
+    for factory, mode in ((lambda s: NoWeightLogit(), 'weighted_resample'),
+                          (lambda s: LogisticRegression(max_iter=1000), 'sample_weight')):
+        ratio, diag = an.fit_weighted_platt_calibrated_origin(*args, factory, seed=0, inner_splits=3)
+        assert diag['weighting'] == mode and len(diag['inner_folds']) == 3
+        assert diag['n_originals'] == 4 and np.isfinite(ratio).all() and (ratio > 0).all()
+    again, _ = an.fit_weighted_platt_calibrated_origin(*args, lambda s: NoWeightLogit(), seed=0, inner_splits=3)
+    np.testing.assert_array_equal(again, an.fit_weighted_platt_calibrated_origin(
+        *args, lambda s: NoWeightLogit(), seed=0, inner_splits=3)[0])
+    with pytest.raises(ValueError, match='fewer clusters than inner folds'):
+        an.fit_weighted_platt_calibrated_origin(np.zeros((4, 1)), np.ones((4, 1)), np.zeros((1, 1)),
+                                                np.asarray(['a', 'a', 'b', 'b']), np.asarray([5.0, 1, 1, 1]),
+                                                lambda s: NoWeightLogit(), seed=0, inner_splits=3)
+
+
+def test_landing_ess_uses_target_weights():
+    """Review counterexample (w = [1000, 1, 1]): the weighted landing mass gives ESS 1002^2 / (1000^2 + 2)."""
+    expected = 1002 ** 2 / (1000 ** 2 + 2)
+    zeros, clusters = np.zeros(3), np.asarray(['c1', 'c2', 'c3'])
+    moved, folds, w = np.asarray([True, False, False]), np.zeros(3, dtype=int), np.asarray([1000.0, 1.0, 1.0])
+
+    def score(r_a, weights):
+        return an.score_anchor_estimate('ess', zeros, zeros, np.asarray([1.0, 0.0, 0.0]), np.asarray(r_a), folds,
+                                        clusters, moved, 1.0, weights)
+    landed = score([3.0, 3.0, 3.0], w)                     # unweighted landing ESS here was 3
+    assert landed['landing_ess'] == pytest.approx(expected)
+    assert landed['per_fold']['0']['landing_ess'] == pytest.approx(expected)
+    assert landed['landing_ess_pct'] == pytest.approx(100.0 * expected / 3)
+    flat = score([1.0, 1.0, 1.0], w)                       # r = 1: nothing lands; the full-ratio ESS still sees w
+    assert flat['landing_ess'] == 0.0
+    assert flat['weighted_ratio_ess'] == pytest.approx(expected)
+    assert flat['per_fold']['0']['weighted_ratio_ess'] == pytest.approx(expected)
+    r = np.random.default_rng(0).lognormal(0.0, 0.7, 3)
+    assert score(r, np.ones(3))['landing_ess'] == pytest.approx(ws._landing_ess(r)[0])   # uniform: unchanged
