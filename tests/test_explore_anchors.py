@@ -1054,7 +1054,8 @@ def test_ecuador_dpa_canton_codes_place_births_without_names():
     frame = an.load_ecuador_inec_frame(births, exposure)
     assert frame.audit['matching'] == 'dpa_code'
     np.testing.assert_allclose(frame.a, [42.0, 42.0, 5.0])
-    assert list(frame.clusters) == ['17::1701', '17::1701', '13::1302'] and list(frame.strata) == ['17', '17', '13']
+    assert list(frame.clusters) == ['PICHINCHA::1701', 'PICHINCHA::1701', 'MANABI::1302']
+    assert list(frame.strata) == ['PICHINCHA', 'PICHINCHA', 'MANABI']          # official DPA province names
     clash = births.assign(prov_res=['17', '17', '04'])           # code 1302 is Manabi, not Carchi
     with pytest.raises(ValueError, match='outside their prov_res province'):
         an.load_ecuador_inec_frame(clash, exposure)
@@ -1273,18 +1274,19 @@ def test_area_keys_canonicalise_integral_numeric_codes():
 
 
 def test_ecuador_numeric_province_codes_match_across_int_and_float():
-    """Review counterexample: births prov_res 17 against exposure province 17.0 is one key, '17::QUITO'."""
+    """Review counterexample: births prov_res 17 against exposure province 17.0 is one key, 'PICHINCHA::QUITO'."""
     births, _ = ecuador_tables()
     births = births.iloc[[0]].reset_index(drop=True)
     births['prov_res'] = [17]
     exposure = pd.DataFrame({'shapeName': ['Quito'], 'province': [17.0], 'oxygen_deficit_mmhg': [42.0]})
     frame = an.load_ecuador_inec_frame(births, exposure)
-    assert len(frame.ids) == 1 and list(frame.clusters) == ['17::QUITO'] and list(frame.a) == [42.0]
-    assert list(frame.strata) == ['17']
+    assert len(frame.ids) == 1 and list(frame.clusters) == ['PICHINCHA::QUITO'] and list(frame.a) == [42.0]
+    assert list(frame.strata) == ['PICHINCHA']
     for spelling in ('017', '17.0', ' 17 '):
         b = births.copy()
         b['prov_res'] = [spelling]
-        assert list(an.load_ecuador_inec_frame(b, exposure.assign(province=[17])).clusters) == ['17::QUITO']
+        assert list(an.load_ecuador_inec_frame(b, exposure.assign(province=[17])).clusters) == [
+            'PICHINCHA::QUITO']
 
 
 # ---------------------------------------------------------------------------
@@ -1324,7 +1326,7 @@ def test_ecuador_numeric_province_conflict_raises_even_when_another_row_is_text(
             an.load_ecuador_inec_frame(births, exposure, on_unmatched=on_unmatched)
     agreeing = quito_births([17, 'Pichincha'], [1701, 1701])
     frame = an.load_ecuador_inec_frame(agreeing, exposure)
-    assert list(frame.a) == [42.0, 42.0] and list(frame.clusters) == ['17::1701', '17::1701']
+    assert list(frame.a) == [42.0, 42.0] and list(frame.clusters) == ['PICHINCHA::1701', 'PICHINCHA::1701']
 
 
 def test_ecuador_mixed_code_and_name_cantons_match_the_same_canton():
@@ -1345,7 +1347,7 @@ def test_ecuador_textual_province_conflict_with_dpa_row_raises():
     """Review bonus: prov_res 'Manabi' with cant_res 1701 contradicts the exposure row's province Pichincha."""
     births = quito_births(['Manabi', 'Pichincha'], [1701, 1701])
     exposure = pd.DataFrame({'dpa_canton': [1701], 'province': ['Pichincha'], 'oxygen_deficit_mmhg': [42.0]})
-    with pytest.raises(ValueError, match="exposure province 'PICHINCHA'"):
+    with pytest.raises(ValueError, match="DPA province 'PICHINCHA'"):
         an.load_ecuador_inec_frame(births, exposure)
     ok = an.load_ecuador_inec_frame(quito_births(['Pichincha', None], [1701, 1701]), exposure)
     assert list(ok.a) == [42.0, 42.0]                                        # missing prov_res: the code places it
@@ -1388,7 +1390,7 @@ def test_ecuador_textual_province_checked_against_dpa_province_without_exposure_
     with pytest.raises(ValueError, match="DPA province 'PICHINCHA'"):
         an.load_ecuador_inec_frame(quito_births(['Manabi', 'Manabi'], [1701, 1701]), dpa_only)
     frame = an.load_ecuador_inec_frame(quito_births(['Pichincha', 'Pichincha'], [1701, 1701]), dpa_only)
-    assert list(frame.a) == [42.0, 42.0] and list(frame.clusters) == ['17::1701', '17::1701']
+    assert list(frame.a) == [42.0, 42.0] and list(frame.clusters) == ['PICHINCHA::1701', 'PICHINCHA::1701']
     accented = an.load_ecuador_inec_frame(quito_births(['Manabí', 'manabi'], [1302, '1302']),
                                           pd.DataFrame({'dpa_canton': ['1302'], 'oxygen_deficit_mmhg': [5.0]}))
     assert list(accented.a) == [5.0, 5.0]
@@ -1396,7 +1398,7 @@ def test_ecuador_textual_province_checked_against_dpa_province_without_exposure_
     with pytest.raises(ValueError, match="DPA province 'PICHINCHA'"):
         an.load_ecuador_inec_frame(quito_births(['Manabi', 'Pichincha'], [1799, 1701]), dpa_only,
                                    on_unmatched='drop')
-    with pytest.raises(ValueError, match='cannot be verified'):
+    with pytest.raises(ValueError, match='unrecognized DPA province code'):
         an.load_ecuador_inec_frame(quito_births(['Pichincha', 'Pichincha'], [9901, 1701]),
                                    pd.DataFrame({'dpa_canton': [9901, 1701], 'oxygen_deficit_mmhg': [3.0, 42.0]}))
     assert an.ECUADOR_DPA_PROVINCES['13'] == an.normalise_area_name('Manabí')
@@ -1412,3 +1414,60 @@ def test_ecuador_exposure_province_name_must_agree_with_its_dpa_code():
     frame = an.load_ecuador_inec_frame(births, pd.DataFrame({'dpa_canton': [1701], 'province': ['Pichincha'],
                                                              'oxygen_deficit_mmhg': [42.0]}))
     assert list(frame.clusters) == ['PICHINCHA::1701'] * 2
+
+
+# ---------------------------------------------------------------------------
+# cycle-3 round 2 regressions: one canonical Ecuador province for codes and names
+# ---------------------------------------------------------------------------
+
+def test_canonical_ecuador_province_unifies_codes_and_names():
+    for value in (17, 17.0, '17', '017', ' 17 ', 'Pichincha', 'PICHINCHA', ' pichincha '):
+        assert an._canonical_ecuador_province(value) == 'PICHINCHA'
+    assert an._canonical_ecuador_province(1) == 'AZUAY' and an._canonical_ecuador_province('Cañar') == 'CANAR'
+    assert an._canonical_ecuador_province(90) == 'ZONAS NO DELIMITADAS'
+    for missing in (None, np.nan, '', '  ', 'nan'):
+        assert an._canonical_ecuador_province(missing) is None
+    assert an._canonical_ecuador_province('Provincia Sintetica') == 'PROVINCIA SINTETICA'   # kept, never official
+    for bad in (99, '99', 25, 0):
+        with pytest.raises(ValueError, match='unrecognized DPA province code'):
+            an._canonical_ecuador_province(bad)
+
+
+def test_ecuador_numeric_prov_res_matches_a_textual_exposure_province_by_name():
+    """Review counterexample 1: prov_res 17 with cant_res 'Quito' matches province 'Pichincha', shapeName 'Quito'."""
+    exposure = pd.DataFrame({'dpa_canton': [1701], 'province': ['Pichincha'], 'shapeName': ['Quito'],
+                             'oxygen_deficit_mmhg': [42.0]})
+    frame = an.load_ecuador_inec_frame(quito_births([17, 17], ['Quito', 'Quito']), exposure)
+    assert len(frame.ids) == 2 and list(frame.a) == [42.0, 42.0]
+    assert list(frame.clusters) == ['PICHINCHA::1701'] * 2 and list(frame.strata) == ['PICHINCHA'] * 2
+    assert frame.audit['matching'] == 'province_name:province'
+    names_only = exposure.drop(columns=['dpa_canton'])
+    named = an.load_ecuador_inec_frame(quito_births([17, 'Pichincha'], ['Quito', 'Quito']), names_only)
+    assert list(named.clusters) == ['PICHINCHA::QUITO'] * 2
+
+
+def test_ecuador_dpa_rows_share_the_official_stratum_with_or_without_exposure_province():
+    """Review counterexample 2: 1701 (province 'Pichincha') and 1702 (no province) are both stratum PICHINCHA."""
+    exposure = pd.DataFrame({'dpa_canton': [1701, 1702], 'province': ['Pichincha', None],
+                             'oxygen_deficit_mmhg': [42.0, 40.0]})
+    frame = an.load_ecuador_inec_frame(quito_births([17, 17], [1701, 1702]), exposure)
+    assert list(frame.strata) == ['PICHINCHA', 'PICHINCHA']
+    assert list(frame.clusters) == ['PICHINCHA::1701', 'PICHINCHA::1702'] and list(frame.a) == [42.0, 40.0]
+    numeric = an.load_ecuador_inec_frame(quito_births([17, 'Pichincha'], [1701, 1702]),
+                                         exposure.assign(province=[17.0, np.nan]))
+    assert list(numeric.strata) == ['PICHINCHA', 'PICHINCHA']
+
+
+def test_ecuador_unrecognized_dpa_province_code_raises():
+    """Review counterexample 3: prov_res 99 with cant_res 9901 against dpa_canton 9901 is not a DPA province."""
+    with pytest.raises(ValueError, match="unrecognized DPA province code '99'"):
+        an.load_ecuador_inec_frame(quito_births([99, 99], [9901, 9901]),
+                                   pd.DataFrame({'dpa_canton': [9901], 'oxygen_deficit_mmhg': [3.0]}))
+    with pytest.raises(ValueError, match="unrecognized DPA province code '99'"):     # birth-side prefix too
+        an.load_ecuador_inec_frame(quito_births([None, None], [9901, 1701]),
+                                   pd.DataFrame({'dpa_canton': [1701], 'oxygen_deficit_mmhg': [42.0]}),
+                                   on_unmatched='drop')
+    with pytest.raises(ValueError, match='unrecognized DPA province code 99'):        # numeric prov_res by name
+        an.load_ecuador_inec_frame(quito_births([99, 99], ['Quito', 'Quito']),
+                                   pd.DataFrame({'province': ['Pichincha'], 'shapeName': ['Quito'],
+                                                 'oxygen_deficit_mmhg': [42.0]}))

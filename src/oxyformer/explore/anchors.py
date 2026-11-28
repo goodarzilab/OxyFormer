@@ -625,6 +625,24 @@ def _area_key(value: Any) -> Any:
     return normalise_area_name(stripped)
 
 
+def _canonical_ecuador_province(value: Any) -> str | None:
+    """One province label for codes and names: ``17``, ``17.0``, ``'017'`` and ``'Pichincha'`` -> ``'PICHINCHA'``.
+
+    Missing -> ``None``. An integral code must be an INEC DPA province code, else
+    ``ValueError``. Text is normalised; an official name is returned as such and any other
+    name is kept as normalised text (it can never agree with a DPA code).
+    """
+    if _is_missing_value(value):
+        return None
+    code = _try_int_code(value)
+    if code is not None:
+        padded = f'{int(code):02d}'
+        _check(padded in ECUADOR_DPA_PROVINCES, f'ecuador_inec: unrecognized DPA province code {value!r}')
+        return ECUADOR_DPA_PROVINCES[padded]
+    name = _area_key(value)
+    return name if isinstance(name, str) else None
+
+
 def _area_keys(series: pd.Series) -> pd.Series:
     """:func:`_area_key` per value; missing, blank or stringified-missing values stay ``NaN`` (never ``'NAN'``)."""
     return series.astype(object).map(_area_key).astype(object)
@@ -724,38 +742,40 @@ def load_ecuador_inec_frame(births: pd.DataFrame, canton_exposure: pd.DataFrame,
            f'{ECUADOR_EXPOSURE_DPA_COLUMNS}; canton names repeat across provinces, '
            'so canton-only matching is never used')
 
-    # Exposure lookups, parsed row by row up front. A record's stratum is its province name key (else the DPA
-    # province digits) and its cluster label is stratum::DPA code (else stratum::canton name).
+    # Exposure lookups, parsed row by row up front. Every province (exposure and births, code or name) goes
+    # through _canonical_ecuador_province; a DPA row's stratum is always the official province of its code.
+    # Cluster labels are stratum::DPA code, else stratum::canton name.
     dpa_rows: dict[str, list[dict]] = {}
     name_rows: dict[str, list[dict]] = {}
     exposure_unusable = 0
     for i in range(len(exposure)):
-        prov_key = _area_key(exposure.at[i, province_col]) if province_col else np.nan
+        raw_province = exposure.at[i, province_col] if province_col else None
+        exp_province = _canonical_ecuador_province(raw_province)
         dpa = None
         if dpa_col is not None:
             raw_code = exposure.at[i, dpa_col]
             dpa = _try_dpa_code(raw_code)
             _check(dpa is not None or _is_missing_value(raw_code),
                    f'ecuador_inec: exposure {dpa_col} {raw_code!r} is not a 4-digit DPA canton code')
-            if dpa is not None and isinstance(prov_key, str) and prov_key.isdigit():
-                _check(int(prov_key) == int(dpa[:2]),
-                       f'ecuador_inec: exposure DPA code {dpa} lies outside its own province {prov_key}')
-            elif dpa is not None and isinstance(prov_key, str) and dpa[:2] in ECUADOR_DPA_PROVINCES:
-                _check(prov_key == ECUADOR_DPA_PROVINCES[dpa[:2]],
-                       f'ecuador_inec: exposure DPA code {dpa} lies outside its own province {prov_key!r} '
-                       f'(DPA province {ECUADOR_DPA_PROVINCES[dpa[:2]]!r})')
+        if dpa is not None:
+            _check(dpa[:2] in ECUADOR_DPA_PROVINCES,
+                   f'ecuador_inec: unrecognized DPA province code {dpa[:2]!r} in exposure {dpa_col} {dpa}')
+            official = ECUADOR_DPA_PROVINCES[dpa[:2]]
+            _check(exp_province is None or exp_province == official,
+                   f'ecuador_inec: exposure DPA code {dpa} lies outside its own province {raw_province!r} '
+                   f'(DPA province {official!r})')
+            exp_province = official
         cant_key = _area_key(exposure.at[i, name_col]) if has_names else np.nan
-        named = isinstance(prov_key, str) and isinstance(cant_key, str)
+        named = exp_province is not None and isinstance(cant_key, str) and has_names
         if dpa is None and not named:
             exposure_unusable += 1                 # neither a code nor a (province, canton) key: places nothing
             continue
-        stratum_key = prov_key if isinstance(prov_key, str) else dpa[:2]
-        record = dict(deficit=float(deficits[i]), stratum=stratum_key, prov_key=prov_key,
-                      cluster=f'{stratum_key}::{dpa if dpa is not None else cant_key}')
+        record = dict(deficit=float(deficits[i]), stratum=exp_province,
+                      cluster=f'{exp_province}::{dpa if dpa is not None else cant_key}')
         if dpa is not None:
             dpa_rows.setdefault(dpa, []).append(record)
         if named:
-            name_rows.setdefault(f'{prov_key}::{cant_key}', []).append(record)
+            name_rows.setdefault(f'{exp_province}::{cant_key}', []).append(record)
     ambiguous = sorted([f'DPA:{k}' for k, v in dpa_rows.items() if len(v) > 1]
                        + [k for k, v in name_rows.items() if len(v) > 1])
     dpa_lookup = {k: v[0] for k, v in dpa_rows.items() if len(v) == 1} if dpa_col is not None else None
@@ -769,34 +789,22 @@ def load_ecuador_inec_frame(births: pd.DataFrame, canton_exposure: pd.DataFrame,
     for prov_value, cant_value in zip(df[spec.residence_province_field].tolist(),
                                       df[spec.residence_canton_field].tolist()):
         dpa = _try_dpa_code(cant_value) if dpa_lookup is not None else None
+        birth_province = _canonical_ecuador_province(prov_value)
         record, mode = None, None
         if dpa is not None:
+            _check(dpa[:2] in ECUADOR_DPA_PROVINCES,
+                   f'ecuador_inec: unrecognized DPA province code {dpa[:2]!r} in cant_res {cant_value!r}')
+            official = ECUADOR_DPA_PROVINCES[dpa[:2]]
+            if birth_province is not None and birth_province != official:   # one check for codes and names
+                conflicts.append(f'prov_res {prov_value!r} ({birth_province!r}) vs DPA province {official!r} '
+                                 f'of cant_res {cant_value!r}')
             record, mode = dpa_lookup.get(dpa), 'dpa_code'
-            prov_code = _try_int_code(prov_value)
-            if prov_code is not None:
-                if int(prov_code) != int(dpa[:2]):
-                    conflicts.append(f'prov_res {prov_value!r} vs cant_res {cant_value!r}')
-            elif not _is_missing_value(prov_value):
-                # A textual province must be verified against the exposure row's province name and the official
-                # DPA province of the code; a name nothing can verify is an error, never a silent pass.
-                prov_name = _area_key(prov_value)
-                exposure_prov = record['prov_key'] if record is not None else np.nan
-                official = ECUADOR_DPA_PROVINCES.get(dpa[:2])
-                textual_exposure = isinstance(exposure_prov, str) and not exposure_prov.isdigit()
-                if textual_exposure and prov_name != exposure_prov:
-                    conflicts.append(f'prov_res {prov_value!r} vs exposure province {exposure_prov!r} '
-                                     f'of cant_res {cant_value!r}')
-                elif official is not None and prov_name != official:
-                    conflicts.append(f'prov_res {prov_value!r} vs DPA province {official!r} of cant_res {cant_value!r}')
-                elif official is None and not textual_exposure:
-                    conflicts.append(f'prov_res {prov_value!r} cannot be verified against cant_res {cant_value!r} '
-                                     '(unknown DPA province, no exposure province name)')
         elif name_lookup is not None:
-            prov_name, cant_name = _area_key(prov_value), _area_key(cant_value)
+            cant_name = _area_key(cant_value)
             if isinstance(cant_name, str):
                 cant_name = CANTON_ALIASES.get(cant_name, cant_name)
-            if isinstance(prov_name, str) and isinstance(cant_name, str):
-                record, mode = name_lookup.get(f'{prov_name}::{cant_name}'), f'province_name:{province_col}'
+            if birth_province is not None and isinstance(cant_name, str):
+                record, mode = name_lookup.get(f'{birth_province}::{cant_name}'), f'province_name:{province_col}'
             else:
                 n_missing_area += 1                # missing province or canton: unmatched
         elif _is_missing_value(cant_value):
