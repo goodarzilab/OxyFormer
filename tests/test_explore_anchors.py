@@ -986,10 +986,11 @@ def test_normalize_hhid_canonicalises_integral_numbers_and_keeps_dhs_text_ids():
         assert an._normalize_hhid(pd.Series([value], dtype=object), 'x').tolist() == [expected]
     same = an._normalize_hhid(pd.Series([1, 1.0, '1.0', '2', ' 000101 02 '], dtype=object), 'x')
     assert same.tolist() == ['1', '1', '1', '2', '000101 02']        # one household spelled three ways
-    for bad, match in (([None], 'missing HHID'), ([''], 'missing HHID'), ([1.5], 'non-integral'),
-                       (['0101', '101'], 'merge distinct households')):
+    for bad, match in (([None], 'missing HHID'), ([''], 'missing HHID'), ([1.5], 'non-integral')):
         with pytest.raises(ValueError, match=match):
             an._normalize_hhid(pd.Series(bad, dtype=object), 'x')
+    # Spellings are only canonicalised here; duplicate households are judged structurally by the loader.
+    assert an._normalize_hhid(pd.Series(['0101', '101'], dtype=object), 'x').tolist() == ['101', '101']
 
 
 def test_peru_float_hhid_in_one_module_still_joins_text_hhid_in_another():
@@ -1060,3 +1061,97 @@ def test_ecuador_dpa_canton_codes_place_births_without_names():
     names, _ = ecuador_tables()
     with pytest.raises(ValueError, match='cant_res holds names'):
         an.load_ecuador_inec_frame(names, exposure)
+
+
+# ---------------------------------------------------------------------------
+# review round 3 regressions
+# ---------------------------------------------------------------------------
+
+def test_ecuador_missing_province_or_canton_never_matches_as_nan():
+    """Review counterexample: prov_res NaN + Bolivar must not match an exposure row province NaN + Bolivar."""
+    births, _ = ecuador_tables()
+    births = births.iloc[[0, 4]].reset_index(drop=True)          # Quito; Bolivar
+    births.loc[1, 'prov_res'] = np.nan
+    exposure = pd.DataFrame({'shapeName': ['Quito', 'Bolivar'], 'province': ['Pichincha', np.nan],
+                             'oxygen_deficit_mmhg': [42.0, 30.0]})
+    with pytest.raises(ValueError, match='unmatched or ambiguous'):
+        an.load_ecuador_inec_frame(births, exposure)
+    frame = an.load_ecuador_inec_frame(births, exposure, on_unmatched='drop')
+    assert list(frame.a) == [42.0] and 'NAN::BOLIVAR' not in set(frame.clusters.tolist())
+    assert frame.audit['excluded_unmatched_cantons'] == {'Bolívar': 1}
+    assert frame.audit['n_births_missing_residence'] == 1 and frame.audit['n_exposure_rows_missing_area'] == 1
+    for blank_birth, blank_exposure in (('', ''), ('  ', None), ('nan', 'NaN'), (None, np.nan)):
+        b, e = births.copy(), exposure.copy()
+        b.loc[1, 'prov_res'], e.loc[1, 'province'] = blank_birth, blank_exposure
+        with pytest.raises(ValueError, match='unmatched or ambiguous'):
+            an.load_ecuador_inec_frame(b, e)
+    no_canton = births.copy()
+    no_canton.loc[1, ['prov_res', 'cant_res']] = ['Pichincha', np.nan]
+    with pytest.raises(ValueError, match="'<missing>': 1"):
+        an.load_ecuador_inec_frame(no_canton, exposure)
+
+
+def test_peru_two_spellings_of_one_household_keep_both_children():
+    """Review counterexample: RECH6 HHIDs '1' and '0001' (distinct HC0) are one household with two children."""
+    modules = peru_modules()
+    r6 = modules['RECH6']
+    r6.loc[1, ['HHID', 'HC1']] = ['0001', '20']                  # second child of household 1, now eligible
+    frame = an.load_peru_endes_frame({2023: modules})
+    assert list(frame.ids) == ['2023:1:1', '2023:1:2', '2023:2:1', '2023:3:1', '2023:5:2']
+    assert list(frame.clusters[:2]) == ['2023:10', '2023:10']
+    np.testing.assert_allclose(frame.y[:2], [11.0, 12.0])
+    np.testing.assert_allclose(frame.survey_weights[:2], [1.0, 1.0])
+
+
+def test_peru_structural_duplicates_are_rejected_after_normalisation():
+    dup_child = peru_modules()
+    dup_child['RECH6'].loc[1, ['HHID', 'HC0', 'HC1']] = ['0001', '01', '20']   # same household, same child line
+    with pytest.raises(ValueError, match='RECH6 children'):
+        an.load_peru_endes_frame({2023: dup_child})
+    dup_house = peru_modules()
+    r0 = dup_house['RECH0']
+    extra = r0.iloc[[0]].copy()
+    extra.iloc[0, 0] = '0001'                                     # household 1 again, different altitude
+    extra['HV040'] = '900'
+    dup_house['RECH0'] = pd.concat([r0, extra], ignore_index=True)
+    with pytest.raises(ValueError, match='RECH0 households'):
+        an.load_peru_endes_frame({2023: dup_house})
+    dup_assets = peru_modules()
+    dup_assets['RECH23'] = pd.concat([dup_assets['RECH23'], pd.DataFrame(
+        {'HHID': ['0002'], 'HV270': ['5'], 'HV271': ['999']})], ignore_index=True)
+    with pytest.raises(ValueError, match='RECH23 households'):
+        an.load_peru_endes_frame({2023: dup_assets})
+    exact = peru_modules()
+    exact['RECH0'] = pd.concat([exact['RECH0'], exact['RECH0'].iloc[[0]]], ignore_index=True)
+    assert len(an.load_peru_endes_frame({2023: exact}).ids) == 4      # an exact repeat is harmless
+
+
+def test_survey_weights_take_the_horvitz_thompson_expansion():
+    """Review counterexample: A (N=100, 1 sampled, w=1, y=1), B (N=10, 1 sampled, w=1, y=0)."""
+    clusters = np.array(['A', 'B'])
+    w = an.anchor_weights('survey', clusters, survey_weights=np.ones(2), population_counts={'A': 100, 'B': 10})
+    np.testing.assert_array_equal(w, [100.0, 10.0])
+    y = np.array([1.0, 0.0])
+    assert float(np.sum(w * y) / np.sum(w)) == pytest.approx(100 / 110)
+    np.testing.assert_array_equal(an.anchor_weights('survey', clusters, survey_weights=[2.0, 3.0]), [2.0, 3.0])
+    expanded = an.anchor_weights('survey', np.array(['A', 'A', 'B']), survey_weights=[2.0, 4.0, 3.0],
+                                 population_counts={'A': 10, 'B': 3})
+    np.testing.assert_allclose(expanded, [10.0, 20.0, 9.0])
+    with pytest.raises(ValueError, match='below its sampled count'):
+        an.anchor_weights('survey', np.array(['A', 'A']), survey_weights=[1.0, 1.0], population_counts={'A': 1})
+    with pytest.raises(ValueError, match='missing clusters'):
+        an.anchor_weights('survey', clusters, survey_weights=np.ones(2), population_counts={'A': 100})
+
+
+def test_markdown_states_the_permutation_null_only_when_it_ran():
+    d = cluster_design(seed=11, n_strata=3, clusters_per_stratum=24, rows=5)
+    data, _ = anchor_inputs(d, continuous_outcome(d), 'continuous')
+    kwargs = dict(delta=2.0, q_learners=[linear_q('lin')], g_learners=[logistic_g('logit')],
+                  combos=[('lin + logit', 'lin', 'logit')])
+    without = an.render_anchor_markdown(an.anchor_payload('s', 'y', 'u', an.run_anchor(data, **kwargs)))
+    assert 'no permutation null was run' in without
+    assert 'permuted-A null' not in without and an.ANCHOR_NULL_LABEL not in without
+    with_null = an.render_anchor_markdown(an.anchor_payload('s', 'y', 'u', an.run_anchor(
+        data, null_learners=([linear_q('lin', 7)], [logistic_g('logit', 9)]), **kwargs)))
+    assert 'cluster-level within-stratum permuted-A null' in with_null and an.ANCHOR_NULL_LABEL in with_null
+    assert f'seed `{an.NULL_SEED}`' in with_null and 'no permutation null was run' not in with_null

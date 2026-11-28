@@ -448,8 +448,9 @@ def _normalize_hhid(series: pd.Series, what: str) -> pd.Series:
     Values are stripped; an integral number (``1``, ``1.0``, ``'1.0'``, ``'0001'``) becomes
     its integer string (``'1'``) so a float-typed module still joins a text-typed one.
     Genuine DHS text ids such as ``'000101 02'`` are kept exactly as stripped. Missing or
-    non-integral numeric ids, and a normalisation that would merge distinct households,
-    raise ``ValueError``.
+    non-integral numeric ids raise ``ValueError``. Spellings of one household (``'1'`` and
+    ``'0001'``) may coexist; :func:`_require_unique_rows` checks the household-level and
+    child-level tables for genuine duplicates after normalisation.
     """
     def one(value: Any) -> Any:
         if value is None or value is pd.NA or (isinstance(value, (float, np.floating)) and np.isnan(value)):
@@ -465,16 +466,20 @@ def _normalize_hhid(series: pd.Series, what: str) -> pd.Series:
         if not text:
             return None
         return str(int(text.split('.')[0])) if _INTEGRAL_TEXT.match(text) else text
-    def spelling(value: Any) -> str:                # the id as written, minus a numeric '.0' suffix
-        text = str(value).strip()
-        return text.split('.')[0] if _INTEGRAL_TEXT.match(text) else text
-    values = series.astype(object)
-    out = values.map(one).astype(object)
+    out = series.astype(object).map(one).astype(object)
     _check(bool(out.notna().all()), f'{what}: missing HHID')
-    spellings = pd.DataFrame({'id': out, 'raw': values.map(spelling)}).groupby('id')['raw'].nunique()
-    _check(bool((spellings == 1).all()), f'{what}: HHID normalisation would merge distinct households '
-                                         f'{sorted(spellings.index[spellings > 1].tolist())[:5]}')
     return out
+
+
+def _require_unique_rows(frame: pd.DataFrame, key: Sequence[str], what: str) -> pd.DataFrame:
+    """Drop exact duplicate rows, then require one row per ``key`` (rows with a missing key part are exempt)."""
+    frame = frame.drop_duplicates()
+    complete = frame[list(key)].notna().all(axis=1)
+    clash = frame.loc[complete].duplicated(list(key), keep=False)
+    example = frame.loc[complete].loc[clash, list(key)].head(2).values.tolist()
+    _check(not bool(clash.any()), f'{what}: {int(clash.sum())} rows share {"/".join(key)} after normalisation '
+                                  f'with conflicting values, e.g. {example}')
+    return frame
 
 
 def _zfill(codes: pd.Series, width: int) -> pd.Series:
@@ -513,8 +518,11 @@ def load_peru_endes_frame(modules_by_year: Mapping[int, Mapping[str, pd.DataFram
         keep23 = ['HHID'] + [c for c in hh23_cols if c in r23.columns]
         for name, frame in (('RECH0', r0), ('RECH23', r23), ('RECH6', r6)):
             frame['HHID'] = _normalize_hhid(frame['HHID'], f'peru_endes {year} {name}')
-        merged = r6[keep6].merge(r0[keep0].drop_duplicates('HHID'), on='HHID', how='inner')
-        merged = merged.merge(r23[keep23].drop_duplicates('HHID'), on='HHID', how='left')
+        r6['_hc0'] = integer_codes(r6['HC0'], f'peru_endes {year} HC0')
+        house0 = _require_unique_rows(r0[keep0], ['HHID'], f'peru_endes {year} RECH0 households')
+        house23 = _require_unique_rows(r23[keep23], ['HHID'], f'peru_endes {year} RECH23 households')
+        children = _require_unique_rows(r6[keep6 + ['_hc0']], ['HHID', '_hc0'], f'peru_endes {year} RECH6 children')
+        merged = children.merge(house0, on='HHID', how='inner').merge(house23, on='HHID', how='left')
         status, raw_hb = _numeric(merged[spec.status_field]), _numeric(merged[spec.outcome_field])
         age, altitude = _numeric(merged[spec.age_field]), _numeric(merged[spec.exposure_field])
         weight = _numeric(merged[spec.weight_field]) / spec.weight_divisor
@@ -528,7 +536,7 @@ def load_peru_endes_frame(modules_by_year: Mapping[int, Mapping[str, pd.DataFram
         merged['_w'] = _numeric(merged[spec.weight_field]) / spec.weight_divisor
         stratum = integer_codes(merged[spec.stratum_field], f'peru_endes {year} {spec.stratum_field}')
         cluster = integer_codes(merged[spec.cluster_field], f'peru_endes {year} {spec.cluster_field}')
-        line = integer_codes(merged['HC0'], f'peru_endes {year} HC0')
+        line = merged['_hc0']
         _check(not (stratum.isna() | cluster.isna() | line.isna()).any(),
                f'peru_endes {year}: missing {spec.stratum_field}, {spec.cluster_field} or HC0 codes')
         merged['_stratum'] = _zfill(stratum, 2)
@@ -550,6 +558,25 @@ def load_peru_endes_frame(modules_by_year: Mapping[int, Mapping[str, pd.DataFram
                        y=df['_y'].to_numpy(np.float64), X=X, clusters=clusters, strata=df['_stratum'].to_numpy(),
                        feature_names=feature_names, outcome='hb_g_dl', outcome_kind='continuous',
                        survey_weights=df['_w'].to_numpy(np.float64), audit=audit)
+
+
+_MISSING_AREA_TEXT = frozenset({'', 'NAN', 'NONE', '<NA>'})
+
+
+def _area_keys(series: pd.Series) -> pd.Series:
+    """Normalised area names; missing, blank or stringified-missing values stay ``NaN`` (never ``'NAN'``)."""
+    def one(value: Any) -> Any:
+        if value is None or value is pd.NA or (isinstance(value, (float, np.floating)) and np.isnan(value)):
+            return np.nan
+        text = normalise_area_name(value)
+        return np.nan if text in _MISSING_AREA_TEXT else text
+    return series.astype(object).map(one).astype(object)
+
+
+def _join_keys(left: pd.Series, right: pd.Series) -> pd.Series:
+    """``left::right`` per row, ``NaN`` when either part is missing."""
+    return pd.Series([f'{a}::{b}' if isinstance(a, str) and isinstance(b, str) else np.nan
+                      for a, b in zip(left.tolist(), right.tolist())], index=left.index, dtype=object)
 
 
 def normalise_area_name(value: Any) -> str:
@@ -643,25 +670,31 @@ def load_ecuador_inec_frame(births: pd.DataFrame, canton_exposure: pd.DataFrame,
             _check(not bool(clash.any()), f'ecuador_inec: {int(clash.sum())} births have a cant_res DPA code '
                                           'outside their prov_res province')
         key = canton
+        exposure_missing_area = 0
     else:
         _require_columns(exposure, ['shapeName'], 'ecuador_inec canton exposure')
-        exposure['_key'] = (exposure[province_col].map(normalise_area_name) + '::'
-                            + exposure['shapeName'].map(normalise_area_name))
-        province = df[spec.residence_province_field].map(normalise_area_name)
-        canton = df[spec.residence_canton_field].map(normalise_area_name).map(lambda k: CANTON_ALIASES.get(k, k))
-        key = province + '::' + canton
+        exposure['_key'] = _join_keys(_area_keys(exposure[province_col]), _area_keys(exposure['shapeName']))
+        exposure_missing_area = int(exposure['_key'].isna().sum())
+        exposure = exposure.loc[exposure['_key'].notna()]       # a row without province or canton places nothing
+        province = _area_keys(df[spec.residence_province_field])
+        canton = _area_keys(df[spec.residence_canton_field]).map(
+            lambda k: CANTON_ALIASES.get(k, k) if isinstance(k, str) else np.nan).astype(object)
+        key = _join_keys(province, canton)                      # missing province or canton -> unmatched
     counts = exposure['_key'].value_counts()
     ambiguous = set(counts.index[counts > 1].tolist())
     exposure = exposure.loc[~exposure['_key'].isin(ambiguous)]
     deficit = dict(zip(exposure['_key'], exposure['oxygen_deficit_mmhg'].astype(float)))
 
     matched = key.isin(set(deficit)).to_numpy(dtype=bool)
-    bad = df.loc[~matched, spec.residence_canton_field].astype(str).value_counts().to_dict()
+    raw_canton = df[spec.residence_canton_field]
+    bad = (raw_canton.astype(str).where(_area_keys(raw_canton).notna(), '<missing>')
+           .loc[~matched].value_counts().to_dict())
+    n_missing_area = int((key.isna().to_numpy() & ~matched).sum())
     _resolve_unmatched(bad, on_unmatched, 'ecuador_inec')
     df, province, canton, key = (v.loc[matched].reset_index(drop=True) for v in (df, province, canton, key))
 
     df['_a'] = key.map(deficit).astype(float)
-    df['_cluster'] = province + '::' + canton
+    df['_cluster'] = _join_keys(province, canton)
     df['_stratum'] = province if stratum == 'province' else 'ECU_ALL'
     df['edad_mad'] = _numeric(df['edad_mad'])
     df.loc[~df['edad_mad'].between(*ECUADOR_MATERNAL_AGE_RANGE), 'edad_mad'] = np.nan
@@ -680,6 +713,7 @@ def load_ecuador_inec_frame(births: pd.DataFrame, canton_exposure: pd.DataFrame,
                  match_rate=float(len(df) / n_valid) if n_valid else 0.0, n_cantons=int(df['_cluster'].nunique()),
                  n_provinces=int(province.nunique()), ambiguous_exposure_names=sorted(ambiguous),
                  matching='dpa_code' if use_dpa else f'province_name:{province_col}',
+                 n_births_missing_residence=n_missing_area, n_exposure_rows_missing_area=exposure_missing_area,
                  excluded_unmatched_cantons={str(k): int(v) for k, v in bad.items()}, stratum=stratum,
                  interpretation=INTERPRETATION)
     return AnchorFrame(anchor='ecuador_inec', ids=np.asarray([f'ecu2024:{i}' for i in range(len(df))], dtype=object),
@@ -1033,7 +1067,8 @@ def anchor_weights(scheme: str, clusters: Any, *, survey_weights: Any = None,
     ``equal_cluster``: ``1 / n_g`` (every PSU, canton or municipality counts once);
     ``equal_unit``: 1 per row, or the Horvitz-Thompson expansion ``N_g / n_g`` when
     ``population_counts`` gives each subsampled cluster's full count;
-    ``survey``: the supplied design weights (e.g. ENDES ``HV005 / 1e6``).
+    ``survey``: the supplied design weights (e.g. ENDES ``HV005 / 1e6``), multiplied by
+    the same expansion ``N_g / n_g`` when ``population_counts`` is given.
     """
     clusters = np.asarray(clusters)
     _check(scheme in WEIGHT_SCHEMES, f'weight scheme must be one of {WEIGHT_SCHEMES}')
@@ -1042,16 +1077,19 @@ def anchor_weights(scheme: str, clusters: Any, *, survey_weights: Any = None,
     inverse = inverse.reshape(-1)
     if scheme == 'equal_cluster':
         return 1.0 / n_g[inverse]
-    if scheme == 'equal_unit':
-        if population_counts is None:
-            return np.ones(len(clusters))
+    expansion = np.ones(len(clusters))
+    if population_counts is not None:
+        missing = [c for c in labels.tolist() if c not in population_counts]
+        _check(not missing, f'population counts are missing clusters {missing[:5]}')
         full = np.asarray([population_counts[c] for c in labels.tolist()], dtype=np.float64)
         _check(bool((full >= n_g).all()), 'a population count is below its sampled count')
-        return (full / n_g)[inverse]
+        expansion = (full / n_g)[inverse]
+    if scheme == 'equal_unit':
+        return expansion
     w = np.asarray(survey_weights, dtype=np.float64) if survey_weights is not None else None
     _check(w is not None and w.shape == clusters.shape, 'survey weights are required and must align with targets')
     _check(bool(np.isfinite(w).all() and (w > 0).all()), 'survey weights must be finite and positive')
-    return w
+    return w * expansion
 
 
 def _normalised(weights: Any, n: int) -> np.ndarray:
@@ -1309,6 +1347,10 @@ def _fmt(value: Any, spec: str = '+.4f') -> str:
 
 def render_anchor_markdown(payload: Mapping[str, Any]) -> str:
     """Markdown readout carrying the exploratory notice and every permanent reporting invariant."""
+    has_null = any(ANCHOR_NULL_LABEL in models for models in payload['results'].values())
+    null_text = (f'Falsification: cluster-level within-stratum permuted-A null (seed `{payload.get("null_seed")}`, '
+                 f'`{ANCHOR_NULL_LABEL}` rows).' if has_null else
+                 'Falsification: no permutation null was run for this readout (null_learners=None).')
     lines = [f'# Exploratory external anchor: `{payload["anchor"]}` ({payload["outcome"]})', '',
              f'**{EXPLORATORY_NOTICE}**', '',
              f'Outcome `{payload["outcome"]}` ({payload["outcome_kind"]}, {payload["outcome_units"]}); estimates are '
@@ -1316,7 +1358,7 @@ def render_anchor_markdown(payload: Mapping[str, Any]) -> str:
              f'`{payload["delivered_shift_mmhg"]:.4f}` mmHg). Targets `{payload["n_targets"]:,}`, movers '
              f'`{payload["n_movers"]:,}`, clusters `{payload["n_clusters"]:,}`, strata `{payload["n_strata"]}`.',
              'Design: exact one-hot stratum FE (no raw A), whole-cluster balanced 5-fold CV, cluster-grouped inner '
-             '3-fold Platt calibration, cluster-level within-stratum permuted-A null.', '',
+             '3-fold Platt calibration. ' + null_text, '',
              '## One-step estimates', '',
              '| Weights | Model | Delivered shift | OOF R^2 | Plug-in | Correction | One-step (per mmHg) | '
              'Cluster SE | 95% CI | Hajek (per mmHg) | Mean / max r_a | Landing ESS (%) | s_max / G_eff |',
