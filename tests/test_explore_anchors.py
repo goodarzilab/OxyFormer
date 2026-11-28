@@ -1381,9 +1381,10 @@ def test_ecuador_exposure_lookups_are_validated_up_front():
 
 def test_anchors_module_has_no_value_error_fallbacks():
     """Audit: no loader guesses a mode by catching ValueError over a whole column."""
+    import ast
     import inspect
-    source = inspect.getsource(an)
-    assert 'except ValueError' not in source and 'try:' not in source
+    tree = ast.parse(inspect.getsource(an))
+    assert not any(isinstance(node, ast.Try) for node in ast.walk(tree))
 
 
 # ---------------------------------------------------------------------------
