@@ -567,33 +567,59 @@ def load_peru_endes_frame(modules_by_year: Mapping[int, Mapping[str, pd.DataFram
 _MISSING_AREA_TEXT = frozenset({'', 'NAN', 'NONE', '<NA>'})
 
 
-def _area_keys(series: pd.Series) -> pd.Series:
-    """Normalised area names; missing, blank or stringified-missing values stay ``NaN`` (never ``'NAN'``).
+_DECIMAL_TEXT = re.compile(r'^[+-]?\d*\.\d+$')
+
+
+def _is_missing_value(value: Any) -> bool:
+    return (value is None or value is pd.NA or (isinstance(value, (float, np.floating)) and np.isnan(value))
+            or (isinstance(value, str) and normalise_area_name(value) in _MISSING_AREA_TEXT))
+
+
+def _try_int_code(value: Any) -> str | None:
+    """Canonical integer string of one integral value (``13``, ``13.0``, ``'13'``, ``'013'`` -> ``'13'``).
+
+    Returns ``None`` for missing values and text (a name); a non-integral number
+    (``13.5``, ``'13.5'``, ``inf``) raises ``ValueError``. Judged per value, never per column.
+    """
+    if _is_missing_value(value) or isinstance(value, (bool, np.bool_)):
+        return None
+    if isinstance(value, (int, np.integer)):
+        return str(int(value))
+    if isinstance(value, (float, np.floating)):
+        _check(float(value).is_integer(), f'non-integral numeric code {value!r}')
+        return str(int(value))
+    text = str(value).strip()
+    _check(not _DECIMAL_TEXT.match(text) or _INTEGRAL_TEXT.match(text), f'non-integral numeric code {value!r}')
+    return str(int(text.split('.')[0])) if _INTEGRAL_TEXT.match(text) else None
+
+
+def _try_dpa_code(value: Any) -> str | None:
+    """4-digit zero-padded DPA canton code (``1701``, ``1701.0``, ``'1701'``, ``'0101'``) or ``None``."""
+    code = _try_int_code(value)
+    return f'{int(code):04d}' if code is not None and 1 <= int(code) <= 9999 else None
+
+
+def _area_key(value: Any) -> Any:
+    """One normalised area name; integral codes become integer strings; missing stays ``NaN``.
 
     Integral numeric codes in any spelling (``17``, ``17.0``, ``'17.0'``, ``'017'``) become the
     integer string (``'17'``) before name normalisation, which would otherwise turn ``17.0``
     into ``'17 0'``. A non-integral number raises ``ValueError``.
     """
-    def one(value: Any) -> Any:
-        if value is None or value is pd.NA or (isinstance(value, (float, np.floating)) and np.isnan(value)):
-            return np.nan
-        if isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_)):
-            return str(int(value))
-        if isinstance(value, (float, np.floating)):
-            _check(float(value).is_integer(), f'non-integral numeric area code {value!r}')
-            return str(int(value))
-        stripped = str(value).strip()
-        if _INTEGRAL_TEXT.match(stripped):
-            return str(int(stripped.split('.')[0]))
-        text = normalise_area_name(stripped)
-        return np.nan if text in _MISSING_AREA_TEXT else text
-    return series.astype(object).map(one).astype(object)
+    if _is_missing_value(value):
+        return np.nan
+    if isinstance(value, (int, np.integer, float, np.floating)) and not isinstance(value, (bool, np.bool_)):
+        _check(float(value).is_integer(), f'non-integral numeric area code {value!r}')
+        return str(int(value))
+    stripped = str(value).strip()
+    if _INTEGRAL_TEXT.match(stripped):
+        return str(int(stripped.split('.')[0]))
+    return normalise_area_name(stripped)
 
 
-def _join_keys(left: pd.Series, right: pd.Series) -> pd.Series:
-    """``left::right`` per row, ``NaN`` when either part is missing."""
-    return pd.Series([f'{a}::{b}' if isinstance(a, str) and isinstance(b, str) else np.nan
-                      for a, b in zip(left.tolist(), right.tolist())], index=left.index, dtype=object)
+def _area_keys(series: pd.Series) -> pd.Series:
+    """:func:`_area_key` per value; missing, blank or stringified-missing values stay ``NaN`` (never ``'NAN'``)."""
+    return series.astype(object).map(_area_key).astype(object)
 
 
 def normalise_area_name(value: Any) -> str:
@@ -648,12 +674,21 @@ def load_ecuador_inec_frame(births: pd.DataFrame, canton_exposure: pd.DataFrame,
 
     ``canton_exposure`` carries the transform-before-aggregate ``oxygen_deficit_mmhg``
     and must place every canton in its province, because canton names repeat across
-    provinces. Either ``cant_res`` holds 4-digit DPA canton codes matched against an
-    exposure ``cant_code`` / ``dpa_canton`` column, or births match on (province, canton
-    name) against ``shapeName`` plus a province column (``province``, ``prov_res``,
-    ``prov_key``, ``provincia`` or ``ADM1``). An exposure table with neither raises
-    ``ValueError``: canton-only matching is never used. Repeated keys and unmatched
-    cantons stop the run unless ``on_unmatched='drop'``, which excludes and audits them.
+    provinces. Two lookups are built from it up front:
+
+    * a DPA lookup from a ``cant_code`` / ``dpa_canton`` column (4-digit codes; a numeric
+      exposure province must equal the code's first two digits);
+    * a name lookup from ``shapeName`` plus a province column (``province``, ``prov_res``,
+      ``prov_key``, ``provincia`` or ``ADM1``), keyed on (province, canton name).
+
+    An exposure table supporting neither raises ``ValueError``: canton-only matching is
+    never used. Births are matched one row at a time, never by guessing a mode for a
+    whole column: a ``cant_res`` that is a DPA code uses the DPA lookup, and that row's
+    ``prov_res`` must agree with the code (numeric) or with the exposure row's province
+    name (text), else ``ValueError``; any other ``cant_res`` uses the name lookup. A
+    birth's cluster and stratum come from the exposure row it matches, so births reaching
+    one canton by code and by name share a cluster. Repeated keys and unmatched cantons
+    stop the run unless ``on_unmatched='drop'``, which excludes and audits them.
     """
     spec = validate_ecuador_inec_spec(spec)
     _check(stratum in ('province', 'national'), "stratum must be 'province' or 'national'")
@@ -668,63 +703,100 @@ def load_ecuador_inec_frame(births: pd.DataFrame, canton_exposure: pd.DataFrame,
 
     exposure = _clean_columns(canton_exposure)
     _require_columns(exposure, ['oxygen_deficit_mmhg'], 'ecuador_inec canton exposure')
-    exposure = exposure.loc[exposure['oxygen_deficit_mmhg'].notna()].copy()
+    exposure = exposure.loc[exposure['oxygen_deficit_mmhg'].notna()].reset_index(drop=True)
+    deficits = exposure['oxygen_deficit_mmhg'].astype(float).to_numpy()
+    _check(bool(np.isfinite(deficits).all()), 'ecuador_inec: exposure deficits must be finite')
     province_col = next((c for c in ECUADOR_EXPOSURE_PROVINCE_COLUMNS if c in exposure.columns), None)
     dpa_col = next((c for c in ECUADOR_EXPOSURE_DPA_COLUMNS if c in exposure.columns), None)
-    try:
-        birth_codes = integer_codes(df[spec.residence_canton_field], 'ecuador_inec cant_res')
-    except ValueError:
-        birth_codes = None                         # canton names, not DPA codes
-    _check(dpa_col is not None or province_col is not None,
+    name_col = 'shapeName' if 'shapeName' in exposure.columns else None
+    has_names = province_col is not None and name_col is not None
+    _check(dpa_col is not None or has_names,
            'ecuador_inec: the canton exposure table needs a province column '
-           f'{ECUADOR_EXPOSURE_PROVINCE_COLUMNS} or a 4-digit DPA canton code {ECUADOR_EXPOSURE_DPA_COLUMNS}; '
-           'canton names repeat across provinces, so canton-only matching is never used')
-    use_dpa = dpa_col is not None and birth_codes is not None
-    _check(use_dpa or province_col is not None,
-           f'ecuador_inec: exposure {dpa_col} holds DPA codes but cant_res holds names; supply a province column')
-    if use_dpa:
-        exposure_codes = integer_codes(exposure[dpa_col], f'ecuador_inec exposure {dpa_col}')
-        _check(bool(exposure_codes.notna().all()), f'ecuador_inec: missing DPA codes in exposure {dpa_col}')
-        exposure['_key'] = _zfill(exposure_codes, 4)
-        canton = _zfill(birth_codes, 4)
-        _check(bool(exposure['_key'].str.len().eq(4).all() and canton.dropna().str.len().eq(4).all()),
-               'ecuador_inec: DPA canton codes have 4 digits')
-        province = canton.map(lambda c: c[:2] if isinstance(c, str) else np.nan).astype(object)
-        try:
-            stated = integer_codes(df[spec.residence_province_field], 'ecuador_inec prov_res')
-        except ValueError:
-            stated = None                          # province names: the DPA code alone places the canton
-        if stated is not None:
-            stated = _zfill(stated, 2)
-            clash = stated.notna() & province.notna() & (stated != province)
-            _check(not bool(clash.any()), f'ecuador_inec: {int(clash.sum())} births have a cant_res DPA code '
-                                          'outside their prov_res province')
-        key = canton
-        exposure_missing_area = 0
-    else:
-        _require_columns(exposure, ['shapeName'], 'ecuador_inec canton exposure')
-        exposure['_key'] = _join_keys(_area_keys(exposure[province_col]), _area_keys(exposure['shapeName']))
-        exposure_missing_area = int(exposure['_key'].isna().sum())
-        exposure = exposure.loc[exposure['_key'].notna()]       # a row without province or canton places nothing
-        province = _area_keys(df[spec.residence_province_field])
-        canton = _area_keys(df[spec.residence_canton_field]).map(
-            lambda k: CANTON_ALIASES.get(k, k) if isinstance(k, str) else np.nan).astype(object)
-        key = _join_keys(province, canton)                      # missing province or canton -> unmatched
-    counts = exposure['_key'].value_counts()
-    ambiguous = set(counts.index[counts > 1].tolist())
-    exposure = exposure.loc[~exposure['_key'].isin(ambiguous)]
-    deficit = dict(zip(exposure['_key'], exposure['oxygen_deficit_mmhg'].astype(float)))
+           f'{ECUADOR_EXPOSURE_PROVINCE_COLUMNS} with shapeName, or a 4-digit DPA canton code '
+           f'{ECUADOR_EXPOSURE_DPA_COLUMNS}; canton names repeat across provinces, '
+           'so canton-only matching is never used')
 
-    matched = key.isin(set(deficit)).to_numpy(dtype=bool)
+    # Exposure lookups, parsed row by row up front. A record's stratum is its province name key (else the DPA
+    # province digits) and its cluster label is stratum::DPA code (else stratum::canton name).
+    dpa_rows: dict[str, list[dict]] = {}
+    name_rows: dict[str, list[dict]] = {}
+    exposure_unusable = 0
+    for i in range(len(exposure)):
+        prov_key = _area_key(exposure.at[i, province_col]) if province_col else np.nan
+        dpa = None
+        if dpa_col is not None:
+            raw_code = exposure.at[i, dpa_col]
+            dpa = _try_dpa_code(raw_code)
+            _check(dpa is not None or _is_missing_value(raw_code),
+                   f'ecuador_inec: exposure {dpa_col} {raw_code!r} is not a 4-digit DPA canton code')
+            if dpa is not None and isinstance(prov_key, str) and prov_key.isdigit():
+                _check(int(prov_key) == int(dpa[:2]),
+                       f'ecuador_inec: exposure DPA code {dpa} lies outside its own province {prov_key}')
+        cant_key = _area_key(exposure.at[i, name_col]) if has_names else np.nan
+        named = isinstance(prov_key, str) and isinstance(cant_key, str)
+        if dpa is None and not named:
+            exposure_unusable += 1                 # neither a code nor a (province, canton) key: places nothing
+            continue
+        stratum_key = prov_key if isinstance(prov_key, str) else dpa[:2]
+        record = dict(deficit=float(deficits[i]), stratum=stratum_key, prov_key=prov_key,
+                      cluster=f'{stratum_key}::{dpa if dpa is not None else cant_key}')
+        if dpa is not None:
+            dpa_rows.setdefault(dpa, []).append(record)
+        if named:
+            name_rows.setdefault(f'{prov_key}::{cant_key}', []).append(record)
+    ambiguous = sorted([f'DPA:{k}' for k, v in dpa_rows.items() if len(v) > 1]
+                       + [k for k, v in name_rows.items() if len(v) > 1])
+    dpa_lookup = {k: v[0] for k, v in dpa_rows.items() if len(v) == 1} if dpa_col is not None else None
+    name_lookup = {k: v[0] for k, v in name_rows.items() if len(v) == 1} if has_names else None
+
+    # Births, one row at a time.
+    records: list[dict | None] = []
+    modes: list[str | None] = []
+    conflicts: list[str] = []
+    n_missing_area = 0
+    for prov_value, cant_value in zip(df[spec.residence_province_field].tolist(),
+                                      df[spec.residence_canton_field].tolist()):
+        dpa = _try_dpa_code(cant_value) if dpa_lookup is not None else None
+        record, mode = None, None
+        if dpa is not None:
+            record, mode = dpa_lookup.get(dpa), 'dpa_code'
+            prov_code = _try_int_code(prov_value)
+            if prov_code is not None:
+                if int(prov_code) != int(dpa[:2]):
+                    conflicts.append(f'prov_res {prov_value!r} vs cant_res {cant_value!r}')
+            elif record is not None:
+                prov_name, exposure_prov = _area_key(prov_value), record['prov_key']
+                if (isinstance(prov_name, str) and isinstance(exposure_prov, str) and not exposure_prov.isdigit()
+                        and prov_name != exposure_prov):
+                    conflicts.append(f'prov_res {prov_value!r} vs exposure province {exposure_prov!r} '
+                                     f'of cant_res {cant_value!r}')
+        elif name_lookup is not None:
+            prov_name, cant_name = _area_key(prov_value), _area_key(cant_value)
+            if isinstance(cant_name, str):
+                cant_name = CANTON_ALIASES.get(cant_name, cant_name)
+            if isinstance(prov_name, str) and isinstance(cant_name, str):
+                record, mode = name_lookup.get(f'{prov_name}::{cant_name}'), f'province_name:{province_col}'
+            else:
+                n_missing_area += 1                # missing province or canton: unmatched
+        elif _is_missing_value(cant_value):
+            n_missing_area += 1
+        records.append(record)
+        modes.append(mode if record is not None else None)
+    _check(not conflicts, f'ecuador_inec: {len(conflicts)} births have a cant_res DPA code outside their prov_res '
+                          f'province, e.g. {conflicts[:3]}')
+
+    matched = np.asarray([r is not None for r in records], dtype=bool)
     raw_canton = df[spec.residence_canton_field]
     bad = (raw_canton.astype(str).where(_area_keys(raw_canton).notna(), '<missing>')
            .loc[~matched].value_counts().to_dict())
-    n_missing_area = int((key.isna().to_numpy() & ~matched).sum())
     _resolve_unmatched(bad, on_unmatched, 'ecuador_inec')
-    df, province, canton, key = (v.loc[matched].reset_index(drop=True) for v in (df, province, canton, key))
-
-    df['_a'] = key.map(deficit).astype(float)
-    df['_cluster'] = _join_keys(province, canton)
+    kept = [r for r in records if r is not None]
+    used_modes = {m for m in modes if m is not None}
+    matching = '+'.join(m for m in ('dpa_code', f'province_name:{province_col}') if m in used_modes)
+    df = df.loc[matched].reset_index(drop=True)
+    df['_a'] = [r['deficit'] for r in kept]
+    df['_cluster'] = [r['cluster'] for r in kept]
+    province = pd.Series([r['stratum'] for r in kept], dtype=object)
     df['_stratum'] = province if stratum == 'province' else 'ECU_ALL'
     df['edad_mad'] = _numeric(df['edad_mad'])
     df.loc[~df['edad_mad'].between(*ECUADOR_MATERNAL_AGE_RANGE), 'edad_mad'] = np.nan
@@ -742,8 +814,9 @@ def load_ecuador_inec_frame(births: pd.DataFrame, canton_exposure: pd.DataFrame,
     audit = dict(n_raw=n_raw, n_valid_birthweight=n_valid, n_matched_residence=int(len(df)),
                  match_rate=float(len(df) / n_valid) if n_valid else 0.0, n_cantons=int(df['_cluster'].nunique()),
                  n_provinces=int(province.nunique()), ambiguous_exposure_names=sorted(ambiguous),
-                 matching='dpa_code' if use_dpa else f'province_name:{province_col}',
-                 n_births_missing_residence=n_missing_area, n_exposure_rows_missing_area=exposure_missing_area,
+                 matching=matching, n_matched_by_dpa=sum(m == 'dpa_code' for m in modes),
+                 n_matched_by_name=sum(m is not None and m != 'dpa_code' for m in modes),
+                 n_births_missing_residence=n_missing_area, n_exposure_rows_missing_area=exposure_unusable,
                  excluded_unmatched_cantons={str(k): int(v) for k, v in bad.items()}, stratum=stratum,
                  interpretation=INTERPRETATION)
     return AnchorFrame(anchor='ecuador_inec', ids=np.asarray([f'ecu2024:{i}' for i in range(len(df))], dtype=object),

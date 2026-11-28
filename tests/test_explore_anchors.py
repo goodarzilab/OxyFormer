@@ -1058,8 +1058,8 @@ def test_ecuador_dpa_canton_codes_place_births_without_names():
     clash = births.assign(prov_res=['17', '17', '04'])           # code 1302 is Manabi, not Carchi
     with pytest.raises(ValueError, match='outside their prov_res province'):
         an.load_ecuador_inec_frame(clash, exposure)
-    names, _ = ecuador_tables()
-    with pytest.raises(ValueError, match='cant_res holds names'):
+    names, _ = ecuador_tables()                                  # names cannot use a DPA-only table: unmatched
+    with pytest.raises(ValueError, match='unmatched or ambiguous'):
         an.load_ecuador_inec_frame(names, exposure)
 
 
@@ -1285,3 +1285,94 @@ def test_ecuador_numeric_province_codes_match_across_int_and_float():
         b = births.copy()
         b['prov_res'] = [spelling]
         assert list(an.load_ecuador_inec_frame(b, exposure.assign(province=[17])).clusters) == ['17::QUITO']
+
+
+# ---------------------------------------------------------------------------
+# cycle-2 round 3 regressions: per-row DPA / name matching, no column-mode guessing
+# ---------------------------------------------------------------------------
+
+def quito_births(prov_res, cant_res):
+    births, _ = ecuador_tables()
+    births = births.iloc[[0, 1]].reset_index(drop=True)          # two valid Quito births
+    births['prov_res'] = pd.Series(prov_res, dtype=object)
+    births['cant_res'] = pd.Series(cant_res, dtype=object)
+    return births
+
+
+def test_try_code_helpers_judge_each_value():
+    for value in (1701, 1701.0, '1701', ' 1701 ', '1701.0', np.int64(1701)):
+        assert an._try_dpa_code(value) == '1701'
+    assert an._try_dpa_code('0101') == '0101' and an._try_dpa_code(101) == '0101'
+    for value in ('Quito', None, np.nan, '', 10000, 0, -5):
+        assert an._try_dpa_code(value) is None
+    for value in (13, 13.0, '13', '013', ' 13 '):
+        assert an._try_int_code(value) == '13'
+    assert an._try_int_code('Pichincha') is None and an._try_int_code(np.nan) is None
+    for bad in (1701.5, '1701.5', 13.5, np.inf):
+        with pytest.raises(ValueError, match='non-integral'):
+            an._try_int_code(bad)
+        with pytest.raises(ValueError, match='non-integral'):
+            an._try_dpa_code(bad)
+
+
+def test_ecuador_numeric_province_conflict_raises_even_when_another_row_is_text():
+    """Review counterexample 1: prov_res [13, 'Pichincha'] with cant_res [1701, 1701] is a province conflict."""
+    births = quito_births([13, 'Pichincha'], [1701, 1701])
+    exposure = pd.DataFrame({'dpa_canton': [1701], 'oxygen_deficit_mmhg': [42.0]})
+    for on_unmatched in ('raise', 'drop'):
+        with pytest.raises(ValueError, match='outside their prov_res province'):
+            an.load_ecuador_inec_frame(births, exposure, on_unmatched=on_unmatched)
+    agreeing = quito_births([17, 'Pichincha'], [1701, 1701])
+    frame = an.load_ecuador_inec_frame(agreeing, exposure)
+    assert list(frame.a) == [42.0, 42.0] and list(frame.clusters) == ['17::1701', '17::1701']
+
+
+def test_ecuador_mixed_code_and_name_cantons_match_the_same_canton():
+    """Review counterexample 2: cant_res [1701, 'Quito'] both reach Quito (one by DPA code, one by name)."""
+    births = quito_births(['Pichincha', 'Pichincha'], [1701, 'Quito'])
+    exposure = pd.DataFrame({'dpa_canton': [1701], 'shapeName': ['Quito'], 'province': ['Pichincha'],
+                             'oxygen_deficit_mmhg': [42.0]})
+    frame = an.load_ecuador_inec_frame(births, exposure)
+    assert len(frame.ids) == 2 and list(frame.a) == [42.0, 42.0]
+    assert list(frame.clusters) == ['PICHINCHA::1701', 'PICHINCHA::1701'] and list(frame.strata) == ['PICHINCHA'] * 2
+    assert frame.audit['matching'] == 'dpa_code+province_name:province'
+    assert (frame.audit['n_matched_by_dpa'], frame.audit['n_matched_by_name']) == (1, 1)
+    mixed_province = quito_births([17, 'Pichincha'], [1701, 'Quito'])         # numeric and text provinces too
+    assert list(an.load_ecuador_inec_frame(mixed_province, exposure).a) == [42.0, 42.0]
+
+
+def test_ecuador_textual_province_conflict_with_dpa_row_raises():
+    """Review bonus: prov_res 'Manabi' with cant_res 1701 contradicts the exposure row's province Pichincha."""
+    births = quito_births(['Manabi', 'Pichincha'], [1701, 1701])
+    exposure = pd.DataFrame({'dpa_canton': [1701], 'province': ['Pichincha'], 'oxygen_deficit_mmhg': [42.0]})
+    with pytest.raises(ValueError, match="exposure province 'PICHINCHA'"):
+        an.load_ecuador_inec_frame(births, exposure)
+    ok = an.load_ecuador_inec_frame(quito_births(['Pichincha', None], [1701, 1701]), exposure)
+    assert list(ok.a) == [42.0, 42.0]                                        # missing prov_res: the code places it
+
+
+def test_ecuador_exposure_lookups_are_validated_up_front():
+    births = quito_births(['Pichincha', 'Pichincha'], [1701, 1701])
+    with pytest.raises(ValueError, match='not a 4-digit DPA canton code'):
+        an.load_ecuador_inec_frame(births, pd.DataFrame({'dpa_canton': ['Quito'], 'oxygen_deficit_mmhg': [42.0]}))
+    with pytest.raises(ValueError, match='outside its own province'):
+        an.load_ecuador_inec_frame(births, pd.DataFrame({'dpa_canton': [1701], 'province': [13],
+                                                         'oxygen_deficit_mmhg': [42.0]}))
+    repeated = pd.DataFrame({'dpa_canton': [1701, 1701.0], 'oxygen_deficit_mmhg': [42.0, 40.0]})
+    with pytest.raises(ValueError, match='unmatched or ambiguous'):
+        an.load_ecuador_inec_frame(births, repeated)
+    frame = an.load_ecuador_inec_frame(pd.concat([births, quito_births(['Pichincha'] * 2, ['Quito'] * 2)],
+                                                 ignore_index=True),
+                                       repeated.assign(shapeName=[np.nan, 'Quito'], province=[np.nan, 'Pichincha']),
+                                       on_unmatched='drop')
+    assert frame.audit['ambiguous_exposure_names'] == ['DPA:1701'] and list(frame.a) == [40.0, 40.0]
+    with pytest.raises(ValueError, match='non-integral'):
+        an.load_ecuador_inec_frame(quito_births(['Pichincha'] * 2, [1701.5, 1701]),
+                                   pd.DataFrame({'dpa_canton': [1701], 'oxygen_deficit_mmhg': [42.0]}))
+
+
+def test_anchors_module_has_no_value_error_fallbacks():
+    """Audit: no loader guesses a mode by catching ValueError over a whole column."""
+    import inspect
+    source = inspect.getsource(an)
+    assert 'except ValueError' not in source and 'try:' not in source
