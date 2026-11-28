@@ -1502,3 +1502,22 @@ def test_ecuador_conflicting_dpa_rows_cannot_leak_through_the_name_lookup():
     assert list(clean.a) == [39.0, 39.0]
     assert clean.audit['ambiguous_exposure_names'] == ['DPA:1701', 'DPA:1702', 'DPA:1703', 'PICHINCHA::CAYAMBE',
                                                        'PICHINCHA::QUITO']
+
+
+# ---------------------------------------------------------------------------
+# cycle-4 round 1 regression: canton aliases apply to exposure names too
+# ---------------------------------------------------------------------------
+
+def test_ecuador_canton_aliases_apply_to_births_and_exposure_alike():
+    """Review counterexample: cant_res 'El Empalme' matches exposure shapeName 'El Empalme' (and 'Empalme')."""
+    births, _ = ecuador_tables()
+    births = births.iloc[[2]].reset_index(drop=True)
+    assert (births.loc[0, 'prov_res'], births.loc[0, 'cant_res']) == ('Guayas', 'El Empalme')
+    for shape in ('El Empalme', 'Empalme'):
+        exposure = pd.DataFrame({'province': ['Guayas'], 'shapeName': [shape], 'oxygen_deficit_mmhg': [1.0]})
+        frame = an.load_ecuador_inec_frame(births, exposure)
+        assert list(frame.a) == [1.0] and list(frame.clusters) == ['GUAYAS::EMPALME']
+    both = pd.DataFrame({'province': ['Guayas', 'Guayas'], 'shapeName': ['El Empalme', 'Empalme'],
+                         'oxygen_deficit_mmhg': [1.0, 1.2]})                 # one canton listed twice
+    with pytest.raises(ValueError, match='unmatched or ambiguous'):
+        an.load_ecuador_inec_frame(births, both)

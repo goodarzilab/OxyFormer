@@ -643,6 +643,12 @@ def _canonical_ecuador_province(value: Any) -> str | None:
     return name if isinstance(name, str) else None
 
 
+def _canton_key(value: Any) -> Any:
+    """Normalised canton name with the reviewed INEC -> geoBoundaries aliases, for births and exposure alike."""
+    name = _area_key(value)
+    return CANTON_ALIASES.get(name, name) if isinstance(name, str) else name
+
+
 def _area_keys(series: pd.Series) -> pd.Series:
     """:func:`_area_key` per value; missing, blank or stringified-missing values stay ``NaN`` (never ``'NAN'``)."""
     return series.astype(object).map(_area_key).astype(object)
@@ -764,7 +770,7 @@ def load_ecuador_inec_frame(births: pd.DataFrame, canton_exposure: pd.DataFrame,
                    f'ecuador_inec: exposure DPA code {dpa} lies outside its own province {raw_province!r} '
                    f'(DPA province {official!r})')
             exp_province = official
-        cant_key = _area_key(exposure.at[i, name_col]) if has_names else np.nan
+        cant_key = _canton_key(exposure.at[i, name_col]) if has_names else np.nan
         named = exp_province is not None and isinstance(cant_key, str) and has_names
         if dpa is None and not named:
             exposure_unusable += 1                 # neither a code nor a (province, canton) key: places nothing
@@ -804,9 +810,7 @@ def load_ecuador_inec_frame(births: pd.DataFrame, canton_exposure: pd.DataFrame,
                                  f'of cant_res {cant_value!r}')
             record, mode = dpa_lookup.get(dpa), 'dpa_code'
         elif name_lookup is not None:
-            cant_name = _area_key(cant_value)
-            if isinstance(cant_name, str):
-                cant_name = CANTON_ALIASES.get(cant_name, cant_name)
+            cant_name = _canton_key(cant_value)
             if birth_province is not None and isinstance(cant_name, str):
                 record, mode = name_lookup.get(f'{birth_province}::{cant_name}'), f'province_name:{province_col}'
             else:
