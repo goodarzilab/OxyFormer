@@ -500,9 +500,10 @@ def load_peru_endes_frame(modules_by_year: Mapping[int, Mapping[str, pd.DataFram
     """
     spec = validate_peru_endes_spec(spec)
     _check(bool(modules_by_year), 'peru_endes: no survey years supplied')
-    child_cols = [c for c in spec.covariates if c in PERU_CHILD_COVARIATES]
-    hh0_cols = [c for c in spec.covariates if c in PERU_HOUSEHOLD_COVARIATES]
-    hh23_cols = [c for c in spec.covariates if c in PERU_ASSET_COVARIATES]
+    # Requested covariates per module: immutable and never rebound inside the year loop.
+    child_covariates = tuple(c for c in spec.covariates if c in PERU_CHILD_COVARIATES)
+    household_covariates = tuple(c for c in spec.covariates if c in PERU_HOUSEHOLD_COVARIATES)
+    asset_covariates = tuple(c for c in spec.covariates if c in PERU_ASSET_COVARIATES)
     frames, audit = [], dict(years={}, absent_covariates={})
     for year in sorted(modules_by_year):
         modules = modules_by_year[year]
@@ -513,9 +514,9 @@ def load_peru_endes_frame(modules_by_year: Mapping[int, Mapping[str, pd.DataFram
         _require_columns(r6, base6, f'peru_endes {year} RECH6')
         _require_columns(r0, base0, f'peru_endes {year} RECH0')
         _require_columns(r23, ['HHID'], f'peru_endes {year} RECH23')
-        keep6 = list(dict.fromkeys(base6 + [c for c in child_cols if c in r6.columns]))
-        keep0 = base0 + [c for c in hh0_cols if c in r0.columns]
-        keep23 = ['HHID'] + [c for c in hh23_cols if c in r23.columns]
+        keep6 = list(dict.fromkeys(base6 + [c for c in child_covariates if c in r6.columns]))
+        keep0 = base0 + [c for c in household_covariates if c in r0.columns]
+        keep23 = ['HHID'] + [c for c in asset_covariates if c in r23.columns]
         for name, frame in (('RECH0', r0), ('RECH23', r23), ('RECH6', r6)):
             frame['HHID'] = _normalize_hhid(frame['HHID'], f'peru_endes {year} {name}')
         r6['_hc0'] = integer_codes(r6['HC0'], f'peru_endes {year} HC0')
@@ -523,8 +524,8 @@ def load_peru_endes_frame(modules_by_year: Mapping[int, Mapping[str, pd.DataFram
         house23 = _require_unique_rows(r23[keep23], ['HHID'], f'peru_endes {year} RECH23 households')
         # Rows are compared on normalised keys only (HHID is already normalised; raw HC0 '1' vs '01' is dropped),
         # so an exact repeat spelled differently is deduplicated and only conflicting values raise.
-        child_cols = [c for c in keep6 if c != 'HC0'] + ['_hc0']
-        children = _require_unique_rows(r6[child_cols], ['HHID', '_hc0'], f'peru_endes {year} RECH6 children')
+        dedup_cols6 = [c for c in keep6 if c != 'HC0'] + ['_hc0']
+        children = _require_unique_rows(r6[dedup_cols6], ['HHID', '_hc0'], f'peru_endes {year} RECH6 children')
         merged = children.merge(house0, on='HHID', how='inner').merge(house23, on='HHID', how='left')
         status, raw_hb = _numeric(merged[spec.status_field]), _numeric(merged[spec.outcome_field])
         age, altitude = _numeric(merged[spec.age_field]), _numeric(merged[spec.exposure_field])
@@ -567,11 +568,24 @@ _MISSING_AREA_TEXT = frozenset({'', 'NAN', 'NONE', '<NA>'})
 
 
 def _area_keys(series: pd.Series) -> pd.Series:
-    """Normalised area names; missing, blank or stringified-missing values stay ``NaN`` (never ``'NAN'``)."""
+    """Normalised area names; missing, blank or stringified-missing values stay ``NaN`` (never ``'NAN'``).
+
+    Integral numeric codes in any spelling (``17``, ``17.0``, ``'17.0'``, ``'017'``) become the
+    integer string (``'17'``) before name normalisation, which would otherwise turn ``17.0``
+    into ``'17 0'``. A non-integral number raises ``ValueError``.
+    """
     def one(value: Any) -> Any:
         if value is None or value is pd.NA or (isinstance(value, (float, np.floating)) and np.isnan(value)):
             return np.nan
-        text = normalise_area_name(value)
+        if isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_)):
+            return str(int(value))
+        if isinstance(value, (float, np.floating)):
+            _check(float(value).is_integer(), f'non-integral numeric area code {value!r}')
+            return str(int(value))
+        stripped = str(value).strip()
+        if _INTEGRAL_TEXT.match(stripped):
+            return str(int(stripped.split('.')[0]))
+        text = normalise_area_name(stripped)
         return np.nan if text in _MISSING_AREA_TEXT else text
     return series.astype(object).map(one).astype(object)
 
@@ -669,9 +683,9 @@ def load_ecuador_inec_frame(births: pd.DataFrame, canton_exposure: pd.DataFrame,
     _check(use_dpa or province_col is not None,
            f'ecuador_inec: exposure {dpa_col} holds DPA codes but cant_res holds names; supply a province column')
     if use_dpa:
-        codes = integer_codes(exposure[dpa_col], f'ecuador_inec exposure {dpa_col}')
-        _check(bool(codes.notna().all()), f'ecuador_inec: missing DPA codes in exposure {dpa_col}')
-        exposure['_key'] = _zfill(codes, 4)
+        exposure_codes = integer_codes(exposure[dpa_col], f'ecuador_inec exposure {dpa_col}')
+        _check(bool(exposure_codes.notna().all()), f'ecuador_inec: missing DPA codes in exposure {dpa_col}')
+        exposure['_key'] = _zfill(exposure_codes, 4)
         canton = _zfill(birth_codes, 4)
         _check(bool(exposure['_key'].str.len().eq(4).all() and canton.dropna().str.len().eq(4).all()),
                'ecuador_inec: DPA canton codes have 4 digits')
@@ -763,11 +777,11 @@ def load_colombia_dane_frame(births: pd.DataFrame, muni_exposure: pd.DataFrame,
     exposure = _clean_columns(muni_exposure)
     _require_columns(exposure, ['cod_mpio', 'oxygen_deficit_mmhg'], 'colombia_dane municipality exposure')
     exposure = exposure.loc[exposure['oxygen_deficit_mmhg'].notna()]
-    codes = integer_codes(exposure['cod_mpio'], 'colombia_dane exposure cod_mpio')
-    _check(not codes.isna().any(), 'colombia_dane: missing municipality codes in the exposure table')
-    codes = _zfill(codes, 5)
-    _check(codes.is_unique, 'colombia_dane: repeated municipality codes in the exposure table')
-    deficit = dict(zip(codes, exposure['oxygen_deficit_mmhg'].astype(float)))
+    exposure_codes = integer_codes(exposure['cod_mpio'], 'colombia_dane exposure cod_mpio')
+    _check(not exposure_codes.isna().any(), 'colombia_dane: missing municipality codes in the exposure table')
+    exposure_codes = _zfill(exposure_codes, 5)
+    _check(exposure_codes.is_unique, 'colombia_dane: repeated municipality codes in the exposure table')
+    deficit = dict(zip(exposure_codes, exposure['oxygen_deficit_mmhg'].astype(float)))
 
     dept = _zfill(integer_codes(df[spec.residence_department_field], 'colombia_dane CODPTORE'), 2)
     muni = dept + _zfill(integer_codes(df[spec.residence_municipality_field], 'colombia_dane CODMUNRE'), 3)
@@ -781,8 +795,8 @@ def load_colombia_dane_frame(births: pd.DataFrame, muni_exposure: pd.DataFrame,
                'vlbw': df['_band'].isin(COLOMBIA_VLBW_BANDS).astype(np.float64),
                'bw_mid_g': df['_band'].map(COLOMBIA_BAND_MIDPOINTS_G).astype(np.float64)}[spec.outcome]
     for col in maternal:
-        codes = integer_codes(df[col], f'colombia_dane {col}')
-        df[col] = codes.where(codes.notna() & ~codes.isin(COLOMBIA_MISSING_CODES[col]), 'MISSING')
+        level_codes = integer_codes(df[col], f'colombia_dane {col}')
+        df[col] = level_codes.where(level_codes.notna() & ~level_codes.isin(COLOMBIA_MISSING_CODES[col]), 'MISSING')
     parts, names = _onehot(df, maternal)
     if YEAR_TERM in spec.covariates:
         year = _numeric(integer_codes(df[year_col], f'colombia_dane {year_col}')).to_numpy(np.float64)

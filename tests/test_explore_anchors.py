@@ -1228,3 +1228,60 @@ def test_markdown_null_claim_follows_null_estimates_present_in_results():
     unseeded = json.loads(json.dumps(payload))
     unseeded['null_seed'] = None
     assert 'seed `' not in an.render_anchor_markdown(unseeded)
+
+
+# ---------------------------------------------------------------------------
+# cycle-2 round 2 regressions: year-loop shadowing, numeric area codes
+# ---------------------------------------------------------------------------
+
+def test_peru_pooled_years_keep_child_covariates_in_every_year():
+    """Review counterexample (a): both years keep HC27, HC61, HC62, HC64 and match their single-year loads."""
+    frame = an.load_peru_endes_frame({2023: peru_modules(2023), 2024: peru_modules(2024)})
+    names = list(frame.feature_names)
+    assert {'HC27', 'HC61', 'HC62', 'HC64'} <= set(names) and frame.audit['absent_covariates'] == ['HV201'] + [
+        c for c in an.PERU_ASSET_COVARIATES if c not in ('HV201', 'HV270', 'HV271')]
+    for year in (2023, 2024):
+        rows = np.char.startswith(frame.ids.astype(str), f'{year}:')
+        assert rows.sum() == 4
+        for col in ('HC27', 'HC61', 'HC64'):
+            assert np.isfinite(frame.X[rows, names.index(col)]).all(), (year, col)
+        single = an.load_peru_endes_frame({year: peru_modules(year)})
+        cols = [names.index(c) for c in single.feature_names]
+        np.testing.assert_array_equal(np.nan_to_num(frame.X[rows][:, cols]), np.nan_to_num(single.X))
+
+
+def test_peru_child_covariate_absent_in_first_year_still_loads_for_later_years():
+    """Review counterexample (b): HC27 missing from 2023 RECH6 stays a feature, NaN for 2023, values for 2024."""
+    early = peru_modules(2023)
+    early['RECH6'] = early['RECH6'].drop(columns=['HC27'])
+    frame = an.load_peru_endes_frame({2023: early, 2024: peru_modules(2024)})
+    names = list(frame.feature_names)
+    assert 'HC27' in names and 'HC27' not in frame.audit['absent_covariates']
+    hc27 = frame.X[:, names.index('HC27')]
+    in_2023 = np.char.startswith(frame.ids.astype(str), '2023:')
+    assert np.isnan(hc27[in_2023]).all()
+    np.testing.assert_array_equal(hc27[~in_2023], [1.0, 1.0, 2.0, 1.0])     # children (1,1), (2,1), (3,1), (5,2)
+    for col in ('HC61', 'HC64'):                                          # other child covariates in both years
+        assert np.isfinite(frame.X[:, names.index(col)]).all()
+
+
+def test_area_keys_canonicalise_integral_numeric_codes():
+    keys = an._area_keys(pd.Series([17, 17.0, '17.0', ' 017 ', 'Pichincha', np.nan, 'nan', ''], dtype=object))
+    assert keys.tolist()[:5] == ['17', '17', '17', '17', 'PICHINCHA'] and keys.iloc[5:].isna().all()
+    with pytest.raises(ValueError, match='non-integral numeric area code'):
+        an._area_keys(pd.Series([17.5], dtype=object))
+
+
+def test_ecuador_numeric_province_codes_match_across_int_and_float():
+    """Review counterexample: births prov_res 17 against exposure province 17.0 is one key, '17::QUITO'."""
+    births, _ = ecuador_tables()
+    births = births.iloc[[0]].reset_index(drop=True)
+    births['prov_res'] = [17]
+    exposure = pd.DataFrame({'shapeName': ['Quito'], 'province': [17.0], 'oxygen_deficit_mmhg': [42.0]})
+    frame = an.load_ecuador_inec_frame(births, exposure)
+    assert len(frame.ids) == 1 and list(frame.clusters) == ['17::QUITO'] and list(frame.a) == [42.0]
+    assert list(frame.strata) == ['17']
+    for spelling in ('017', '17.0', ' 17 '):
+        b = births.copy()
+        b['prov_res'] = [spelling]
+        assert list(an.load_ecuador_inec_frame(b, exposure.assign(province=[17])).clusters) == ['17::QUITO']
